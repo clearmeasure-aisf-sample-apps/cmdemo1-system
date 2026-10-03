@@ -31,7 +31,8 @@ env:
   ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
   ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_OCTOPUS_CONFIG }}
-  OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE_ID }}
+  # The Octopus actions (push-package, create-release) look the space up by name, not by ID.
+  OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE_NAME }}
 
 jobs:
   octopus-apply:
