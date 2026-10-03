@@ -93,7 +93,8 @@ resource "octopusdeploy_process" "deployable" {
   project_id = octopusdeploy_project.deployable[each.key].id
 }
 
-# Desired state first: the new version is committed to environments/<env>/versions.json before anything changes.
+# Desired state first: the new version is committed to environments/<env>/versions.json before anything changes;
+# step "Revert pin" puts the previous version back when a later step fails.
 resource "octopusdeploy_process_step" "pin" {
   for_each = local.deployables
 
@@ -182,6 +183,26 @@ resource "octopusdeploy_process_step" "verify" {
   }
 }
 
+# Runs only when an earlier step failed: puts the previous version back into versions.json (scripts/revert-pin.ps1).
+resource "octopusdeploy_process_step" "revert_pin" {
+  for_each = local.deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Revert pin"
+  type           = "Octopus.Script"
+  condition      = "Failure"
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  execution_properties = {
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/revert-pin.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
 resource "octopusdeploy_process_steps_order" "deployable" {
   for_each = local.deployables
 
@@ -191,5 +212,6 @@ resource "octopusdeploy_process_steps_order" "deployable" {
     octopusdeploy_process_step.migrate[each.key].id,
     octopusdeploy_process_step.update[each.key].id,
     octopusdeploy_process_step.verify[each.key].id,
+    octopusdeploy_process_step.revert_pin[each.key].id,
   ]
 }
