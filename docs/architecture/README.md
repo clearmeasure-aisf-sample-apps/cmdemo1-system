@@ -63,3 +63,9 @@ Source: [06-prod-environment.puml](06-prod-environment.puml)
 ![Progression: telemetry in tdd (2026-10-03)](07-telemetry-tdd.png)
 
 Source: [07-telemetry-tdd.puml](07-telemetry-tdd.puml)
+
+## Safe path to production (2026-10-03)
+
+![Safe path to production (2026-10-03)](09-safe-path-to-prod.png)
+
+Source: [09-safe-path-to-prod.puml](09-safe-path-to-prod.puml)
