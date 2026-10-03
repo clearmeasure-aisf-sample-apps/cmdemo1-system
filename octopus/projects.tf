@@ -30,6 +30,22 @@ resource "octopusdeploy_process" "system" {
   project_id = octopusdeploy_project.system.id
 }
 
+resource "octopusdeploy_process_step" "system_sign_off" {
+  count = length(local.promoted_environments) > 0 ? 1 : 0
+
+  process_id   = octopusdeploy_process.system.id
+  name         = "Sign-off"
+  type         = "Octopus.Manual"
+  environments = [for name in local.promoted_environments : octopusdeploy_environment.this[name].id]
+
+  execution_properties = {
+    "Octopus.Action.RunOnServer"                       = "false"
+    "Octopus.Action.Manual.Instructions"               = "Sign off #{Octopus.Project.Name} #{Octopus.Release.Number} for #{Octopus.Environment.Name}: check the earlier environments, then Proceed with a note, or Abort."
+    "Octopus.Action.Manual.ResponsibleTeamIds"         = local.sign_off_team_id
+    "Octopus.Action.Manual.BlockConcurrentDeployments" = "False"
+  }
+}
+
 resource "octopusdeploy_process_step" "system_apply" {
   process_id     = octopusdeploy_process.system.id
   name           = "Apply environment"
@@ -79,10 +95,13 @@ resource "octopusdeploy_process_step" "system_verify" {
 
 resource "octopusdeploy_process_steps_order" "system" {
   process_id = octopusdeploy_process.system.id
-  steps = [
-    octopusdeploy_process_step.system_apply.id,
-    octopusdeploy_process_step.system_verify.id,
-  ]
+  steps = concat(
+    [for step in octopusdeploy_process_step.system_sign_off : step.id],
+    [
+      octopusdeploy_process_step.system_apply.id,
+      octopusdeploy_process_step.system_verify.id,
+    ],
+  )
 }
 
 # ---------------------------------------------------------------- <slug>-<deployable>
@@ -91,6 +110,43 @@ resource "octopusdeploy_process" "deployable" {
   for_each = local.deployables
 
   project_id = octopusdeploy_project.deployable[each.key].id
+}
+
+resource "octopusdeploy_process_step" "sign_off" {
+  for_each = length(local.promoted_environments) > 0 ? local.deployables : {}
+
+  process_id   = octopusdeploy_process.deployable[each.key].id
+  name         = "Sign-off"
+  type         = "Octopus.Manual"
+  environments = [for name in local.promoted_environments : octopusdeploy_environment.this[name].id]
+
+  execution_properties = {
+    "Octopus.Action.RunOnServer"                       = "false"
+    "Octopus.Action.Manual.Instructions"               = "Sign off #{Octopus.Project.Name} #{Octopus.Release.Number} for #{Octopus.Environment.Name}: check the earlier environments, then Proceed with a note, or Abort."
+    "Octopus.Action.Manual.ResponsibleTeamIds"         = local.sign_off_team_id
+    "Octopus.Action.Manual.BlockConcurrentDeployments" = "False"
+  }
+}
+
+# Prod tier: the restore point of the database before the release changes anything (scripts/record-restore-point.ps1).
+resource "octopusdeploy_process_step" "restore_point" {
+  for_each = length(local.prod_environments) > 0 ? local.deployables : {}
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Record restore point"
+  type           = "Octopus.AzurePowerShell"
+  environments   = [for name in local.prod_environments : octopusdeploy_environment.this[name].id]
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/record-restore-point.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
 }
 
 # Desired state first: the new version is committed to environments/<env>/versions.json before anything changes;
@@ -309,6 +365,8 @@ resource "octopusdeploy_process_steps_order" "deployable" {
 
   process_id = octopusdeploy_process.deployable[each.key].id
   steps = concat(
+    contains(keys(octopusdeploy_process_step.sign_off), each.key) ? [octopusdeploy_process_step.sign_off[each.key].id] : [],
+    contains(keys(octopusdeploy_process_step.restore_point), each.key) ? [octopusdeploy_process_step.restore_point[each.key].id] : [],
     [
       octopusdeploy_process_step.pin[each.key].id,
       octopusdeploy_process_step.migrate[each.key].id,
@@ -325,4 +383,21 @@ resource "octopusdeploy_process_steps_order" "deployable" {
       octopusdeploy_process_step.close_test_database[each.key].id,
     ] : [],
   )
+}
+
+# ---------------------------------------------------------------- deployment freezes
+
+# One freeze per project and entry of system.json "freezes"; while it runs, Octopus refuses deployments to its
+# environments (prod tier unless the entry lists others).
+resource "octopusdeploy_project_deployment_freeze" "this" {
+  for_each = {
+    for pair in setproduct(keys(local.project_ids), range(length(local.freezes))) :
+    "${pair[0]}-${local.freezes[pair[1]].name}" => { project = pair[0], freeze = local.freezes[pair[1]] }
+  }
+
+  owner_id        = local.project_ids[each.value.project]
+  name            = each.value.freeze.name
+  start           = each.value.freeze.start
+  end             = each.value.freeze.end
+  environment_ids = [for name in try(each.value.freeze.environments, local.prod_environments) : octopusdeploy_environment.this[name].id]
 }
