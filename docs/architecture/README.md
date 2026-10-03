@@ -45,3 +45,9 @@ Source: [04-app-repository.puml](04-app-repository.puml)
 ![Phase 4a: app 2.4.5 running in tdd (2026-10-03)](04a-app-in-tdd.png)
 
 Source: [04a-app-in-tdd.puml](04a-app-in-tdd.puml)
+
+## Progression: uat added and promoted (2026-10-03)
+
+![Progression: uat added and promoted (2026-10-03)](05-uat-environment.png)
+
+Source: [05-uat-environment.puml](05-uat-environment.puml)

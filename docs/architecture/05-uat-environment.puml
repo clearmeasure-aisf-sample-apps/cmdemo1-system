@@ -1,0 +1,39 @@
+@startuml 05-uat-environment
+!include _c4.iuml
+title Clear Measure work orders demo 1 | Progression: uat added and promoted (2026-10-03)
+
+Person(viewer, "Class audience", "Browser")
+
+Boundary(gh, "GitHub org clearmeasure-aisf-sample-apps") {
+  Container(sysrepo, "cmdemo1-system", "system repository", "system.json lists tdd, uat; environments/uat/versions.json", $tags="new")
+  Container(apprepo, "cmdemo1-workorders", "app repository", "Build, then Release, for every green master")
+}
+
+Boundary(octo, "Octopus space cmdemo1 demo") {
+  Container(lifecycle, "cmdemo1-lifecycle", "lifecycle", "tdd (automatic), then uat (promotion)", $tags="new")
+  Container(proj_sys, "cmdemo1-system", "project", "tdd 1.0.8, uat 1.0.8", $tags="new")
+  Container(proj_app, "cmdemo1-ui", "project", "tdd 2.4.5, uat 2.4.5", $tags="new")
+}
+
+Boundary(rgn, "rg-cmdemo1-nonprod") {
+  Container(id_dn, "id-cmdemo1-deploy-nonprod", "managed identity", "Deploys tdd and uat")
+  Boundary(tdd, "stack-cmdemo1-tdd") {
+    Container(tdd_app, "ca-cmdemo1-tdd-ui", "Container App", "https://ca-cmdemo1-tdd-ui.graybush-19a6e13b.southcentralus.azurecontainerapps.io")
+    ContainerDb(tdd_sql, "sql-cmdemo1-tdd-5tu77 / sqldb-cmdemo1-tdd", "Azure SQL, centralus")
+  }
+  Boundary(uat, "stack-cmdemo1-uat") {
+    Container(uat_app, "ca-cmdemo1-uat-ui", "Container App", "https://ca-cmdemo1-uat-ui.ambitiousforest-5b1ebcdd.southcentralus.azurecontainerapps.io", $tags="new")
+    ContainerDb(uat_sql, "sql-cmdemo1-uat-72l7x / sqldb-cmdemo1-uat", "Azure SQL, centralus", $tags="new")
+    ContainerDb(uat_kv, "kvcmdemo1uatypwme", "Key Vault", $tags="new")
+  }
+}
+
+Rel(sysrepo, lifecycle, "pull request merged: octopus-apply adds uat", $tags="new")
+Rel(proj_sys, id_dn, "promote to uat: Apply environment", "Octopus OIDC", $tags="new")
+Rel(id_dn, uat, "az stack group create", $tags="new")
+Rel(proj_app, uat_app, "promote to uat: Pin, Migrate, Update, Verify", $tags="new")
+Rel(proj_app, tdd_app, "deployed earlier")
+Rel(viewer, uat_app, "HTTPS", $tags="new")
+
+SHOW_LEGEND()
+@enduml
