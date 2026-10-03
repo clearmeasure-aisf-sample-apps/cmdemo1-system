@@ -39,3 +39,9 @@ Source: [03a-tdd-environment.puml](03a-tdd-environment.puml)
 ![Phase 4: app repository pushed (2026-10-03)](04-app-repository.png)
 
 Source: [04-app-repository.puml](04-app-repository.puml)
+
+## Phase 4a: app 2.4.5 running in tdd (2026-10-03)
+
+![Phase 4a: app 2.4.5 running in tdd (2026-10-03)](04a-app-in-tdd.png)
+
+Source: [04a-app-in-tdd.puml](04a-app-in-tdd.puml)
