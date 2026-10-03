@@ -30,6 +30,8 @@ var sqlLocation = system.system.?sqlLocation ?? location
 var environment = first(filter(system.environments, e => e.name == environmentName))!
 var capabilities = union(['baseline'], environment.capabilities)
 var appLocation = environment.?appLocation ?? location
+// A Container Apps environment that failed in one region keeps its name there; an appLocation gets a name of its own.
+var managedEnvironmentName = appLocation == location ? 'cae-${slug}-${environmentName}' : 'cae-${slug}-${environmentName}-${take(uniqueString(appLocation), 4)}'
 var app = first(filter(system.azure.identities.apps, a => a.environment == environmentName))!
 var suffix = take(uniqueString(subscription().id, resourceGroup().id, environmentName), 5)
 var tags = {
@@ -88,6 +90,7 @@ module apps 'modules/containerapps.bicep' = {
   params: {
     slug: slug
     environmentName: environmentName
+    managedEnvironmentName: managedEnvironmentName
     location: appLocation
     tags: tags
     deployables: system.deployables

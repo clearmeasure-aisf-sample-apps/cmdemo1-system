@@ -5,6 +5,9 @@ targetScope = 'resourceGroup'
 
 param slug string
 param environmentName string
+
+@description('Name of the Container Apps environment; main.bicep gives it a region suffix when the environment has an appLocation of its own.')
+param managedEnvironmentName string = 'cae-${slug}-${environmentName}'
 param location string
 param tags object
 param deployables array
@@ -26,7 +29,7 @@ var telemetryEnv = empty(applicationInsightsConnectionString)
     ]
 
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: 'cae-${slug}-${environmentName}'
+  name: managedEnvironmentName
   location: location
   tags: tags
   properties: {
