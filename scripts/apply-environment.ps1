@@ -139,8 +139,12 @@ $parameters | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $parametersFil
 
 try {
     $result = $null
-    # New role assignments and identities take a few minutes to propagate: the first apply of an environment can fail
-    # once on them, so it is retried.
+    # New role assignments and identities take a few minutes to propagate, and Azure sometimes reports
+    # DeploymentStackTenantRegistrationFailed on a stack with deny settings: the apply is retried. An error the retry
+    # recovers from is information, so az's stderr is kept and shown only when it is not a known transient one, or
+    # when the last attempt fails (no broken windows: a healthy run logs no error).
+    $transient = 'DeploymentStackTenantRegistrationFailed|PrincipalNotFound|InvalidAuthenticationToken'
+    $errorFile = Join-Path ([IO.Path]::GetTempPath()) "stack-$([Guid]::NewGuid().ToString('N')).err"
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $PSNativeCommandUseErrorActionPreference = $false
         $result = az stack group create `
@@ -152,21 +156,32 @@ try {
             --deny-settings-mode denyWriteAndDelete `
             --deny-settings-excluded-principals $deployPrincipalId `
             --yes `
-            --output json
+            --output json 2>$errorFile
         $applied = $LASTEXITCODE -eq 0
         $PSNativeCommandUseErrorActionPreference = $true
+        $stderr = (Get-Content -LiteralPath $errorFile -Raw -ErrorAction SilentlyContinue) ?? ''
         if ($applied) {
+            # A successful apply that still wrote something (a Bicep warning) is a finding: show it.
+            if ($stderr.Trim()) { Write-Warning $stderr.Trim() }
             break
         }
         if ($attempt -eq 3) {
+            Write-Host $stderr
             Fail-Step "az stack group create failed three times for $stackName; the error is above."
         }
-        Write-Warning "az stack group create failed (attempt $attempt of 3); retrying in 90 seconds."
+        $code = [regex]::Match($stderr, $transient).Value
+        if ($code) {
+            Write-Host "Azure reported $code, a transient error (attempt $attempt of 3); retrying in 90 seconds."
+        }
+        else {
+            Write-Warning "az stack group create failed (attempt $attempt of 3); retrying in 90 seconds:`n$($stderr.Trim())"
+        }
         Start-Sleep -Seconds 90
     }
 }
 finally {
     Remove-Item -LiteralPath $parametersFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $errorFile -Force -ErrorAction SilentlyContinue
 }
 
 $stack = $result | ConvertFrom-Json -AsHashtable
