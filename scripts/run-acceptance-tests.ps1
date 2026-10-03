@@ -48,47 +48,47 @@ $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:DOTNET_NOLOGO = '1'
 Write-Host ".NET $(dotnet --version) SDK in $([int] $clock.Elapsed.TotalSeconds) s"
 
-# Zip extraction drops the execute bit of Playwright's Node driver.
-Get-ChildItem -LiteralPath (Join-Path $package '.playwright') -Recurse -File -Filter 'node' | ForEach-Object { chmod +x $_.FullName }
-$revision = ((Get-Content -LiteralPath (Join-Path $package '.playwright' 'package' 'browsers.json') -Raw | ConvertFrom-Json).browsers |
-        Where-Object { $_.name -eq 'chromium' }).revision
-if (-not (Test-Path -LiteralPath (Join-Path ([string] $env:PLAYWRIGHT_BROWSERS_PATH) "chromium-$revision"))) {
-    Write-Warning "The image has no Chromium $revision (the suite's Playwright version changed): installing it."
-    pwsh -NoProfile -File (Join-Path $package 'playwright.ps1') install chromium
-}
-
-$cores = [Environment]::ProcessorCount
-$memoryGb = ([long] ((Get-Content -LiteralPath '/proc/meminfo' | Select-String -Pattern '^MemTotal:\s+(\d+)').Matches[0].Groups[1].Value)) / 1MB
-$automatic = [Math]::Max(2, [Math]::Min(16, [Math]::Min([Math]::Floor($cores * 1.5), [Math]::Floor(($memoryGb - 1) / 0.5))))
-$workers = if ($requestedWorkers -gt 0) { $requestedWorkers } else { [int] $automatic }
-Write-Highlight "Acceptance tests: $workers parallel workers ($cores cores, $([Math]::Round($memoryGb, 1)) GB) against $baseUrl"
-
-$env:ApplicationBaseUrl = $baseUrl
-$env:ConnectionStrings__SqlConnectionString = $connectionString
-$env:StartLocalServer = 'false'
-$env:StartWorker = 'false'
-$env:HeadlessTestBrowser = 'true'
-$env:SkipScreenshotsForSpeed = 'true'
-$env:TEST_INPUT_DELAY_MS = [string] $OctopusParameters['AcceptanceTests.InputDelayMs']
-
-function Get-TrxSummary {
-    # Counts and the parallelism the run reached: the sum of test durations over the wall time of the tests.
-    param([Parameter(Mandatory)] [string] $Path)
-    [xml] $trx = Get-Content -LiteralPath $Path -Raw
-    $counters = $trx.TestRun.ResultSummary.Counters
-    $tests = @($trx.TestRun.Results.UnitTestResult)
-    $parallelism = 0
-    if ($tests.Count -gt 0) {
-        $busy = ($tests | ForEach-Object { [TimeSpan]::Parse($_.duration).TotalSeconds } | Measure-Object -Sum).Sum
-        $wall = (([datetimeoffset[]] @($tests.endTime) | Measure-Object -Maximum).Maximum - ([datetimeoffset[]] @($tests.startTime) | Measure-Object -Minimum).Minimum).TotalSeconds
-        if ($wall -gt 0) { $parallelism = [Math]::Round($busy / $wall, 2) }
-    }
-    return "$($counters.passed) passed, $($counters.failed) failed, $([int] $counters.total - [int] $counters.executed) not run; effective parallelism $parallelism"
-}
-
 $testsExit = 1
 $loadExit = 1
 try {
+    # Zip extraction drops the execute bit of Playwright's Node driver.
+    Get-ChildItem -LiteralPath (Join-Path $package '.playwright') -Recurse -File -Force -Filter 'node' | ForEach-Object { chmod +x $_.FullName }
+    $revision = ((Get-Content -LiteralPath (Join-Path $package '.playwright' 'package' 'browsers.json') -Raw | ConvertFrom-Json).browsers |
+            Where-Object { $_.name -eq 'chromium' }).revision
+    if (-not (Test-Path -LiteralPath (Join-Path ([string] $env:PLAYWRIGHT_BROWSERS_PATH) "chromium-$revision"))) {
+        Write-Warning "The image has no Chromium $revision (the suite's Playwright version changed): installing it."
+        pwsh -NoProfile -File (Join-Path $package 'playwright.ps1') install chromium
+    }
+
+    $cores = [Environment]::ProcessorCount
+    $memoryGb = ([long] ((Get-Content -LiteralPath '/proc/meminfo' | Select-String -Pattern '^MemTotal:\s+(\d+)').Matches[0].Groups[1].Value)) / 1MB
+    $automatic = [Math]::Max(2, [Math]::Min(16, [Math]::Min([Math]::Floor($cores * 1.5), [Math]::Floor(($memoryGb - 1) / 0.5))))
+    $workers = if ($requestedWorkers -gt 0) { $requestedWorkers } else { [int] $automatic }
+    Write-Highlight "Acceptance tests: $workers parallel workers ($cores cores, $([Math]::Round($memoryGb, 1)) GB) against $baseUrl"
+
+    $env:ApplicationBaseUrl = $baseUrl
+    $env:ConnectionStrings__SqlConnectionString = $connectionString
+    $env:StartLocalServer = 'false'
+    $env:StartWorker = 'false'
+    $env:HeadlessTestBrowser = 'true'
+    $env:SkipScreenshotsForSpeed = 'true'
+    $env:TEST_INPUT_DELAY_MS = [string] $OctopusParameters['AcceptanceTests.InputDelayMs']
+
+    function Get-TrxSummary {
+        # Counts and the parallelism the run reached: the sum of test durations over the wall time of the tests.
+        param([Parameter(Mandatory)] [string] $Path)
+        [xml] $trx = Get-Content -LiteralPath $Path -Raw
+        $counters = $trx.TestRun.ResultSummary.Counters
+        $tests = @($trx.TestRun.Results.UnitTestResult)
+        $parallelism = 0
+        if ($tests.Count -gt 0) {
+            $busy = ($tests | ForEach-Object { [TimeSpan]::Parse($_.duration).TotalSeconds } | Measure-Object -Sum).Sum
+            $wall = (([datetimeoffset[]] @($tests.endTime) | Measure-Object -Maximum).Maximum - ([datetimeoffset[]] @($tests.startTime) | Measure-Object -Minimum).Minimum).TotalSeconds
+            if ($wall -gt 0) { $parallelism = [Math]::Round($busy / $wall, 2) }
+        }
+        return "$($counters.passed) passed, $($counters.failed) failed, $([int] $counters.total - [int] $counters.executed) not run; effective parallelism $parallelism"
+    }
+
     $clock.Restart()
     $PSNativeCommandUseErrorActionPreference = $false
     dotnet test $testAssembly --settings (Join-Path $package 'AcceptanceTests.runsettings') `
