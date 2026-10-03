@@ -6,6 +6,9 @@ targetScope = 'resourceGroup'
 param slug string
 param environmentName string
 
+@description('vCPU of each app container: 0.5, 1, 1.5 or 2; Consumption pairs it with twice as many GiB (the lookup fails for any other value).')
+param appCpu string = '0.5'
+
 @description('Name of the Container Apps environment; main.bicep gives it a region suffix when the environment has an appLocation of its own.')
 param managedEnvironmentName string = 'cae-${slug}-${environmentName}'
 param location string
@@ -84,8 +87,8 @@ resource apps 'Microsoft.App/containerApps@2024-03-01' = [
             name: d.name
             image: empty(versions[?d.name] ?? '') ? placeholderImage : '${registryServer}/${slug}/${d.name}:${versions[d.name]}'
             resources: {
-              cpu: json('0.5')
-              memory: '1Gi'
+              cpu: json(appCpu)
+              memory: { '0.5': '1Gi', '1': '2Gi', '1.5': '3Gi', '2': '4Gi' }[appCpu]
             }
             env: concat(
               [

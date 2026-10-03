@@ -13,6 +13,12 @@ variable "github_token" {
   sensitive   = true
 }
 
+variable "test_runner_image" {
+  description = "Execution container of the acceptance-test steps (on mcr.microsoft.com): Chromium, pwsh and .NET 8; the step adds .NET 10. Match the Playwright version of the app's AcceptanceTests project."
+  type        = string
+  default     = "playwright/dotnet:v1.54.0-noble"
+}
+
 variable "worker_tools_image" {
   description = "Execution container of every step on Hosted Ubuntu: Azure CLI and PowerShell 7."
   type        = string
@@ -26,6 +32,12 @@ locals {
   environments = { for i, e in local.system.environments : e.name => merge(e, { sort_order = i + 1 }) }
   tiers        = toset([for e in local.system.environments : e.tier])
   deployables  = { for d in local.system.deployables : d.name => d }
+  # Environments whose app deployments run the acceptance tests (system.json environments[].acceptanceTests), and the
+  # deployables that ship an acceptance-test package (deployables[].acceptanceTestsPackage).
+  test_environments = [for name, e in local.environments : name if try(e.acceptanceTests, false)]
+  tested_deployables = length(local.test_environments) == 0 ? {} : {
+    for name, d in local.deployables : name => d if try(d.acceptanceTestsPackage, "") != ""
+  }
 }
 
 provider "octopusdeploy" {
@@ -94,6 +106,14 @@ resource "octopusdeploy_docker_container_registry" "docker_hub" {
   download_retry_backoff_seconds = 10
 }
 
+resource "octopusdeploy_docker_container_registry" "mcr" {
+  name                           = "mcr"
+  feed_uri                       = "https://mcr.microsoft.com"
+  api_version                    = "v2"
+  download_attempts              = 3
+  download_retry_backoff_seconds = 10
+}
+
 data "octopusdeploy_worker_pools" "hosted_ubuntu" {
   partial_name = "Hosted Ubuntu"
   take         = 10
@@ -112,5 +132,9 @@ locals {
   container = {
     feed_id = octopusdeploy_docker_container_registry.docker_hub.id
     image   = var.worker_tools_image
+  }
+  test_container = {
+    feed_id = octopusdeploy_docker_container_registry.mcr.id
+    image   = var.test_runner_image
   }
 }
