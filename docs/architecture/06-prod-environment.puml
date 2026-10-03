@@ -1,0 +1,41 @@
+@startuml 06-prod-environment
+!include _c4.iuml
+title Clear Measure work orders demo 1 | Progression: prod added and promoted (2026-10-03)
+
+Person(viewer, "Class audience", "Browser")
+
+Boundary(gh, "GitHub org clearmeasure-aisf-sample-apps") {
+  Container(sysrepo, "cmdemo1-system", "system repository", "system.json lists tdd, uat, prod; environments/prod/versions.json", $tags="new")
+}
+
+Boundary(octo, "Octopus space cmdemo1 demo") {
+  Container(lifecycle, "cmdemo1-lifecycle", "lifecycle", "tdd (automatic), uat, then prod (promotions)", $tags="new")
+  Container(acct_prod, "azure-cmdemo1-prod", "Azure OIDC account", "Prod environments only", $tags="new")
+  Container(proj_sys, "cmdemo1-system", "project", "tdd 1.0.11, uat 1.0.11, prod 1.0.11", $tags="new")
+  Container(proj_app, "cmdemo1-ui", "project", "tdd 2.4.5, uat 2.4.5, prod 2.4.5", $tags="new")
+}
+
+Boundary(rgn, "rg-cmdemo1-nonprod") {
+  Container(nonprod_apps, "tdd and uat", "stacks stack-cmdemo1-tdd, stack-cmdemo1-uat", "https://ca-cmdemo1-tdd-ui.graybush-19a6e13b.southcentralus.azurecontainerapps.io, https://ca-cmdemo1-uat-ui.ambitiousforest-5b1ebcdd.southcentralus.azurecontainerapps.io")
+  ContainerDb(acr, "acrcmdemo1chu4gq", "Container Registry", "Prod pulls from here")
+}
+
+Boundary(rgp, "rg-cmdemo1-prod") {
+  Container(id_dp, "id-cmdemo1-deploy-prod", "managed identity", "Owner of rg-cmdemo1-prod; Octopus OIDC subjects for prod only")
+  Boundary(prod, "stack-cmdemo1-prod (deny write and delete)") {
+    Container(prod_app, "ca-cmdemo1-prod-ui", "Container App", "https://ca-cmdemo1-prod-ui.ashycliff-a6bfedb7.westus3.azurecontainerapps.io", $tags="new")
+    ContainerDb(prod_sql, "sql-cmdemo1-prod-swxdz / sqldb-cmdemo1-prod", "Azure SQL, centralus", $tags="new")
+    ContainerDb(prod_kv, "kvcmdemo1prod7ep6z", "Key Vault", $tags="new")
+  }
+}
+
+Rel(sysrepo, lifecycle, "pull request merged: octopus-apply adds prod", $tags="new")
+Rel(proj_sys, acct_prod, "promote to prod", $tags="new")
+Rel(acct_prod, id_dp, "Octopus OIDC", $tags="new")
+Rel(id_dp, prod, "az stack group create", $tags="new")
+Rel(proj_app, prod_app, "promote to prod: Pin, Migrate, Update, Verify", $tags="new")
+Rel(prod_app, acr, "pull image", "runtime identity, AcrPull", $tags="new")
+Rel(viewer, prod_app, "HTTPS", $tags="new")
+
+SHOW_LEGEND()
+@enduml
