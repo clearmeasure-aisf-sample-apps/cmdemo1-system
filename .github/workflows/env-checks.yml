@@ -1,0 +1,61 @@
+# Checks of every pull request to main. Job env-checks is the required status check of the main ruleset: it needs no
+# credential, so it runs for every pull request. Job preview shows what each environment would change (what-if, as
+# id-<slug>-plan with Reader); it runs only for branches of this repository, because a fork's pull request gets no
+# OIDC token, and it never blocks a merge.
+name: env-checks
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  env-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: system.json and environment folders
+        shell: pwsh
+        run: ./scripts/test-system.ps1
+
+      - name: Bicep build
+        run: |
+          az bicep install
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          az bicep build --file bootstrap/seed.bicep --stdout > /dev/null
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.4"
+          terraform_wrapper: false
+
+      - name: Terraform format and validate
+        working-directory: octopus
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+  preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: azure-read
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if per environment
+        shell: pwsh
+        run: ./scripts/preview-environment.ps1

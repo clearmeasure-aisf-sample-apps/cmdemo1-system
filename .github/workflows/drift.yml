@@ -1,0 +1,31 @@
+# Nightly drift check: what-if of main against every environment, as id-<slug>-plan (Reader). A red run means an
+# environment differs from Git; the job summary lists what. Repair by deploying the latest <slug>-system release to
+# that environment again (the deployment stack puts back what Git says). The deny settings of the stacks make most
+# manual changes impossible in the first place, so drift here usually means a change merged but not yet promoted.
+name: drift
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    environment: azure-read
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if per environment
+        shell: pwsh
+        run: ./scripts/preview-environment.ps1 -FailOnChange
