@@ -30,6 +30,7 @@ $template = Join-Path $Root 'infra' 'main.bicep'
 $summary = if ($env:GITHUB_STEP_SUMMARY) { $env:GITHUB_STEP_SUMMARY } else { Join-Path ([IO.Path]::GetTempPath()) 'preview-summary.md' }
 $ignoredTypes = @('Microsoft.KeyVault/vaults/secrets')
 $drifted = [Collections.Generic.List[string]]::new()
+$unchecked = [Collections.Generic.List[string]]::new()
 
 foreach ($entry in $system.environments) {
     $name = [string] $entry.name
@@ -68,7 +69,9 @@ foreach ($entry in $system.environments) {
     if (-not $ok) {
         $message = (@($raw) | ForEach-Object { "$_" }) -join "`n"
         Add-Content -LiteralPath $summary -Value "What-if could not run:`n`n``````text`n$message`n```````n"
-        Write-Host "SKIP preview $name"
+        Write-Host "SKIP preview ${name}: what-if could not run"
+        Write-Host (($message -split "`n" | Where-Object { $_ -match 'ERROR|Code|Message' } | Select-Object -First 5) -join "`n")
+        $unchecked.Add($name)
         continue
     }
 
@@ -92,3 +95,9 @@ if ($FailOnChange -and $drifted.Count -gt 0) {
     Write-Host "FAIL drift: $($drifted -join ', ') differ from main"
     exit 1
 }
+# A drift check that could not look is not green; a pull request preview never blocks.
+if ($FailOnChange -and $unchecked.Count -gt 0) {
+    Write-Host "FAIL drift: what-if could not run for $($unchecked -join ', ')"
+    exit 1
+}
+exit 0

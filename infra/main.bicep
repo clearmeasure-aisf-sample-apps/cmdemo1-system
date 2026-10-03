@@ -21,6 +21,9 @@ param deployPrincipalId string
 var system = loadJsonContent('../system.json')
 var slug = system.system.slug
 var location = system.system.location
+// Azure SQL may need its own region: subscription offers restrict where new SQL servers can be created
+// (RegionDoesNotAllowProvisioning). system.sqlLocation overrides location for the SQL server and database only.
+var sqlLocation = system.system.?sqlLocation ?? location
 var environment = first(filter(system.environments, e => e.name == environmentName))!
 var capabilities = union(['baseline'], environment.capabilities)
 var app = first(filter(system.azure.identities.apps, a => a.environment == environmentName))!
@@ -53,7 +56,7 @@ module sql 'modules/sql.bicep' = {
   params: {
     serverName: sqlServerName
     databaseName: databaseName
-    location: location
+    location: sqlLocation
     tags: tags
     administratorLogin: sqlAdminLogin
     administratorPassword: sqlAdminPassword
