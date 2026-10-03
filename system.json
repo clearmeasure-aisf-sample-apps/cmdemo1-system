@@ -4,7 +4,8 @@
     "name": "Clear Measure work orders demo 1",
     "location": "southcentralus",
     "githubOrg": "clearmeasure-aisf-sample-apps",
-    "repository": "cmdemo1-system"
+    "repository": "cmdemo1-system",
+    "sqlLocation": "centralus"
   },
   "azure": {
     "tenantId": "40645332-2e20-4bca-882c-b2706f93ce44",
