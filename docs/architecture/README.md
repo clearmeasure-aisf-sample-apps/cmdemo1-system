@@ -27,3 +27,9 @@ Source: [02-azure-seed.puml](02-azure-seed.puml)
 ![Phase 3: system repository pushed (2026-10-03)](03-system-repository.png)
 
 Source: [03-system-repository.puml](03-system-repository.puml)
+
+## Phase 3a: tdd environment from the pipeline (2026-10-03)
+
+![Phase 3a: tdd environment from the pipeline (2026-10-03)](03a-tdd-environment.png)
+
+Source: [03a-tdd-environment.puml](03a-tdd-environment.puml)
