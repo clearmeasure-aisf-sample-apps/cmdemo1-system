@@ -38,7 +38,17 @@ locals {
     ]
   ])
 
-  string_variables = { for v in concat(local.shared_variables, local.deployable_variables) : v.key => v }
+  test_variables = flatten([
+    for name, d in local.tested_deployables : [
+      { key = "${name}-tests-assembly", project = octopusdeploy_project.deployable[name].id, name = "AcceptanceTests.Assembly", value = d.acceptanceTestsAssembly, environment = null },
+      { key = "${name}-loader-assembly", project = octopusdeploy_project.deployable[name].id, name = "DataLoader.Assembly", value = d.dataLoaderAssembly, environment = null },
+      # 0: sized from the worker (1.5 per core, 0.5 GB of memory per browser, at most 16).
+      { key = "${name}-tests-workers", project = octopusdeploy_project.deployable[name].id, name = "AcceptanceTests.Workers", value = tostring(try(d.acceptanceTestsWorkers, 0)), environment = null },
+      { key = "${name}-tests-delay", project = octopusdeploy_project.deployable[name].id, name = "AcceptanceTests.InputDelayMs", value = "200", environment = null },
+    ]
+  ])
+
+  string_variables = { for v in concat(local.shared_variables, local.deployable_variables, local.test_variables) : v.key => v }
 }
 
 resource "octopusdeploy_variable" "string" {

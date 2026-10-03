@@ -89,7 +89,10 @@
       "port": 8080,
       "healthPath": "/_healthcheck",
       "databasePackage": "ChurchBulletin.Database",
-      "databaseAssembly": "ClearMeasure.Bootcamp.Database.dll"
+      "databaseAssembly": "ClearMeasure.Bootcamp.Database.dll",
+      "acceptanceTestsPackage": "ChurchBulletin.AcceptanceTests",
+      "acceptanceTestsAssembly": "ClearMeasure.Bootcamp.AcceptanceTests.dll",
+      "dataLoaderAssembly": "ClearMeasure.Bootcamp.IntegrationTests.dll"
     }
   ],
   "environments": [
@@ -99,7 +102,9 @@
       "capabilities": [
         "baseline",
         "telemetry"
-      ]
+      ],
+      "acceptanceTests": true,
+      "appCpu": "2"
     },
     {
       "name": "uat",

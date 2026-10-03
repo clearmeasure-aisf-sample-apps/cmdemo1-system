@@ -145,6 +145,107 @@ resource "octopusdeploy_process_step" "migrate" {
   }
 }
 
+# Acceptance tests, in the environments with "acceptanceTests": true only. "Prepare test runner" starts with "Migrate
+# database" and pulls the test image meanwhile; the test steps follow "Revert pin", so a failed test keeps the pin
+# (the version runs) but fails the deployment, which blocks its promotion.
+resource "octopusdeploy_process_step" "prepare_tests" {
+  for_each = local.tested_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Prepare test runner"
+  type           = "Octopus.Script"
+  start_trigger  = "StartWithPrevious"
+  environments   = [for name in local.test_environments : octopusdeploy_environment.this[name].id]
+  worker_pool_id = local.worker_pool_id
+  container      = local.test_container
+
+  execution_properties = {
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/prepare-test-runner.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
+resource "octopusdeploy_process_step" "open_test_database" {
+  for_each = local.tested_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Open test database"
+  type           = "Octopus.AzurePowerShell"
+  environments   = [for name in local.test_environments : octopusdeploy_environment.this[name].id]
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/open-test-database.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
+resource "octopusdeploy_process_step" "acceptance_tests" {
+  for_each = local.tested_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Acceptance tests"
+  type           = "Octopus.Script"
+  environments   = [for name in local.test_environments : octopusdeploy_environment.this[name].id]
+  worker_pool_id = local.worker_pool_id
+  container      = local.test_container
+
+  packages = {
+    tests = {
+      package_id           = each.value.acceptanceTestsPackage
+      feed_id              = local.built_in_feed_id
+      acquisition_location = "Server"
+      properties = {
+        Extract       = "True"
+        Purpose       = ""
+        SelectionMode = "immediate"
+      }
+    }
+  }
+
+  execution_properties = {
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/run-acceptance-tests.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
+# Whenever the database was opened for the tests, also after they failed.
+resource "octopusdeploy_process_step" "close_test_database" {
+  for_each = local.tested_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Close test database"
+  type           = "Octopus.AzurePowerShell"
+  condition      = "Variable"
+  environments   = [for name in local.test_environments : octopusdeploy_environment.this[name].id]
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  properties = {
+    "Octopus.Step.ConditionVariableExpression" = "#{Octopus.Action[Open test database].Output.Opened}"
+  }
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/close-test-database.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
 resource "octopusdeploy_process_step" "update" {
   for_each = local.deployables
 
@@ -207,11 +308,21 @@ resource "octopusdeploy_process_steps_order" "deployable" {
   for_each = local.deployables
 
   process_id = octopusdeploy_process.deployable[each.key].id
-  steps = [
-    octopusdeploy_process_step.pin[each.key].id,
-    octopusdeploy_process_step.migrate[each.key].id,
-    octopusdeploy_process_step.update[each.key].id,
-    octopusdeploy_process_step.verify[each.key].id,
-    octopusdeploy_process_step.revert_pin[each.key].id,
-  ]
+  steps = concat(
+    [
+      octopusdeploy_process_step.pin[each.key].id,
+      octopusdeploy_process_step.migrate[each.key].id,
+    ],
+    contains(keys(local.tested_deployables), each.key) ? [octopusdeploy_process_step.prepare_tests[each.key].id] : [],
+    [
+      octopusdeploy_process_step.update[each.key].id,
+      octopusdeploy_process_step.verify[each.key].id,
+      octopusdeploy_process_step.revert_pin[each.key].id,
+    ],
+    contains(keys(local.tested_deployables), each.key) ? [
+      octopusdeploy_process_step.open_test_database[each.key].id,
+      octopusdeploy_process_step.acceptance_tests[each.key].id,
+      octopusdeploy_process_step.close_test_database[each.key].id,
+    ] : [],
+  )
 }

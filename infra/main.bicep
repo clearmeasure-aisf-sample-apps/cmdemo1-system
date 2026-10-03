@@ -91,6 +91,7 @@ module apps 'modules/containerapps.bicep' = {
     slug: slug
     environmentName: environmentName
     managedEnvironmentName: managedEnvironmentName
+    appCpu: string(environment.?appCpu ?? '0.5')
     location: appLocation
     tags: tags
     deployables: system.deployables
