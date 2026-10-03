@@ -21,6 +21,11 @@ $PSNativeCommandArgumentPassing = 'Standard'
 $PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
 
+# Every step starts in a fresh worker container. The Azure CLI writes progress spinners and, when it installs Bicep,
+# a WARNING line to stderr, which Octopus logs as errors ("SuccessWithWarning"): turn both off.
+$env:AZURE_CORE_DISABLE_PROGRESS_BAR = 'true'
+$env:AZURE_BICEP_USE_BINARY_FROM_PATH = 'false'
+
 $environmentName = [string] $OctopusParameters['Octopus.Environment.Name']
 $slug = [string] $OctopusParameters['System.Slug']
 $resourceGroup = [string] $OctopusParameters['Azure.ResourceGroup']
