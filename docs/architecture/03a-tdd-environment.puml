@@ -1,0 +1,44 @@
+@startuml 03a-tdd-environment
+!include _c4.iuml
+title Clear Measure work orders demo 1 | Phase 3a: tdd environment from the pipeline (2026-10-03)
+
+Person(viewer, "Class audience", "Browser")
+
+Boundary(gh, "GitHub org clearmeasure-aisf-sample-apps") {
+  Container(sysrepo, "cmdemo1-system", "public repository", "system.json, infra/, octopus/; docs/architecture/")
+  Container(wf_system, "Workflow system", "GitHub Actions", "octopus-apply, then system-release (immutable OIDC subjects)")
+}
+
+Boundary(octo, "Octopus space cmdemo1 demo") {
+  Container(octo_cfg, "Environments, lifecycle cmdemo1-lifecycle", "Terraform octopus/", "tdd", $tags="new")
+  Container(octo_accounts, "Azure OIDC accounts", "azure-cmdemo1-nonprod, azure-cmdemo1-prod", "Subjects space/project/environment", $tags="new")
+  Container(octo_projects, "Projects cmdemo1-system, cmdemo1-ui", "Hosted Ubuntu workers, worker-tools container", "Apply/Verify environment; Pin, Migrate, Update, Verify", $tags="new")
+  Container(rel_sys, "cmdemo1-system 1.0.4", "release", "Deployed to tdd", $tags="new")
+}
+
+Boundary(rgn, "rg-cmdemo1-nonprod (southcentralus)") {
+  Container(id_dn, "id-cmdemo1-deploy-nonprod", "managed identity", "Owner of the group; the only principal the stack's deny settings exclude")
+  Container(id_app, "id-cmdemo1-tdd-app", "managed identity", "AcrPull; Key Vault Secrets User")
+  ContainerDb(acr, "acrcmdemo1chu4gq", "Container Registry")
+  Boundary(stack, "Deployment stack stack-cmdemo1-tdd (deny write and delete)") {
+    ContainerDb(kv, "kvcmdemo1tddvq464", "Key Vault", "sql-admin-password, sql-connection-string", $tags="new")
+    ContainerDb(sql, "sql-cmdemo1-tdd-5tu77 / sqldb-cmdemo1-tdd", "Azure SQL, free offer, centralus", "Serverless; auto-pause", $tags="new")
+    Container(cae, "cae-cmdemo1-tdd", "Container Apps environment", "Consumption", $tags="new")
+    Container(app, "ca-cmdemo1-tdd-ui", "Container App", "Placeholder image until the first app release; https://ca-cmdemo1-tdd-ui.graybush-19a6e13b.southcentralus.azurecontainerapps.io", $tags="new")
+  }
+}
+
+Rel(sysrepo, wf_system, "merge to main")
+Rel(wf_system, octo_cfg, "terraform apply", "OIDC", $tags="new")
+Rel(wf_system, rel_sys, "push package, create release", $tags="new")
+Rel(rel_sys, octo_accounts, "uses azure-cmdemo1-nonprod", $tags="new")
+Rel(octo_accounts, id_dn, "Octopus OIDC", $tags="new")
+Rel(id_dn, stack, "az stack group create", $tags="new")
+Rel(app, id_app, "runs as", $tags="new")
+Rel(id_app, kv, "secrets", $tags="new")
+Rel(id_app, acr, "pull images", $tags="new")
+Rel(app, sql, "SQL connection", $tags="new")
+Rel(viewer, app, "HTTPS", $tags="new")
+
+SHOW_LEGEND()
+@enduml
