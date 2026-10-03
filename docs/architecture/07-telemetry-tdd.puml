@@ -1,0 +1,32 @@
+@startuml 07-telemetry-tdd
+!include _c4.iuml
+title Clear Measure work orders demo 1 | Progression: telemetry in tdd (2026-10-03)
+
+Person(dev, "Developer", "Azure portal: Application Insights")
+
+Boundary(gh, "GitHub org clearmeasure-aisf-sample-apps") {
+  Container(sysrepo, "cmdemo1-system", "system repository", "system.json: tdd capabilities baseline, telemetry", $tags="new")
+}
+
+Boundary(octo, "Octopus space cmdemo1 demo") {
+  Container(proj_sys, "cmdemo1-system 1.0.12", "release", "Deployed to tdd automatically after the merge", $tags="new")
+}
+
+Boundary(rgn, "rg-cmdemo1-nonprod") {
+  Boundary(tdd, "stack-cmdemo1-tdd") {
+    Container(tdd_app, "ca-cmdemo1-tdd-ui", "Container App, 2.4.5", "APPLICATIONINSIGHTS_CONNECTION_STRING; OpenTelemetry export")
+    ContainerDb(logs, "log-cmdemo1-tdd", "Log Analytics workspace", $tags="new")
+    Container(appi, "appi-cmdemo1-tdd", "Application Insights", "Workspace-based", $tags="new")
+    ContainerDb(tdd_sql, "sql-cmdemo1-tdd-5tu77 / sqldb-cmdemo1-tdd", "Azure SQL, centralus")
+  }
+  Container(uat_prod, "uat, prod", "unchanged", "Capabilities: baseline")
+}
+
+Rel(sysrepo, proj_sys, "pull request merged: new system release", $tags="new")
+Rel(proj_sys, tdd, "Apply environment: module telemetry.bicep", $tags="new")
+Rel(tdd_app, appi, "traces, metrics, logs", "OpenTelemetry", $tags="new")
+Rel(appi, logs, "stores in", $tags="new")
+Rel(dev, appi, "queries", $tags="new")
+
+SHOW_LEGEND()
+@enduml

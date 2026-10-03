@@ -57,3 +57,9 @@ Source: [05-uat-environment.puml](05-uat-environment.puml)
 ![Progression: prod added and promoted (2026-10-03)](06-prod-environment.png)
 
 Source: [06-prod-environment.puml](06-prod-environment.puml)
+
+## Progression: telemetry in tdd (2026-10-03)
+
+![Progression: telemetry in tdd (2026-10-03)](07-telemetry-tdd.png)
+
+Source: [07-telemetry-tdd.puml](07-telemetry-tdd.puml)
