@@ -22,10 +22,17 @@ jobs:
         run: ./scripts/test-system.ps1
 
       - name: Bicep build
+        # Warnings fail like errors (no broken windows): Bicep writes its diagnostics to stderr with exit code 0. The
+        # setting keeps az from reporting its own config change when it installs Bicep.
+        env:
+          AZURE_BICEP_USE_BINARY_FROM_PATH: "false"
         run: |
+          set -euo pipefail
           az bicep install
-          az bicep build --file infra/main.bicep --stdout > /dev/null
-          az bicep build --file bootstrap/seed.bicep --stdout > /dev/null
+          for file in infra/main.bicep bootstrap/seed.bicep; do
+            diagnostics=$(az bicep build --file "$file" --stdout 2>&1 >/dev/null | grep -E ': (Warning|Error) ' || true)
+            if [ -n "$diagnostics" ]; then echo "$diagnostics"; exit 1; fi
+          done
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -37,7 +44,8 @@ jobs:
         run: |
           terraform fmt -check -recursive
           terraform init -backend=false -input=false
-          terraform validate
+          validation=$(terraform validate -no-color 2>&1); echo "$validation"
+          if echo "$validation" | grep -q '^Warning:'; then exit 1; fi
 
   preview:
     if: github.event.pull_request.head.repo.full_name == github.repository
