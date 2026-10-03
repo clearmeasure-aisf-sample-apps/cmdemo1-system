@@ -11,6 +11,8 @@
     straight to main through the contents API with GitHub.Token, whose account the main ruleset lets bypass pull
     requests; the system workflow ignores pushes that change only versions.json, so a pin never starts an
     environment release. A pin that is already in place is not committed again (a redeployment).
+    Output variables Pinned and PreviousVersion let step "Revert pin" put the previous version back when a later step
+    fails, so main never keeps a version that did not deploy.
 #>
 [CmdletBinding()]
 param()
@@ -50,9 +52,11 @@ for ($attempt = 1; $attempt -le 4; $attempt++) {
     }
 
     if ($versions.ContainsKey($deployable) -and [string] $versions[$deployable] -eq $version) {
+        Set-OctopusVariable -name 'Pinned' -value 'False'
         Write-Highlight "$path already pins $deployable ${version}: nothing to commit."
         return
     }
+    $previous = if ($versions.ContainsKey($deployable)) { [string] $versions[$deployable] } else { '' }
 
     $versions[$deployable] = $version
     $ordered = [ordered] @{}
@@ -71,6 +75,8 @@ for ($attempt = 1; $attempt -le 4; $attempt++) {
 
     try {
         $commit = Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body ($body | ConvertTo-Json) -ContentType 'application/json'
+        Set-OctopusVariable -name 'Pinned' -value 'True'
+        Set-OctopusVariable -name 'PreviousVersion' -value $previous
         Write-Highlight "Pinned $deployable $version in ${environmentName}: $($commit.commit.html_url)"
         return
     }

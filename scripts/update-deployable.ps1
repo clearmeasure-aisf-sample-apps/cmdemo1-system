@@ -10,7 +10,8 @@
     fast path of a deployment: the image tag <registry>/<slug>/<deployable>:<release> and the app's port, on the
     container app the stack created. The pin step already wrote the same version to Git, so the next apply of the
     stack (an environment release, or the nightly drift check) agrees with what runs. The deploy identity is excluded
-    from the stack's deny settings, so it may make this change.
+    from the stack's deny settings, so it may make this change. It then waits until the new revision is ready, and fails
+    at once, with the container's last console lines, when the revision cannot start.
 #>
 [CmdletBinding()]
 param()
@@ -28,6 +29,40 @@ $port = [string] $OctopusParameters['Deployable.Port']
 $registry = [string] $OctopusParameters['Azure.RegistryServer']
 $version = [string] $OctopusParameters['Octopus.Release.Number']
 $app = "ca-$slug-$environmentName-$deployable"
+
+# Container Apps reports a revision that cannot start long before its URL times out: read the latest revision and its
+# replicas, and give the reason with the container's last console lines (the deploy identity may read them; the
+# stack's deny settings keep everyone else from streaming logs).
+function Get-RevisionProblem {
+    param([Parameter(Mandatory)] [string] $App)
+    $PSNativeCommandUseErrorActionPreference = $false
+    $latest = ([string] (az containerapp show --name $App --resource-group $resourceGroup --query properties.latestRevisionName --output tsv 2>$null)).Trim()
+    if (-not $latest) { return $null }
+    $revision = az containerapp revision show --name $App --resource-group $resourceGroup --revision $latest --output json 2>$null | ConvertFrom-Json -AsHashtable
+    $replicas = @(az containerapp replica list --name $App --resource-group $resourceGroup --revision $latest --output json 2>$null | ConvertFrom-Json -AsHashtable)
+    $PSNativeCommandUseErrorActionPreference = $true
+    if ($revision -and ($revision.properties.provisioningState -eq 'Failed' -or $revision.properties.runningState -eq 'Failed')) {
+        return "revision $latest is $($revision.properties.provisioningState)/$($revision.properties.runningState)"
+    }
+    foreach ($replica in $replicas) {
+        foreach ($container in @($replica.properties.containers)) {
+            $detail = [string] $container.runningStateDetails
+            if ($detail -match 'CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerError' -or [int] $container.restartCount -ge 3) {
+                return "revision ${latest}: container $($container.name) is $($container.runningState) ($detail) after $($container.restartCount) restart(s)"
+            }
+        }
+    }
+    return $null
+}
+
+function Write-RevisionLog {
+    param([Parameter(Mandatory)] [string] $App)
+    $PSNativeCommandUseErrorActionPreference = $false
+    $lines = az containerapp logs show --name $App --resource-group $resourceGroup --type console --tail 40 --format text 2>&1
+    $PSNativeCommandUseErrorActionPreference = $true
+    Write-Host "Last console lines of ${App}:"
+    @($lines) | ForEach-Object { Write-Host "  $_" }
+}
 $image = "$registry/$slug/${deployable}:$version"
 
 $PSNativeCommandUseErrorActionPreference = $false
@@ -41,4 +76,25 @@ if (-not $exists) {
 Write-Host "Updating $app to $image"
 az containerapp update --name $app --resource-group $resourceGroup --image $image --output none
 az containerapp ingress update --name $app --resource-group $resourceGroup --target-port $port --output none
+
+# Ready when the latest revision is the latest ready one; a revision that cannot start fails at once.
+$deadline = (Get-Date).AddMinutes(10)
+while ($true) {
+    $state = az containerapp show --name $app --resource-group $resourceGroup --query '{latest: properties.latestRevisionName, ready: properties.latestReadyRevisionName}' --output json | ConvertFrom-Json -AsHashtable
+    if ($state.latest -and $state.latest -eq $state.ready) {
+        Write-Host "Revision $($state.latest) is ready"
+        break
+    }
+    $problem = Get-RevisionProblem -App $app
+    if ($problem) {
+        Write-RevisionLog -App $app
+        Fail-Step "$deployable $version cannot start in ${environmentName}: $problem"
+    }
+    if ((Get-Date) -gt $deadline) {
+        Write-RevisionLog -App $app
+        Fail-Step "Revision $($state.latest) of $app was not ready within 10 minutes."
+    }
+    Write-Host "Waiting for revision $($state.latest) (ready: $($state.ready))"
+    Start-Sleep -Seconds 15
+}
 Write-Highlight "$deployable $version runs in $environmentName ($app)."
