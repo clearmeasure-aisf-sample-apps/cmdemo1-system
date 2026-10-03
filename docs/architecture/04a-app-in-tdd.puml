@@ -1,0 +1,41 @@
+@startuml 04a-app-in-tdd
+!include _c4.iuml
+title Clear Measure work orders demo 1 | Phase 4a: app 2.4.5 running in tdd (2026-10-03)
+
+Person(viewer, "Class audience", "Browser")
+
+Boundary(gh, "GitHub org clearmeasure-aisf-sample-apps") {
+  Container(apprepo, "cmdemo1-workorders", "app repository", "Build, then Release, for every green master")
+  Container(sysrepo, "cmdemo1-system", "system repository", "environments/tdd/versions.json: ui = 2.4.5 (commit e0f4929)", $tags="new")
+}
+
+Boundary(octo, "Octopus space cmdemo1 demo") {
+  ContainerDb(feed, "Built-in feed", "Octopus packages", "ChurchBulletin.Database 2.4.5", $tags="new")
+  Container(rel_app, "cmdemo1-ui 2.4.5", "release", "Deployed to tdd", $tags="new")
+  Container(worker, "Hosted Ubuntu worker", "worker-tools container", "Runs the deployment steps", $tags="new")
+}
+
+Boundary(rgn, "rg-cmdemo1-nonprod") {
+  ContainerDb(acr, "acrcmdemo1chu4gq", "Container Registry", "cmdemo1/ui:2.4.5", $tags="new")
+  Container(id_dn, "id-cmdemo1-deploy-nonprod", "managed identity", "Octopus OIDC account azure-cmdemo1-nonprod")
+  Boundary(stack, "stack-cmdemo1-tdd") {
+    Container(app, "ca-cmdemo1-tdd-ui", "Container App", "Image 2.4.5; https://ca-cmdemo1-tdd-ui.graybush-19a6e13b.southcentralus.azurecontainerapps.io/_healthcheck answers 200", $tags="new")
+    ContainerDb(sql, "sql-cmdemo1-tdd-5tu77 / sqldb-cmdemo1-tdd", "Azure SQL, centralus", "Schema migrated to 2.4.5", $tags="new")
+    ContainerDb(kv, "kvcmdemo1tddvq464", "Key Vault")
+  }
+}
+
+Rel(apprepo, acr, "Release: push image", "OIDC as id-cmdemo1-acr-push", $tags="new")
+Rel(apprepo, feed, "Release: push database package", "OIDC", $tags="new")
+Rel(apprepo, rel_app, "Release: create release", "OIDC", $tags="new")
+Rel(rel_app, worker, "deploy", $tags="new")
+Rel(worker, sysrepo, "1. Pin version (5. Revert pin, only when a step failed)", "GitHub contents API, OCTOPUS_GITHUB_TOKEN", $tags="new")
+Rel(worker, sql, "2. Migrate database", "SQL admin login from the vault", $tags="new")
+Rel(worker, id_dn, "3. Update deployable", "Octopus OIDC", $tags="new")
+Rel(id_dn, app, "az containerapp update; waits for the new revision", $tags="new")
+Rel(worker, app, "4. Verify deployable", "/_healthcheck; fails at once on a crash loop", $tags="new")
+Rel(app, kv, "connection string", "runtime identity")
+Rel(viewer, app, "HTTPS")
+
+SHOW_LEGEND()
+@enduml
