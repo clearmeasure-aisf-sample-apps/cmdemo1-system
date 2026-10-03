@@ -38,6 +38,13 @@ locals {
   tested_deployables = length(local.test_environments) == 0 ? {} : {
     for name, d in local.deployables : name => d if try(d.acceptanceTestsPackage, "") != ""
   }
+  # Every environment after the first waits for a sign-off by the space's Space Managers (people join that team to
+  # sign off; automation answers only with a recorded reason). Prod-tier environments record a restore point first.
+  promoted_environments = [for name, e in local.environments : name if e.sort_order > 1]
+  prod_environments     = [for name, e in local.environments : name if e.tier == "prod"]
+  sign_off_team_id      = "teams-spacemanagers-${local.system.octopus.spaceId}"
+  # Deployment freezes from system.json: [{ "name", "start", "end", "environments" (default: the prod tier) }].
+  freezes = try(local.system.freezes, [])
 }
 
 provider "octopusdeploy" {
