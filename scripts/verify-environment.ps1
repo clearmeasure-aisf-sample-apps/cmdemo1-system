@@ -42,13 +42,24 @@ $healthPath = [string] $OctopusParameters['Deployable.HealthPath']
 # replicas, and give the reason with the container's last console lines (the deploy identity may read them; the
 # stack's deny settings keep everyone else from streaming logs).
 function Get-RevisionProblem {
+    # Through the ARM REST API, so it does not depend on the Azure CLI version of the worker image.
     param([Parameter(Mandatory)] [string] $App)
+    $api = 'api-version=2024-03-01'
     $PSNativeCommandUseErrorActionPreference = $false
-    $latest = ([string] (az containerapp show --name $App --resource-group $resourceGroup --query properties.latestRevisionName --output tsv 2>$null)).Trim()
-    if (-not $latest) { return $null }
-    $revision = az containerapp revision show --name $App --resource-group $resourceGroup --revision $latest --output json 2>$null | ConvertFrom-Json -AsHashtable
-    $replicas = @(az containerapp replica list --name $App --resource-group $resourceGroup --revision $latest --output json 2>$null | ConvertFrom-Json -AsHashtable)
+    $subscription = ([string] (az account show --query id --output tsv 2>$null)).Trim()
+    $appId = "/subscriptions/$subscription/resourceGroups/$resourceGroup/providers/Microsoft.App/containerApps/$App"
+    $appJson = az rest --method get --url "https://management.azure.com${appId}?$api" --output json 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $PSNativeCommandUseErrorActionPreference = $true
+        Write-Warning "Could not read ${App}: $appJson"
+        return $null
+    }
+    $latest = [string] ($appJson | ConvertFrom-Json -AsHashtable).properties.latestRevisionName
+    $revisionJson = az rest --method get --url "https://management.azure.com$appId/revisions/${latest}?$api" --output json 2>$null
+    $replicasJson = az rest --method get --url "https://management.azure.com$appId/revisions/$latest/replicas?$api" --output json 2>$null
     $PSNativeCommandUseErrorActionPreference = $true
+    $revision = if ($revisionJson) { $revisionJson | ConvertFrom-Json -AsHashtable } else { $null }
+    $replicas = if ($replicasJson) { @(($replicasJson | ConvertFrom-Json -AsHashtable).value) } else { @() }
     if ($revision -and ($revision.properties.provisioningState -eq 'Failed' -or $revision.properties.runningState -eq 'Failed')) {
         return "revision $latest is $($revision.properties.provisioningState)/$($revision.properties.runningState)"
     }
