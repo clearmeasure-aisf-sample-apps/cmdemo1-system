@@ -89,25 +89,55 @@ if (-not $exists) {
     Fail-Step "Container app $app does not exist: deploy a release of $slug-system to $environmentName first (the environment is created by the system pipeline)."
 }
 
-Write-Host "Updating $app to $image"
-az containerapp update --name $app --resource-group $resourceGroup --image $image --output none
-# The port changes only on the first deployment over the placeholder; the CLI reports a change of ingress as a
-# warning ("Ingress Updated. Access your app at ..."), the only warning that command has.
-$currentPort = ([string] (az containerapp show --name $app --resource-group $resourceGroup --query properties.configuration.ingress.targetPort --output tsv)).Trim()
+# The Container Apps commands of the Azure CLI draw a console animation on stderr while they wait, whatever the CLI
+# settings, which Octopus logs as errors. So the update starts with --no-wait (the ingress port goes through az rest,
+# as the same PATCH "az containerapp ingress update" sends) and this script does the waiting, with a readable log.
+$current = az containerapp show --name $app --resource-group $resourceGroup --output json |
+    ConvertFrom-Json -AsHashtable
+$appUri = "https://management.azure.com$($current.id)?api-version=2024-03-01"
+$before = [string] $current.properties.latestRevisionName
+
+# The port changes only on the first deployment over the placeholder image.
+$currentPort = [string] $current.properties.configuration.ingress.targetPort
 if ($currentPort -ne $port) {
-    az containerapp ingress update --name $app --resource-group $resourceGroup --target-port $port --only-show-errors --output none
+    $body = @{ properties = @{ configuration = @{ ingress = @{ targetPort = [int] $port; exposedPort = $null } } } } |
+        ConvertTo-Json -Depth 6 -Compress
+    az rest --method patch --url $appUri --body $body --headers 'Content-Type=application/json' --output none
+    $deadline = (Get-Date).AddMinutes(5)
+    do {
+        Start-Sleep -Seconds 5
+        $provisioning = [string] (az rest --method get --url $appUri --query properties.provisioningState --output tsv)
+    } while ($provisioning.Trim() -notin @('Succeeded', 'Failed') -and (Get-Date) -lt $deadline)
+    if ($provisioning.Trim() -ne 'Succeeded') {
+        Fail-Step "The ingress of $app did not change to port $port (provisioning state $provisioning)."
+    }
     Write-Host "Ingress of $app now targets port $port (was $currentPort)"
 }
 
-# Ready when the latest revision is the latest ready one; a revision that cannot start fails at once.
+$currentImage = [string] $current.properties.template.containers[0].image
+if ($currentImage -eq $image) {
+    Write-Host "$app already runs $image"
+}
+else {
+    Write-Host "Updating $app from $currentImage to $image"
+    az containerapp update --name $app --resource-group $resourceGroup --image $image --no-wait --output none
+}
+
+# Ready when a new revision (or, for an unchanged image, the current one) is the latest and the latest ready one; a
+# revision that cannot start fails at once.
 $deadline = (Get-Date).AddMinutes(10)
 while ($true) {
-    $state = az containerapp show --name $app --resource-group $resourceGroup --query '{latest: properties.latestRevisionName, ready: properties.latestReadyRevisionName}' --output json | ConvertFrom-Json -AsHashtable
-    if ($state.latest -and $state.latest -eq $state.ready) {
+    $state = az containerapp show --name $app --resource-group $resourceGroup --query '{latest: properties.latestRevisionName, ready: properties.latestReadyRevisionName, provisioning: properties.provisioningState}' --output json | ConvertFrom-Json -AsHashtable
+    $isNew = $currentImage -eq $image -or $state.latest -ne $before
+    if ($isNew -and $state.provisioning -eq 'Succeeded' -and $state.latest -and $state.latest -eq $state.ready) {
         Write-Host "Revision $($state.latest) is ready"
         break
     }
-    $problem = Get-RevisionProblem -App $app
+    if ($state.provisioning -eq 'Failed') {
+        Write-RevisionLog -App $app
+        Fail-Step "Updating $app to $image failed (provisioning state Failed)."
+    }
+    $problem = if ($isNew) { Get-RevisionProblem -App $app } else { $null }
     if ($problem) {
         Write-RevisionLog -App $app
         Fail-Step "$deployable $version cannot start in ${environmentName}: $problem"
@@ -116,7 +146,7 @@ while ($true) {
         Write-RevisionLog -App $app
         Fail-Step "Revision $($state.latest) of $app was not ready within 10 minutes."
     }
-    Write-Host "Waiting for revision $($state.latest) (ready: $($state.ready))"
-    Start-Sleep -Seconds 15
+    Write-Host "Waiting for the new revision (latest $($state.latest), ready $($state.ready), $($state.provisioning))"
+    Start-Sleep -Seconds 10
 }
 Write-Highlight "$deployable $version runs in $environmentName ($app)."
