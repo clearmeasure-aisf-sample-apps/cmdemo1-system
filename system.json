@@ -112,7 +112,8 @@
       "tier": "prod",
       "capabilities": [
         "baseline"
-      ]
+      ],
+      "appLocation": "centralus"
     }
   ]
 }
