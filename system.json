@@ -97,7 +97,8 @@
       "name": "tdd",
       "tier": "nonprod",
       "capabilities": [
-        "baseline"
+        "baseline",
+        "telemetry"
       ]
     },
     {
