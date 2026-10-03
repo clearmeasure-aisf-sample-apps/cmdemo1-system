@@ -21,6 +21,11 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandArgumentPassing = 'Standard'
 $PSNativeCommandUseErrorActionPreference = $true
 
+# Every step starts in a fresh worker container. The Azure CLI writes progress spinners and, when it installs Bicep,
+# a WARNING line to stderr, which Octopus logs as errors ("SuccessWithWarning"): turn both off.
+$env:AZURE_CORE_DISABLE_PROGRESS_BAR = 'true'
+$env:AZURE_BICEP_USE_BINARY_FROM_PATH = 'false'
+
 $environmentName = [string] $OctopusParameters['Octopus.Environment.Name']
 $slug = [string] $OctopusParameters['System.Slug']
 $resourceGroup = [string] $OctopusParameters['Azure.ResourceGroup']
@@ -86,7 +91,13 @@ if (-not $exists) {
 
 Write-Host "Updating $app to $image"
 az containerapp update --name $app --resource-group $resourceGroup --image $image --output none
-az containerapp ingress update --name $app --resource-group $resourceGroup --target-port $port --output none
+# The port changes only on the first deployment over the placeholder; the CLI reports a change of ingress as a
+# warning ("Ingress Updated. Access your app at ..."), the only warning that command has.
+$currentPort = ([string] (az containerapp show --name $app --resource-group $resourceGroup --query properties.configuration.ingress.targetPort --output tsv)).Trim()
+if ($currentPort -ne $port) {
+    az containerapp ingress update --name $app --resource-group $resourceGroup --target-port $port --only-show-errors --output none
+    Write-Host "Ingress of $app now targets port $port (was $currentPort)"
+}
 
 # Ready when the latest revision is the latest ready one; a revision that cannot start fails at once.
 $deadline = (Get-Date).AddMinutes(10)
