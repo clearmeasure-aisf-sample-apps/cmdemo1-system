@@ -36,7 +36,10 @@ var tags = {
 }
 
 var vaultName = take('kv${slug}${environmentName}${suffix}', 24)
-var sqlServerName = 'sql-${slug}-${environmentName}-${suffix}'
+// SQL server names are global, and a create refused in one region keeps the name from another for a while; a SQL
+// region of its own therefore gets a name of its own (unchanged when sqlLocation is location).
+var sqlSuffix = sqlLocation == location ? suffix : take(uniqueString(subscription().id, resourceGroup().id, environmentName, sqlLocation), 5)
+var sqlServerName = 'sql-${slug}-${environmentName}-${sqlSuffix}'
 var databaseName = 'sqldb-${slug}-${environmentName}'
 var sqlAdminLogin = 'sqladmin'
 var sqlServerFqdn = '${sqlServerName}${az.environment().suffixes.sqlServerHostname}'
