@@ -1,0 +1,37 @@
+@startuml 09-safe-path-to-prod
+!include _c4.iuml
+title Clear Measure work orders demo 1 | Safe path to production (2026-10-03)
+
+Person(signer, "Space Manager", "Signs off in Octopus, or automation with a recorded reason")
+
+Boundary(gh, "GitHub org clearmeasure-aisf-sample-apps") {
+  Container(apprepo, "cmdemo1-workorders", "required checks: Build result, secret-scan", "Release write-locks the image tag", $tags="new")
+  Container(sysrepo, "cmdemo1-system", "env-checks with gitleaks", "system.json: freezes (none declared)", $tags="new")
+}
+
+Boundary(octo, "Octopus space cmdemo1 demo") {
+  Container(lifecycle, "cmdemo1-lifecycle", "tdd automatic; uat, prod by promotion", "Project deployment freezes block prod while they run", $tags="new")
+  Container(proj_app, "cmdemo1-ui", "uat and prod", "Sign-off, Record restore point (prod), Pin, Migrate, Update, Verify", $tags="new")
+  Container(proj_sys, "cmdemo1-system", "uat and prod", "Sign-off, Apply environment, Verify environment", $tags="new")
+}
+
+Boundary(rgn, "rg-cmdemo1-nonprod") {
+  ContainerDb(acr, "acrcmdemo1chu4gq", "Container Registry", "Released tags write- and delete-locked", $tags="new")
+  Container(tdd_app, "ca-cmdemo1-tdd-ui", "tdd, 2.4.12", "Acceptance tests on every deployment; rollback check")
+}
+
+Boundary(rgp, "rg-cmdemo1-prod") {
+  Container(prod_app, "ca-cmdemo1-prod-ui", "prod, 2.4.12", "https://ca-cmdemo1-prod-ui.ashycliff-a6bfedb7.westus3.azurecontainerapps.io")
+  ContainerDb(prod_sql, "sql-cmdemo1-prod-swxdz / sqldb-cmdemo1-prod", "Azure SQL, point-in-time restore", "Restore point recorded before every release", $tags="new")
+}
+
+Rel(apprepo, acr, "push and lock", "OIDC", $tags="new")
+Rel(signer, proj_app, "Proceed with a note", $tags="new")
+Rel(signer, proj_sys, "Proceed with a note", $tags="new")
+Rel(proj_app, prod_sql, "record restore point", $tags="new")
+Rel(proj_app, prod_app, "deploy after sign-off")
+Rel(proj_app, tdd_app, "redeploy previous release, then current (test-rollback.ps1)", $tags="new")
+Rel(lifecycle, proj_app, "promotion")
+
+SHOW_LEGEND()
+@enduml
