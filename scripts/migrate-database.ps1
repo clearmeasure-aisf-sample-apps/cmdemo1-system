@@ -39,7 +39,12 @@ $database = [string] $outputs.databaseName.value
 $login = [string] $outputs.sqlAdminLogin.value
 $vault = [string] $outputs.keyVaultName.value
 
-$assembly = Get-ChildItem -Path $package -Filter $assemblyName -Recurse | Select-Object -First 1
+# The package also carries build intermediates (obj/, ref/) that cannot run: take a copy with its runtimeconfig.json,
+# Release before Debug.
+$assembly = Get-ChildItem -Path $package -Filter $assemblyName -Recurse |
+    Where-Object { $_.FullName -notmatch '[\\/]obj[\\/]' -and (Test-Path -LiteralPath (Join-Path $_.DirectoryName "$($_.BaseName).runtimeconfig.json")) } |
+    Sort-Object { if ($_.FullName -match '[\\/]Release[\\/]') { 0 } else { 1 } }, { $_.FullName.Length } |
+    Select-Object -First 1
 if (-not $assembly) {
     Fail-Step "$assemblyName is not in the database package ($package)."
 }
