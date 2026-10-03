@@ -56,8 +56,11 @@ foreach ($entry in $system.environments) {
 
     try {
         $PSNativeCommandUseErrorActionPreference = $false
+        # ProviderNoRbac: full validation, but only read permissions are checked, so id-<slug>-plan (Reader and the
+        # what-if role) can preview without any write right; the default level checks write on every resource.
         $raw = az deployment group what-if --resource-group $resourceGroup --template-file $template `
-            --parameters "@$parametersFile" --result-format ResourceIdOnly --no-pretty-print --output json 2>&1
+            --parameters "@$parametersFile" --validation-level ProviderNoRbac `
+            --result-format ResourceIdOnly --no-pretty-print --output json 2>&1
         $ok = $LASTEXITCODE -eq 0
         $PSNativeCommandUseErrorActionPreference = $true
     }
