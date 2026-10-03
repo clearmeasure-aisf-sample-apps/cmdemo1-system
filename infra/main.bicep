@@ -24,8 +24,12 @@ var location = system.system.location
 // Azure SQL may need its own region: subscription offers restrict where new SQL servers can be created
 // (RegionDoesNotAllowProvisioning). system.sqlLocation overrides location for the SQL server and database only.
 var sqlLocation = system.system.?sqlLocation ?? location
+// The Container Apps environment, its apps and telemetry may need another region per environment: a subscription
+// offer may allow only a few Container Apps environments per region (ManagedEnvironmentCount).
+// environments[].appLocation overrides location for those only.
 var environment = first(filter(system.environments, e => e.name == environmentName))!
 var capabilities = union(['baseline'], environment.capabilities)
+var appLocation = environment.?appLocation ?? location
 var app = first(filter(system.azure.identities.apps, a => a.environment == environmentName))!
 var suffix = take(uniqueString(subscription().id, resourceGroup().id, environmentName), 5)
 var tags = {
@@ -49,7 +53,7 @@ module telemetry 'modules/telemetry.bicep' = if (contains(capabilities, 'telemet
   params: {
     slug: slug
     environmentName: environmentName
-    location: location
+    location: appLocation
     tags: tags
   }
 }
@@ -84,7 +88,7 @@ module apps 'modules/containerapps.bicep' = {
   params: {
     slug: slug
     environmentName: environmentName
-    location: location
+    location: appLocation
     tags: tags
     deployables: system.deployables
     versions: versions
