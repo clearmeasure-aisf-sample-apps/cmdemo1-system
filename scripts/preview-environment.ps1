@@ -29,6 +29,25 @@ $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | Conver
 $template = Join-Path $Root 'infra' 'main.bicep'
 $summary = if ($env:GITHUB_STEP_SUMMARY) { $env:GITHUB_STEP_SUMMARY } else { Join-Path ([IO.Path]::GetTempPath()) 'preview-summary.md' }
 $ignoredTypes = @('Microsoft.KeyVault/vaults/secrets')
+# What-if reports properties Azure fills in itself as Delete, expressions it cannot evaluate before deployment
+# (reference(), the outputs of other modules) as Modify, and write-only properties as Create. None of them is drift.
+$writeOnlyPaths = @('properties.Flow_Type', 'properties.Request_Source')
+function Get-PropertyChange {
+    param($Delta, [string] $Prefix = '')
+    foreach ($item in @($Delta)) {
+        if (-not $item) { continue }
+        $path = if ($Prefix) { "$Prefix.$($item.path)" } else { [string] $item.path }
+        if ($item.children) {
+            Get-PropertyChange -Delta $item.children -Prefix $path
+            continue
+        }
+        if ($item.propertyChangeType -in @('Delete', 'NoEffect')) { continue }
+        if ($writeOnlyPaths -contains $path) { continue }
+        $after = ($item.after | ConvertTo-Json -Depth 20 -Compress)
+        if ($after -match '\[[a-zA-Z]+\(') { continue }
+        $path
+    }
+}
 $drifted = [Collections.Generic.List[string]]::new()
 $unchecked = [Collections.Generic.List[string]]::new()
 
@@ -60,7 +79,7 @@ foreach ($entry in $system.environments) {
         # what-if role) can preview without any write right; the default level checks write on every resource.
         $raw = az deployment group what-if --resource-group $resourceGroup --template-file $template `
             --parameters "@$parametersFile" --validation-level ProviderNoRbac `
-            --result-format ResourceIdOnly --no-pretty-print --output json 2>&1
+            --result-format FullResourcePayloads --no-pretty-print --output json 2>&1
         $ok = $LASTEXITCODE -eq 0
         $PSNativeCommandUseErrorActionPreference = $true
     }
@@ -79,14 +98,23 @@ foreach ($entry in $system.environments) {
     }
 
     $result = (@($raw) -join "`n") | ConvertFrom-Json -AsHashtable
-    $changes = @($result.changes | Where-Object { $_.changeType -notin @('NoChange', 'Ignore') })
+    $changes = @($result.changes | Where-Object { $_.changeType -notin @('NoChange', 'Ignore') } | ForEach-Object {
+            $properties = @(if ($_.changeType -eq 'Modify') { Get-PropertyChange -Delta $_.delta })
+            if ($_.changeType -ne 'Modify' -or $properties.Count -gt 0) {
+                @{ changeType = $_.changeType; resourceId = $_.resourceId; properties = $properties }
+            }
+        })
     $relevant = @($changes | Where-Object { $type = ($_.resourceId -split '/providers/')[-1]; -not ($ignoredTypes | Where-Object { $type -like "$_/*" }) })
     if ($changes.Count -eq 0) {
         Add-Content -LiteralPath $summary -Value "No change.`n"
     }
     else {
-        $rows = $changes | ForEach-Object { "| $($_.changeType) | ``$(($_.resourceId -split '/providers/')[-1])`` |" }
-        Add-Content -LiteralPath $summary -Value ((@('| Change | Resource |', '|---|---|') + $rows + '') -join "`n")
+        $rows = foreach ($change in $changes) {
+            $resource = ($change.resourceId -split '/providers/')[-1]
+            $properties = @($change.properties | ForEach-Object { '`' + $_ + '`' }) -join ', '
+            "| $($change.changeType) | ``$resource`` | $properties |"
+        }
+        Add-Content -LiteralPath $summary -Value ((@('| Change | Resource | Properties |', '|---|---|---|') + $rows + '') -join "`n")
     }
     if ($relevant.Count -gt 0) {
         $drifted.Add($name)
