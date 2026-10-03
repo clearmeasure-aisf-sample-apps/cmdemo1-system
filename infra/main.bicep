@@ -23,13 +23,15 @@ var slug = system.system.slug
 var location = system.system.location
 // Azure SQL may need its own region: subscription offers restrict where new SQL servers can be created
 // (RegionDoesNotAllowProvisioning). system.sqlLocation overrides location for the SQL server and database only.
-var sqlLocation = system.system.?sqlLocation ?? location
+// Optional keys come from defaults merged with union(): reading a key absent from system.json (.?key) is warning
+// BCP053, and the build treats warnings as errors.
+var sqlLocation = union({ sqlLocation: location }, system.system).sqlLocation
 // The Container Apps environment, its apps and telemetry may need another region per environment: a subscription
 // offer may allow only a few Container Apps environments per region (ManagedEnvironmentCount).
 // environments[].appLocation overrides location for those only.
-var environment = first(filter(system.environments, e => e.name == environmentName))!
+var environment = union({ appLocation: location, appCpu: '0.5' }, first(filter(system.environments, e => e.name == environmentName))!)
 var capabilities = union(['baseline'], environment.capabilities)
-var appLocation = environment.?appLocation ?? location
+var appLocation = environment.appLocation
 // A Container Apps environment that failed in one region keeps its name there; an appLocation gets a name of its own.
 var managedEnvironmentName = appLocation == location ? 'cae-${slug}-${environmentName}' : 'cae-${slug}-${environmentName}-${take(uniqueString(appLocation), 4)}'
 var app = first(filter(system.azure.identities.apps, a => a.environment == environmentName))!
@@ -91,7 +93,7 @@ module apps 'modules/containerapps.bicep' = {
     slug: slug
     environmentName: environmentName
     managedEnvironmentName: managedEnvironmentName
-    appCpu: string(environment.?appCpu ?? '0.5')
+    appCpu: string(environment.appCpu)
     location: appLocation
     tags: tags
     deployables: system.deployables
