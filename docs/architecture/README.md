@@ -51,3 +51,9 @@ Source: [04a-app-in-tdd.puml](04a-app-in-tdd.puml)
 ![Progression: uat added and promoted (2026-10-03)](05-uat-environment.png)
 
 Source: [05-uat-environment.puml](05-uat-environment.puml)
+
+## Progression: prod added and promoted (2026-10-03)
+
+![Progression: prod added and promoted (2026-10-03)](06-prod-environment.png)
+
+Source: [06-prod-environment.puml](06-prod-environment.puml)
