@@ -44,6 +44,9 @@ if (-not $ListChecks) {
     $space = [string] $system.octopus.spaceId
     $environments = @($system.environments | ForEach-Object { [string] $_.name })
     $first = $environments[0]
+    # The first app runs as a container app, or on App Service (deployables[].hosting "appservice"): the checks of
+    # the artifact, the size, the idle cost and the placement ask the hosting it has.
+    $onAppService = $system.deployables[0]['hosting'] -eq 'appservice'
 }
 
 function Write-Pass { param([string] $Message) Write-Host "PASS $Message" }
@@ -124,8 +127,25 @@ function Get-Group([string] $Environment) {
 }
 function Get-App([string] $Environment) {
     # By the name the stack reports: a shared or moved Container Apps environment gives the app a suffix.
-    $name = [string] (az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query "outputs.deployables.value[?name=='$deployable'].containerApp | [0]" --output tsv)
-    az containerapp show --name $name.Trim() --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
+    $name = ([string] (az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query "outputs.deployables.value[?name=='$deployable'].containerApp | [0]" --output tsv)).Trim()
+    if (-not $name) { throw "stack-$slug-$Environment lists no container app for $deployable (a failed or unfinished apply?)" }
+    az containerapp show --name $name --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
+}
+function Get-Site([string] $Environment) {
+    # The App Service web app of the first deployable, by the name the stack reports, with its plan's SKU.
+    $entry = az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query "outputs.deployables.value[?name=='$deployable'] | [0]" --output json | ConvertFrom-Json -AsHashtable
+    if (-not $entry -or -not $entry['webApp']) { throw "stack-$slug-$Environment lists no web app for $deployable (a failed or unfinished apply?)" }
+    $site = az webapp show --name $entry.webApp --resource-group (Get-Group $Environment) --query '{name: name, location: location, plan: appServicePlanId}' --output json | ConvertFrom-Json -AsHashtable
+    $site.url = [string] $entry.url
+    $site.sku = az appservice plan show --ids $site.plan --query '{name: sku.name, tier: sku.tier}' --output json | ConvertFrom-Json -AsHashtable
+    $site
+}
+function Get-DeployedPackage([string] $Environment) {
+    # The version of the app package (the zip in the Octopus built-in feed) the environment's current release deploys.
+    $deployment = Get-LastDeployment $deployableProject $Environment
+    $release = Invoke-Octopus "/api/$space/releases/$($deployment.ReleaseId)"
+    $package = @($release.SelectedPackages | Where-Object { $_.ActionName -eq 'Update deployable' })[0]
+    @{ release = [string] $release.Version; package = [string] $package.Version }
 }
 function Get-RoleName([string] $Group, [string] $PrincipalId) {
     # Assignments at, above and below the group that name the principal; role names from their definitions.
@@ -163,22 +183,54 @@ $checks = [ordered] @{
     'CAP-010' = { Assert-AppRepository; Assert-That ((Get-RequiredCheck $appRepo) -contains 'Build result') 'Build result not required'; 'Build result required on the app' }
     'CAP-011' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the current deployment of every project and environment logged no warning or error' }
     'CAP-012' = { Assert-That ((Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'head\.repo\.full_name == github\.repository') 'preview runs for forks'; 'the credentialed preview runs only for branches of the repository' }
-    'CAP-013' = { $v = (Get-LastDeployment $deployableProject $first).Version; $image = [string] (Get-App $first).properties.template.containers[0].image; Assert-That ($image.EndsWith(":$v")) "$first runs $image for release $v"; "release $v = image tag in $first" }
+    'CAP-013' = {
+        $v = (Get-LastDeployment $deployableProject $first).Version
+        if ($onAppService) {
+            # The build stamps the version into the app, which reports it; the release's package carries the same number.
+            $running = [string] (Invoke-RestMethod -Uri "$((Get-Site $first).url)/_version" -TimeoutSec 120).version
+            Assert-That ($running -eq $v -or $running.StartsWith("$v+")) "$first runs $running for release $v"
+            Assert-That ((Get-DeployedPackage $first).package -eq $v) "release $v deploys package $((Get-DeployedPackage $first).package)"
+            return "release $v = package version = the version the app reports in $first"
+        }
+        $image = [string] (Get-App $first).properties.template.containers[0].image; Assert-That ($image.EndsWith(":$v")) "$first runs $image for release $v"; "release $v = image tag in $first"
+    }
     'CAP-014' = {
         $files = @(gh api "repos/$systemRepo/contents/scripts" --jq '.[].name' | Where-Object { $_ -like '*.ps1' })
         foreach ($f in $files) { $t = Get-RepoFile $systemRepo "scripts/$f"; Assert-That ($t -match "ErrorActionPreference = 'Stop'" -and $t -match 'PSNativeCommandUseErrorActionPreference = \$true') "$f lacks the preamble" }
         "$($files.Count) step scripts stop on errors"
     }
     'CAP-020' = {
+        if ($onAppService) {
+            # One zip per version in the built-in feed; every environment's release deploys the package of its own number.
+            $shown = foreach ($e in $environments) { if (-not (Find-LastDeployment $deployableProject $e)) { continue }; $p = Get-DeployedPackage $e; Assert-That ($p.release -eq $p.package) "$e runs release $($p.release) with package $($p.package)"; "$e $($p.package)" }
+            if (-not $shown) { Skip-Check "no successful $deployableProject deployment yet" }
+            return "one package per version: $($shown -join ', ')"
+        }
         $byVersion = @{}
         foreach ($e in $environments) { $img = [string] (Get-App $e).properties.template.containers[0].image; $v = $img.Split(':')[-1]; if ($byVersion.ContainsKey($v)) { Assert-That ($byVersion[$v] -eq $img) "$v differs: $($byVersion[$v]) / $img" } else { $byVersion[$v] = $img } }
         "one image per version across $($environments -join ', ')"
     }
-    'CAP-021' = { $v = (Get-LastDeployment $deployableProject $first).Version; $w = az acr repository show --name $system.azure.registry.name --image "$($slug)/${deployable}:$v" --query 'changeableAttributes.writeEnabled' --output tsv; Assert-That ($w -eq 'false') "$v is writable"; "$($slug)/${deployable}:$v is write-locked" }
+    'CAP-021' = {
+        if ($onAppService) {
+            # The package feed keeps the first upload of a version: the release workflow pushes with IgnoreIfExists only.
+            Assert-AppRepository
+            $modes = @([regex]::Matches((Get-RepoFile $appRepo '.github/workflows/release.yml'), 'overwrite_mode:\s*(\S+)') | ForEach-Object { $_.Groups[1].Value })
+            Assert-That ($modes.Count -gt 0 -and @($modes | Where-Object { $_ -ne 'IgnoreIfExists' }).Count -eq 0) "release.yml pushes with $($modes -join ', ')"
+            return "release.yml never replaces a pushed package ($($modes.Count) pushes, IgnoreIfExists)"
+        }
+        $v = (Get-LastDeployment $deployableProject $first).Version; $w = az acr repository show --name $system.azure.registry.name --image "$($slug)/${deployable}:$v" --query 'changeableAttributes.writeEnabled' --output tsv; Assert-That ($w -eq 'false') "$v is writable"; "$($slug)/${deployable}:$v is write-locked"
+    }
     'CAP-030' = { $l = @((Invoke-Octopus "/api/$space/lifecycles?partialName=$($slug)-lifecycle&take=100").Items | Where-Object { $_.Name -eq "$($slug)-lifecycle" })[0]; Assert-That (@($l.Phases[0].AutomaticDeploymentTargets).Count -eq 1 -and @($l.Phases | Select-Object -Skip 1 | Where-Object { $_.AutomaticDeploymentTargets.Count -gt 0 }).Count -eq 0) 'lifecycle phases wrong'; "first phase automatic, $($l.Phases.Count - 1) by promotion" }
     'CAP-031' = { foreach ($e in $environments) { Assert-That ([bool] (Get-EnvironmentId $e)) "$e missing in Octopus"; az stack group show --name "stack-$($slug)-$e" --resource-group (Get-Group $e) --query name --output tsv | Out-Null }; "$($environments.Count) environments in Octopus and Azure" }
     'CAP-032' = { foreach ($e in $environments) { $st = az stack group show --name "stack-$($slug)-$e" --resource-group (Get-Group $e) --query '{p: provisioningState, d: denySettings.mode}' --output json | ConvertFrom-Json; Assert-That ($st.p -eq 'succeeded' -and $st.d -eq 'denyWriteAndDelete') "$e stack $($st.p) $($st.d)" }; 'every stack succeeded, deny write and delete' }
-    'CAP-033' = { foreach ($entry in $system.environments) { $want = if ($entry.ContainsKey('appCpu')) { [double] $entry.appCpu } else { 0.5 }; $got = [double] (Get-App $entry.name).properties.template.containers[0].resources.cpu; Assert-That ($want -eq $got) "$($entry.name) has $got vCPU, system.json $want" }; 'app sizes follow system.json' }
+    'CAP-033' = {
+        if ($onAppService) {
+            # App Service: every environment's app runs on the Free plan of its tier; there is no size to declare.
+            foreach ($e in $environments) { $s = Get-Site $e; Assert-That ($s.sku.name -eq 'F1') "$e runs on $($s.sku.name), the template declares F1" }
+            return 'every app runs on the plan size the template declares (F1)'
+        }
+        foreach ($entry in $system.environments) { $want = if ($entry.ContainsKey('appCpu')) { [double] $entry.appCpu } else { 0.5 }; $got = [double] (Get-App $entry.name).properties.template.containers[0].resources.cpu; Assert-That ($want -eq $got) "$($entry.name) has $got vCPU, system.json $want" }; 'app sizes follow system.json'
+    }
     'CAP-034' = { $n = @(Get-ProcessStep $deployableProject | ForEach-Object Name); Assert-That ($n.IndexOf('Migrate database') -lt $n.IndexOf('Update deployable')) 'Update before Migrate'; 'Migrate database before Update deployable' }
     'CAP-035' = { foreach ($f in 'update-deployable.ps1', 'verify-environment.ps1') { Assert-That ((Get-RepoFile $systemRepo "scripts/$f") -match 'Get-RevisionProblem') "$f does not fail fast" }; 'Update and Verify fail fast on a revision that cannot start' }
     'CAP-036' = { Assert-That (@(Get-ProcessStep $systemProject | Where-Object Name -eq 'Verify environment').Count -eq 1 -and @(Get-ProcessStep $deployableProject | Where-Object Name -eq 'Verify deployable').Count -eq 1) 'a verify step is missing'; 'both projects end with a verify step' }
@@ -195,7 +247,13 @@ $checks = [ordered] @{
         foreach ($slug in $systemProject, $deployableProject) { $s = @(Get-ProcessStep $slug)[0]; Assert-That ($s.Name -eq 'Sign-off' -and $s.Actions[0].ActionType -eq 'Octopus.Manual') "$slug does not start with Sign-off" }
         Assert-That ((Get-RepoFile $systemRepo 'octopus/projects.tf') -match 'octopusdeploy_project_deployment_freeze') 'no freeze support'; 'Sign-off first in both projects; freezes from system.json'
     }
-    'CAP-039' = { foreach ($e in $environments) { $a = Get-App $e; Assert-That ($a.properties.template.scale.minReplicas -eq 0) "$e has min replicas $($a.properties.template.scale.minReplicas)" }; 'every app scales to zero' }
+    'CAP-039' = {
+        if ($onAppService) {
+            foreach ($e in $environments) { $s = Get-Site $e; Assert-That ($s.sku.tier -eq 'Free') "$e runs on the $($s.sku.tier) tier" }
+            return 'every app runs on a Free plan'
+        }
+        foreach ($e in $environments) { $a = Get-App $e; Assert-That ($a.properties.template.scale.minReplicas -eq 0) "$e has min replicas $($a.properties.template.scale.minReplicas)" }; 'every app scales to zero'
+    }
     'CAP-040' = { $d = Get-LastDeployment $deployableProject $first; Assert-That ($d.Log -match 'Acceptance tests passed') "the last deployment to $first ran no passing acceptance tests"; "$($d.Version) passed the acceptance tests in $first" }
     'CAP-041' = { $d = Get-LastDeployment $deployableProject $first; Assert-That ($d.Log -match 'test data was reloaded') 'no ZDataLoader'; "test data reloaded after $($d.Version)" }
     'CAP-042' = { $d = Get-LastDeployment $deployableProject $first; $m = [regex]::Match($d.Log, 'effective parallelism ([\d.]+)'); Assert-That $m.Success 'no parallelism reported'; "effective parallelism $($m.Groups[1].Value)" }
@@ -219,6 +277,10 @@ $checks = [ordered] @{
     }
     'CAP-045' = {
         # Every environment's apps run where system.json places them: region and Container Apps environment.
+        if ($onAppService) {
+            foreach ($e in $environments) { $actual = (([string] (Get-Site $e).location) -replace '\s', '').ToLowerInvariant(); Assert-That ($actual -eq [string] $system.system.location) "$e runs in $actual; system.json places it in $($system.system.location)" }
+            return "every environment's apps run where system.json places them"
+        }
         foreach ($entry in $system.environments) {
             $e = [string] $entry.name
             $app = Get-App $e
@@ -253,6 +315,7 @@ $checks = [ordered] @{
         # and requests recorded by that agent (SDK "otelc-...") arrived in the last 30 days.
         $on = @($system.environments | Where-Object { @($_.capabilities) -contains 'telemetry' } | ForEach-Object { [string] $_.name })
         if ($on.Count -eq 0) { Skip-Check 'no environment has capability telemetry yet' }
+        if ($onAppService) { Skip-Check 'the OpenTelemetry agent is a Container Apps feature; the first app runs on App Service' }
         foreach ($e in $on) {
             $managedEnvironment = [string] (Get-App $e).properties.environmentId
             $otel = (az rest --method get --url "https://management.azure.com${managedEnvironment}?api-version=2024-10-02-preview" --output json | ConvertFrom-Json -AsHashtable).properties.openTelemetryConfiguration

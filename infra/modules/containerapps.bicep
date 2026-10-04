@@ -39,12 +39,7 @@ var telemetryEnv = empty(applicationInsightsConnectionString)
         value: ''
       }
     ]
-  : [
-      {
-        name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-        value: applicationInsightsConnectionString
-      }
-    ]
+  : []
 
 // With capability "telemetry" the environment runs Container Apps' managed OpenTelemetry agent (a preview feature,
 // hence the API version): it injects OTEL_EXPORTER_OTLP_ENDPOINT into every app, so the app only speaks OTLP, and
