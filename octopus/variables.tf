@@ -48,7 +48,18 @@ locals {
     ]
   ])
 
-  string_variables = { for v in concat(local.shared_variables, local.deployable_variables, local.test_variables) : v.key => v }
+  # Employee.MiddleNames: the environment's employeeMiddleNames as JSON, in the environments that declare some.
+  middle_name_variables = [
+    for name in local.middle_name_environments : {
+      key         = "system-middle-names-${name}"
+      project     = octopusdeploy_project.system.id
+      name        = "Employee.MiddleNames"
+      value       = jsonencode(local.environments[name].employeeMiddleNames)
+      environment = name
+    }
+  ]
+
+  string_variables = { for v in concat(local.shared_variables, local.deployable_variables, local.test_variables, local.middle_name_variables) : v.key => v }
 }
 
 resource "octopusdeploy_variable" "string" {

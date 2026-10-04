@@ -14,6 +14,7 @@
     - Each environment has a tier (nonprod or prod), a runtime identity from the seed and a folder
       environments/<env>/ with a versions.json object whose keys are deployables.
     - Each capability has a module: baseline is built in, every other one is infra/modules/<capability>.bicep.
+    - employeeMiddleNames, where an environment has it, maps user names to middle names of 1 to 100 characters.
 #>
 [CmdletBinding()]
 param(
@@ -72,6 +73,16 @@ foreach ($environment in $system.environments) {
         foreach ($deployableName in $deployableNames) {
             Test-Rule "environment $name app name length ($deployableName)" (("ca-$slug-$name-$deployableName-xxxx").Length -le 32) 'slug, environment and deployable too long for a suffixed container app name (32 characters)'
         }
+    }
+
+    # Demo data, optional: user name -> middle name for the system step "Set employee middle names";
+    # dbo.Employee.MiddleName holds at most 100 characters.
+    if ($environment.ContainsKey('employeeMiddleNames')) {
+        $middleNames = $environment.employeeMiddleNames
+        $valid = $middleNames -is [Collections.IDictionary] -and @($middleNames.GetEnumerator() | Where-Object {
+                [string]::IsNullOrWhiteSpace($_.Key) -or $_.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($_.Value) -or $_.Value.Length -gt 100
+            }).Count -eq 0
+        Test-Rule "environment $name employee middle names" $valid 'an object of user name to middle name, 1 to 100 characters each'
     }
 
     foreach ($capability in @($environment.capabilities)) {

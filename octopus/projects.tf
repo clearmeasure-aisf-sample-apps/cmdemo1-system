@@ -114,12 +114,35 @@ resource "octopusdeploy_process_step" "system_grant" {
   }
 }
 
+# Only where an environment declares employeeMiddleNames in system.json, and only in those environments: the demo data
+# (scripts/set-employee-middle-names.ps1, variable Employee.MiddleNames), after the database logins.
+resource "octopusdeploy_process_step" "system_middle_names" {
+  count = length(local.middle_name_environments) > 0 ? 1 : 0
+
+  process_id     = octopusdeploy_process.system.id
+  name           = "Set employee middle names"
+  type           = "Octopus.AzurePowerShell"
+  environments   = [for name in local.middle_name_environments : octopusdeploy_environment.this[name].id]
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/set-employee-middle-names.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
 resource "octopusdeploy_process_steps_order" "system" {
   process_id = octopusdeploy_process.system.id
   steps = concat(
     [for step in octopusdeploy_process_step.system_sign_off : step.id],
     [octopusdeploy_process_step.system_apply.id],
     [for step in octopusdeploy_process_step.system_grant : step.id],
+    [for step in octopusdeploy_process_step.system_middle_names : step.id],
     [octopusdeploy_process_step.system_verify.id],
   )
 }

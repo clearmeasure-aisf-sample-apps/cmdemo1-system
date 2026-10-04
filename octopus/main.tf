@@ -51,6 +51,9 @@ locals {
   promoted_environments = [for name, e in local.environments : name if e.sort_order > 1]
   prod_environments     = [for name, e in local.environments : name if e.tier == "prod"]
   sign_off_team_id      = "teams-spacemanagers-${local.system.octopus.spaceId}"
+  # Demo data: environments[].employeeMiddleNames ({ "<user name>": "<middle name>" }); the system step "Set employee
+  # middle names" writes them to the environments that declare some.
+  middle_name_environments = [for name, e in local.environments : name if length(try(e.employeeMiddleNames, {})) > 0]
   # Deployment freezes from system.json: [{ "name", "start", "end", "environments" (default: the prod tier) }].
   freezes = try(local.system.freezes, [])
 }

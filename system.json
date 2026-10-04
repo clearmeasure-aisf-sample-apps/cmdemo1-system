@@ -127,7 +127,12 @@
       "capabilities": [
         "baseline"
       ],
-      "appLocation": "southcentralus"
+      "appLocation": "southcentralus",
+      "employeeMiddleNames": {
+        "imatest": "Marie",
+        "johnblac": "Lee",
+        "mpond": "James"
+      }
     }
   ]
 }

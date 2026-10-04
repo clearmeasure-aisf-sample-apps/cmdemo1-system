@@ -42,6 +42,7 @@ In Octopus, two kinds of project run against these environments:
 | Add an environment | Append it to `environments` in `system.json` with its tier, and add `environments/<env>/versions.json` containing `{}`. After the merge, promote the new `<slug>-system` release to it in Octopus, then promote the app release |
 | Add a capability | Add its name to the environment's `capabilities`; a new capability also adds `infra/modules/<capability>.bicep` and one condition in `infra/main.bicep` (see `telemetry`) |
 | Add a deployable | Append it to `deployables` in `system.json`. A new project `<slug>-<name>` appears in Octopus, and the new app repository's release workflow creates its releases |
+| Set employee middle names (demo data) | Add `employeeMiddleNames` (`{ "<user name>": "<middle name>" }`) to the environment in `system.json`. The `<slug>-system` step "Set employee middle names", present only in environments that declare some, writes them to that environment's database when the release is deployed there |
 | Remove an environment | Delete it from `system.json` and its folder, and delete its stack (`az stack group delete --action-on-unmanage deleteResources`) |
 
 Local check before a pull request: `pwsh -NoProfile -File scripts/test-system.ps1`.
