@@ -127,7 +127,8 @@
       "name": "prod",
       "tier": "prod",
       "capabilities": [
-        "baseline"
+        "baseline",
+        "telemetry"
       ],
       "appLocation": "southcentralus",
       "employeeMiddleNames": {
