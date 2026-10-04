@@ -70,6 +70,11 @@ jobs:
             '-backend-config=use_azuread_auth=true'
           terraform apply -input=false -auto-approve -parallelism=1
 
+      # Scheduled runbooks run their published snapshot, which Terraform does not create.
+      - name: Publish runbooks
+        shell: pwsh
+        run: ./scripts/publish-runbooks.ps1 -Name "run ${{ github.run_number }}.${{ github.run_attempt }}"
+
   system-release:
     needs: octopus-apply
     runs-on: ubuntu-latest
