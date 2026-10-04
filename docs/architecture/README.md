@@ -69,3 +69,9 @@ Source: [07-telemetry-tdd.puml](07-telemetry-tdd.puml)
 ![Safe path to production (2026-10-03)](09-safe-path-to-prod.png)
 
 Source: [09-safe-path-to-prod.puml](09-safe-path-to-prod.puml)
+
+## A second app that shares the database (2026-10-04)
+
+![A second app that shares the database (2026-10-04)](10-second-app-appservice.png)
+
+Source: [10-second-app-appservice.puml](10-second-app-appservice.puml)

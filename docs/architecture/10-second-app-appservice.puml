@@ -1,0 +1,38 @@
+@startuml 10-second-app-appservice
+!include _c4.iuml
+title Clear Measure work orders demo 1 | A second app that shares the database (2026-10-04)
+
+Person(signer, "Space Manager", "Signs off uat and prod for both apps")
+
+Boundary(gh, "GitHub org clearmeasure-aisf-sample-apps") {
+  Container(apprepo, "cmdemo1-workorders", "Build, Release (image)", "Owns the database: migrations, acceptance tests")
+  Container(app2repo, "cmdemo1-app2-ui", "Build, Release (zip)", "A copy of cmdemo1-workorders; no registry, no Azure credentials", $tags="new")
+  Container(sysrepo, "cmdemo1-system", "system.json", "deployables: ui (container app), app2-ui (App Service)", $tags="new")
+}
+
+Boundary(octo, "Octopus space cmdemo1 demo") {
+  Container(feed, "Built-in feed", "packages", "cmdemo1-app2-ui.<version>.zip", $tags="new")
+  Container(proj_sys, "cmdemo1-system", "every environment", "Sign-off, Apply environment, Grant database access, Verify", $tags="new")
+  Container(proj_app2, "cmdemo1-app2-ui", "tdd, uat, prod", "Sign-off, Pin, Update deployable (zip), Verify, Revert pin; no migrations, no tests", $tags="new")
+  Container(proj_app, "cmdemo1-ui", "tdd, uat, prod", "Pin, Migrate, Update, Verify, acceptance tests in tdd")
+}
+
+Boundary(env, "Every environment: stack-cmdemo1-<env>") {
+  Container(ca, "ca-cmdemo1-<env>-ui", "Container Apps", "Administrator connection string")
+  Container(web, "app-cmdemo1-tdd-app2-ui, app-cmdemo1-uat-app2-ui, app-cmdemo1-prod-app2-ui", "App Service Free (F1), Linux, .NET 10", "Key Vault reference to its own connection string", $tags="new")
+  ContainerDb(kv, "Key Vault of <env>", "RBAC", "app2-ui-sql-connection-string: readable only by id-cmdemo1-<env>-app2-ui", $tags="new")
+  ContainerDb(sql, "sqldb-cmdemo1-<env>", "Azure SQL serverless", "Owned by ui; contained user app2-ui: read and write, no schema rights", $tags="new")
+}
+
+Rel(app2repo, feed, "push zip", "OIDC", $tags="new")
+Rel(app2repo, proj_app2, "create release", "OIDC", $tags="new")
+Rel(proj_sys, sql, "CREATE or ALTER USER app2-ui", $tags="new")
+Rel(proj_app2, web, "zip deploy", $tags="new")
+Rel(signer, proj_app2, "Proceed with a note", $tags="new")
+Rel(web, kv, "its own secret", "managed identity", $tags="new")
+Rel(web, sql, "own login: work orders and NServiceBus queue UI.Server", $tags="new")
+Rel(ca, sql, "administrator: migrations, work orders, the same queue")
+Rel(proj_app, ca, "deploy")
+
+SHOW_LEGEND()
+@enduml
