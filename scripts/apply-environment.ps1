@@ -62,14 +62,32 @@ function Get-DesiredVersion {
 }
 
 function Get-StackOutput {
-    $PSNativeCommandUseErrorActionPreference = $false
-    $json = az stack group show --name $stackName --resource-group $resourceGroup --output json 2>$null
-    $found = $LASTEXITCODE -eq 0
-    $PSNativeCommandUseErrorActionPreference = $true
-    if (-not $found) {
-        return $null
+    # Only a stack that does not exist means "first apply". Any other failure to read it is retried, then stops the
+    # step: an apply that wrongly takes the stack for new generates new SQL passwords (it happened in cmdemo1's prod).
+    $errorFile = Join-Path ([IO.Path]::GetTempPath()) "stack-show-$([Guid]::NewGuid().ToString('N')).err"
+    try {
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $PSNativeCommandUseErrorActionPreference = $false
+            $json = az stack group show --name $stackName --resource-group $resourceGroup --output json 2>$errorFile
+            $code = $LASTEXITCODE
+            $PSNativeCommandUseErrorActionPreference = $true
+            if ($code -eq 0) {
+                return ($json | ConvertFrom-Json -AsHashtable).outputs
+            }
+            $stderr = ((Get-Content -LiteralPath $errorFile -Raw -ErrorAction SilentlyContinue) ?? '').Trim()
+            if ($stderr -match 'DeploymentStackNotFound|ResourceNotFound|could not be found|was not found') {
+                return $null
+            }
+            if ($attempt -eq 3) {
+                Fail-Step "Cannot read ${stackName}: $stderr"
+            }
+            Write-Host "Reading $stackName failed (attempt $attempt of 3); retrying in 30 seconds: $stderr"
+            Start-Sleep -Seconds 30
+        }
     }
-    return ($json | ConvertFrom-Json -AsHashtable).outputs
+    finally {
+        Remove-Item -LiteralPath $errorFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function New-SqlPassword {
@@ -118,9 +136,18 @@ function Get-LoginPassword {
     foreach ($name in $Names) {
         $value = $null
         if ($Outputs -and $Outputs.ContainsKey('keyVaultName')) {
-            $PSNativeCommandUseErrorActionPreference = $false
-            $value = az keyvault secret show --vault-name ([string] $Outputs.keyVaultName.value) --name "$name-sql-password" --query value --output tsv 2>$null
-            $PSNativeCommandUseErrorActionPreference = $true
+            # Only a secret that does not exist yet gets a new password; another failure to read it stops the step.
+            for ($attempt = 1; $attempt -le 3 -and -not $value; $attempt++) {
+                $PSNativeCommandUseErrorActionPreference = $false
+                $read = az keyvault secret show --vault-name ([string] $Outputs.keyVaultName.value) --name "$name-sql-password" --query value --output tsv 2>&1
+                $code = $LASTEXITCODE
+                $PSNativeCommandUseErrorActionPreference = $true
+                if ($code -eq 0) { $value = [string] $read; break }
+                if ("$read" -match 'SecretNotFound|was not found') { break }
+                if ($attempt -eq 3) { Fail-Step "Cannot read $name-sql-password: the vault answered $("$read" -replace '\s+', ' ')" }
+                Write-Host "Reading $name-sql-password failed (attempt $attempt of 3); retrying in 30 seconds."
+                Start-Sleep -Seconds 30
+            }
         }
         if ($value) {
             $result[$name] = ([string] $value).Trim()
