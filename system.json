@@ -118,7 +118,8 @@
       "tier": "nonprod",
       "capabilities": [
         "baseline"
-      ]
+      ],
+      "sharesAppEnvironmentWith": "tdd"
     },
     {
       "name": "prod",
