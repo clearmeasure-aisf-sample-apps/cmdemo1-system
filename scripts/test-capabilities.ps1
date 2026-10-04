@@ -67,13 +67,18 @@ function Get-LastDeployment([string] $Slug, [string] $Environment) {
     $deployment | Add-Member -NotePropertyName Log -NotePropertyValue (Invoke-Octopus "/api/tasks/$($deployment.TaskId)/raw") -PassThru |
         Add-Member -NotePropertyName Version -NotePropertyValue (Invoke-Octopus "/api/$space/releases/$($deployment.ReleaseId)").Version -PassThru
 }
-function Get-NoisyDeployment([int] $Take) {
-    # No broken windows: successful deployments that logged an Error or Warning line or ended SuccessWithWarning.
-    foreach ($task in @((Invoke-Octopus "/api/$space/tasks?take=50&name=Deploy").Items | Where-Object State -eq 'Success' | Select-Object -First $Take)) {
-        $details = Invoke-Octopus "/api/tasks/$($task.Id)/details?verbose=false"
-        $warned = @($details.ActivityLogs[0].Children | Where-Object { $_.Status -eq 'SuccessWithWarning' })
-        $lines = @((Invoke-Octopus "/api/tasks/$($task.Id)/raw") -split "`n" | Where-Object { $_ -match '^\S+\s+(Error|Warning)\s+\|' })
-        if ($warned.Count -gt 0 -or $lines.Count -gt 0) { $task.Description }
+function Get-NoisyDeployment {
+    # No broken windows: the deployment each environment runs now, per project, logged no Error or Warning line and did
+    # not end SuccessWithWarning. Current deployments rather than the last N: a fixed warning stops counting once the
+    # environment is redeployed, without deployments made only to push it out of a window.
+    foreach ($project in $systemProject, $deployableProject) {
+        foreach ($e in $environments) {
+            $deployment = Get-LastDeployment $project $e
+            $details = Invoke-Octopus "/api/tasks/$($deployment.TaskId)/details?verbose=false"
+            $warned = @($details.ActivityLogs[0].Children | Where-Object { $_.Status -eq 'SuccessWithWarning' })
+            $lines = @($deployment.Log -split "`n" | Where-Object { $_ -match '^\S+\s+(Error|Warning)\s+\|' })
+            if ($warned.Count -gt 0 -or $lines.Count -gt 0) { "$project $($deployment.Version) in $e" }
+        }
     }
 }
 function Get-Group([string] $Environment) {
@@ -112,7 +117,7 @@ $checks = [ordered] @{
     }
     'CAP-005' = { $step = @(Get-ProcessStep $deployableProject | Where-Object Name -eq 'Revert pin'); Assert-That ($step.Count -eq 1 -and $step[0].Condition -eq 'Failure') 'no Revert pin on failure'; 'Revert pin runs on failure' }
     'CAP-010' = { Assert-That ((Get-RequiredCheck $appRepo) -contains 'Build result') 'Build result not required'; 'Build result required on the app' }
-    'CAP-011' = { $noisy = @(Get-NoisyDeployment 5); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the last 5 deployments logged no warning or error' }
+    'CAP-011' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the current deployment of every project and environment logged no warning or error' }
     'CAP-012' = { Assert-That ((Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'head\.repo\.full_name == github\.repository') 'preview runs for forks'; 'the credentialed preview runs only for branches of the repository' }
     'CAP-013' = { $v = (Get-LastDeployment $deployableProject $first).Version; $image = [string] (Get-App $first).properties.template.containers[0].image; Assert-That ($image.EndsWith(":$v")) "$first runs $image for release $v"; "release $v = image tag in $first" }
     'CAP-014' = {
@@ -167,7 +172,7 @@ $checks = [ordered] @{
     'CAP-060' = { $r = Get-RecentRun 'Restore test' 8; Assert-That ($r.Count -ge 1) 'no successful restore test in 8 days'; "restore test passed $($r[0].CompletedTime)" }
     'CAP-061' = { $prod = @($environments | Where-Object { (Get-Group $_) -eq $system.azure.resourceGroups.prod })[0]; $d = Get-LastDeployment $deployableProject $prod; Assert-That ($d.Log -match 'Restore point before') "no restore point in the last $prod deployment"; "restore point recorded before $($d.Version) in $prod" }
     'CAP-070' = { $a = Get-App $first; $variableNames = @($a.properties.template.containers[0].env | ForEach-Object name); Assert-That ($variableNames -contains 'APPLICATIONINSIGHTS_CONNECTION_STRING') "no telemetry in $first"; "telemetry on in $first" }
-    'CAP-071' = { $noisy = @(Get-NoisyDeployment 5); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'recent deployment logs clean' }
+    'CAP-071' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the logs of every current deployment are clean' }
     'CAP-080' = { $files = @(gh api "repos/$systemRepo/contents/docs/architecture" --jq '.[].name'); $missing = @($files | Where-Object { $_ -like '*.puml' -and $files -notcontains ($_ -replace '\.puml$', '.png') }); Assert-That ($missing.Count -eq 0 -and $files.Count -gt 0) "not rendered: $missing"; "$(@($files | Where-Object { $_ -like '*.png' }).Count) diagrams rendered" }
 }
 
