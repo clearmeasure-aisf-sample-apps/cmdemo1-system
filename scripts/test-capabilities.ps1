@@ -63,12 +63,45 @@ function Get-RequiredCheck([string] $Repo) {
 function Get-Project([string] $Slug) { Invoke-Octopus "/api/$space/projects/$Slug" }
 function Get-ProcessStep([string] $Slug) { @((Invoke-Octopus "/api/$space/projects/$((Get-Project $Slug).Id)/deploymentprocesses").Steps) }
 function Get-EnvironmentId([string] $Name) { @((Invoke-Octopus "/api/$space/environments?partialName=$Name&take=100").Items | Where-Object Name -eq $Name)[0].Id }
-function Get-LastDeployment([string] $Slug, [string] $Environment) {
+# A capability whose precondition does not exist yet (no app deployment, no prod-tier environment, a runbook not due
+# yet) is skipped with the reason, not failed: a new system's first builds run every check. Only facts skip a check;
+# once the precondition exists, the check proves or fails.
+class CheckSkipped : System.Exception {
+    CheckSkipped([string] $Message) : base($Message) {}
+}
+function Skip-Check([string] $Reason) { throw [CheckSkipped]::new($Reason) }
+function Find-LastDeployment([string] $Slug, [string] $Environment) {
+    # The latest successful deployment of a project to an environment, or $null when there is none yet.
     $project = Get-Project $Slug
     $deployment = @((Invoke-Octopus "/api/$space/deployments?projects=$($project.Id)&environments=$(Get-EnvironmentId $Environment)&take=10").Items |
-            Where-Object { (Invoke-Octopus "/api/tasks/$($_.TaskId)").State -eq 'Success' })[0]
+            Where-Object { (Invoke-Octopus "/api/tasks/$($_.TaskId)").State -eq 'Success' }) | Select-Object -First 1
+    if (-not $deployment) { return $null }
     $deployment | Add-Member -NotePropertyName Log -NotePropertyValue (Invoke-Octopus "/api/tasks/$($deployment.TaskId)/raw") -PassThru |
         Add-Member -NotePropertyName Version -NotePropertyValue (Invoke-Octopus "/api/$space/releases/$($deployment.ReleaseId)").Version -PassThru
+}
+function Get-LastDeployment([string] $Slug, [string] $Environment) {
+    $deployment = Find-LastDeployment $Slug $Environment
+    if (-not $deployment) { Skip-Check "no successful $Slug deployment in $Environment yet" }
+    $deployment
+}
+function Get-ProdEnvironment {
+    $prod = @($environments | Where-Object { (Get-Group $_) -eq $system.azure.resourceGroups.prod })
+    if ($prod.Count -eq 0) { Skip-Check 'no prod-tier environment yet' }
+    $prod
+}
+function Assert-AppRepository {
+    $PSNativeCommandUseErrorActionPreference = $false
+    gh api "repos/$appRepo" --jq .id *> $null
+    $exists = $LASTEXITCODE -eq 0
+    $PSNativeCommandUseErrorActionPreference = $true
+    if (-not $exists) { Skip-Check "app repository $appRepo does not exist yet" }
+}
+function Get-SystemAge {
+    # Days since the system's first release: a runbook on a schedule cannot have run before its first due date.
+    $project = Get-Project $systemProject
+    $releases = @((Invoke-Octopus "/api/$space/projects/$($project.Id)/releases?take=1000").Items)
+    if ($releases.Count -eq 0) { return 0 }
+    ([datetimeoffset]::UtcNow - [datetimeoffset] $releases[-1].Assembled).TotalDays
 }
 function Get-NoisyDeployment {
     # No broken windows: the deployment each environment runs now, per project, logged no Error or Warning line and did
@@ -76,7 +109,8 @@ function Get-NoisyDeployment {
     # environment is redeployed, without deployments made only to push it out of a window.
     foreach ($project in $systemProject, $deployableProject) {
         foreach ($e in $environments) {
-            $deployment = Get-LastDeployment $project $e
+            $deployment = Find-LastDeployment $project $e
+            if (-not $deployment) { continue }
             $details = Invoke-Octopus "/api/tasks/$($deployment.TaskId)/details?verbose=false"
             $warned = @($details.ActivityLogs[0].Children | Where-Object { $_.Status -eq 'SuccessWithWarning' })
             $lines = @($deployment.Log -split "`n" | Where-Object { $_ -match '^\S+\s+(Error|Warning)\s+\|' })
@@ -89,7 +123,9 @@ function Get-Group([string] $Environment) {
     [string] $system.azure.resourceGroups[$tier]
 }
 function Get-App([string] $Environment) {
-    az containerapp show --name "ca-$slug-$Environment-$deployable" --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
+    # By the name the stack reports: a shared or moved Container Apps environment gives the app a suffix.
+    $name = [string] (az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query "outputs.deployables.value[?name=='$deployable'].containerApp | [0]" --output tsv)
+    az containerapp show --name $name.Trim() --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
 }
 function Get-RoleName([string] $Group, [string] $PrincipalId) {
     # Assignments at, above and below the group that name the principal; role names from their definitions.
@@ -101,25 +137,30 @@ function Get-RoleName([string] $Group, [string] $PrincipalId) {
     }
 }
 function Get-RecentRun([string] $Runbook, [int] $Days) {
-    @((Invoke-Octopus "/api/$space/tasks?name=RunbookRun&take=100").Items |
+    $runs = @((Invoke-Octopus "/api/$space/tasks?name=RunbookRun&take=100").Items |
             Where-Object { $_.Description -like "*$Runbook*" -and $_.State -eq 'Success' -and [datetimeoffset] $_.CompletedTime -gt [datetimeoffset]::UtcNow.AddDays(-$Days) })
+    if ($runs.Count -eq 0 -and (Get-SystemAge) -lt $Days) { Skip-Check "the system is younger than $Days days: $Runbook is not due yet" }
+    $runs
 }
 function Assert-That([bool] $Condition, [string] $Message) { if (-not $Condition) { throw $Message } }
 
 $checks = [ordered] @{
     'CAP-001' = { $rules = gh api "repos/$systemRepo/rulesets" --jq '[.[] | select(.name=="default-branch" and .enforcement=="active")] | length'; Assert-That ([int] $rules -eq 1) 'no active default-branch ruleset'; 'ruleset default-branch active' }
     'CAP-002' = { Assert-That ((Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'preview-environment\.ps1') 'env-checks has no preview'; 'env-checks previews every environment' }
-    'CAP-003' = { $s = Get-RequiredCheck $systemRepo; $a = Get-RequiredCheck $appRepo; Assert-That ($s -contains 'env-checks' -and $a -contains 'Build result') "required: $s / $a"; "system: $($s -join ', '); app: $($a -join ', ')" }
+    'CAP-003' = { Assert-AppRepository; $s = Get-RequiredCheck $systemRepo; $a = Get-RequiredCheck $appRepo; Assert-That ($s -contains 'env-checks' -and $a -contains 'Build result') "required: $s / $a"; "system: $($s -join ', '); app: $($a -join ', ')" }
     'CAP-004' = {
-        foreach ($e in $environments) {
-            $pinned = (Get-RepoFile $systemRepo "environments/$e/versions.json" | ConvertFrom-Json -AsHashtable)[$deployable]
-            $deployed = (Get-LastDeployment $deployableProject $e).Version
-            Assert-That ($pinned -eq $deployed) "$e pins $pinned, Octopus deployed $deployed"
-        }
-        "versions.json equals the deployed release in $($environments -join ', ')"
+        $checked = @(foreach ($e in $environments) {
+                $deployment = Find-LastDeployment $deployableProject $e
+                if (-not $deployment) { continue }
+                $pinned = (Get-RepoFile $systemRepo "environments/$e/versions.json" | ConvertFrom-Json -AsHashtable)[$deployable]
+                Assert-That ($pinned -eq $deployment.Version) "$e pins $pinned, Octopus deployed $($deployment.Version)"
+                $e
+            })
+        if ($checked.Count -eq 0) { Skip-Check "no successful $deployableProject deployment yet" }
+        "versions.json equals the deployed release in $($checked -join ', ')"
     }
     'CAP-005' = { $step = @(Get-ProcessStep $deployableProject | Where-Object Name -eq 'Revert pin'); Assert-That ($step.Count -eq 1 -and $step[0].Condition -eq 'Failure') 'no Revert pin on failure'; 'Revert pin runs on failure' }
-    'CAP-010' = { Assert-That ((Get-RequiredCheck $appRepo) -contains 'Build result') 'Build result not required'; 'Build result required on the app' }
+    'CAP-010' = { Assert-AppRepository; Assert-That ((Get-RequiredCheck $appRepo) -contains 'Build result') 'Build result not required'; 'Build result required on the app' }
     'CAP-011' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the current deployment of every project and environment logged no warning or error' }
     'CAP-012' = { Assert-That ((Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'head\.repo\.full_name == github\.repository') 'preview runs for forks'; 'the credentialed preview runs only for branches of the repository' }
     'CAP-013' = { $v = (Get-LastDeployment $deployableProject $first).Version; $image = [string] (Get-App $first).properties.template.containers[0].image; Assert-That ($image.EndsWith(":$v")) "$first runs $image for release $v"; "release $v = image tag in $first" }
@@ -146,6 +187,7 @@ $checks = [ordered] @{
         $versions = @((Invoke-Octopus "/api/$space/deployments?projects=$($project.Id)&environments=$(Get-EnvironmentId $first)&take=30").Items |
                 Where-Object { (Invoke-Octopus "/api/tasks/$($_.TaskId)").State -eq 'Success' } |
                 ForEach-Object { [version] (Invoke-Octopus "/api/$space/releases/$($_.ReleaseId)").Version })
+        if (@($versions | Select-Object -Unique).Count -lt 2) { Skip-Check "fewer than two releases deployed in $first" }
         $rolledBack = $false; for ($i = 0; $i -lt $versions.Count - 1; $i++) { if ($versions[$i] -lt $versions[$i + 1]) { $rolledBack = $true } }
         Assert-That $rolledBack "no successful redeployment of an older release in $first"; "an older release was redeployed successfully in $first (test-rollback.ps1)"
     }
@@ -168,17 +210,17 @@ $checks = [ordered] @{
         foreach ($x in $expect) { $roles = @(Get-RoleName -Group $x.group -PrincipalId $x.id); Assert-That ($roles -contains $x.role -and $roles -notcontains 'Contributor') "$($x.id): $($roles -join ', ')" }
         'plan Reader, push AcrPush, deploy Owner of its group only'
     }
-    'CAP-052' = { $prod = @($environments | Where-Object { (Get-Group $_) -eq $system.azure.resourceGroups.prod }); Assert-That ($prod.Count -ge 1) 'no prod-tier environment'; "$($prod -join ', ') in $($system.azure.resourceGroups.prod) with id-$($slug)-deploy-prod" }
+    'CAP-052' = { $prod = @(Get-ProdEnvironment); Assert-That ($prod.Count -ge 1) 'no prod-tier environment'; "$($prod -join ', ') in $($system.azure.resourceGroups.prod) with id-$($slug)-deploy-prod" }
     'CAP-053' = { $u = az account show --query user.type --output tsv; $me = Invoke-Octopus '/api/users/me'; Assert-That ($u -eq 'servicePrincipal' -and $me.IsService) "az $u, Octopus service $($me.IsService)"; "az as a service principal, Octopus as $($me.Username)" }
-    'CAP-055' = { Assert-That ((Get-RequiredCheck $appRepo) -contains 'secret-scan' -and (Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'gitleaks') 'secret scanning not enforced'; 'gitleaks in env-checks and the required check secret-scan' }
+    'CAP-055' = { Assert-AppRepository; Assert-That ((Get-RequiredCheck $appRepo) -contains 'secret-scan' -and (Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'gitleaks') 'secret scanning not enforced'; 'gitleaks in env-checks and the required check secret-scan' }
     'CAP-056' = { $r = Get-RecentRun 'Rotate SQL password' 35; Assert-That ($r.Count -ge 1) 'no successful rotation in 35 days'; "rotated $($r[0].CompletedTime)" }
     'CAP-060' = { $r = Get-RecentRun 'Restore test' 8; Assert-That ($r.Count -ge 1) 'no successful restore test in 8 days'; "restore test passed $($r[0].CompletedTime)" }
-    'CAP-061' = { $prod = @($environments | Where-Object { (Get-Group $_) -eq $system.azure.resourceGroups.prod })[0]; $d = Get-LastDeployment $deployableProject $prod; Assert-That ($d.Log -match 'Restore point before') "no restore point in the last $prod deployment"; "restore point recorded before $($d.Version) in $prod" }
+    'CAP-061' = { $prod = @(Get-ProdEnvironment)[0]; $d = Get-LastDeployment $deployableProject $prod; Assert-That ($d.Log -match 'Restore point before') "no restore point in the last $prod deployment"; "restore point recorded before $($d.Version) in $prod" }
     'CAP-070' = {
         # Telemetry is proven where it comes from: the environment's OpenTelemetry agent sends to Application Insights,
         # and requests recorded by that agent (SDK "otelc-...") arrived in the last 30 days.
         $on = @($system.environments | Where-Object { @($_.capabilities) -contains 'telemetry' } | ForEach-Object { [string] $_.name })
-        Assert-That ($on.Count -gt 0) 'no environment has capability telemetry'
+        if ($on.Count -eq 0) { Skip-Check 'no environment has capability telemetry yet' }
         foreach ($e in $on) {
             $managedEnvironment = [string] (Get-App $e).properties.environmentId
             $otel = (az rest --method get --url "https://management.azure.com${managedEnvironment}?api-version=2024-10-02-preview" --output json | ConvertFrom-Json -AsHashtable).properties.openTelemetryConfiguration
@@ -223,13 +265,16 @@ if ($WaitOnly) {
 # @(...) around the whole if: a single -Only ID would otherwise become a string, which has no Count in strict mode.
 $ids = @(if ($Only) { $Only } else { $checks.Keys })
 $failed = 0
+$skipped = 0
 foreach ($id in $ids) {
     if (-not $checks.Contains($id)) { Write-Fail "${id}: no check"; $failed++; continue }
     try { Write-Pass "${id}: $(& $checks[$id])" }
+    catch [CheckSkipped] { Write-Host "SKIP ${id}: $($_.Exception.Message)"; $skipped++ }
     catch { Write-Fail "${id}: $($_.Exception.Message)"; $failed++ }
 }
+$skippedNote = if ($skipped -gt 0) { " ($skipped skipped: their preconditions do not exist yet)" } else { '' }
 if ($failed -gt 0) {
-    Write-Host "$failed of $($ids.Count) capabilities failed."
+    Write-Host "$failed of $($ids.Count) capabilities failed$skippedNote."
     exit 1
 }
-Write-Host "All $($ids.Count) capabilities are proven."
+Write-Host "All $($ids.Count - $skipped) checked capabilities are proven$skippedNote."

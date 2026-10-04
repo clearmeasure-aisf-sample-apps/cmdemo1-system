@@ -33,7 +33,12 @@ $deployable = [string] $OctopusParameters['Deployable.Name']
 $port = [string] $OctopusParameters['Deployable.Port']
 $registry = [string] $OctopusParameters['Azure.RegistryServer']
 $version = [string] $OctopusParameters['Octopus.Release.Number']
-$app = "ca-$slug-$environmentName-$deployable"
+# The container app's name comes from the stack: a shared or moved Container Apps environment gives it a suffix.
+$stackOutputs = (az stack group show --name "stack-$slug-$environmentName" --resource-group $resourceGroup --output json | ConvertFrom-Json -AsHashtable).outputs
+$app = [string] (@($stackOutputs.deployables.value | Where-Object { $_.name -eq $deployable -and $_['hosting'] -ne 'appservice' }) | Select-Object -First 1).containerApp
+if (-not $app) {
+    Fail-Step "Stack stack-$slug-$environmentName lists no container app for ${deployable}: deploy a release of $slug-system to $environmentName first."
+}
 
 # Container Apps reports a revision that cannot start long before its URL times out: read the latest revision and its
 # replicas, and give the reason with the container's last console lines (the deploy identity may read them; the
@@ -97,6 +102,112 @@ $current = az containerapp show --name $app --resource-group $resourceGroup --ou
 $appUri = "https://management.azure.com$($current.id)?api-version=2024-03-01"
 $before = [string] $current.properties.latestRevisionName
 
+# Zero downtime, measured: while this step changes the environment, a background probe asks every app's health
+# endpoint every few seconds. It follows the apps as they are, not as they were: every 15 seconds it lists the
+# environment's container apps (tag "deployable"), so a move's new app is watched from the moment it exists, next to the
+# old one. A deployable is available when any of its apps answers 200. Before its first 200 (an app waking from zero,
+# a new environment) nothing counts; after it, two checks in a row (about 6 seconds) without a 200 are downtime.
+function Start-AvailabilityProbe {
+    param([Parameter(Mandatory)] [string] $Group, [Parameter(Mandatory)] [string] $Environment, [hashtable] $Outputs, [string] $Only = '')
+    $paths = @{}
+    $static = @{}
+    if ($Outputs -and $Outputs.ContainsKey('deployables')) {
+        foreach ($entry in @($Outputs.deployables.value)) {
+            $paths[[string] $entry.name] = [string] $entry.healthPath
+            if ($entry['hosting'] -eq 'appservice') { $static[[string] $entry.name] = [string] $entry.url }
+        }
+    }
+    $probe = [hashtable]::Synchronized(@{ Stop = $false; Samples = [Collections.Generic.List[object]]::new(); Error = '' })
+    if ($Only) { foreach ($name in @($static.Keys)) { if ($name -ne $Only) { $static.Remove($name) } } }
+    $probeGroup = $Group
+    $probeEnvironment = $Environment
+    $job = Start-ThreadJob -ScriptBlock {
+        # $using: in a thread job passes the objects themselves: $probe is the shared, synchronized table.
+        $probe = $using:probe
+        $group = $using:probeGroup
+        $environment = $using:probeEnvironment
+        $paths = $using:paths
+        $static = $using:static
+        $only = $using:Only
+        $targets = @{}
+        $listed = [datetime]::MinValue
+        $tick = 0
+        try {
+            while (-not $probe.Stop) {
+                if (([datetime]::UtcNow - $listed).TotalSeconds -ge 15) {
+                    $json = az containerapp list --resource-group $group --query "[?tags.environment=='$environment'].{name: name, deployable: tags.deployable, fqdn: properties.configuration.ingress.fqdn}" --output json 2>$null
+                    if ($LASTEXITCODE -eq 0 -and $json) {
+                        foreach ($app in @($json | ConvertFrom-Json)) {
+                            if ($app.fqdn -and $app.deployable -and (-not $only -or $app.deployable -eq $only)) { $targets["https://$($app.fqdn)"] = @{ Deployable = [string] $app.deployable; Name = [string] $app.name } }
+                        }
+                    }
+                    foreach ($name in $static.Keys) { $targets[$static[$name]] = @{ Deployable = $name; Name = $static[$name] } }
+                    $listed = [datetime]::UtcNow
+                }
+                $tick++
+                foreach ($url in @($targets.Keys)) {
+                    $target = $targets[$url]
+                    $path = if ($paths.ContainsKey($target.Deployable) -and $paths[$target.Deployable]) { $paths[$target.Deployable] } else { '/' }
+                    $failure = ''
+                    $status = try { [int] (Invoke-WebRequest -Uri "$url$path" -TimeoutSec 15 -SkipHttpErrorCheck).StatusCode } catch { $failure = $_.Exception.Message; 0 }
+                    $probe.Samples.Add([pscustomobject] @{ Tick = $tick; Time = [datetime]::UtcNow; Deployable = $target.Deployable; App = $target.Name; Status = $status; Failure = $failure })
+                }
+                Start-Sleep -Seconds 3
+            }
+        }
+        catch { $probe.Error = $_.Exception.Message }
+    }
+    return @{ Probe = $probe; Job = $job }
+}
+
+function Stop-AvailabilityProbe {
+    # Stops the probe and reports per deployable; returns the number of downtime periods.
+    param([Parameter(Mandatory)] [hashtable] $Handle)
+    $Handle.Probe.Stop = $true
+    $null = Wait-Job -Job $Handle.Job -Timeout 60
+    Remove-Job -Job $Handle.Job -Force
+    if ($Handle.Probe.Error) { Write-Host "Availability probe stopped early: $($Handle.Probe.Error)" }
+    $downtimes = 0
+    $samples = @($Handle.Probe.Samples)
+    foreach ($group in @($samples | Group-Object Deployable)) {
+        $ticks = @($group.Group | Group-Object Tick | Sort-Object { [int] $_.Name })
+        $own = 0
+        $seenHealthy = $false
+        $missed = 0
+        $gapStart = $null
+        foreach ($tickGroup in $ticks) {
+            $healthy = @($tickGroup.Group | Where-Object Status -eq 200).Count -gt 0
+            if ($healthy) {
+                if ($missed -ge 2) {
+                    $own++
+                    Write-Host "Downtime of $($group.Name): no app answered 200 from $($gapStart.ToString('HH:mm:ss')) to $(($tickGroup.Group[0].Time).ToString('HH:mm:ss'))"
+                }
+                $seenHealthy = $true
+                $missed = 0
+            }
+            elseif ($seenHealthy) {
+                if ($missed -eq 0) { $gapStart = $tickGroup.Group[0].Time }
+                $missed++
+            }
+        }
+        if ($seenHealthy -and $missed -ge 2) {
+            $own++
+            Write-Host "Downtime of $($group.Name): no app answered 200 from $($gapStart.ToString('HH:mm:ss')) to the end of the step"
+        }
+        $served = @($group.Group | Where-Object Status -eq 200 | Group-Object App | ForEach-Object {
+                $first = ($_.Group | Measure-Object Time -Minimum).Minimum
+                $last = ($_.Group | Measure-Object Time -Maximum).Maximum
+                "$($_.Name) $($first.ToString('HH:mm:ss'))-$($last.ToString('HH:mm:ss'))"
+            })
+        $summary = if (-not $seenHealthy) { 'not available yet (nothing to keep up)' } elseif ($served.Count -gt 0) { "served by $($served -join ', ')" } else { '' }
+        $downtimes += $own
+        Write-Highlight "Availability of $($group.Name) in ${environmentName}: $($ticks.Count) checks, $(if ($own) { "$own downtime period(s)" } else { 'no downtime' }); $summary"
+    }
+    return $downtimes
+}
+
+$probe = Start-AvailabilityProbe -Group $resourceGroup -Environment $environmentName -Outputs $stackOutputs -Only $deployable
+
 # The port changes only on the first deployment over the placeholder image.
 $currentPort = [string] $current.properties.configuration.ingress.targetPort
 if ($currentPort -ne $port) {
@@ -148,5 +259,11 @@ while ($true) {
     }
     Write-Host "Waiting for the new revision (latest $($state.latest), ready $($state.ready), $($state.provisioning))"
     Start-Sleep -Seconds 10
+}
+# A little longer than the update: the new revision takes the traffic once it is ready.
+Start-Sleep -Seconds 30
+$downtime = Stop-AvailabilityProbe -Handle $probe
+if ($downtime -gt 0) {
+    Fail-Step "Updating $app to $version caused $downtime downtime period(s); the timeline is above."
 }
 Write-Highlight "$deployable $version runs in $environmentName ($app)."

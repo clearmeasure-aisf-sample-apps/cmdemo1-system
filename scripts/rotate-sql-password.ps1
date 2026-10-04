@@ -81,7 +81,7 @@ finally {
 $failed = 0
 # App Service deployables use logins of their own, not the administrator password: only container apps restart.
 foreach ($deployable in @($outputs.deployables.value | Where-Object { $_['hosting'] -ne 'appservice' })) {
-    $app = "ca-$slug-$environmentName-$($deployable.name)"
+    $app = [string] $deployable.containerApp
     $appId = ([string] (az containerapp show --name $app --resource-group $resourceGroup --query id --output tsv)).Trim()
     $revision = ([string] (az containerapp show --name $app --resource-group $resourceGroup --query properties.latestRevisionName --output tsv)).Trim()
     az rest --method post --url "https://management.azure.com$appId/revisions/$revision/restart?api-version=2024-03-01" --output none

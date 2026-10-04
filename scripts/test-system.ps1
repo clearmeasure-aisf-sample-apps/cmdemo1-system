@@ -60,6 +60,20 @@ foreach ($environment in $system.environments) {
     Test-Rule "environment $name tier" (@('nonprod', 'prod') -ccontains [string] $environment.tier)
     Test-Rule "environment $name runtime identity" (@($system.azure.identities.apps | Where-Object { $_.environment -eq $name }).Count -eq 1) 'the seed creates one per planned environment; re-run it for a new name'
 
+    # Placement: sharesAppEnvironmentWith names an earlier environment of the same tier that hosts its own apps; a moved or
+    # shared placement adds a 5-character suffix to the app names (ca-<slug>-<env>-<deployable>-xxxx, at most 32).
+    $index = [array]::IndexOf($environmentNames, $name)
+    if ($environment.ContainsKey('sharesAppEnvironmentWith')) {
+        $hostName = [string] $environment.sharesAppEnvironmentWith
+        $hostEntry = @($system.environments | Where-Object { $_.name -eq $hostName })[0]
+        Test-Rule "environment $name shares $hostName" ($null -ne $hostEntry -and [array]::IndexOf($environmentNames, $hostName) -lt $index -and $hostEntry.tier -eq $environment.tier -and -not $hostEntry.ContainsKey('sharesAppEnvironmentWith') -and -not $environment.ContainsKey('appLocation')) 'an earlier environment of the same tier that hosts its own apps; no appLocation of its own'
+    }
+    if ($environment.ContainsKey('sharesAppEnvironmentWith') -or $environment.ContainsKey('appLocation')) {
+        foreach ($deployableName in $deployableNames) {
+            Test-Rule "environment $name app name length ($deployableName)" (("ca-$slug-$name-$deployableName-xxxx").Length -le 32) 'slug, environment and deployable too long for a suffixed container app name (32 characters)'
+        }
+    }
+
     foreach ($capability in @($environment.capabilities)) {
         $known = $capability -eq 'baseline' -or (Test-Path -LiteralPath (Join-Path $modules "$capability.bicep"))
         Test-Rule "environment $name capability $capability" $known "no module infra/modules/$capability.bicep"

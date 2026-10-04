@@ -35,7 +35,7 @@ $ruleName = "octopus-tests-$(([string] $OctopusParameters['Octopus.Deployment.Id
 $outputs = (az stack group show --name "stack-$slug-$environmentName" --resource-group $resourceGroup --output json | ConvertFrom-Json -AsHashtable).outputs
 $server = [string] $outputs.sqlServerName.value
 $vault = [string] $outputs.keyVaultName.value
-$fqdn = ([string] (az containerapp show --name "ca-$slug-$environmentName-$deployable" --resource-group $resourceGroup --query properties.configuration.ingress.fqdn --output tsv)).Trim()
+$fqdn = ([string] (@($outputs.deployables.value | Where-Object { $_.name -eq $deployable }) | Select-Object -First 1).url) -replace '^https://', ''
 
 $workerIp = (Invoke-RestMethod -Uri 'https://api.ipify.org').ToString().Trim()
 Write-Host "Opening $server to the worker ($workerIp) as rule $ruleName"
