@@ -60,7 +60,7 @@ function Get-Shape {
 try {
     Write-Host "Restoring $database to $($point.ToString('u')) as $copy"
     az sql db restore --resource-group $resourceGroup --server $server --name $database --dest-name $copy `
-        --time $point.ToString('yyyy-MM-ddTHH:mm:ssZ') --service-objective GP_S_Gen5_1 --compute-model Serverless `
+        --time $point.ToString('yyyy-MM-ddTHH:mm:ssZ') --edition GeneralPurpose --family Gen5 --capacity 1 --compute-model Serverless `
         --auto-pause-delay 60 --min-capacity 0.5 --backup-storage-redundancy Local --output none
     Write-Host "Restored in $([int] $clock.Elapsed.TotalMinutes) minutes"
 
@@ -80,8 +80,11 @@ try {
 }
 finally {
     $PSNativeCommandUseErrorActionPreference = $false
-    az sql db delete --resource-group $resourceGroup --server $server --name $copy --yes --output none 2>$null
+    az sql db show --resource-group $resourceGroup --server $server --name $copy --output none 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        az sql db delete --resource-group $resourceGroup --server $server --name $copy --yes --output none
+        Write-Host "Deleted $copy"
+    }
     az sql server firewall-rule delete --resource-group $resourceGroup --server $server --name $ruleName --output none 2>$null
     $PSNativeCommandUseErrorActionPreference = $true
-    Write-Host "Deleted $copy and firewall rule $ruleName"
 }
