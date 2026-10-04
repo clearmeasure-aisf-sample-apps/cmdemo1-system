@@ -280,9 +280,10 @@ resource "octopusdeploy_process_step" "seed_demo_employees" {
   }
 }
 
-# Acceptance tests, in the environments with "acceptanceTests": true only. "Prepare test runner" starts with "Migrate
-# database" and pulls the test image meanwhile; the test steps follow "Revert pin", so a failed test keeps the pin
-# (the version runs) but fails the deployment, which blocks its promotion.
+# Acceptance tests, in the environments with "acceptanceTests": true only: the full suite, or the tests of the
+# deployable's acceptanceTestsFilter. "Prepare test runner" starts with "Migrate database" and pulls the test image
+# meanwhile; the test steps follow "Revert pin", so a failed test keeps the pin (the version runs) but fails the
+# deployment, which blocks its promotion.
 resource "octopusdeploy_process_step" "prepare_tests" {
   for_each = local.tested_deployables
 
