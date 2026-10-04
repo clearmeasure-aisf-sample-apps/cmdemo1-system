@@ -18,7 +18,10 @@
 param(
     [string] $Root = (Split-Path -Parent $PSScriptRoot),
     [string[]] $Only = @(),
-    [switch] $ListChecks
+    [switch] $ListChecks,
+    # Only wait until no Octopus task runs, then stop (the workflow waits before it signs in to Azure; see capabilities.yml).
+    [switch] $WaitOnly,
+    [int] $WaitMinutes = 90
 )
 
 Set-StrictMode -Version Latest
@@ -171,7 +174,22 @@ $checks = [ordered] @{
     'CAP-056' = { $r = Get-RecentRun 'Rotate SQL password' 35; Assert-That ($r.Count -ge 1) 'no successful rotation in 35 days'; "rotated $($r[0].CompletedTime)" }
     'CAP-060' = { $r = Get-RecentRun 'Restore test' 8; Assert-That ($r.Count -ge 1) 'no successful restore test in 8 days'; "restore test passed $($r[0].CompletedTime)" }
     'CAP-061' = { $prod = @($environments | Where-Object { (Get-Group $_) -eq $system.azure.resourceGroups.prod })[0]; $d = Get-LastDeployment $deployableProject $prod; Assert-That ($d.Log -match 'Restore point before') "no restore point in the last $prod deployment"; "restore point recorded before $($d.Version) in $prod" }
-    'CAP-070' = { $a = Get-App $first; $variableNames = @($a.properties.template.containers[0].env | ForEach-Object name); Assert-That ($variableNames -contains 'APPLICATIONINSIGHTS_CONNECTION_STRING') "no telemetry in $first"; "telemetry on in $first" }
+    'CAP-070' = {
+        # Telemetry is proven where it comes from: the environment's OpenTelemetry agent sends to Application Insights,
+        # and requests recorded by that agent (SDK "otelc-...") arrived in the last 30 days.
+        $on = @($system.environments | Where-Object { @($_.capabilities) -contains 'telemetry' } | ForEach-Object { [string] $_.name })
+        Assert-That ($on.Count -gt 0) 'no environment has capability telemetry'
+        foreach ($e in $on) {
+            $managedEnvironment = [string] (Get-App $e).properties.environmentId
+            $otel = (az rest --method get --url "https://management.azure.com${managedEnvironment}?api-version=2024-10-02-preview" --output json | ConvertFrom-Json -AsHashtable).properties.openTelemetryConfiguration
+            Assert-That ($otel -and @($otel.tracesConfiguration.destinations) -contains 'appInsights') "no OpenTelemetry agent to Application Insights in $e"
+            $component = "/subscriptions/$($system.azure.subscriptionId)/resourceGroups/$(Get-Group $e)/providers/Microsoft.Insights/components/appi-$slug-$e"
+            $body = @{ query = "requests | where sdkVersion startswith 'otelc' | summarize count()"; timespan = 'P30D' } | ConvertTo-Json -Compress
+            $count = [int] (az rest --method post --url "https://management.azure.com$component/query?api-version=2018-04-20" --body $body --query 'tables[0].rows[0][0]' --output tsv)
+            Assert-That ($count -gt 0) "no OpenTelemetry requests in appi-$slug-$e in 30 days"
+        }
+        "OpenTelemetry agent to Application Insights in $($on -join ', '), requests arriving"
+    }
     'CAP-071' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the logs of every current deployment are clean' }
     'CAP-080' = { $files = @(gh api "repos/$systemRepo/contents/docs/architecture" --jq '.[].name'); $missing = @($files | Where-Object { $_ -like '*.puml' -and $files -notcontains ($_ -replace '\.puml$', '.png') }); Assert-That ($missing.Count -eq 0 -and $files.Count -gt 0) "not rendered: $missing"; "$(@($files | Where-Object { $_ -like '*.png' }).Count) diagrams rendered" }
     'CAP-081' = {
@@ -187,14 +205,23 @@ if ($ListChecks) {
     return
 }
 # Checks compare Git, Octopus and Azure; in the middle of a deployment or runbook run they differ by design, so the
-# run waits until the space is quiet (up to 90 minutes).
-$deadline = [datetimeoffset]::UtcNow.AddMinutes(90)
+# run waits until the space is quiet.
+$deadline = [datetimeoffset]::UtcNow.AddMinutes($WaitMinutes)
 while (@((Invoke-Octopus "/api/$space/tasks?states=Executing,Queued,Cancelling&take=10").Items).Count -gt 0) {
-    if ([datetimeoffset]::UtcNow -gt $deadline) { Write-Fail 'the space did not become quiet in 90 minutes'; exit 1 }
+    if ([datetimeoffset]::UtcNow -gt $deadline) {
+        if ($WaitOnly) { Write-Host "Octopus is still busy after $WaitMinutes minutes; the checks wait on."; exit 0 }
+        Write-Fail "the space did not become quiet in $WaitMinutes minutes"
+        exit 1
+    }
     Write-Host 'Waiting for running Octopus tasks to finish.'
     Start-Sleep -Seconds 60
 }
-$ids = if ($Only) { @($Only) } else { @($checks.Keys) }
+if ($WaitOnly) {
+    Write-Host 'Octopus is quiet.'
+    exit 0
+}
+# @(...) around the whole if: a single -Only ID would otherwise become a string, which has no Count in strict mode.
+$ids = @(if ($Only) { $Only } else { $checks.Keys })
 $failed = 0
 foreach ($id in $ids) {
     if (-not $checks.Contains($id)) { Write-Fail "${id}: no check"; $failed++; continue }
