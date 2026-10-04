@@ -200,6 +200,38 @@ $checks = [ordered] @{
     'CAP-041' = { $d = Get-LastDeployment $deployableProject $first; Assert-That ($d.Log -match 'test data was reloaded') 'no ZDataLoader'; "test data reloaded after $($d.Version)" }
     'CAP-042' = { $d = Get-LastDeployment $deployableProject $first; $m = [regex]::Match($d.Log, 'effective parallelism ([\d.]+)'); Assert-That $m.Success 'no parallelism reported'; "effective parallelism $($m.Groups[1].Value)" }
     'CAP-043' = { $d = Get-LastDeployment $deployableProject $first; $a = @((Invoke-Octopus "/api/$space/artifacts?regarding=$($d.TaskId)").Items | Where-Object Filename -like '*.trx'); Assert-That ($a.Count -ge 1) 'no TRX artifact'; "$($a[0].Filename)" }
+    'CAP-044' = {
+        # Every current deployment that ran the availability probe logged no downtime.
+        $measured = 0
+        foreach ($project in $systemProject, $deployableProject) {
+            foreach ($e in $environments) {
+                $deployment = Find-LastDeployment $project $e
+                if (-not $deployment) { continue }
+                $lines = @($deployment.Log -split "`n" | Where-Object { $_ -match 'Availability of ' })
+                if ($lines.Count -eq 0) { continue }
+                $down = @($lines | Where-Object { $_ -match 'downtime period' })
+                if ($down.Count -gt 0) { throw "$project $($deployment.Version) in ${e}: $($down[0])" }
+                $measured++
+            }
+        }
+        if ($measured -eq 0) { Skip-Check 'no current deployment has run the availability probe yet' }
+        "$measured current deployments measured, no downtime"
+    }
+    'CAP-045' = {
+        # Every environment's apps run where system.json places them: region and Container Apps environment.
+        foreach ($entry in $system.environments) {
+            $e = [string] $entry.name
+            $app = Get-App $e
+            $hostName = if ($entry.ContainsKey('sharesAppEnvironmentWith')) { [string] $entry.sharesAppEnvironmentWith } else { $e }
+            $hostEntry = @($system.environments | Where-Object { $_.name -eq $hostName })[0]
+            $region = if ($hostEntry.ContainsKey('appLocation')) { [string] $hostEntry.appLocation } else { [string] $system.system.location }
+            $actual = (([string] $app.location) -replace '\s', '').ToLowerInvariant()
+            Assert-That ($actual -eq $region) "$e runs in $($app.location); system.json places it in $region"
+            $managed = ([string] $app.properties.environmentId -split '/')[-1]
+            Assert-That ($managed -like "cae-$slug-$hostName*") "$e runs in $managed; system.json places it in the Container Apps environment of $hostName"
+        }
+        "every environment's apps run where system.json places them"
+    }
     'CAP-051' = {
         $ids = $system.azure.identities
         $expect = @(
