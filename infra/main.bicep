@@ -117,7 +117,8 @@ module vault 'modules/keyvault.bicep' = {
     logins: [
       for (d, i) in appServiceDeployables: {
         name: d.name
-        identityName: loginIdentities[i].name
+        // Only an identity that placement renamed gets a role assignment of its own (see modules/keyvault.bicep).
+        renamedIdentity: empty(placementSuffix) ? '' : loginIdentities[i].name
         principalId: loginIdentities[i].properties.principalId
       }
     ]
