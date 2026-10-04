@@ -46,6 +46,20 @@ $webApp = [string] $entry.webApp
 Write-Host "Deploying $name $version ($([Math]::Round((Get-Item -LiteralPath $package).Length / 1MB)) MB) to $webApp"
 # az webapp deploy reports its progress as WARNING lines, which Octopus would log as warnings: errors only. A failed
 # deployment still fails the command.
+$PSNativeCommandUseErrorActionPreference = $false
 az webapp deploy --resource-group $resourceGroup --name $webApp --src-path $package --type zip --async false `
     --restart true --only-show-errors --output none
+$deployed = $LASTEXITCODE -eq 0
+$PSNativeCommandUseErrorActionPreference = $true
+if (-not $deployed) {
+    # An app that fails at startup restarts until the Free plan's quotas stop the site ("QuotaExceeded"), which also
+    # closes its logs until the quota resets: say so, and where the usual cause is.
+    $siteId = ([string] (az resource show --resource-group $resourceGroup --name $webApp --resource-type Microsoft.Web/sites --query id --output tsv)).Trim()
+    $site = (az rest --method get --url "https://management.azure.com${siteId}?api-version=2024-04-01" --output json | ConvertFrom-Json -AsHashtable).properties
+    $usage = @((az rest --method get --url "https://management.azure.com$siteId/usages?api-version=2024-04-01" --output json | ConvertFrom-Json -AsHashtable).value |
+            Where-Object { $_.name.value -eq 'WPStopRequests' }) | Select-Object -First 1
+    $restarts = if ($usage) { [int] $usage.currentValue } else { 0 }
+    Fail-Step ("$webApp did not start: state $($site.state), usage $($site.usageState), $restarts worker restarts this hour. " +
+        'An app that crashes at startup restarts until the Free quota stops it; check its database login (system step "Grant database access") and its settings, then deploy again after the quota resets.')
+}
 Write-Highlight "$name $version deployed to $webApp in $environmentName"
