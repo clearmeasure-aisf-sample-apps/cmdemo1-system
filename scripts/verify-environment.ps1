@@ -105,7 +105,7 @@ foreach ($deployable in $deployables) {
         if ($status -eq 200) {
             break
         }
-        $problem = Get-RevisionProblem -App $app
+        $problem = if ($deployable['hosting'] -eq 'appservice') { $null } else { Get-RevisionProblem -App $app }
         if ($problem) {
             Write-Warning "FAIL $($deployable.name) in ${environmentName}: $problem"
             Write-RevisionLog -App $app

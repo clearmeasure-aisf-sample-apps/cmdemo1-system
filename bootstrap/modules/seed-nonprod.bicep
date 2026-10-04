@@ -10,6 +10,9 @@ param octopusIssuer string
 param audience string
 param planSubject string
 param octopusConfigSubject string
+
+@description('GitHub OIDC subject of the nightly capability checks of the system repository (environment "capabilities"); they sign in as the plan identity.')
+param capabilitiesSubject string
 param acrPushSubjects array
 param deploySubjects array
 param appEnvironments array
@@ -69,6 +72,17 @@ resource planCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federa
     subject: planSubject
     audiences: [audience]
   }
+}
+
+resource planCapabilitiesCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = {
+  parent: plan
+  name: 'github-capabilities'
+  properties: {
+    issuer: githubIssuer
+    subject: capabilitiesSubject
+    audiences: [audience]
+  }
+  dependsOn: [planCredential]
 }
 
 module planReader 'role-assignment.bicep' = {
@@ -136,6 +150,76 @@ resource acrPusher 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '8311e382-0749-4cb8-b61a-304f252e45ec')
     description: 'id-${slug}-acr-push: release workflows of the app repositories'
+  }
+}
+
+// Released images are write-locked by the release workflow (az acr repository update --write-enabled false), which
+// AcrPush does not allow: this role adds only the repository metadata rights, on this registry.
+resource tagLockRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(registry.id, 'acr-tag-lock')
+  properties: {
+    roleName: 'ACR tag lock (${slug})'
+    description: 'Lock released image tags of the ${slug} registry (repository metadata read and write).'
+    type: 'CustomRole'
+    permissions: [
+      {
+        // Registry permission mode "legacy" (the default): repository metadata rights are control-plane actions.
+        actions: [
+          'Microsoft.ContainerRegistry/registries/metadata/read'
+          'Microsoft.ContainerRegistry/registries/metadata/write'
+        ]
+        notActions: []
+      }
+    ]
+    assignableScopes: [
+      registry.id
+    ]
+  }
+}
+
+resource tagLocker 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(registry.id, acrPush.id, 'acr-tag-lock')
+  scope: registry
+  properties: {
+    principalId: acrPush.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: tagLockRole.id
+    description: 'id-${slug}-acr-push: write-lock released image tags'
+  }
+}
+
+// The capability checks read the lock state of released images. In permission mode "legacy" the registry hands out a
+// data-plane token only to an identity with pull rights, so metadata read alone fails the token exchange ("Unable to
+// authenticate using AAD"); both are read-only.
+resource registryMetadataReadRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(registry.id, 'acr-metadata-read')
+  properties: {
+    roleName: 'ACR metadata read (${slug})'
+    description: 'Read images and repository metadata of the ${slug} registry, such as the lock state of released images.'
+    type: 'CustomRole'
+    permissions: [
+      {
+        actions: [
+          'Microsoft.ContainerRegistry/registries/pull/read'
+          'Microsoft.ContainerRegistry/registries/metadata/read'
+        ]
+        notActions: []
+      }
+    ]
+    assignableScopes: [
+      registry.id
+    ]
+  }
+}
+
+resource planMetadataReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(registry.id, plan.id, 'acr-metadata-read')
+  scope: registry
+  properties: {
+    principalId: plan.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: registryMetadataReadRole.id
+    description: 'id-${slug}-plan: lock state of released images (capability checks)'
   }
 }
 

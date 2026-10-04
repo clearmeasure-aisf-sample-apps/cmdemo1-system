@@ -93,14 +93,34 @@ resource "octopusdeploy_process_step" "system_verify" {
   }
 }
 
+# Only with an App Service deployable: its database login (scripts/grant-database-access.ps1), right after the apply
+# that keeps the login's password in the vault.
+resource "octopusdeploy_process_step" "system_grant" {
+  count = length(local.appservice_deployables) > 0 ? 1 : 0
+
+  process_id     = octopusdeploy_process.system.id
+  name           = "Grant database access"
+  type           = "Octopus.AzurePowerShell"
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/grant-database-access.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
 resource "octopusdeploy_process_steps_order" "system" {
   process_id = octopusdeploy_process.system.id
   steps = concat(
     [for step in octopusdeploy_process_step.system_sign_off : step.id],
-    [
-      octopusdeploy_process_step.system_apply.id,
-      octopusdeploy_process_step.system_verify.id,
-    ],
+    [octopusdeploy_process_step.system_apply.id],
+    [for step in octopusdeploy_process_step.system_grant : step.id],
+    [octopusdeploy_process_step.system_verify.id],
   )
 }
 
@@ -130,7 +150,7 @@ resource "octopusdeploy_process_step" "sign_off" {
 
 # Prod tier: the restore point of the database before the release changes anything (scripts/record-restore-point.ps1).
 resource "octopusdeploy_process_step" "restore_point" {
-  for_each = length(local.prod_environments) > 0 ? local.deployables : {}
+  for_each = length(local.prod_environments) > 0 ? local.migrated_deployables : {}
 
   process_id     = octopusdeploy_process.deployable[each.key].id
   name           = "Record restore point"
@@ -170,7 +190,7 @@ resource "octopusdeploy_process_step" "pin" {
 }
 
 resource "octopusdeploy_process_step" "migrate" {
-  for_each = local.deployables
+  for_each = local.migrated_deployables
 
   process_id     = octopusdeploy_process.deployable[each.key].id
   name           = "Migrate database"
@@ -303,7 +323,7 @@ resource "octopusdeploy_process_step" "close_test_database" {
 }
 
 resource "octopusdeploy_process_step" "update" {
-  for_each = local.deployables
+  for_each = local.container_deployables
 
   process_id     = octopusdeploy_process.deployable[each.key].id
   name           = "Update deployable"
@@ -317,6 +337,40 @@ resource "octopusdeploy_process_step" "update" {
     "Octopus.Action.Script.ScriptSource" = "Inline"
     "Octopus.Action.Script.Syntax"       = "PowerShell"
     "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/update-deployable.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
+# App Service deployables: the release's zip (package <slug>-<deployable> in the built-in feed, not extracted) onto the
+# web app the stack created (scripts/deploy-appservice.ps1).
+resource "octopusdeploy_process_step" "deploy_appservice" {
+  for_each = local.appservice_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Update deployable"
+  type           = "Octopus.AzurePowerShell"
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  packages = {
+    app = {
+      package_id           = "${local.slug}-${each.key}"
+      feed_id              = local.built_in_feed_id
+      acquisition_location = "Server"
+      properties = {
+        Extract       = "False"
+        Purpose       = ""
+        SelectionMode = "immediate"
+      }
+    }
+  }
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/deploy-appservice.ps1")
     "OctopusUseBundledTooling"           = "False"
   }
 }
@@ -367,13 +421,12 @@ resource "octopusdeploy_process_steps_order" "deployable" {
   steps = concat(
     contains(keys(octopusdeploy_process_step.sign_off), each.key) ? [octopusdeploy_process_step.sign_off[each.key].id] : [],
     contains(keys(octopusdeploy_process_step.restore_point), each.key) ? [octopusdeploy_process_step.restore_point[each.key].id] : [],
-    [
-      octopusdeploy_process_step.pin[each.key].id,
-      octopusdeploy_process_step.migrate[each.key].id,
-    ],
+    [octopusdeploy_process_step.pin[each.key].id],
+    contains(keys(local.migrated_deployables), each.key) ? [octopusdeploy_process_step.migrate[each.key].id] : [],
     contains(keys(local.tested_deployables), each.key) ? [octopusdeploy_process_step.prepare_tests[each.key].id] : [],
+    contains(keys(local.container_deployables), each.key) ? [octopusdeploy_process_step.update[each.key].id] : [],
+    contains(keys(local.appservice_deployables), each.key) ? [octopusdeploy_process_step.deploy_appservice[each.key].id] : [],
     [
-      octopusdeploy_process_step.update[each.key].id,
       octopusdeploy_process_step.verify[each.key].id,
       octopusdeploy_process_step.revert_pin[each.key].id,
     ],

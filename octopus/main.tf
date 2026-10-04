@@ -32,6 +32,14 @@ locals {
   environments = { for i, e in local.system.environments : e.name => merge(e, { sort_order = i + 1 }) }
   tiers        = toset([for e in local.system.environments : e.tier])
   deployables  = { for d in local.system.deployables : d.name => d }
+
+  # deployables[].hosting: "containerapp" (default) or "appservice" (a web app on the Free plan, zip deployed, with no
+  # database of its own). Only deployables with a databasePackage own the database: they migrate it and, in the prod
+  # tier, record a restore point first; an App Service deployable gets a login of its own (system step "Grant database
+  # access").
+  container_deployables  = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "containerapp" }
+  appservice_deployables = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "appservice" }
+  migrated_deployables   = { for name, d in local.deployables : name => d if try(d.databasePackage, "") != "" }
   # Environments whose app deployments run the acceptance tests (system.json environments[].acceptanceTests), and the
   # deployables that ship an acceptance-test package (deployables[].acceptanceTestsPackage).
   test_environments = [for name, e in local.environments : name if try(e.acceptanceTests, false)]
