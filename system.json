@@ -93,6 +93,13 @@
       "acceptanceTestsPackage": "ChurchBulletin.AcceptanceTests",
       "acceptanceTestsAssembly": "ClearMeasure.Bootcamp.AcceptanceTests.dll",
       "dataLoaderAssembly": "ClearMeasure.Bootcamp.IntegrationTests.dll"
+    },
+    {
+      "name": "app2-ui",
+      "repository": "cmdemo1-app2-ui",
+      "hosting": "appservice",
+      "healthPath": "/_healthcheck",
+      "startupAssembly": "ClearMeasure.Bootcamp.UI.Server.dll"
     }
   ],
   "environments": [
