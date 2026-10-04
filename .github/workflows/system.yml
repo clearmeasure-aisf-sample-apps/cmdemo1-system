@@ -116,3 +116,15 @@ jobs:
           package_version: ${{ steps.package.outputs.version }}
           ignore_existing: true
           release_notes: "Commit ${{ github.sha }}: ${{ github.event.head_commit.message || 'manual run' }}"
+
+  # Every system build ends by proving every capability of the system (scripts/test-capabilities.ps1, the same checks
+  # as the nightly run). The checks wait until Octopus is quiet, so they see the new release applied to the first
+  # environment and any app deployment it queued behind.
+  capabilities:
+    needs: system-release
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    uses: ./.github/workflows/capabilities.yml
+    secrets: inherit
