@@ -18,6 +18,8 @@ param versions object
 param registryServer string
 param identityResourceId string
 param connectionStringSecretUri string
+@secure()
+@description('Application Insights connection string when the environment has capability "telemetry"; the managed OpenTelemetry agent takes it as a secure value.')
 param applicationInsightsConnectionString string = ''
 
 var placeholderImage = 'mcr.microsoft.com/k8se/quickstart:latest'
@@ -31,7 +33,11 @@ var telemetryEnv = empty(applicationInsightsConnectionString)
       }
     ]
 
-resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
+// With capability "telemetry" the environment runs Container Apps' managed OpenTelemetry agent (a preview feature,
+// hence the API version): it injects OTEL_EXPORTER_OTLP_ENDPOINT into every app, so the app only speaks OTLP, and
+// forwards traces and logs to Application Insights. Application Insights takes no metrics from the agent; request
+// rates and durations come from the traces.
+resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
   name: managedEnvironmentName
   location: location
   tags: tags
@@ -42,6 +48,25 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
         workloadProfileType: 'Consumption'
       }
     ]
+    appInsightsConfiguration: empty(applicationInsightsConnectionString)
+      ? null
+      : {
+          connectionString: applicationInsightsConnectionString
+        }
+    openTelemetryConfiguration: empty(applicationInsightsConnectionString)
+      ? null
+      : {
+          tracesConfiguration: {
+            destinations: [
+              'appInsights'
+            ]
+          }
+          logsConfiguration: {
+            destinations: [
+              'appInsights'
+            ]
+          }
+        }
   }
 }
 
