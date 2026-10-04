@@ -39,7 +39,7 @@ if (-not $package -or -not (Test-Path -LiteralPath $package)) {
 $outputs = (az stack group show --name "stack-$slug-$environmentName" --resource-group $resourceGroup --output json | ConvertFrom-Json -AsHashtable).outputs
 $entry = @($outputs.deployables.value | Where-Object { $_.name -eq $name -and $_['hosting'] -eq 'appservice' }) | Select-Object -First 1
 if (-not $entry) {
-    Fail-Step "Stack stack-$slug-$environmentName has no App Service deployable named $name: deploy the latest $slug-system release to $environmentName first."
+    Fail-Step "Stack stack-$slug-$environmentName has no App Service deployable named ${name}: deploy the latest $slug-system release to $environmentName first."
 }
 $webApp = [string] $entry.webApp
 
