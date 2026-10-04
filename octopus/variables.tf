@@ -32,9 +32,9 @@ locals {
 
   deployable_variables = flatten([
     for name, d in local.deployables : [
-      { key = "${name}-port", project = octopusdeploy_project.deployable[name].id, name = "Deployable.Port", value = tostring(d.port), environment = null },
+      { key = "${name}-port", project = octopusdeploy_project.deployable[name].id, name = "Deployable.Port", value = tostring(try(d.port, 0)), environment = null },
       { key = "${name}-health", project = octopusdeploy_project.deployable[name].id, name = "Deployable.HealthPath", value = d.healthPath, environment = null },
-      { key = "${name}-assembly", project = octopusdeploy_project.deployable[name].id, name = "Database.Assembly", value = d.databaseAssembly, environment = null },
+      { key = "${name}-assembly", project = octopusdeploy_project.deployable[name].id, name = "Database.Assembly", value = try(d.databaseAssembly, ""), environment = null },
     ]
   ])
 

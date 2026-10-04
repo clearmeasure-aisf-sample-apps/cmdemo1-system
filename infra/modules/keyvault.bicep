@@ -12,6 +12,15 @@ param sqlAdminPassword string
 @secure()
 param sqlConnectionString string
 
+@description('Database logins of App Service deployables: name, and the principal ID of the one identity that may read its connection string.')
+param logins array = []
+@description('Password of each login, by name.')
+@secure()
+param loginPasswords object = {}
+@description('Connection string of each login, by name.')
+@secure()
+param loginConnectionStrings object = {}
+
 resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: name
   location: location
@@ -74,6 +83,45 @@ resource connectionString 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   ]
 }
 
+// A login's password (read by the deploy identity's grant step) and its connection string, which only the
+// deployable's own identity may read: the role is assigned on the secret, not on the vault.
+resource loginPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [
+  for l in logins: {
+    parent: vault
+    name: '${l.name}-sql-password'
+    properties: {
+      value: loginPasswords[l.name]
+      contentType: 'text/plain'
+    }
+  }
+]
+
+resource loginConnectionString 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [
+  for l in logins: {
+    parent: vault
+    name: '${l.name}-sql-connection-string'
+    properties: {
+      value: loginConnectionStrings[l.name]
+      contentType: 'text/plain'
+    }
+  }
+]
+
+resource loginReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (l, i) in logins: {
+    name: guid(vault.id, l.name, 'login-secret-user')
+    scope: loginConnectionString[i]
+    properties: {
+      principalId: l.principalId
+      principalType: 'ServicePrincipal'
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+    }
+  }
+]
+
 output name string = vault.name
+output loginConnectionStringUris array = [
+  for (l, i) in logins: '${vault.properties.vaultUri}secrets/${loginConnectionString[i].name}'
+]
 // Versionless URI: the container app picks up a rotated value without a new revision.
 output connectionStringSecretUri string = '${vault.properties.vaultUri}secrets/${connectionString.name}'

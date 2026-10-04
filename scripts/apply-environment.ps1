@@ -109,6 +109,30 @@ function Get-SqlPassword {
     Fail-Step "Cannot read sql-admin-password from vault $vault as the deploy identity. Check its Key Vault Secrets Officer assignment."
 }
 
+function Get-LoginPassword {
+    # One database login per App Service deployable (system.json hosting "appservice"). Its password stays in the
+    # vault; a new deployable or a new environment gets a generated one. Either way the grant step then sets the
+    # login's password to the vault's, so a value generated after a failed read still matches.
+    param([hashtable] $Outputs, [string[]] $Names)
+    $result = @{}
+    foreach ($name in $Names) {
+        $value = $null
+        if ($Outputs -and $Outputs.ContainsKey('keyVaultName')) {
+            $PSNativeCommandUseErrorActionPreference = $false
+            $value = az keyvault secret show --vault-name ([string] $Outputs.keyVaultName.value) --name "$name-sql-password" --query value --output tsv 2>$null
+            $PSNativeCommandUseErrorActionPreference = $true
+        }
+        if ($value) {
+            $result[$name] = ([string] $value).Trim()
+        }
+        else {
+            Write-Host "Generating the database login password of $name."
+            $result[$name] = New-SqlPassword
+        }
+    }
+    return $result
+}
+
 $template = Join-Path $root 'infra' 'main.bicep'
 if (-not (Test-Path -LiteralPath $template)) {
     Fail-Step "Package <slug>-system has no infra/main.bicep under $root."
@@ -117,6 +141,9 @@ if (-not (Test-Path -LiteralPath $template)) {
 $versions = Get-DesiredVersion
 $outputs = Get-StackOutput
 $password = Get-SqlPassword -Outputs $outputs
+$system = Get-Content -LiteralPath (Join-Path $root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
+$loginNames = @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' } | ForEach-Object { [string] $_.name })
+$loginPasswords = Get-LoginPassword -Outputs $outputs -Names $loginNames
 Write-Host "Environment $environmentName, resource group $resourceGroup, stack $stackName"
 Write-Host "Versions on main: $(if ($versions.Count) { ($versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ' } else { 'none (placeholders)' })"
 
@@ -128,6 +155,7 @@ $parameters = @{
         versions          = @{ value = $versions }
         sqlAdminPassword  = @{ value = $password }
         deployPrincipalId = @{ value = $deployPrincipalId }
+        loginPasswords    = @{ value = $loginPasswords }
     }
 }
 $parametersFile = Join-Path ([IO.Path]::GetTempPath()) "stack-$([Guid]::NewGuid().ToString('N')).json"

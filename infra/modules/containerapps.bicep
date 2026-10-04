@@ -138,6 +138,7 @@ resource apps 'Microsoft.App/containerApps@2024-03-01' = [
 output deployables array = [
   for (d, i) in deployables: {
     name: d.name
+    hosting: 'containerapp'
     containerApp: apps[i].name
     url: 'https://${apps[i].properties.configuration.ingress.fqdn}'
     healthPath: empty(versions[?d.name] ?? '') ? '/' : d.healthPath

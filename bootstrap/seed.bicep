@@ -27,6 +27,9 @@ param systemRepository string
 @description('Names of the app repositories whose release workflow pushes images (environment "release").')
 param appRepositories array
 
+@description('OIDC subject prefix per repository, as GitHub reports it once the repository exists (sub_claim_prefix of actions/oidc/customization/sub). Repositories created after 2026-07-15 use immutable subjects, repo:<org>@<org-id>/<repo>@<repo-id>; a repository without an entry yet uses repo:<org>/<repo>. new-system-repository.ps1 and new-app-repository.ps1 fill it in before their first push.')
+param githubSubjectPrefixes object = {}
+
 @description('Octopus server URL without a trailing slash; it is the OIDC issuer of the Octopus Azure accounts.')
 param octopusUrl string
 
@@ -70,9 +73,10 @@ module nonprod 'modules/seed-nonprod.bicep' = {
     githubIssuer: githubIssuer
     octopusIssuer: octopusUrl
     audience: audience
-    planSubject: 'repo:${githubOrg}/${systemRepository}:environment:azure-read'
-    octopusConfigSubject: 'repo:${githubOrg}/${systemRepository}:environment:octopus'
-    acrPushSubjects: [for repository in appRepositories: 'repo:${githubOrg}/${repository}:environment:release']
+    planSubject: '${githubSubjectPrefixes[?systemRepository] ?? 'repo:${githubOrg}/${systemRepository}'}:environment:azure-read'
+    octopusConfigSubject: '${githubSubjectPrefixes[?systemRepository] ?? 'repo:${githubOrg}/${systemRepository}'}:environment:octopus'
+    capabilitiesSubject: '${githubSubjectPrefixes[?systemRepository] ?? 'repo:${githubOrg}/${systemRepository}'}:environment:capabilities'
+    acrPushSubjects: [for repository in appRepositories: '${githubSubjectPrefixes[?repository] ?? 'repo:${githubOrg}/${repository}'}:environment:release']
     deploySubjects: flatten(map(nonprodEnvironments, e => map(octopusProjectSlugs, p => 'space:${octopusSpaceSlug}:project:${p}:environment:${e.name}')))
     appEnvironments: map(nonprodEnvironments, e => e.name)
   }
@@ -91,6 +95,50 @@ module prod 'modules/seed-tier.bicep' = {
     audience: audience
     deploySubjects: flatten(map(prodEnvironments, e => map(octopusProjectSlugs, p => 'space:${octopusSpaceSlug}:project:${p}:environment:${e.name}')))
     appEnvironments: map(prodEnvironments, e => e.name)
+  }
+}
+
+// What-if needs Microsoft.Resources/deployments/whatIf/action, which Reader lacks (first live run): this role adds only
+// that and validate/action, assignable to the system's two groups.
+resource whatIfRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(subscription().id, slug, 'deployment-what-if')
+  properties: {
+    roleName: 'Deployment what-if (${slug})'
+    description: 'What-if and validation of deployments, for the previews and drift checks of id-${slug}-plan (with Reader).'
+    type: 'CustomRole'
+    permissions: [
+      {
+        actions: [
+          'Microsoft.Resources/deployments/whatIf/action'
+          'Microsoft.Resources/deployments/validate/action'
+        ]
+        notActions: []
+      }
+    ]
+    assignableScopes: [
+      nonprodGroup.id
+      prodGroup.id
+    ]
+  }
+}
+
+module nonprodWhatIf 'modules/role-assignment.bicep' = {
+  name: 'seed-${slug}-nonprod-what-if'
+  scope: nonprodGroup
+  params: {
+    principalId: nonprod.outputs.plan.principalId
+    roleDefinitionId: whatIfRole.name
+    description: 'id-${slug}-plan: what-if of nonprod'
+  }
+}
+
+module prodWhatIf 'modules/role-assignment.bicep' = {
+  name: 'seed-${slug}-prod-what-if'
+  scope: prodGroup
+  params: {
+    principalId: nonprod.outputs.plan.principalId
+    roleDefinitionId: whatIfRole.name
+    description: 'id-${slug}-plan: what-if of prod'
   }
 }
 

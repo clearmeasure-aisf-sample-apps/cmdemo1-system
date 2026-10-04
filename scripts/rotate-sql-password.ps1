@@ -79,7 +79,8 @@ finally {
 }
 
 $failed = 0
-foreach ($deployable in $outputs.deployables.value) {
+# App Service deployables use logins of their own, not the administrator password: only container apps restart.
+foreach ($deployable in @($outputs.deployables.value | Where-Object { $_['hosting'] -ne 'appservice' })) {
     $app = "ca-$slug-$environmentName-$($deployable.name)"
     $appId = ([string] (az containerapp show --name $app --resource-group $resourceGroup --query id --output tsv)).Trim()
     $revision = ([string] (az containerapp show --name $app --resource-group $resourceGroup --query properties.latestRevisionName --output tsv)).Trim()
