@@ -41,12 +41,23 @@ locals {
   test_variables = flatten([
     for name, d in local.tested_deployables : [
       { key = "${name}-tests-assembly", project = octopusdeploy_project.deployable[name].id, name = "AcceptanceTests.Assembly", value = d.acceptanceTestsAssembly, environment = null },
-      { key = "${name}-loader-assembly", project = octopusdeploy_project.deployable[name].id, name = "DataLoader.Assembly", value = d.dataLoaderAssembly, environment = null },
       # 0: sized from the worker (1.5 per core, 0.5 GB of memory per browser, at most 16).
       { key = "${name}-tests-workers", project = octopusdeploy_project.deployable[name].id, name = "AcceptanceTests.Workers", value = tostring(try(d.acceptanceTestsWorkers, 0)), environment = null },
       { key = "${name}-tests-delay", project = octopusdeploy_project.deployable[name].id, name = "AcceptanceTests.InputDelayMs", value = "200", environment = null },
     ]
   ])
+
+  # DataLoader.Assembly: the assembly of ZDataLoader (step "Acceptance tests") and of the demo-employee seeder (step
+  # "Seed demo employees") in the acceptance-test package.
+  loader_variables = [
+    for name, d in merge(local.tested_deployables, local.seeded_deployables) : {
+      key         = "${name}-loader-assembly"
+      project     = octopusdeploy_project.deployable[name].id
+      name        = "DataLoader.Assembly"
+      value       = d.dataLoaderAssembly
+      environment = null
+    }
+  ]
 
   # Employee.MiddleNames: the environment's employeeMiddleNames as JSON, in the environments that declare some.
   middle_name_variables = [
@@ -59,7 +70,7 @@ locals {
     }
   ]
 
-  string_variables = { for v in concat(local.shared_variables, local.deployable_variables, local.test_variables, local.middle_name_variables) : v.key => v }
+  string_variables = { for v in concat(local.shared_variables, local.deployable_variables, local.test_variables, local.loader_variables, local.middle_name_variables) : v.key => v }
 }
 
 resource "octopusdeploy_variable" "string" {

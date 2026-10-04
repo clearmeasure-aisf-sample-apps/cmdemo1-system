@@ -46,6 +46,14 @@ locals {
   tested_deployables = length(local.test_environments) == 0 ? {} : {
     for name, d in local.deployables : name => d if try(d.acceptanceTestsPackage, "") != ""
   }
+  # Every other environment gets the demo employees from the app's own seeder (step "Seed demo employees", right after
+  # "Migrate database"), run from the acceptance-test package of a deployable that owns the database and ships a data
+  # loader assembly; in the environments above, ZDataLoader loads the same employees.
+  seed_environments = [for name, e in local.environments : name if !try(e.acceptanceTests, false)]
+  seeded_deployables = length(local.seed_environments) == 0 ? {} : {
+    for name, d in local.migrated_deployables : name => d
+    if try(d.acceptanceTestsPackage, "") != "" && try(d.dataLoaderAssembly, "") != ""
+  }
   # Every environment after the first waits for a sign-off by the space's Space Managers (people join that team to
   # sign off; automation answers only with a recorded reason). Prod-tier environments record a restore point first.
   promoted_environments = [for name, e in local.environments : name if e.sort_order > 1]

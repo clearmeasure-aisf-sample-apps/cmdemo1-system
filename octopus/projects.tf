@@ -244,6 +244,42 @@ resource "octopusdeploy_process_step" "migrate" {
   }
 }
 
+# Outside the acceptance-test environments: the demo employees from the app's own seeder (scripts/seed-demo-employees.ps1),
+# an explicit test of the data loader assembly in the release's acceptance-test package. It only inserts what is missing,
+# so it runs on every deployment; in the acceptance-test environments ZDataLoader loads the same employees.
+resource "octopusdeploy_process_step" "seed_demo_employees" {
+  for_each = local.seeded_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Seed demo employees"
+  type           = "Octopus.AzurePowerShell"
+  environments   = [for name in local.seed_environments : octopusdeploy_environment.this[name].id]
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  packages = {
+    tests = {
+      package_id           = each.value.acceptanceTestsPackage
+      feed_id              = local.built_in_feed_id
+      acquisition_location = "Server"
+      properties = {
+        Extract       = "True"
+        Purpose       = ""
+        SelectionMode = "immediate"
+      }
+    }
+  }
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/seed-demo-employees.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
 # Acceptance tests, in the environments with "acceptanceTests": true only. "Prepare test runner" starts with "Migrate
 # database" and pulls the test image meanwhile; the test steps follow "Revert pin", so a failed test keeps the pin
 # (the version runs) but fails the deployment, which blocks its promotion.
@@ -447,6 +483,7 @@ resource "octopusdeploy_process_steps_order" "deployable" {
     [octopusdeploy_process_step.pin[each.key].id],
     contains(keys(local.migrated_deployables), each.key) ? [octopusdeploy_process_step.migrate[each.key].id] : [],
     contains(keys(local.tested_deployables), each.key) ? [octopusdeploy_process_step.prepare_tests[each.key].id] : [],
+    contains(keys(local.seeded_deployables), each.key) ? [octopusdeploy_process_step.seed_demo_employees[each.key].id] : [],
     contains(keys(local.container_deployables), each.key) ? [octopusdeploy_process_step.update[each.key].id] : [],
     contains(keys(local.appservice_deployables), each.key) ? [octopusdeploy_process_step.deploy_appservice[each.key].id] : [],
     [
