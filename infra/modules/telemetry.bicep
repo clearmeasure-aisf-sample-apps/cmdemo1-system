@@ -1,5 +1,7 @@
-// Capability "telemetry": Log Analytics plus workspace-based Application Insights. The app is already instrumented
-// with OpenTelemetry (Azure.Monitor.OpenTelemetry.AspNetCore), which reads APPLICATIONINSIGHTS_CONNECTION_STRING.
+// Capability "telemetry": Log Analytics plus workspace-based Application Insights, fed by the Container Apps
+// environment's managed OpenTelemetry agent (containerapps.bicep). The app exports OTLP to the agent, which injects
+// OTEL_EXPORTER_OTLP_ENDPOINT; nothing in the app names Application Insights. The app also gets
+// APPLICATIONINSIGHTS_CONNECTION_STRING, for browser telemetry only.
 // Turn it on by adding "telemetry" to the environment's capabilities in system.json.
 targetScope = 'resourceGroup'
 

@@ -12,6 +12,11 @@
     vault. The worker's address gets a firewall rule for the duration of the step, as the bootcamp's own Octopus
     process does. The .NET 10 runtime is installed into a temporary folder when the container lacks it.
 
+    The databases are serverless with auto-pause. A paused database resumes only on a login attempt (reading its
+    status with az sql db show does not wake it), and the migration tool fails while it resumes. So the step first
+    logs in itself, and repeats that until a query succeeds, for up to five minutes. The waiting lines are plain
+    information: a resume is normal, not a warning.
+
     Known limit: the bootcamp's database tool takes the password as a positional argument (DatabaseOptions), so it is
     visible to processes of the single-use worker container while the tool runs. The capability "secretless" removes
     it by switching the database to Microsoft Entra authentication.
@@ -78,6 +83,41 @@ az sql server firewall-rule create --resource-group $resourceGroup --server $ser
 
 try {
     $password = ([string] (az keyvault secret show --vault-name $vault --name sql-admin-password --query value --output tsv)).Trim()
+    $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+    $builder['Data Source'] = "tcp:$serverFqdn,1433"
+    $builder['Initial Catalog'] = $database
+    $builder['User ID'] = $login
+    $builder['Password'] = $password
+    $builder['Encrypt'] = $true
+    $builder['Connect Timeout'] = 30
+    $deadline = (Get-Date).AddMinutes(5)
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        $connection = [System.Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+        $reason = $null
+        try {
+            $connection.Open()
+            $command = $connection.CreateCommand()
+            $command.CommandText = 'SELECT 1'
+            $null = $command.ExecuteScalar()
+        }
+        catch {
+            $reason = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+        }
+        finally {
+            $connection.Dispose()
+        }
+        if (-not $reason) { break }
+        if ((Get-Date) -gt $deadline) {
+            Fail-Step "Database $database did not accept a login within 5 minutes: $reason"
+        }
+        $status = [string] (az sql db show --resource-group $resourceGroup --server $server --name $database --query status --output tsv)
+        Write-Host "Waiting for database $database to resume (status $status, attempt $attempt)."
+        Start-Sleep -Seconds 15
+    }
+    Write-Host "Database $database is online$(if ($attempt -gt 1) { " after $attempt login attempts" })."
+
     Write-Host "Migrating $database on $serverFqdn with $($assembly.Name)"
     & $dotnet $assembly.FullName update $serverFqdn $database $scripts $login $password
     if ($LASTEXITCODE -ne 0) {
