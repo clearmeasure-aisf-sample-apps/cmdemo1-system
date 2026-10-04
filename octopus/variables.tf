@@ -91,3 +91,16 @@ resource "octopusdeploy_variable" "github_token" {
   sensitive_value = var.github_token
   description     = "Reads environments/<env>/versions.json from main and, in deployable projects, commits the pin. From repository secret OCTOPUS_GITHUB_TOKEN."
 }
+
+# One task per environment at a time, across both projects and the runbooks: an app deployment, a system deployment
+# and a restore test touch the same stack and database, and running them together fails (stack outputs read while the
+# stack redeploys, ConflictingDatabaseOperation). Octopus queues tasks that share a concurrency tag.
+resource "octopusdeploy_variable" "concurrency_tag" {
+  for_each = local.project_ids
+
+  owner_id    = each.value
+  name        = "Octopus.Task.ConcurrencyTag"
+  type        = "String"
+  value       = "#{Octopus.Environment.Id}"
+  description = "Serializes deployments and runbook runs per environment across projects."
+}
