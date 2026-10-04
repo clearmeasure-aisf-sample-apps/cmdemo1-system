@@ -4,13 +4,14 @@
 # identities: Azure as id-<slug>-plan (Reader), Octopus as the system's service account. GitHub reads go through
 # OCTOPUS_GITHUB_TOKEN because the app repository's rulesets are outside this repository's token; a read-only GitHub
 # App replaces it with CAP-050. The result is an issue with label "capability": opened or updated while a check fails,
-# closed when the next run passes.
+# closed when the next run passes. Every system build ends with the same checks (system.yml calls this workflow).
 name: capabilities
 
 on:
   schedule:
     - cron: "47 6 * * *"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
