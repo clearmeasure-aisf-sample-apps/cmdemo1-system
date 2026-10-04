@@ -57,7 +57,9 @@ resource sites 'Microsoft.Web/sites@2024-04-01' = [
       keyVaultReferenceIdentity: identityResourceIds[i]
       siteConfig: {
         linuxFxVersion: 'DOTNETCORE|10.0'
-        appCommandLine: 'dotnet ${d.startupAssembly}'
+        // No startup command until a version is pinned: an empty site with one crash-loops, and on a shared Free plan
+        // the restarts exhaust the quota of every app on it. deploy-appservice.ps1 sets it right before the first zip.
+        appCommandLine: empty(versions[?d.name] ?? '') ? '' : 'dotnet ${d.startupAssembly}'
         alwaysOn: false
         ftpsState: 'Disabled'
         minTlsVersion: '1.2'
@@ -78,6 +80,7 @@ output deployables array = [
     name: d.name
     hosting: 'appservice'
     webApp: sites[i].name
+    startupCommand: 'dotnet ${d.startupAssembly}'
     url: 'https://${sites[i].properties.defaultHostName}'
     healthPath: empty(versions[?d.name] ?? '') ? '/' : d.healthPath
     version: versions[?d.name] ?? ''
