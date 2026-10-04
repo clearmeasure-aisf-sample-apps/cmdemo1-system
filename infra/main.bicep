@@ -67,12 +67,25 @@ var sqlAdminLogin = 'sqladmin'
 var sqlServerFqdn = '${sqlServerName}${az.environment().suffixes.sqlServerHostname}'
 
 // A deployable runs as a container app (modules/containerapps.bicep) unless deployables[].hosting is "appservice": then
-// a Linux web app on the Free plan (modules/appservice.bicep). An App Service deployable has no database of its own and
-// runs no migrations: it reaches the system's database with a login of its own (scripts/grant-database-access.ps1),
-// whose connection string only its identity may read.
+// a Linux web app on the Free plan (modules/appservice.bicep). An App Service deployable reaches the system's database
+// with a login of its own (scripts/grant-database-access.ps1), whose connection string only its identity may read. One
+// with a databasePackage owns the database (Octopus migrates it as the administrator, and its login may change the
+// schema: the app creates its message queues at startup); the others share it, read and write.
+// deployables[].hosting "staticwebapp": a site of static files on Azure Static Web Apps (modules/staticwebapp.bicep):
+// the health dashboard, which has no server, no identity and no database login.
 var hostedDeployables = map(system.deployables, d => union({ hosting: 'containerapp' }, d))
 var containerDeployables = filter(hostedDeployables, d => d.hosting == 'containerapp')
 var appServiceDeployables = filter(hostedDeployables, d => d.hosting == 'appservice')
+var staticDeployables = filter(hostedDeployables, d => d.hosting == 'staticwebapp')
+// The Free plan of Static Web Apps exists in a few regions only; the files are served from edge locations everywhere,
+// so the region of the resource need not be the system's (system.staticLocation, optional).
+var staticLocation = union({ staticLocation: 'centralus' }, system.system).staticLocation
+// The dashboard runs in the browser and calls the health and version endpoints of every app itself, so with a static
+// deployable the App Service apps answer requests from other origins (CORS). Every origin (*), not the dashboard's
+// address: each environment's dashboard shows the nodes of every environment, so the origins to allow would be the
+// sites of all environments, of both tiers; the endpoints it calls are public health and version endpoints that
+// answer anyone anyway; and no credentials are sent or allowed. Without a static deployable nothing is set.
+var corsAllowedOrigins = empty(staticDeployables) ? [] : ['*']
 
 resource loginIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = [
   for d in appServiceDeployables: {
@@ -136,6 +149,13 @@ module vault 'modules/keyvault.bicep' = {
 // environment of a tier owns the tier's plan, the others in the tier run their web apps on it. App Service uses the
 // system's location (appLocation is a Container Apps quota matter).
 var planOwner = first(filter(system.environments, e => e.tier == environment.tier))!.name
+// environments[].standbyLocation: the App Service apps a second time, in that region (primary and standby behind the
+// environment's Front Door endpoint, capability "frontdoor"). The standby region's Free plan belongs to the first
+// environment of the tier that has this standby region.
+var standbyLocation = string(union({ standbyLocation: '' }, rawEnvironment).standbyLocation)
+var standbyPlanOwner = empty(standbyLocation)
+  ? environmentName
+  : first(filter(system.environments, e => e.tier == environment.tier && union({ standbyLocation: '' }, e).standbyLocation == standbyLocation))!.name
 
 module appService 'modules/appservice.bicep' = if (!empty(appServiceDeployables)) {
   name: 'appservice-${environmentName}'
@@ -150,10 +170,45 @@ module appService 'modules/appservice.bicep' = if (!empty(appServiceDeployables)
     versions: versions
     identityResourceIds: [for (d, i) in appServiceDeployables: loginIdentities[i].id]
     connectionStringSecretUris: vault.outputs.loginConnectionStringUris
+    applicationInsightsConnectionString: contains(capabilities, 'telemetry') ? telemetry!.outputs.connectionString : ''
+    corsAllowedOrigins: corsAllowedOrigins
   }
 }
 
-module apps 'modules/containerapps.bicep' = {
+module appServiceStandby 'modules/appservice.bicep' = if (!empty(appServiceDeployables) && !empty(standbyLocation)) {
+  name: 'appservice-${environmentName}-standby'
+  params: {
+    slug: slug
+    environmentName: environmentName
+    location: standbyLocation
+    planName: 'asp-${slug}-${standbyPlanOwner}-${standbyLocation}'
+    ownsPlan: standbyPlanOwner == environmentName
+    nameSuffix: '-${standbyLocation}'
+    role: 'standby'
+    tags: tags
+    deployables: appServiceDeployables
+    versions: versions
+    identityResourceIds: [for (d, i) in appServiceDeployables: loginIdentities[i].id]
+    connectionStringSecretUris: vault.outputs.loginConnectionStringUris
+    corsAllowedOrigins: corsAllowedOrigins
+  }
+}
+
+// Only with a static deployable: one Static Web App per deployable, in staticLocation.
+module staticSites 'modules/staticwebapp.bicep' = if (!empty(staticDeployables)) {
+  name: 'staticwebapp-${environmentName}'
+  params: {
+    slug: slug
+    environmentName: environmentName
+    location: staticLocation
+    tags: tags
+    deployables: staticDeployables
+    versions: versions
+  }
+}
+
+// Only with a container deployable: a system whose apps all run on App Service has no Container Apps environment.
+module apps 'modules/containerapps.bicep' = if (!empty(containerDeployables)) {
   name: 'apps-${environmentName}'
   params: {
     slug: slug
@@ -178,5 +233,12 @@ output sqlServerName string = sqlServerName
 output sqlServerFqdn string = sqlServerFqdn
 output databaseName string = databaseName
 output sqlAdminLogin string = sqlAdminLogin
-output deployables array = concat(apps.outputs.deployables, empty(appServiceDeployables) ? [] : appService!.outputs.deployables)
+output deployables array = concat(
+  empty(containerDeployables) ? [] : apps!.outputs.deployables,
+  empty(appServiceDeployables) ? [] : appService!.outputs.deployables,
+  empty(staticDeployables) ? [] : staticSites!.outputs.deployables
+)
+// The same App Service deployables in the standby region (empty without a standbyLocation): the scripts deploy to and
+// verify both, and the Front Door endpoint has both as origins.
+output standby array = (empty(appServiceDeployables) || empty(standbyLocation)) ? [] : appServiceStandby!.outputs.deployables
 output capabilities array = capabilities

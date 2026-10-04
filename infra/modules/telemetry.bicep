@@ -1,6 +1,6 @@
-// Capability "telemetry": Log Analytics plus workspace-based Application Insights, fed by the Container Apps
-// environment's managed OpenTelemetry agent (containerapps.bicep). The app exports OTLP to the agent, which injects
-// OTEL_EXPORTER_OTLP_ENDPOINT; nothing in the app names Application Insights, and the app gets no connection string.
+// Capability "telemetry": Log Analytics plus workspace-based Application Insights. The apps of the environment (container
+// apps and App Service alike) get APPLICATIONINSIGHTS_CONNECTION_STRING, and their OpenTelemetry SDK exports traces, logs
+// and metrics to it with the Azure Monitor exporter; OTEL_SERVICE_NAME (<slug>-<deployable>) names each app's role.
 // Turn it on by adding "telemetry" to the environment's capabilities in system.json.
 targetScope = 'resourceGroup'
 

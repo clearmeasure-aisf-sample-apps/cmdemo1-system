@@ -435,6 +435,41 @@ resource "octopusdeploy_process_step" "deploy_appservice" {
   }
 }
 
+# Static deployables (the health dashboard): the release's zip (package <slug>-<deployable> in the built-in feed,
+# extracted) onto the Static Web App the stack created, with the topology.json the step writes into it
+# (scripts/deploy-staticwebapp.ps1).
+resource "octopusdeploy_process_step" "deploy_staticwebapp" {
+  for_each = local.static_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Update deployable"
+  type           = "Octopus.AzurePowerShell"
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  packages = {
+    site = {
+      package_id           = "${local.slug}-${each.key}"
+      feed_id              = local.built_in_feed_id
+      acquisition_location = "Server"
+      properties = {
+        Extract       = "True"
+        Purpose       = ""
+        SelectionMode = "immediate"
+      }
+    }
+  }
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/deploy-staticwebapp.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
 resource "octopusdeploy_process_step" "verify" {
   for_each = local.deployables
 
@@ -487,6 +522,7 @@ resource "octopusdeploy_process_steps_order" "deployable" {
     contains(keys(local.seeded_deployables), each.key) ? [octopusdeploy_process_step.seed_demo_employees[each.key].id] : [],
     contains(keys(local.container_deployables), each.key) ? [octopusdeploy_process_step.update[each.key].id] : [],
     contains(keys(local.appservice_deployables), each.key) ? [octopusdeploy_process_step.deploy_appservice[each.key].id] : [],
+    contains(keys(local.static_deployables), each.key) ? [octopusdeploy_process_step.deploy_staticwebapp[each.key].id] : [],
     [
       octopusdeploy_process_step.verify[each.key].id,
       octopusdeploy_process_step.revert_pin[each.key].id,

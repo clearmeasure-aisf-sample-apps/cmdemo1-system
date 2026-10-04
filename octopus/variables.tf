@@ -13,6 +13,9 @@ locals {
       { key = "${project}-repository", project = id, name = "System.Repository", value = local.repository, environment = null },
       { key = "${project}-registry", project = id, name = "Azure.RegistryServer", value = local.system.azure.registry.loginServer, environment = null },
       { key = "${project}-deployable", project = id, name = "Deployable.Name", value = project == "system" ? "" : project, environment = null },
+      # The resource group of the system's Front Door profile (system.json azure.frontDoor), empty without one: the
+      # scripts read the environment's endpoints from stack-<slug>-<env>-edge there.
+      { key = "${project}-edge", project = id, name = "Azure.EdgeResourceGroup", value = try(local.system.azure.frontDoor.resourceGroup, ""), environment = null },
       [for name, e in local.environments : {
         key         = "${project}-rg-${name}"
         project     = id
@@ -114,7 +117,7 @@ resource "octopusdeploy_variable" "github_token" {
   type            = "Sensitive"
   is_sensitive    = true
   sensitive_value = var.github_token
-  description     = "Reads environments/<env>/versions.json from main and, in deployable projects, commits the pin. From repository secret OCTOPUS_GITHUB_TOKEN."
+  description     = "Reads environments/<env>/versions.json from main and, in deployable projects, commits the pin; the dashboard's deployment reads system.json with it. From repository secret OCTOPUS_GITHUB_TOKEN."
 }
 
 # One task per environment at a time, across both projects and the runbooks: an app deployment, a system deployment

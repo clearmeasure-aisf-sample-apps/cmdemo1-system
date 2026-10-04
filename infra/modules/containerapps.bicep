@@ -24,28 +24,24 @@ param versions object
 param registryServer string
 param identityResourceId string
 param connectionStringSecretUri string
-@secure()
-@description('Application Insights connection string when the environment has capability "telemetry"; the managed OpenTelemetry agent takes it as a secure value.')
+@description('Application Insights connection string when the environment has capability "telemetry" (not a secret: it identifies where to send telemetry).')
 param applicationInsightsConnectionString string = ''
 
 var placeholderImage = 'mcr.microsoft.com/k8se/quickstart:latest'
 var placeholderPort = 80
-// Without telemetry the apps opt out of an OpenTelemetry agent they may share with another environment: an explicit
-// OTEL_EXPORTER_OTLP_ENDPOINT overrides the one the agent injects, and an empty one keeps the app's exporter off.
+// Telemetry: the app's OpenTelemetry SDK exports to Application Insights with the Azure Monitor exporter whenever it
+// gets APPLICATIONINSIGHTS_CONNECTION_STRING (traces, logs and metrics, Live Metrics too); without the capability it
+// gets none and sends nothing. OTEL_SERVICE_NAME names each app (its role in Application Insights).
 var telemetryEnv = empty(applicationInsightsConnectionString)
-  ? [
+  ? []
+  : [
       {
-        name: 'OTEL_EXPORTER_OTLP_ENDPOINT'
-        value: ''
+        name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+        value: applicationInsightsConnectionString
       }
     ]
-  : []
 
-// With capability "telemetry" the environment runs Container Apps' managed OpenTelemetry agent (a preview feature,
-// hence the API version): it injects OTEL_EXPORTER_OTLP_ENDPOINT into every app, so the app only speaks OTLP, and
-// forwards traces and logs to Application Insights. Application Insights takes no metrics from the agent; request
-// rates and durations come from the traces.
-resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' = if (ownsManagedEnvironment) {
+resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = if (ownsManagedEnvironment) {
   name: managedEnvironmentName
   location: location
   tags: tags
@@ -56,25 +52,6 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-previe
         workloadProfileType: 'Consumption'
       }
     ]
-    appInsightsConfiguration: empty(applicationInsightsConnectionString)
-      ? null
-      : {
-          connectionString: applicationInsightsConnectionString
-        }
-    openTelemetryConfiguration: empty(applicationInsightsConnectionString)
-      ? null
-      : {
-          tracesConfiguration: {
-            destinations: [
-              'appInsights'
-            ]
-          }
-          logsConfiguration: {
-            destinations: [
-              'appInsights'
-            ]
-          }
-        }
   }
 }
 
@@ -131,6 +108,10 @@ resource apps 'Microsoft.App/containerApps@2024-03-01' = [
                 {
                   name: 'ConnectionStrings__SqlConnectionString'
                   secretRef: 'sql-connection-string'
+                }
+                {
+                  name: 'OTEL_SERVICE_NAME'
+                  value: '${slug}-${d.name}'
                 }
               ],
               telemetryEnv
