@@ -114,7 +114,8 @@ function Start-AvailabilityProbe {
     if ($Outputs -and $Outputs.ContainsKey('deployables')) {
         foreach ($entry in @($Outputs.deployables.value)) {
             $paths[[string] $entry.name] = [string] $entry.healthPath
-            if ($entry['hosting'] -eq 'appservice') { $static[[string] $entry.name] = [string] $entry.url }
+            # App Service apps and static sites keep the URL the stack reports; container apps are listed below.
+            if (@('appservice', 'staticwebapp') -contains $entry['hosting']) { $static[[string] $entry.name] = [string] $entry.url }
         }
     }
     $probe = [hashtable]::Synchronized(@{ Stop = $false; Samples = [Collections.Generic.List[object]]::new(); Error = '' })
