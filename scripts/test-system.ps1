@@ -43,7 +43,8 @@ Test-Rule 'slug' ($slug -cmatch '^[a-z][a-z0-9]{2,9}$') "'$slug' must be 3 to 10
 $deployableNames = @($system.deployables | ForEach-Object { [string] $_.name })
 Test-Rule 'deployables present' ($deployableNames.Count -gt 0)
 foreach ($name in $deployableNames) {
-    Test-Rule "deployable $name name" ($name -cmatch '^[a-z][a-z0-9]{1,9}$') 'lowercase letters and digits, 2 to 10'
+    # Azure names carry it: ca-<slug>-<env>-<deployable> has at most 32 characters, hyphens inside but not doubled.
+    Test-Rule "deployable $name name" ($name -cmatch '^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){1,9}$') 'lowercase letters, digits and inner hyphens, 2 to 10'
     Test-Rule "deployable $name is not 'system'" ($name -cne 'system') 'the Octopus project <slug>-system is the environments project'
 }
 Test-Rule 'deployable names unique' (@($deployableNames | Select-Object -Unique).Count -eq $deployableNames.Count)
