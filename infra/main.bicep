@@ -120,12 +120,19 @@ module vault 'modules/keyvault.bicep' = {
   }
 }
 
+// Azure allows one Free Linux App Service plan per resource group (FreeLinuxSkuNotAllowedInResourceGroup): the first
+// environment of a tier owns the tier's plan, the others in the tier run their web apps on it. App Service uses the
+// system's location (appLocation is a Container Apps quota matter).
+var planOwner = first(filter(system.environments, e => e.tier == environment.tier))!.name
+
 module appService 'modules/appservice.bicep' = if (!empty(appServiceDeployables)) {
   name: 'appservice-${environmentName}'
   params: {
     slug: slug
     environmentName: environmentName
-    location: appLocation
+    location: location
+    planName: 'asp-${slug}-${planOwner}'
+    ownsPlan: planOwner == environmentName
     tags: tags
     deployables: appServiceDeployables
     versions: versions
