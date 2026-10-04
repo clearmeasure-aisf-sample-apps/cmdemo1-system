@@ -140,10 +140,11 @@ $parameters | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $parametersFil
 try {
     $result = $null
     # New role assignments and identities take a few minutes to propagate, and Azure sometimes reports
-    # DeploymentStackTenantRegistrationFailed on a stack with deny settings: the apply is retried. An error the retry
+    # DeploymentStackTenantRegistrationFailed on a stack with deny settings, and a runbook (restore test, password
+    # rotation) may hold the database briefly (ConflictingDatabaseOperation): the apply is retried. An error the retry
     # recovers from is information, so az's stderr is kept and shown only when it is not a known transient one, or
     # when the last attempt fails (no broken windows: a healthy run logs no error).
-    $transient = 'DeploymentStackTenantRegistrationFailed|PrincipalNotFound|InvalidAuthenticationToken'
+    $transient = 'DeploymentStackTenantRegistrationFailed|PrincipalNotFound|InvalidAuthenticationToken|ConflictingDatabaseOperation'
     $errorFile = Join-Path ([IO.Path]::GetTempPath()) "stack-$([Guid]::NewGuid().ToString('N')).err"
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $PSNativeCommandUseErrorActionPreference = $false
