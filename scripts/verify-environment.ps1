@@ -79,6 +79,22 @@ function Get-RevisionProblem {
     return $null
 }
 
+# An App Service site on a Free plan that exhausted a quota answers 403 until the quota resets (hourly or daily): say
+# so at once instead of waiting out the deadline. A crash-looping app on the tier's shared plan is the usual cause.
+function Get-SiteProblem {
+    param([Parameter(Mandatory)] [string] $WebApp)
+    $PSNativeCommandUseErrorActionPreference = $false
+    $siteId = ([string] (az resource show --resource-group $resourceGroup --name $WebApp --resource-type Microsoft.Web/sites --query id --output tsv 2>$null)).Trim()
+    $siteJson = if ($siteId) { az rest --method get --url "https://management.azure.com${siteId}?api-version=2024-04-01" --output json 2>$null } else { $null }
+    $PSNativeCommandUseErrorActionPreference = $true
+    if (-not $siteJson) { return $null }
+    $site = ($siteJson | ConvertFrom-Json -AsHashtable).properties
+    if ($site.usageState -eq 'Exceeded') {
+        return "site $WebApp is $($site.state): its Free plan exhausted a quota; an app crash-looping on the same plan is the usual cause"
+    }
+    return $null
+}
+
 function Write-RevisionLog {
     param([Parameter(Mandatory)] [string] $App)
     $PSNativeCommandUseErrorActionPreference = $false
@@ -105,10 +121,10 @@ foreach ($deployable in $deployables) {
         if ($status -eq 200) {
             break
         }
-        $problem = if ($deployable['hosting'] -eq 'appservice') { $null } else { Get-RevisionProblem -App $app }
+        $problem = if ($deployable['hosting'] -eq 'appservice') { Get-SiteProblem -WebApp ([string] $deployable.webApp) } else { Get-RevisionProblem -App $app }
         if ($problem) {
             Write-Warning "FAIL $($deployable.name) in ${environmentName}: $problem"
-            Write-RevisionLog -App $app
+            if ($deployable['hosting'] -ne 'appservice') { Write-RevisionLog -App $app }
             $status = -1
             break
         }
@@ -123,7 +139,7 @@ foreach ($deployable in $deployables) {
     }
     else {
         Write-Warning "FAIL $($deployable.name) in ${environmentName}: $uri did not answer 200 within $deadlineMinutes minutes (last $status)"
-        Write-RevisionLog -App $app
+        if ($deployable['hosting'] -ne 'appservice') { Write-RevisionLog -App $app }
         $failed++
     }
 }
