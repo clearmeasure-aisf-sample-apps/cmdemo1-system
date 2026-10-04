@@ -53,8 +53,20 @@ function Get-Shape {
     $query = "SELECT (SELECT COUNT(*) FROM sys.tables WHERE is_ms_shipped = 0) AS UserTables, " +
         "(SELECT COALESCE(SUM(p.rows), 0) FROM sys.partitions p JOIN sys.tables t ON t.object_id = p.object_id " +
         "WHERE t.is_ms_shipped = 0 AND p.index_id IN (0, 1)) AS TotalRows"
-    Invoke-Sqlcmd -ServerInstance $serverFqdn -Database $Name -Credential $Credential -Query $query `
-        -Encrypt Mandatory -ConnectionTimeout 120 -QueryTimeout 120
+    # A paused serverless database resumes only on a login attempt and refuses logins while it resumes ("is not
+    # currently available"): log in again until it answers, for up to five minutes, logging the waits as information.
+    $deadline = (Get-Date).AddMinutes(5)
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            return Invoke-Sqlcmd -ServerInstance $serverFqdn -Database $Name -Credential $Credential -Query $query `
+                -Encrypt Mandatory -ConnectionTimeout 120 -QueryTimeout 120
+        }
+        catch {
+            if ((Get-Date) -gt $deadline) { throw }
+            Write-Host "Waiting for database $Name to resume (attempt $attempt)."
+            Start-Sleep -Seconds 15
+        }
+    }
 }
 
 try {
