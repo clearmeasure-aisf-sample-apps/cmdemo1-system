@@ -33,9 +33,7 @@ jobs:
         id: whatif
         continue-on-error: true
         shell: pwsh
-        env:
-          GITHUB_STEP_SUMMARY: ${{ runner.temp }}/drift.md
-        run: ./scripts/preview-environment.ps1 -FailOnChange
+        run: ./scripts/preview-environment.ps1 -FailOnChange -SummaryPath "${{ runner.temp }}/drift.md"
 
       - name: Report drift as an issue
         env:

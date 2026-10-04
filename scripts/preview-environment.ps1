@@ -18,7 +18,9 @@
 param(
     [string] $Root = (Split-Path -Parent $PSScriptRoot),
     [string[]] $Environment = @(),
-    [switch] $FailOnChange
+    [switch] $FailOnChange,
+    # Where the Markdown report goes; the job summary by default.
+    [string] $SummaryPath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -27,8 +29,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
 $template = Join-Path $Root 'infra' 'main.bicep'
-$summary = if ($env:GITHUB_STEP_SUMMARY) { $env:GITHUB_STEP_SUMMARY } else { Join-Path ([IO.Path]::GetTempPath()) 'preview-summary.md' }
-$ignoredTypes = @('Microsoft.KeyVault/vaults/secrets')
+$summary = if ($SummaryPath) { $SummaryPath } elseif ($env:GITHUB_STEP_SUMMARY) { $env:GITHUB_STEP_SUMMARY } else { Join-Path ([IO.Path]::GetTempPath()) 'preview-summary.md' }
 # What-if reports properties Azure fills in itself as Delete, expressions it cannot evaluate before deployment
 # (reference(), the outputs of other modules) as Modify, and write-only properties as Create. None of them is drift.
 $writeOnlyPaths = @('properties.Flow_Type', 'properties.Request_Source')
@@ -104,7 +105,7 @@ foreach ($entry in $system.environments) {
                 @{ changeType = $_.changeType; resourceId = $_.resourceId; properties = $properties }
             }
         })
-    $relevant = @($changes | Where-Object { $type = ($_.resourceId -split '/providers/')[-1]; -not ($ignoredTypes | Where-Object { $type -like "$_/*" }) })
+    $relevant = $changes
     if ($changes.Count -eq 0) {
         Add-Content -LiteralPath $summary -Value "No change.`n"
     }
