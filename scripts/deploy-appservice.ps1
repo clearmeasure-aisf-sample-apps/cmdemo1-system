@@ -43,6 +43,15 @@ if (-not $entry) {
 }
 $webApp = [string] $entry.webApp
 
+# The stack sets the startup command only once a version is pinned (an empty site with one would crash-loop): set it
+# before the zip arrives, so the site starts the app and not the default page.
+$startup = [string] $entry.startupCommand
+$current = ([string] (az webapp config show --resource-group $resourceGroup --name $webApp --query appCommandLine --output tsv)).Trim()
+if ($current -ne $startup) {
+    az webapp config set --resource-group $resourceGroup --name $webApp --startup-file $startup --only-show-errors --output none
+    Write-Host "Startup command of ${webApp}: $startup"
+}
+
 Write-Host "Deploying $name $version ($([Math]::Round((Get-Item -LiteralPath $package).Length / 1MB)) MB) to $webApp"
 # az webapp deploy reports its progress as WARNING lines, which Octopus would log as warnings: errors only. A failed
 # deployment still fails the command.
