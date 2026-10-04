@@ -174,6 +174,11 @@ $checks = [ordered] @{
     'CAP-070' = { $a = Get-App $first; $variableNames = @($a.properties.template.containers[0].env | ForEach-Object name); Assert-That ($variableNames -contains 'APPLICATIONINSIGHTS_CONNECTION_STRING') "no telemetry in $first"; "telemetry on in $first" }
     'CAP-071' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the logs of every current deployment are clean' }
     'CAP-080' = { $files = @(gh api "repos/$systemRepo/contents/docs/architecture" --jq '.[].name'); $missing = @($files | Where-Object { $_ -like '*.puml' -and $files -notcontains ($_ -replace '\.puml$', '.png') }); Assert-That ($missing.Count -eq 0 -and $files.Count -gt 0) "not rendered: $missing"; "$(@($files | Where-Object { $_ -like '*.png' }).Count) diagrams rendered" }
+    'CAP-081' = {
+        $build = Get-RepoFile $systemRepo '.github/workflows/system.yml'; $nightly = Get-RepoFile $systemRepo '.github/workflows/capabilities.yml'
+        Assert-That ($build -match 'uses: \./\.github/workflows/capabilities\.yml' -and $nightly -match 'schedule:') 'the checks do not run with every system build and nightly'
+        "$($checks.Count) checks, after every system build and nightly"
+    }
 }
 
 
