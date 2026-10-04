@@ -75,3 +75,9 @@ Source: [09-safe-path-to-prod.puml](09-safe-path-to-prod.puml)
 ![A second app that shares the database (2026-10-04)](10-second-app-appservice.png)
 
 Source: [10-second-app-appservice.puml](10-second-app-appservice.puml)
+
+## Placement by pull request, zero downtime measured (2026-10-04)
+
+![Placement by pull request, zero downtime measured (2026-10-04)](11-placement.png)
+
+Source: [11-placement.puml](11-placement.puml)

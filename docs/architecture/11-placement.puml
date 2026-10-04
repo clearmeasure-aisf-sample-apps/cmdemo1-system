@@ -1,0 +1,37 @@
+@startuml 11-placement
+!include _c4.iuml
+title Clear Measure work orders demo 1 | Placement by pull request, zero downtime measured (2026-10-04)
+
+Person(signer, "Space Manager", "Signs off uat and prod")
+
+Boundary(gh, "GitHub org clearmeasure-aisf-sample-apps") {
+  Container(sysrepo, "cmdemo1-system", "system.json", "uat: sharesAppEnvironmentWith tdd; prod: appLocation southcentralus", $tags="new")
+}
+
+Boundary(octo, "Octopus space cmdemo1 demo") {
+  Container(proj_sys, "cmdemo1-system", "tdd, uat, prod", "Apply environment with the availability probe; fails on downtime", $tags="new")
+}
+
+Boundary(scus, "South Central US") {
+  Container(cae_tdd, "cae-cmdemo1-tdd", "Container Apps environment", "Hosts tdd and uat apps; OpenTelemetry agent (tdd)", $tags="new")
+  Container(app_tdd, "ca-cmdemo1-tdd-ui", "tdd", "")
+  Container(app_uat, "ca-cmdemo1-uat-ui-xxxx", "uat (shares tdd's runtime)", "Opts out of the shared telemetry agent", $tags="new")
+  Container(cae_prod, "cae-cmdemo1-prod-xxxx", "Container Apps environment", "prod's own, moved from West US 3", $tags="new")
+  Container(app_prod, "ca-cmdemo1-prod-ui-xxxx", "prod", "New URL after the move", $tags="new")
+}
+
+Boundary(gone, "Removed by the stacks") {
+  Container(old_uat, "cae-cmdemo1-uat, ca-cmdemo1-uat-ui", "South Central US", "Served until the new uat app answered")
+  Container(old_prod, "cae-cmdemo1-prod-6sbu, ca-cmdemo1-prod-ui", "West US 3", "Served until the new prod app answered (95 s overlap)")
+}
+
+Rel(sysrepo, proj_sys, "release per merge")
+Rel(signer, proj_sys, "Proceed with a note")
+Rel(proj_sys, app_uat, "create next to the old app, probe both", $tags="new")
+Rel(proj_sys, app_prod, "create next to the old app, probe both", $tags="new")
+Rel(app_uat, cae_tdd, "runs in")
+Rel(app_tdd, cae_tdd, "runs in")
+Rel(app_prod, cae_prod, "runs in")
+
+SHOW_LEGEND()
+@enduml
