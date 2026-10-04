@@ -92,7 +92,8 @@
       "databaseAssembly": "ClearMeasure.Bootcamp.Database.dll",
       "acceptanceTestsPackage": "ChurchBulletin.AcceptanceTests",
       "acceptanceTestsAssembly": "ClearMeasure.Bootcamp.AcceptanceTests.dll",
-      "dataLoaderAssembly": "ClearMeasure.Bootcamp.IntegrationTests.dll"
+      "dataLoaderAssembly": "ClearMeasure.Bootcamp.IntegrationTests.dll",
+      "acceptanceTestsFilter": "TestCategory=Smoke"
     },
     {
       "name": "app2-ui",
