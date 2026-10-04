@@ -18,6 +18,8 @@ param versions object
 param registryServer string
 param identityResourceId string
 param connectionStringSecretUri string
+@secure()
+@description('Application Insights connection string when the environment has capability "telemetry"; the managed OpenTelemetry agent takes it as a secure value.')
 param applicationInsightsConnectionString string = ''
 
 var placeholderImage = 'mcr.microsoft.com/k8se/quickstart:latest'
