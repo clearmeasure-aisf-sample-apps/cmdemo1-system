@@ -66,9 +66,10 @@ try {
 
     $secret = Join-Path $folder 'secret'
     Set-Content -LiteralPath $secret -Value $password -NoNewline
-    az keyvault secret set --vault-name $vault --name sql-admin-password --file $secret --output none
+    az keyvault secret set --vault-name $vault --name sql-admin-password --file $secret --content-type text/plain --output none
     Set-Content -LiteralPath $secret -Value ($connection -replace 'Password=[^;]*;', "Password=$password;") -NoNewline
-    az keyvault secret set --vault-name $vault --name sql-connection-string --file $secret --output none
+    # The same content type as infra/modules/keyvault.bicep, or the nightly drift check reports the secrets.
+    az keyvault secret set --vault-name $vault --name sql-connection-string --file $secret --content-type text/plain --output none
     $password = $null
     $connection = $null
     Write-Host "Updated sql-admin-password and sql-connection-string in $vault"
