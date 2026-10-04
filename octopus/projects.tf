@@ -289,7 +289,7 @@ resource "octopusdeploy_process_step" "close_test_database" {
   container      = local.container
 
   properties = {
-    "Octopus.Step.ConditionVariableExpression" = "#{Octopus.Action[Open test database].Output.Opened}"
+    "Octopus.Step.ConditionVariableExpression" = "#{if Octopus.Action[Open test database].Output.Opened}True#{/if}"
   }
 
   execution_properties = {
