@@ -25,6 +25,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.1
 
+      # The checks compare Git, Octopus and Azure at rest, so they first wait until no Octopus task runs. They sign in to
+      # Azure only after that: a GitHub OIDC sign-in cannot fetch new tokens (such as the registry's) an hour later.
+      - name: Sign in to Octopus to wait
+        uses: OctopusDeploy/login@v2
+        with:
+          server: ${{ vars.OCTOPUS_URL }}
+          service_account_id: ${{ vars.OCTOPUS_SERVICE_ACCOUNT_ID }}
+
+      - name: Wait until Octopus is quiet
+        shell: pwsh
+        run: ./scripts/test-capabilities.ps1 -WaitOnly -WaitMinutes 50
+
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_PLAN }}
@@ -44,7 +56,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.OCTOPUS_GITHUB_TOKEN }}
         run: |
-          ./scripts/test-capabilities.ps1 *>&1 | Tee-Object -FilePath "${{ runner.temp }}/capabilities.txt"
+          ./scripts/test-capabilities.ps1 -WaitMinutes 40 *>&1 | Tee-Object -FilePath "${{ runner.temp }}/capabilities.txt"
           exit $LASTEXITCODE
 
       - name: Report failed capabilities as an issue
