@@ -11,6 +11,12 @@ param appCpu string = '0.5'
 
 @description('Name of the Container Apps environment; main.bicep gives it a region suffix when the environment has an appLocation of its own.')
 param managedEnvironmentName string = 'cae-${slug}-${environmentName}'
+
+@description('False when the apps run in the Container Apps environment of another environment (sharesAppEnvironmentWith), which creates it.')
+param ownsManagedEnvironment bool = true
+
+@description('Suffix of the app names when they do not run in their own default Container Apps environment, so a move creates them anew.')
+param appNameSuffix string = ''
 param location string
 param tags object
 param deployables array
@@ -24,8 +30,15 @@ param applicationInsightsConnectionString string = ''
 
 var placeholderImage = 'mcr.microsoft.com/k8se/quickstart:latest'
 var placeholderPort = 80
+// Without telemetry the apps opt out of an OpenTelemetry agent they may share with another environment: an explicit
+// OTEL_EXPORTER_OTLP_ENDPOINT overrides the one the agent injects, and an empty one keeps the app's exporter off.
 var telemetryEnv = empty(applicationInsightsConnectionString)
-  ? []
+  ? [
+      {
+        name: 'OTEL_EXPORTER_OTLP_ENDPOINT'
+        value: ''
+      }
+    ]
   : [
       {
         name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
@@ -37,7 +50,7 @@ var telemetryEnv = empty(applicationInsightsConnectionString)
 // hence the API version): it injects OTEL_EXPORTER_OTLP_ENDPOINT into every app, so the app only speaks OTLP, and
 // forwards traces and logs to Application Insights. Application Insights takes no metrics from the agent; request
 // rates and durations come from the traces.
-resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
+resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' = if (ownsManagedEnvironment) {
   name: managedEnvironmentName
   location: location
   tags: tags
@@ -72,9 +85,12 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-previe
 
 resource apps 'Microsoft.App/containerApps@2024-03-01' = [
   for d in deployables: {
-    name: 'ca-${slug}-${environmentName}-${d.name}'
+    name: 'ca-${slug}-${environmentName}-${d.name}${appNameSuffix}'
     location: location
     tags: union(tags, { deployable: d.name })
+    dependsOn: [
+      managedEnvironment
+    ]
     identity: {
       type: 'UserAssigned'
       userAssignedIdentities: {
@@ -82,7 +98,7 @@ resource apps 'Microsoft.App/containerApps@2024-03-01' = [
       }
     }
     properties: {
-      environmentId: managedEnvironment.id
+      environmentId: resourceId('Microsoft.App/managedEnvironments', managedEnvironmentName)
       workloadProfileName: 'Consumption'
       configuration: {
         activeRevisionsMode: 'Single'

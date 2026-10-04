@@ -106,7 +106,7 @@ function Write-RevisionLog {
 
 $failed = 0
 foreach ($deployable in $deployables) {
-    $app = "ca-$slug-$environmentName-$($deployable.name)"
+    $app = [string] $deployable['containerApp']
     $path = if ($only -and $healthPath) { $healthPath } else { [string] $deployable.healthPath }
     $uri = "$($deployable.url.TrimEnd('/'))$path"
     $deadline = (Get-Date).AddMinutes($deadlineMinutes)

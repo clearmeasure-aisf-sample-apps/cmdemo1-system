@@ -30,14 +30,24 @@ var location = system.system.location
 // Optional keys come from defaults merged with union(): reading a key absent from system.json (.?key) is warning
 // BCP053, and the build treats warnings as errors.
 var sqlLocation = union({ sqlLocation: location }, system.system).sqlLocation
-// The Container Apps environment, its apps and telemetry may need another region per environment: a subscription
-// offer may allow only a few Container Apps environments per region (ManagedEnvironmentCount).
-// environments[].appLocation overrides location for those only.
-var environment = union({ appLocation: location, appCpu: '0.5' }, first(filter(system.environments, e => e.name == environmentName))!)
+// Placement of the apps. A subscription allows only a few Container Apps environments per region
+// (ManagedEnvironmentCount), so an environment may run its apps elsewhere:
+//   - environments[].appLocation: its Container Apps environment and apps in that region;
+//   - environments[].sharesAppEnvironmentWith: its apps in that environment's Container Apps environment (same tier,
+//     listed earlier, which creates it), in that environment's region.
+// Azure moves neither a Container Apps environment nor an app to another region or environment, so a placement that is
+// not the default gets names of its own (a short suffix): a move is new resources next to the old ones, which the stack
+// then removes. An explicit appLocation therefore always suffixes, also when it equals location.
+var rawEnvironment = first(filter(system.environments, e => e.name == environmentName))!
+var environment = union({ appLocation: location, appCpu: '0.5' }, rawEnvironment)
 var capabilities = union(['baseline'], environment.capabilities)
-var appLocation = environment.appLocation
-// A Container Apps environment that failed in one region keeps its name there; an appLocation gets a name of its own.
-var managedEnvironmentName = appLocation == location ? 'cae-${slug}-${environmentName}' : 'cae-${slug}-${environmentName}-${take(uniqueString(appLocation), 4)}'
+var sharedWith = string(union({ sharesAppEnvironmentWith: '' }, rawEnvironment).sharesAppEnvironmentWith)
+var hostEnvironment = empty(sharedWith) ? rawEnvironment : first(filter(system.environments, e => e.name == sharedWith))!
+var appLocation = union({ appLocation: location }, hostEnvironment).appLocation
+var placementSuffix = contains(hostEnvironment, 'appLocation') ? '-${take(uniqueString(appLocation), 4)}' : ''
+var managedEnvironmentName = 'cae-${slug}-${hostEnvironment.name}${placementSuffix}'
+var ownsManagedEnvironment = hostEnvironment.name == environmentName
+var appNameSuffix = ownsManagedEnvironment && empty(placementSuffix) ? '' : '-${take(uniqueString(managedEnvironmentName), 4)}'
 var app = first(filter(system.azure.identities.apps, a => a.environment == environmentName))!
 var suffix = take(uniqueString(subscription().id, resourceGroup().id, environmentName), 5)
 var tags = {
@@ -66,7 +76,7 @@ var appServiceDeployables = filter(hostedDeployables, d => d.hosting == 'appserv
 
 resource loginIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = [
   for d in appServiceDeployables: {
-    name: 'id-${slug}-${environmentName}-${d.name}'
+    name: 'id-${slug}-${environmentName}-${d.name}${placementSuffix}'
     location: appLocation
     tags: union(tags, { deployable: d.name })
   }
@@ -147,6 +157,8 @@ module apps 'modules/containerapps.bicep' = {
     slug: slug
     environmentName: environmentName
     managedEnvironmentName: managedEnvironmentName
+    ownsManagedEnvironment: ownsManagedEnvironment
+    appNameSuffix: appNameSuffix
     appCpu: string(environment.appCpu)
     location: appLocation
     tags: tags
