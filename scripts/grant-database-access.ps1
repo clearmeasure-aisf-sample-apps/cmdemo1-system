@@ -76,19 +76,26 @@ function Open-Database {
     }
 }
 
-# CREATE USER and ALTER USER take no parameters, so the statement is built in T-SQL with QUOTENAME around the name and
-# the password; the values themselves arrive as parameters.
+# CREATE USER, ALTER USER and ALTER ROLE take no parameters, so each statement is built in a variable with QUOTENAME
+# around the name and the password (EXEC (...) accepts no function call) and run with sp_executesql; the values
+# themselves arrive as parameters.
 $grant = @'
 DECLARE @sql nvarchar(max);
 IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @name)
     SET @sql = N'ALTER USER ' + QUOTENAME(@name) + N' WITH PASSWORD = ' + QUOTENAME(@password, N'''');
 ELSE
     SET @sql = N'CREATE USER ' + QUOTENAME(@name) + N' WITH PASSWORD = ' + QUOTENAME(@password, N'''');
-EXEC (@sql);
+EXEC sys.sp_executesql @sql;
 IF IS_ROLEMEMBER(N'db_datareader', @name) = 0
-    EXEC (N'ALTER ROLE db_datareader ADD MEMBER ' + QUOTENAME(@name));
+BEGIN
+    SET @sql = N'ALTER ROLE db_datareader ADD MEMBER ' + QUOTENAME(@name);
+    EXEC sys.sp_executesql @sql;
+END
 IF IS_ROLEMEMBER(N'db_datawriter', @name) = 0
-    EXEC (N'ALTER ROLE db_datawriter ADD MEMBER ' + QUOTENAME(@name));
+BEGIN
+    SET @sql = N'ALTER ROLE db_datawriter ADD MEMBER ' + QUOTENAME(@name);
+    EXEC sys.sp_executesql @sql;
+END
 '@
 
 $workerIp = (Invoke-RestMethod -Uri 'https://api.ipify.org').ToString().Trim()
