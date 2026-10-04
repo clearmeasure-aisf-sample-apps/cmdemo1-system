@@ -317,6 +317,24 @@ finally {
     Remove-Item -LiteralPath $parametersFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $errorFile -Force -ErrorAction SilentlyContinue
 }
+# App Service resolves Key Vault references when a site starts and caches them for up to a day. A site whose identity
+# the apply just replaced (a moved environment) may have tried before its new role on the secret took effect: check the
+# references, and force a new resolution while one is not resolved yet (up to five minutes).
+$applied = ($result | ConvertFrom-Json -AsHashtable).outputs
+foreach ($site in @($applied.deployables.value | Where-Object { $_['hosting'] -eq 'appservice' })) {
+    $siteId = ([string] (az resource show --resource-group $resourceGroup --name ([string] $site.webApp) --resource-type Microsoft.Web/sites --query id --output tsv)).Trim()
+    $deadline = (Get-Date).AddMinutes(5)
+    while ($true) {
+        $pending = @((az rest --method get --url "https://management.azure.com$siteId/config/configreferences/appsettings?api-version=2022-03-01" --output json | ConvertFrom-Json -AsHashtable).value |
+                Where-Object { $_.properties.status -ne 'Resolved' } | ForEach-Object { "$($_.name): $($_.properties.status)" })
+        if ($pending.Count -eq 0) { break }
+        if ((Get-Date) -gt $deadline) { Fail-Step "Key Vault references of $($site.webApp) did not resolve within 5 minutes: $($pending -join '; ')" }
+        Write-Host "Key Vault references of $($site.webApp) not resolved yet ($($pending -join '; ')); refreshing in 30 seconds."
+        Start-Sleep -Seconds 30
+        az rest --method post --url "https://management.azure.com$siteId/config/configreferences/appsettings/refresh?api-version=2022-03-01" --output none
+    }
+}
+
 # A little longer than the apply: the stack removes replaced apps at its end, and the new ones take over.
 Start-Sleep -Seconds 30
 $downtime = Stop-AvailabilityProbe -Handle $probe
