@@ -117,6 +117,7 @@ module vault 'modules/keyvault.bicep' = {
     logins: [
       for (d, i) in appServiceDeployables: {
         name: d.name
+        identityName: loginIdentities[i].name
         principalId: loginIdentities[i].properties.principalId
       }
     ]

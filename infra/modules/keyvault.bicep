@@ -12,7 +12,7 @@ param sqlAdminPassword string
 @secure()
 param sqlConnectionString string
 
-@description('Database logins of App Service deployables: name, and the principal ID of the one identity that may read its connection string.')
+@description('Database logins of App Service deployables: name, and the name and principal ID of the one identity that may read its connection string.')
 param logins array = []
 @description('Password of each login, by name.')
 @secure()
@@ -109,7 +109,9 @@ resource loginConnectionString 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = 
 
 resource loginReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
   for (l, i) in logins: {
-    name: guid(vault.id, l.name, 'login-secret-user')
+    // Named after the identity: a role assignment cannot change its principal, so a new identity (a moved
+    // environment) gets a new assignment next to the old one, which the stack then removes.
+    name: guid(vault.id, l.name, l.identityName, 'login-secret-user')
     scope: loginConnectionString[i]
     properties: {
       principalId: l.principalId
