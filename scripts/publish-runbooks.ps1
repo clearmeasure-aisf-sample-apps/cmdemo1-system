@@ -27,7 +27,8 @@ $headers = @{ Authorization = "Bearer $env:OCTOPUS_ACCESS_TOKEN" }
 $project = Invoke-RestMethod -Uri "$url/api/$space/projects/$($system.system.slug)-system" -Headers $headers
 $runbooks = (Invoke-RestMethod -Uri "$url/api/$space/projects/$($project.Id)/runbooks?take=100" -Headers $headers).Items
 foreach ($runbook in $runbooks) {
-    $body = @{ ProjectId = $project.Id; RunbookId = $runbook.Id; Name = $Name; Notes = "Published by the system workflow ($Name)" } | ConvertTo-Json
+    # Snapshot names are unique per project, so the runbook's name is part of it.
+    $body = @{ ProjectId = $project.Id; RunbookId = $runbook.Id; Name = "$($runbook.Name) $Name"; Notes = "Published by the system workflow ($Name)" } | ConvertTo-Json
     $snapshot = Invoke-RestMethod -Uri "$url/api/$space/runbookSnapshots?publish=true" -Method Post -Headers $headers -Body $body -ContentType 'application/json'
     Write-Host "Published $($runbook.Name): snapshot $($snapshot.Name)"
 }
