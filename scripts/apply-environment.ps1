@@ -364,7 +364,7 @@ finally {
 # references, and force a new resolution while one is not resolved yet (up to five minutes).
 $applied = ($result | ConvertFrom-Json -AsHashtable).outputs
 # The same apps in the standby region (environments[].standbyLocation); empty without one.
-$standbySites = if ($applied.ContainsKey('standby')) { @($applied.standby.value) } else { @() }
+$standbySites = @(if ($applied.ContainsKey('standby')) { $applied.standby.value })
 foreach ($site in @($applied.deployables.value | Where-Object { $_['hosting'] -eq 'appservice' }) + $standbySites) {
     $siteId = ([string] (az resource show --resource-group $resourceGroup --name ([string] $site.webApp) --resource-type Microsoft.Web/sites --query id --output tsv)).Trim()
     $deadline = (Get-Date).AddMinutes(5)

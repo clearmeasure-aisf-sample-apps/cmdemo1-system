@@ -44,7 +44,8 @@ if (-not $entry) {
 }
 # An environment with a standbyLocation runs the app in two regions (stack output "standby"): the standby is deployed
 # first, while the primary serves, then the primary, while Front Door can send the traffic to the standby.
-$standby = if ($outputs.ContainsKey('standby')) { @($outputs.standby.value | Where-Object { $_.name -eq $name }) } else { @() }
+# @() around the if: an if statement hands a one-element array on as the element itself.
+$standby = @(if ($outputs.ContainsKey('standby')) { $outputs.standby.value | Where-Object { $_.name -eq $name } })
 
 function Publish-Site {
     param([Parameter(Mandatory)] [hashtable] $Site)
@@ -83,6 +84,6 @@ function Publish-Site {
     Write-Highlight "$name $version deployed to $webApp in $environmentName ($($Site['role'] ?? 'primary'), $($Site['region'] ?? 'home region'))"
 }
 
-foreach ($site in $standby + @($entry)) {
+foreach ($site in @($standby) + @($entry)) {
     Publish-Site -Site $site
 }

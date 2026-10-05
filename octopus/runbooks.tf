@@ -1,17 +1,34 @@
 # Operations runbooks of <slug>-system (environment-level work, run on a schedule):
 #   Restore test          weekly, first environment: point-in-time restore into a temporary database (CAP-060)
 #   Rotate SQL password   monthly, every environment: new administrator password through Key Vault (CAP-056)
+#   Failover test         only with a standby region (environments[].standbyLocation): stops the primary app and times
+#                         the Front Door endpoint's switch to the standby and back (CAP-047); it may run in every
+#                         environment with a standby, and is scheduled monthly in the nonprod ones
 # A schedule runs the runbook's published snapshot; the system workflow publishes one after every apply.
 # The instance's task cap is shared by every system on it, so each system's schedules start at its own time: an offset
 # of 0 to 239 minutes derived from the slug (the same on every apply), after 07:00 UTC for the restore test and after
 # 08:00 UTC for the rotation.
 
 locals {
-  first_environment = local.system.environments[0].name
-  schedule_offset   = parseint(substr(md5(local.slug), 0, 6), 16) % 240
-  schedule_minute   = local.schedule_offset % 60
-  schedule_hours    = floor(local.schedule_offset / 60)
-  runbooks = {
+  first_environment            = local.system.environments[0].name
+  schedule_offset              = parseint(substr(md5(local.slug), 0, 6), 16) % 240
+  schedule_minute              = local.schedule_offset % 60
+  schedule_hours               = floor(local.schedule_offset / 60)
+  standby_environments         = [for name, e in local.environments : name if try(e.standbyLocation, "") != ""]
+  standby_nonprod_environments = [for name in local.standby_environments : name if local.environments[name].tier != "prod"]
+  # A for expression, not a conditional: both branches of a conditional must have the same object type.
+  failover_runbook = { for key, runbook in {
+    failover_test = {
+      name         = "Failover test"
+      description  = "Stops the primary app, times the Front Door endpoint's switch to the standby region and back, and starts it again (scripts/test-failover.ps1)."
+      script       = "test-failover.ps1"
+      environments = local.standby_environments
+      scheduled_in = local.standby_nonprod_environments
+      cron         = "0 ${local.schedule_minute} ${9 + local.schedule_hours} 2 * *"
+      schedule     = "Monthly failover test"
+    }
+  } : key => runbook if length(local.standby_environments) > 0 }
+  runbooks = merge(local.failover_runbook, {
     restore_test = {
       name         = "Restore test"
       description  = "Restores the database to 15 minutes ago into a temporary database, checks it, and deletes it (scripts/test-restore.ps1)."
@@ -28,7 +45,9 @@ locals {
       cron         = "0 ${local.schedule_minute} ${8 + local.schedule_hours} 1 * *"
       schedule     = "Monthly SQL password rotation"
     }
-  }
+  })
+  # A runbook is scheduled in the environments it may run in, unless it names fewer (scheduled_in); none: no trigger.
+  scheduled_runbooks = { for key, r in local.runbooks : key => merge(r, { scheduled_in = try(r.scheduled_in, r.environments) }) if length(try(r.scheduled_in, r.environments)) > 0 }
 }
 
 resource "octopusdeploy_runbook" "this" {
@@ -77,7 +96,7 @@ resource "octopusdeploy_process_steps_order" "runbook" {
 }
 
 resource "octopusdeploy_project_scheduled_trigger" "runbook" {
-  for_each = local.runbooks
+  for_each = local.scheduled_runbooks
 
   project_id  = octopusdeploy_project.system.id
   space_id    = local.system.octopus.spaceId
@@ -91,6 +110,6 @@ resource "octopusdeploy_project_scheduled_trigger" "runbook" {
 
   run_runbook_action {
     runbook_id             = octopusdeploy_runbook.this[each.key].id
-    target_environment_ids = [for name in each.value.environments : octopusdeploy_environment.this[name].id]
+    target_environment_ids = [for name in each.value.scheduled_in : octopusdeploy_environment.this[name].id]
   }
 }

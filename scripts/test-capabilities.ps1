@@ -333,6 +333,20 @@ $checks = [ordered] @{
         }
         "one public address per environment: $($shown -join '; ')"
     }
+    'CAP-047' = {
+        # A measured failover: a "Failover test" run of the last 35 days whose log shows the public address answering
+        # from the standby after the primary was stopped.
+        $with = @($system.environments | Where-Object { $_.ContainsKey('standbyLocation') } | ForEach-Object { [string] $_.name })
+        if ($with.Count -eq 0) { Skip-Check 'no environment has a standby region yet' }
+        if ($system.azure.ContainsKey('frontDoor') -and $system.azure.frontDoor['dormant']) { Skip-Check 'Front Door is dormant (azure.frontDoor.dormant): no public address to fail over' }
+        $measured = foreach ($run in @(Get-RecentRun 'Failover test' 35)) {
+            $line = [regex]::Match((Invoke-Octopus "/api/tasks/$($run.Id)/raw"), 'Failover of [^\r\n]*answered from the standby[^\r\n]*').Value
+            if ($line) { $line; break }
+        }
+        if (-not $measured -and (Get-SystemAge) -lt 35) { Skip-Check 'the system is younger than 35 days: no failover has been measured yet' }
+        Assert-That ([bool] $measured) 'no measured failover in 35 days'
+        [string] $measured
+    }
     'CAP-051' = {
         $ids = $system.azure.identities
         $expect = @(
