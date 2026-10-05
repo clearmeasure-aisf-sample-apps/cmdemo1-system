@@ -246,8 +246,8 @@ $checks = [ordered] @{
         Assert-That $rolledBack "no successful redeployment of an older release in $first"; "an older release was redeployed successfully in $first (test-rollback.ps1)"
     }
     'CAP-038' = {
-        # The sign-off step exists once an environment follows the first: a system with one environment promotes nothing.
-        if ($environments.Count -lt 2) { Skip-Check 'no environment after the first yet' }
+        # The sign-off step is in the process from the start (it excludes the first environment), so a release made
+        # while the system had one environment still stops at it in every environment added later.
         foreach ($slug in $systemProject, $deployableProject) { $s = @(Get-ProcessStep $slug)[0]; Assert-That ($s.Name -eq 'Sign-off' -and $s.Actions[0].ActionType -eq 'Octopus.Manual') "$slug does not start with Sign-off" }
         Assert-That ((Get-RepoFile $systemRepo 'octopus/projects.tf') -match 'octopusdeploy_project_deployment_freeze') 'no freeze support'; 'Sign-off first in both projects; freezes from system.json'
     }
