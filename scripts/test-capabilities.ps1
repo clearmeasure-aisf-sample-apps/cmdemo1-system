@@ -247,9 +247,19 @@ $checks = [ordered] @{
     }
     'CAP-038' = {
         # The sign-off step is in the process from the start (it excludes the first environment), so a release made
-        # while the system had one environment still stops at it in every environment added later.
-        foreach ($slug in $systemProject, $deployableProject) { $s = @(Get-ProcessStep $slug)[0]; Assert-That ($s.Name -eq 'Sign-off' -and $s.Actions[0].ActionType -eq 'Octopus.Manual') "$slug does not start with Sign-off" }
-        Assert-That ((Get-RepoFile $systemRepo 'octopus/projects.tf') -match 'octopusdeploy_project_deployment_freeze') 'no freeze support'; 'Sign-off first in both projects; freezes from system.json'
+        # while the system had one environment still stops at it in every environment added later. Its responsible
+        # team is "<slug> approvers" (octopus/approvers.tf: the people of system.json octopus.approvers and the operator).
+        $teamName = "$slug approvers"
+        $team = @((Invoke-Octopus "/api/$space/teams?partialName=$([uri]::EscapeDataString($teamName))&take=100").Items | Where-Object { $_.Name -eq $teamName -and $_.SpaceId -eq $space }) | Select-Object -First 1
+        Assert-That ($null -ne $team) "no team '$teamName' in the space"
+        foreach ($project in $systemProject, $deployableProject) {
+            $s = @(Get-ProcessStep $project)[0]
+            Assert-That ($s.Name -eq 'Sign-off' -and $s.Actions[0].ActionType -eq 'Octopus.Manual') "$project does not start with Sign-off"
+            $responsible = $s.Actions[0].Properties.PSObject.Properties['Octopus.Action.Manual.ResponsibleTeamIds']
+            $responsibleIds = if ($responsible) { [string] $responsible.Value } else { '' }
+            Assert-That ($responsibleIds -eq $team.Id) "the Sign-off of $project is for '$responsibleIds', not for team '$teamName' ($($team.Id))"
+        }
+        Assert-That ((Get-RepoFile $systemRepo 'octopus/projects.tf') -match 'octopusdeploy_project_deployment_freeze') 'no freeze support'; "Sign-off first in both projects, for team '$teamName'; freezes from system.json"
     }
     'CAP-039' = {
         if ($onAppService) {
