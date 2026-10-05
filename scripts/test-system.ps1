@@ -18,6 +18,8 @@
     - employeeMiddleNames, where an environment has it, maps user names to middle names of 1 to 100 characters.
     - acceptanceTestsFilter, where a deployable has it, is a dotnet test filter (for example TestCategory=Smoke) on a
       deployable with an acceptance-test package.
+    - octopus.approvers, where present, lists each person who may sign off once, by Octopus username or email address,
+      without the system's service account; octopus.operator, where present, is a username.
 #>
 [CmdletBinding()]
 param(
@@ -43,6 +45,23 @@ function Test-Rule {
 $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
 $slug = [string] $system.system.slug
 Test-Rule 'slug' ($slug -cmatch '^[a-z][a-z0-9]{2,9}$') "'$slug' must be 3 to 10 lowercase letters and digits, starting with a letter"
+
+# Who signs off (octopus/approvers.tf): octopus.approvers, the people in the space team "<slug> approvers" by Octopus
+# username or email address ([] or left out: only automation signs off), and octopus.operator, the operator identity
+# that answers a sign-off with a recorded reason ("ai-ops" when left out).
+if ($system.octopus.ContainsKey('approvers')) {
+    $approvers = $system.octopus.approvers
+    $valid = $approvers -is [array] -and @($approvers | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^\S(?:.*\S)?$' }).Count -eq 0
+    Test-Rule 'octopus.approvers' $valid 'a list of Octopus usernames or email addresses ([] when only automation signs off)'
+    if ($valid) {
+        $logins = @($approvers | ForEach-Object { $_.ToLowerInvariant() })
+        Test-Rule 'octopus.approvers each once' (@($logins | Select-Object -Unique).Count -eq $logins.Count) 'a username or email address appears twice (Octopus compares them without case)'
+        Test-Rule 'octopus.approvers without the service account' ($logins -notcontains "$slug-github") "$slug-github applies the configuration; the people who sign off are others"
+    }
+}
+if ($system.octopus.ContainsKey('operator')) {
+    Test-Rule 'octopus.operator' ($system.octopus.operator -is [string] -and $system.octopus.operator -cmatch '^\S(?:.*\S)?$') 'the Octopus username of the operator identity, for example ai-ops'
+}
 
 $deployableNames = @($system.deployables | ForEach-Object { [string] $_.name })
 Test-Rule 'deployables present' ($deployableNames.Count -gt 0)
