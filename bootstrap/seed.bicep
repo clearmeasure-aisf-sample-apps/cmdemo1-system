@@ -18,6 +18,9 @@ param location string
 param nonprodResourceGroupName string
 param prodResourceGroupName string
 
+@description('Runtime aks-argocd: the resource group of the one AKS cluster every environment runs in. Empty for runtime containerapps.')
+param clusterResourceGroupName string = ''
+
 @description('GitHub organization that owns the system and app repositories.')
 param githubOrg string
 
@@ -52,6 +55,8 @@ var audience = 'api://AzureADTokenExchange'
 var nonprodEnvironments = filter(environments, e => e.tier == 'nonprod')
 var prodEnvironments = filter(environments, e => e.tier == 'prod')
 var allTags = union(tags, { system: slug, purpose: 'demo' })
+var hasCluster = !empty(clusterResourceGroupName)
+var systemSubjectPrefix = githubSubjectPrefixes[?systemRepository] ?? 'repo:${githubOrg}/${systemRepository}'
 
 resource nonprodGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: nonprodResourceGroupName
@@ -63,6 +68,13 @@ resource prodGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: prodResourceGroupName
   location: location
   tags: union(allTags, { tier: 'prod' })
+}
+
+// Runtime aks-argocd: the group of the cluster, which holds every environment of both tiers.
+resource clusterGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = if (hasCluster) {
+  name: hasCluster ? clusterResourceGroupName : 'unused'
+  location: location
+  tags: union(allTags, { tier: 'cluster' })
 }
 
 resource edgeGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = if (frontDoor) {
@@ -139,10 +151,7 @@ resource whatIfRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
         notActions: []
       }
     ]
-    assignableScopes: [
-      nonprodGroup.id
-      prodGroup.id
-    ]
+    assignableScopes: concat([nonprodGroup.id, prodGroup.id], hasCluster ? [clusterGroup.id] : [])
   }
 }
 
@@ -186,22 +195,63 @@ module prodAcrPull 'modules/registry-pull.bicep' = {
   }
 }
 
+// Runtime aks-argocd: the cluster's identities and ingress IP; the kubelet identity pulls from the registry in nonprod.
+module cluster 'modules/seed-cluster.bicep' = if (hasCluster) {
+  name: 'seed-${slug}-cluster'
+  scope: clusterGroup
+  params: {
+    slug: slug
+    location: location
+    tags: union(allTags, { tier: 'cluster' })
+    githubIssuer: githubIssuer
+    audience: audience
+    clusterSubject: '${systemSubjectPrefix}:environment:octopus'
+    octopusIssuer: octopusUrl
+    feedSubject: 'space:${octopusSpaceSlug}:feed:acr-${slug}'
+    planPrincipalId: nonprod.outputs.plan.principalId
+    whatIfRoleName: whatIfRole.name
+  }
+}
+
+module clusterAcrPull 'modules/registry-pull.bicep' = if (hasCluster) {
+  name: 'seed-${slug}-cluster-acr-pull'
+  scope: nonprodGroup
+  params: {
+    registryName: nonprod.outputs.registry.name
+    principalIds: [cluster!.outputs.kubelet.principalId, cluster!.outputs.feed.principalId]
+  }
+}
+
 output subscriptionId string = subscription().subscriptionId
 output tenantId string = tenant().tenantId
-output resourceGroups object = {
-  nonprod: nonprodGroup.name
-  prod: prodGroup.name
-}
+output resourceGroups object = union(
+  {
+    nonprod: nonprodGroup.name
+    prod: prodGroup.name
+  },
+  hasCluster ? { cluster: clusterGroup!.name } : {}
+)
 output registry object = nonprod.outputs.registry
 output terraformState object = nonprod.outputs.terraformState
 output frontDoor object = frontDoor ? edge!.outputs.frontDoor : {}
-output identities object = {
-  plan: nonprod.outputs.plan
-  octopusConfig: nonprod.outputs.octopusConfig
-  acrPush: nonprod.outputs.acrPush
-  deploy: {
-    nonprod: nonprod.outputs.deploy
-    prod: prod.outputs.deploy
-  }
-  apps: concat(nonprod.outputs.apps, prod.outputs.apps)
-}
+output identities object = union(
+  {
+    plan: nonprod.outputs.plan
+    octopusConfig: nonprod.outputs.octopusConfig
+    acrPush: nonprod.outputs.acrPush
+    deploy: {
+      nonprod: nonprod.outputs.deploy
+      prod: prod.outputs.deploy
+    }
+    apps: concat(nonprod.outputs.apps, prod.outputs.apps)
+  },
+  hasCluster
+    ? {
+        cluster: cluster!.outputs.pipeline
+        aks: cluster!.outputs.controlPlane
+        kubelet: cluster!.outputs.kubelet
+        feed: cluster!.outputs.feed
+      }
+    : {}
+)
+output ingress object = hasCluster ? cluster!.outputs.ingress : {}

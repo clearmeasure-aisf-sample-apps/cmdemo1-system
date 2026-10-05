@@ -30,13 +30,20 @@ resource "octopusdeploy_process" "system" {
   project_id = octopusdeploy_project.system.id
 }
 
-resource "octopusdeploy_process_step" "system_sign_off" {
-  count = length(local.promoted_environments) > 0 ? 1 : 0
+# Every environment but the first: the step excludes the first instead of naming the others, because a release keeps
+# the process as it was when the release was created. A release made before an environment existed then still stops
+# at the sign-off when it is promoted there.
+# Systems synced while the step had a count keep their step instead of losing it and getting a new one.
+moved {
+  from = octopusdeploy_process_step.system_sign_off[0]
+  to   = octopusdeploy_process_step.system_sign_off
+}
 
-  process_id   = octopusdeploy_process.system.id
-  name         = "Sign-off"
-  type         = "Octopus.Manual"
-  environments = [for name in local.promoted_environments : octopusdeploy_environment.this[name].id]
+resource "octopusdeploy_process_step" "system_sign_off" {
+  process_id            = octopusdeploy_process.system.id
+  name                  = "Sign-off"
+  type                  = "Octopus.Manual"
+  excluded_environments = [octopusdeploy_environment.this[local.first_environment].id]
 
   execution_properties = {
     "Octopus.Action.RunOnServer"                       = "false"
@@ -139,7 +146,7 @@ resource "octopusdeploy_process_step" "system_middle_names" {
 resource "octopusdeploy_process_steps_order" "system" {
   process_id = octopusdeploy_process.system.id
   steps = concat(
-    [for step in octopusdeploy_process_step.system_sign_off : step.id],
+    [octopusdeploy_process_step.system_sign_off.id],
     [octopusdeploy_process_step.system_apply.id],
     [for step in octopusdeploy_process_step.system_grant : step.id],
     [for step in octopusdeploy_process_step.system_middle_names : step.id],
@@ -156,12 +163,12 @@ resource "octopusdeploy_process" "deployable" {
 }
 
 resource "octopusdeploy_process_step" "sign_off" {
-  for_each = length(local.promoted_environments) > 0 ? local.deployables : {}
+  for_each = local.deployables
 
-  process_id   = octopusdeploy_process.deployable[each.key].id
-  name         = "Sign-off"
-  type         = "Octopus.Manual"
-  environments = [for name in local.promoted_environments : octopusdeploy_environment.this[name].id]
+  process_id            = octopusdeploy_process.deployable[each.key].id
+  name                  = "Sign-off"
+  type                  = "Octopus.Manual"
+  excluded_environments = [octopusdeploy_environment.this[local.first_environment].id]
 
   execution_properties = {
     "Octopus.Action.RunOnServer"                       = "false"
@@ -250,12 +257,13 @@ resource "octopusdeploy_process_step" "migrate" {
 resource "octopusdeploy_process_step" "seed_demo_employees" {
   for_each = local.seeded_deployables
 
-  process_id     = octopusdeploy_process.deployable[each.key].id
-  name           = "Seed demo employees"
-  type           = "Octopus.AzurePowerShell"
-  environments   = [for name in local.seed_environments : octopusdeploy_environment.this[name].id]
-  worker_pool_id = local.worker_pool_id
-  container      = local.container
+  process_id = octopusdeploy_process.deployable[each.key].id
+  name       = "Seed demo employees"
+  type       = "Octopus.AzurePowerShell"
+  # The test environments excluded, not the others named: a release made before an environment existed seeds it too.
+  excluded_environments = [for name in local.test_environments : octopusdeploy_environment.this[name].id]
+  worker_pool_id        = local.worker_pool_id
+  container             = local.container
 
   packages = {
     tests = {
@@ -514,7 +522,7 @@ resource "octopusdeploy_process_steps_order" "deployable" {
 
   process_id = octopusdeploy_process.deployable[each.key].id
   steps = concat(
-    contains(keys(octopusdeploy_process_step.sign_off), each.key) ? [octopusdeploy_process_step.sign_off[each.key].id] : [],
+    [octopusdeploy_process_step.sign_off[each.key].id],
     contains(keys(octopusdeploy_process_step.restore_point), each.key) ? [octopusdeploy_process_step.restore_point[each.key].id] : [],
     [octopusdeploy_process_step.pin[each.key].id],
     contains(keys(local.migrated_deployables), each.key) ? [octopusdeploy_process_step.migrate[each.key].id] : [],

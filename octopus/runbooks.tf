@@ -2,16 +2,22 @@
 #   Restore test          weekly, first environment: point-in-time restore into a temporary database (CAP-060)
 #   Rotate SQL password   monthly, every environment: new administrator password through Key Vault (CAP-056)
 # A schedule runs the runbook's published snapshot; the system workflow publishes one after every apply.
+# The instance's task cap is shared by every system on it, so each system's schedules start at its own time: an offset
+# of 0 to 239 minutes derived from the slug (the same on every apply), after 07:00 UTC for the restore test and after
+# 08:00 UTC for the rotation.
 
 locals {
   first_environment = local.system.environments[0].name
+  schedule_offset   = parseint(substr(md5(local.slug), 0, 6), 16) % 240
+  schedule_minute   = local.schedule_offset % 60
+  schedule_hours    = floor(local.schedule_offset / 60)
   runbooks = {
     restore_test = {
       name         = "Restore test"
       description  = "Restores the database to 15 minutes ago into a temporary database, checks it, and deletes it (scripts/test-restore.ps1)."
       script       = "test-restore.ps1"
       environments = [local.first_environment]
-      cron         = "0 0 7 * * Sun"
+      cron         = "0 ${local.schedule_minute} ${7 + local.schedule_hours} * * Sun"
       schedule     = "Weekly restore test"
     }
     rotate_sql_password = {
@@ -19,7 +25,7 @@ locals {
       description  = "New SQL administrator password through Key Vault, app restart and health check (scripts/rotate-sql-password.ps1)."
       script       = "rotate-sql-password.ps1"
       environments = [for name, e in local.environments : name]
-      cron         = "0 0 8 1 * *"
+      cron         = "0 ${local.schedule_minute} ${8 + local.schedule_hours} 1 * *"
       schedule     = "Monthly SQL password rotation"
     }
   }

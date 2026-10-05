@@ -246,8 +246,8 @@ $checks = [ordered] @{
         Assert-That $rolledBack "no successful redeployment of an older release in $first"; "an older release was redeployed successfully in $first (test-rollback.ps1)"
     }
     'CAP-038' = {
-        # The sign-off step exists once an environment follows the first: a system with one environment promotes nothing.
-        if ($environments.Count -lt 2) { Skip-Check 'no environment after the first yet' }
+        # The sign-off step is in the process from the start (it excludes the first environment), so a release made
+        # while the system had one environment still stops at it in every environment added later.
         foreach ($slug in $systemProject, $deployableProject) { $s = @(Get-ProcessStep $slug)[0]; Assert-That ($s.Name -eq 'Sign-off' -and $s.Actions[0].ActionType -eq 'Octopus.Manual') "$slug does not start with Sign-off" }
         Assert-That ((Get-RepoFile $systemRepo 'octopus/projects.tf') -match 'octopusdeploy_project_deployment_freeze') 'no freeze support'; 'Sign-off first in both projects; freezes from system.json'
     }
@@ -357,6 +357,20 @@ $checks = [ordered] @{
         "requests of $role arriving in Application Insights in $($on -join ', ')"
     }
     'CAP-071' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the logs of every current deployment are clean' }
+    'CAP-074' = {
+        # Metrics land where telemetry does: in every environment with the capability, metrics of the app under its own
+        # name (OTEL_SERVICE_NAME, <slug>-<deployable>) arrived in Application Insights in the last 30 days.
+        $on = @($system.environments | Where-Object { @($_.capabilities) -contains 'telemetry' } | ForEach-Object { [string] $_.name })
+        if ($on.Count -eq 0) { Skip-Check 'no environment has capability telemetry yet' }
+        $role = "$slug-$deployable"
+        foreach ($e in $on) {
+            $component = "/subscriptions/$($system.azure.subscriptionId)/resourceGroups/$(Get-Group $e)/providers/Microsoft.Insights/components/appi-$slug-$e"
+            $body = @{ query = "customMetrics | where cloud_RoleName == '$role' | summarize count()"; timespan = 'P30D' } | ConvertTo-Json -Compress
+            $count = [int] (az rest --method post --url "https://management.azure.com$component/query?api-version=2018-04-20" --body $body --query 'tables[0].rows[0][0]' --output tsv)
+            Assert-That ($count -gt 0) "no metrics of $role in appi-$slug-$e in 30 days"
+        }
+        "metrics of $role arriving in Application Insights in $($on -join ', ')"
+    }
     'CAP-075' = {
         # One page shows every node: the dashboard (the deployable with hosting "staticwebapp") serves the topology its
         # deployment wrote, and in every environment it runs in, that topology lists every environment of system.json
