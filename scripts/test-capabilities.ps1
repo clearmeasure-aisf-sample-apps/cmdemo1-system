@@ -127,7 +127,7 @@ function Get-Group([string] $Environment) {
 }
 function Get-App([string] $Environment) {
     # By the name the stack reports: a shared or moved Container Apps environment gives the app a suffix.
-    $name = ([string] (az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query "outputs.deployables.value[?name=='$deployable'].containerApp | [0]" --output tsv)).Trim()
+    $name = "$(az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query "outputs.deployables.value[?name=='$deployable'].containerApp | [0]" --output tsv)".Trim()
     if (-not $name) { throw "stack-$slug-$Environment lists no container app for $deployable (a failed or unfinished apply?)" }
     az containerapp show --name $name --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
 }
@@ -149,6 +149,22 @@ function Get-DeployedPackage([string] $Environment) {
     $package = @($release.SelectedPackages | Where-Object { $_.ActionName -eq 'Update deployable' })[0]
     @{ release = [string] $release.Version; package = [string] $package.Version }
 }
+function Get-StandbyPlan([string] $Environment) {
+    # The plan size of the first deployable's standby app, or $null without a standby region.
+    # "$(...)", not [string] (...): a command that prints nothing (no standby here) casts to $null, and .Trim() then throws.
+    $webApp = "$(az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query "outputs.standby.value[?name=='$deployable'].webApp | [0]" --output tsv)".Trim()
+    if (-not $webApp) { return $null }
+    $plan = ([string] (az resource show --name $webApp --resource-group (Get-Group $Environment) --resource-type Microsoft.Web/sites --query properties.serverFarmId --output tsv)).Trim()
+    ([string] (az resource show --ids $plan --query sku.name --output tsv)).Trim()
+}
+function Get-DeclaredPlan([string] $Environment) {
+    # The plan size system.json declares for the environment's tier: system.planSku, F1 without it, and F1 for every
+    # tier while the system is dormant (azure.frontDoor.dormant).
+    $tier = [string] @($system.environments | Where-Object name -eq $Environment)[0].tier
+    $dormant = $system.azure.ContainsKey('frontDoor') -and $system.azure.frontDoor['dormant']
+    if (-not $dormant -and $system.system.ContainsKey('planSku') -and $system.system.planSku[$tier]) { return [string] $system.system.planSku[$tier] }
+    'F1'
+}
 function Get-RoleName([string] $Group, [string] $PrincipalId) {
     # Assignments at, above and below the group that name the principal; role names from their definitions.
     $subscription = [string] $system.azure.subscriptionId
@@ -159,8 +175,14 @@ function Get-RoleName([string] $Group, [string] $PrincipalId) {
     }
 }
 function Get-RecentRun([string] $Runbook, [int] $Days) {
-    $runs = @((Invoke-Octopus "/api/$space/tasks?name=RunbookRun&take=100").Items |
-            Where-Object { $_.Description -like "*$Runbook*" -and $_.State -eq 'Success' -and [datetimeoffset] $_.CompletedTime -gt [datetimeoffset]::UtcNow.AddDays(-$Days) })
+    # The runbook's own successful runs, newest first. Asked by runbook: the hourly "Health report" alone fills the
+    # first page of all runbook runs within a day and a half, and a monthly run would drop out of it.
+    # Into a variable first: a JSON array answer goes down a pipeline as one object, and nothing would match.
+    $runbooks = Invoke-Octopus "/api/$space/runbooks/all"
+    $ids = @($runbooks | Where-Object { $_.Name -eq $Runbook } | ForEach-Object { [string] $_.Id })
+    $all = @(foreach ($id in $ids) { (Invoke-Octopus "/api/$space/tasks?name=RunbookRun&runbook=$id&states=Success&take=100").Items })
+    $runs = @($all | Where-Object { $_ -and [datetimeoffset] $_.CompletedTime -gt [datetimeoffset]::UtcNow.AddDays(-$Days) } |
+            Sort-Object { [datetimeoffset] $_.CompletedTime } -Descending)
     if ($runs.Count -eq 0 -and (Get-SystemAge) -lt $Days) { Skip-Check "the system is younger than $Days days: $Runbook is not due yet" }
     $runs
 }
@@ -227,9 +249,15 @@ $checks = [ordered] @{
     'CAP-032' = { foreach ($e in $environments) { $st = az stack group show --name "stack-$($slug)-$e" --resource-group (Get-Group $e) --query '{p: provisioningState, d: denySettings.mode}' --output json | ConvertFrom-Json; Assert-That ($st.p -eq 'succeeded' -and $st.d -eq 'denyWriteAndDelete') "$e stack $($st.p) $($st.d)" }; 'every stack succeeded, deny write and delete' }
     'CAP-033' = {
         if ($onAppService) {
-            # App Service: every environment's app runs on the Free plan of its tier; there is no size to declare.
-            foreach ($e in $environments) { $s = Get-Site $e; Assert-That ($s.sku.name -eq 'F1') "$e runs on $($s.sku.name), the template declares F1" }
-            return 'every app runs on the plan size the template declares (F1)'
+            # App Service: every environment's app runs on its tier's plan, of the size system.json declares (F1 without).
+            $sizes = foreach ($e in $environments) {
+                $want = Get-DeclaredPlan $e; $s = Get-Site $e; Assert-That ($s.sku.name -eq $want) "$e runs on $($s.sku.name), system.json declares $want"
+                # The standby region's plan has the tier's size too: a failover must not land on a smaller plan.
+                $standbyPlan = Get-StandbyPlan $e
+                if ($standbyPlan) { Assert-That ($standbyPlan -eq $want) "the standby of $e runs on $standbyPlan, system.json declares $want" }
+                "$e $want$(if ($standbyPlan) { ' (standby too)' })"
+            }
+            return "every app runs on the plan size system.json declares ($($sizes -join ', '))"
         }
         foreach ($entry in $system.environments) { $want = if ($entry.ContainsKey('appCpu')) { [double] $entry.appCpu } else { 0.5 }; $got = [double] (Get-App $entry.name).properties.template.containers[0].resources.cpu; Assert-That ($want -eq $got) "$($entry.name) has $got vCPU, system.json $want" }; 'app sizes follow system.json'
     }
@@ -263,7 +291,10 @@ $checks = [ordered] @{
     }
     'CAP-039' = {
         if ($onAppService) {
-            foreach ($e in $environments) { $s = Get-Site $e; Assert-That ($s.sku.tier -eq 'Free') "$e runs on the $($s.sku.tier) tier" }
+            # Free plans cost nothing; a tier may declare a Basic plan (system.planSku), which the dormant switch turns
+            # back to Free between classes. Either way no plan is larger than declared.
+            $paid = foreach ($e in $environments) { $want = Get-DeclaredPlan $e; $s = Get-Site $e; Assert-That ($s.sku.name -eq $want) "$e runs on $($s.sku.name), system.json declares $want"; if ($want -ne 'F1') { $e } }
+            if ($paid) { return "Free plans, except the declared Basic plan of $($paid -join ', '), which is Free while the system is dormant" }
             return 'every app runs on a Free plan'
         }
         foreach ($e in $environments) { $a = Get-App $e; Assert-That ($a.properties.template.scale.minReplicas -eq 0) "$e has min replicas $($a.properties.template.scale.minReplicas)" }; 'every app scales to zero'
@@ -349,12 +380,19 @@ $checks = [ordered] @{
     }
     'CAP-051' = {
         $ids = $system.azure.identities
+        # The push identity exists only with a registry (system.json azure.registry): a system whose apps are zips in
+        # the Octopus feed has neither.
+        $hasRegistry = $system.azure.ContainsKey('registry') -and $system.azure.registry['name']
         $expect = @(
-            @{ id = $ids.plan.principalId; role = 'Reader'; group = $system.azure.resourceGroups.nonprod },
-            @{ id = $ids.acrPush.principalId; role = 'AcrPush'; group = $system.azure.resourceGroups.nonprod },
-            @{ id = $ids.deploy.nonprod.principalId; role = 'Owner'; group = $system.azure.resourceGroups.nonprod },
+            @{ id = $ids.plan.principalId; role = 'Reader'; group = $system.azure.resourceGroups.nonprod }
+            if ($hasRegistry) { @{ id = $ids.acrPush.principalId; role = 'AcrPush'; group = $system.azure.resourceGroups.nonprod } }
+            @{ id = $ids.deploy.nonprod.principalId; role = 'Owner'; group = $system.azure.resourceGroups.nonprod }
             @{ id = $ids.deploy.prod.principalId; role = 'Owner'; group = $system.azure.resourceGroups.prod })
         foreach ($x in $expect) { $roles = @(Get-RoleName -Group $x.group -PrincipalId $x.id); Assert-That ($roles -contains $x.role -and $roles -notcontains 'Contributor') "$($x.id): $($roles -join ', ')" }
+        if (-not $hasRegistry) {
+            Assert-That (-not $ids.ContainsKey('acrPush')) 'azure.identities.acrPush without azure.registry'
+            return 'plan Reader, deploy Owner of its group only; no registry, so no push identity'
+        }
         'plan Reader, push AcrPush, deploy Owner of its group only'
     }
     'CAP-052' = { $prod = @(Get-ProdEnvironment); Assert-That ($prod.Count -ge 1) 'no prod-tier environment'; "$($prod -join ', ') in $($system.azure.resourceGroups.prod) with id-$($slug)-deploy-prod" }
@@ -371,8 +409,12 @@ $checks = [ordered] @{
         if ($on.Count -eq 0) { Skip-Check 'no environment has capability telemetry yet' }
         $role = "$slug-$deployable"
         foreach ($e in $on) {
-            $variables = @((Get-App $e).properties.template.containers[0].env | ForEach-Object { [string] $_.name })
-            Assert-That ($variables -contains 'APPLICATIONINSIGHTS_CONNECTION_STRING') "the app in $e has no APPLICATIONINSIGHTS_CONNECTION_STRING"
+            # A container app's settings are readable; a web app's are not (listing them is an action the reader lacks
+            # and the stack denies), so on App Service the arriving requests below are the proof.
+            if (-not $onAppService) {
+                $variables = @((Get-App $e).properties.template.containers[0].env | ForEach-Object { [string] $_.name })
+                Assert-That ($variables -contains 'APPLICATIONINSIGHTS_CONNECTION_STRING') "the app in $e has no APPLICATIONINSIGHTS_CONNECTION_STRING"
+            }
             $component = "/subscriptions/$($system.azure.subscriptionId)/resourceGroups/$(Get-Group $e)/providers/Microsoft.Insights/components/appi-$slug-$e"
             $body = @{ query = "requests | where cloud_RoleName == '$role' | summarize count()"; timespan = 'P30D' } | ConvertTo-Json -Compress
             $count = [int] (az rest --method post --url "https://management.azure.com$component/query?api-version=2018-04-20" --body $body --query 'tables[0].rows[0][0]' --output tsv)
@@ -400,6 +442,7 @@ $checks = [ordered] @{
         # deployment wrote, and in every environment it runs in, that topology lists every environment of system.json
         # and, for each App Service deployable, the nodes the naming convention gives (primary, and standby where the
         # environment has a standbyLocation). A topology older than system.json fails: deploy the dashboard again.
+        # Its Runtime view has, in runtime/index.json, every environment with a manifest and an SVG the site serves.
         $dashboard = @($system.deployables | Where-Object { $_['hosting'] -eq 'staticwebapp' }) | Select-Object -First 1
         if (-not $dashboard) { Skip-Check 'no deployable with hosting staticwebapp yet' }
         $dashboardName = [string] $dashboard.name
@@ -412,7 +455,7 @@ $checks = [ordered] @{
             })
         $shown = foreach ($e in $environments) {
             if (-not (Find-LastDeployment "$slug-$dashboardName" $e)) { continue }
-            $url = ([string] (az stack group show --name "stack-$slug-$e" --resource-group (Get-Group $e) --query "outputs.deployables.value[?name=='$dashboardName'].url | [0]" --output tsv)).Trim()
+            $url = "$(az stack group show --name "stack-$slug-$e" --resource-group (Get-Group $e) --query "outputs.deployables.value[?name=='$dashboardName'].url | [0]" --output tsv)".Trim()
             Assert-That ([bool] $url) "stack-$slug-$e lists no site for $dashboardName (a failed or unfinished apply?)"
             $content = (Invoke-WebRequest -Uri "$url/topology.json" -TimeoutSec 120).Content
             $topology = $(if ($content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($content) } else { [string] $content }) | ConvertFrom-Json -AsHashtable
@@ -422,10 +465,111 @@ $checks = [ordered] @{
             $got = @(foreach ($entry in $listed) { foreach ($d in @($entry['deployables'] | Where-Object { $_ })) { foreach ($node in @($d['nodes'] | Where-Object { $_ })) { "$($entry['name'])/$($d['name'])/$($node['name'])" } } })
             $lost = @($want | Where-Object { $got -notcontains $_ })
             Assert-That ($lost.Count -eq 0) "the dashboard in $e does not list the node(s) $($lost -join ', '): deploy the release of $slug-$dashboardName to $e again"
+            $content = (Invoke-WebRequest -Uri "$url/runtime/index.json" -TimeoutSec 120 -SkipHttpErrorCheck)
+            Assert-That ($content.StatusCode -eq 200) "the dashboard in $e has no runtime/index.json (HTTP $($content.StatusCode)): deploy the release of $slug-$dashboardName to $e again"
+            $index = $(if ($content.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($content.Content) } else { [string] $content.Content }) | ConvertFrom-Json -AsHashtable
+            $drawn = @($index['environments'] | Where-Object { $_ })
+            $undrawn = @($environments | Where-Object { @($drawn | ForEach-Object { [string] $_['name'] }) -notcontains $_ })
+            Assert-That ($undrawn.Count -eq 0) "the Runtime view in $e has no diagram of $($undrawn -join ', '): deploy the release of $slug-$dashboardName to $e again"
+            foreach ($entry in $drawn) {
+                foreach ($file in @([string] $entry['manifest'], [string] $entry['svg'])) {
+                    $answer = Invoke-WebRequest -Uri "$url/runtime/$file" -TimeoutSec 120 -SkipHttpErrorCheck
+                    Assert-That ($answer.StatusCode -eq 200 -and $answer.RawContentLength -gt 0) "the Runtime view in $e does not serve runtime/$file (HTTP $($answer.StatusCode))"
+                }
+            }
             "$e $url"
         }
         if (-not $shown) { Skip-Check "no successful $slug-$dashboardName deployment yet" }
-        "$($environments.Count) environment(s) and $($want.Count) node(s) on one page: $($shown -join '; ')"
+        "$($environments.Count) environment(s) and $($want.Count) node(s) on one page, with a runtime diagram each: $($shown -join '; ')"
+    }
+    'CAP-076' = {
+        # The delivery tool shows each environment's health: a "Health report" run of the last three hours succeeded
+        # in every environment (the runbook is hourly, and fails when a node does not answer).
+        if ($system.azure.ContainsKey('frontDoor') -and $system.azure.frontDoor['dormant']) { Skip-Check 'the system is dormant: the hourly health report is off so the apps and their databases can sleep' }
+        $since = [datetimeoffset]::UtcNow.AddHours(-3)
+        $runs = @((Invoke-Octopus "/api/$space/tasks?name=RunbookRun&take=200").Items | Where-Object { $_.Description -like '*Health report*' -and [datetimeoffset] $_.QueueTime -gt $since })
+        if ($runs.Count -eq 0 -and (Get-SystemAge) -lt 0.125) { Skip-Check 'the system is younger than three hours: no health report is due yet' }
+        $shown = foreach ($e in $environments) {
+            $last = @($runs | Where-Object { $_.Description -like "* $e" -or $_.Description -like "* $e *" }) | Sort-Object { [datetimeoffset] $_.QueueTime } -Descending | Select-Object -First 1
+            Assert-That ($null -ne $last) "no Health report run in $e in three hours"
+            Assert-That ($last.State -eq 'Success') "the last Health report in $e is $($last.State)"
+            "$e $(([datetimeoffset] $last.QueueTime).ToString('HH:mm'))"
+        }
+        "the last hourly health report succeeded in $($shown -join ', ') (UTC)"
+    }
+    'CAP-077' = {
+        # Calls are counted where they happen: every web app of an App Service deployable with a telemetryPath (primary
+        # and standby, every environment) answers it with its counts of the last minute, readable from any origin, so
+        # the dashboard's runtime view shows calls per minute on Front Door's routes and the database's.
+        $counted = @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' -and $_['telemetryPath'] })
+        if ($counted.Count -eq 0) { Skip-Check 'no App Service deployable has a telemetryPath in system.json' }
+        $shown = foreach ($app in $counted) {
+            foreach ($entry in $system.environments) {
+                $names = @("app-$slug-$($entry.name)-$($app.name)")
+                if ($entry['standbyLocation']) { $names += "app-$slug-$($entry.name)-$($app.name)-$($entry.standbyLocation)" }
+                foreach ($name in $names) {
+                    $answer = Invoke-WebRequest -Uri "https://$name.azurewebsites.net$($app.telemetryPath)" -Headers @{ Origin = 'https://capability-check.example' } -TimeoutSec 120 -SkipHttpErrorCheck
+                    Assert-That ($answer.StatusCode -eq 200) "$name answers $($app.telemetryPath) with HTTP $($answer.StatusCode): deploy a release of $slug-$($app.name) that has the endpoint"
+                    Assert-That ("$($answer.Headers['Access-Control-Allow-Origin'])" -eq '*') "$name does not allow other origins to read $($app.telemetryPath)"
+                    $counts = $(if ($answer.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($answer.Content) } else { [string] $answer.Content }) | ConvertFrom-Json -AsHashtable
+                    Assert-That ($counts['requests'] -is [hashtable] -and $null -ne $counts.requests['perMinute'] -and $counts['sql'] -is [hashtable]) "$name answers $($app.telemetryPath) without the counts of requests and SQL commands"
+                    "$name $($counts.requests.perMinute) req/min, $($counts.sql.perMinute) SQL/min"
+                }
+            }
+        }
+        "every web app counts its calls: $($shown -join '; ')"
+    }
+    'CAP-078' = {
+        # Delivery facts where a browser can read them: workflow delivery publishes delivery.json on branch status
+        # (one commit, no commit on main), with every environment and, in each, the first app and the system project
+        # at the release Octopus last deployed. A deployment of the last 90 minutes may be ahead of the file: the
+        # workflow waits for the deployment that triggered it.
+        $branches = @(gh api "repos/$systemRepo/branches" --paginate --jq '.[].name')
+        if ($branches -notcontains 'status') { Skip-Check 'workflow delivery has not published branch status yet' }
+        $delivery = Get-RepoFile $systemRepo 'delivery.json?ref=status' | ConvertFrom-Json -AsHashtable
+        $listed = @($delivery['environments'] | Where-Object { $_ })
+        $compared = foreach ($e in $environments) {
+            $entry = @($listed | Where-Object { $_['name'] -eq $e }) | Select-Object -First 1
+            Assert-That ($null -ne $entry) "delivery.json on branch status does not list $e"
+            foreach ($name in @($deployable, 'system')) {
+                $fact = @($entry['deployables'] | Where-Object { $_ -and $_['name'] -eq $name }) | Select-Object -First 1
+                Assert-That ($null -ne $fact) "delivery.json does not list $name in $e"
+                $deployment = Find-LastDeployment "$slug-$(if ($name -eq 'system') { 'system' } else { $name })" $e
+                if (-not $deployment) { continue }
+                $settled = [datetimeoffset] (Invoke-Octopus "/api/tasks/$($deployment.TaskId)").CompletedTime -lt [datetimeoffset]::UtcNow.AddMinutes(-90)
+                Assert-That (-not $settled -or [string] $fact['version'] -eq $deployment.Version) "delivery.json says $name $($fact['version']) in $e, Octopus deployed $($deployment.Version): run workflow delivery"
+                "$e $name $($fact['version'])"
+            }
+        }
+        "delivery facts on branch status: $(@($compared).Count) deployment(s) match Octopus"
+    }
+    'CAP-079' = {
+        # Each deployed process says what it was built from: every web app of an App Service deployable with a
+        # buildPath answers it, from any origin, with the version Octopus last deployed there, the commit and the
+        # count of its lines of code. The quality sections (tests, coverage, complexity, CRAP, analysis) may be null:
+        # the Build run's artifacts expire.
+        $described = @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' -and $_['buildPath'] })
+        if ($described.Count -eq 0) { Skip-Check 'no App Service deployable has a buildPath in system.json' }
+        $shown = foreach ($app in $described) {
+            foreach ($entry in $system.environments) {
+                $deployment = Find-LastDeployment "$slug-$($app.name)" ([string] $entry.name)
+                if (-not $deployment) { continue }
+                $names = @("app-$slug-$($entry.name)-$($app.name)")
+                if ($entry['standbyLocation']) { $names += "app-$slug-$($entry.name)-$($app.name)-$($entry.standbyLocation)" }
+                foreach ($name in $names) {
+                    $answer = Invoke-WebRequest -Uri "https://$name.azurewebsites.net$($app.buildPath)" -Headers @{ Origin = 'https://capability-check.example' } -TimeoutSec 120 -SkipHttpErrorCheck
+                    Assert-That ($answer.StatusCode -eq 200) "$name answers $($app.buildPath) with HTTP $($answer.StatusCode): deploy a release of $slug-$($app.name) that has the endpoint"
+                    Assert-That ("$($answer.Headers['Access-Control-Allow-Origin'])" -eq '*') "$name does not allow other origins to read $($app.buildPath)"
+                    $facts = $(if ($answer.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($answer.Content) } else { [string] $answer.Content }) | ConvertFrom-Json -AsHashtable
+                    Assert-That ([string] $facts['version'] -eq $deployment.Version) "$name says it is build $($facts['version']), Octopus deployed $($deployment.Version)"
+                    Assert-That ([string] $facts['commit'] -match '^[0-9a-f]{40}$') "$name names no commit at $($app.buildPath)"
+                    Assert-That ($facts['code'] -is [hashtable] -and [int] $facts.code['linesOfCode'] -gt 0) "$name counts no lines of code at $($app.buildPath)"
+                    "$name $($facts['version']) $(([string] $facts['commit']).Substring(0, 7))"
+                }
+            }
+        }
+        if (-not $shown) { Skip-Check 'no successful deployment of a deployable with a buildPath yet' }
+        "every web app describes its build: $(@($shown) -join '; ')"
     }
     'CAP-080' = { $files = @(gh api "repos/$systemRepo/contents/docs/architecture" --jq '.[].name'); $missing = @($files | Where-Object { $_ -like '*.puml' -and $files -notcontains ($_ -replace '\.puml$', '.png') }); Assert-That ($missing.Count -eq 0 -and $files.Count -gt 0) "not rendered: $missing"; "$(@($files | Where-Object { $_ -like '*.png' }).Count) diagrams rendered" }
     'CAP-081' = {

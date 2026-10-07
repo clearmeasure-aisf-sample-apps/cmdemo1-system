@@ -25,6 +25,12 @@ param nameSuffix string = ''
 param role string = 'primary'
 @description('True in the first environment of the tier, which creates the plan; the others use it.')
 param ownsPlan bool
+@description('Size of the plan: F1 (Free) or B1 (Basic: a dedicated core, no daily CPU or outbound data quota). main.bicep takes it from system.json system.planSku for the tier, and F1 while the system is dormant.')
+@allowed([
+  'F1'
+  'B1'
+])
+param planSku string = 'F1'
 @description('User-assigned identity of each deployable, in the order of deployables.')
 param identityResourceIds array
 @description('Versionless Key Vault URI of each deployable\'s connection string, in the order of deployables.')
@@ -40,8 +46,8 @@ resource plan 'Microsoft.Web/serverfarms@2024-04-01' = if (ownsPlan) {
   tags: tags
   kind: 'linux'
   sku: {
-    name: 'F1'
-    tier: 'Free'
+    name: planSku
+    tier: planSku == 'F1' ? 'Free' : 'Basic'
   }
   properties: {
     reserved: true

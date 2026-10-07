@@ -11,7 +11,9 @@ locals {
     for project, id in local.project_ids : [
       { key = "${project}-slug", project = id, name = "System.Slug", value = local.slug, environment = null },
       { key = "${project}-repository", project = id, name = "System.Repository", value = local.repository, environment = null },
-      { key = "${project}-registry", project = id, name = "Azure.RegistryServer", value = local.system.azure.registry.loginServer, environment = null },
+      # The login server of the system's registry (system.json azure.registry), empty without one: only the step
+      # "Update deployable" of a container app reads it, and a system that needs no registry has none.
+      { key = "${project}-registry", project = id, name = "Azure.RegistryServer", value = try(local.system.azure.registry.loginServer, ""), environment = null },
       { key = "${project}-deployable", project = id, name = "Deployable.Name", value = project == "system" ? "" : project, environment = null },
       # The resource group of the system's Front Door profile (system.json azure.frontDoor), empty without one: the
       # scripts read the environment's endpoints from stack-<slug>-<env>-edge there.

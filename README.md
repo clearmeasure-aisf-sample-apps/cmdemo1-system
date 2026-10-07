@@ -17,7 +17,7 @@ Every change to an environment is a pull request here:
 | `octopus/` | Terraform for the Octopus configuration, also read from `system.json` | People, by pull request |
 | `scripts/` | The Octopus step scripts and the checks | People, by pull request |
 | `docs/architecture/` | The architecture after each phase of the demo-environment skill: C4-PlantUML sources and rendered PNG files | The operator, by pull request after each phase |
-| `bootstrap/seed.bicep` | The resource groups, registry, state account and identities. Applied once by the operator, never by a pipeline | The operator |
+| `bootstrap/seed.bicep` | The resource groups, the registry (only for a system with a container app), the state account and the identities. Applied once by the operator, never by a pipeline | The operator |
 
 ## Pipelines
 
