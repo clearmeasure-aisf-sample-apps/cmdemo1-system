@@ -102,6 +102,51 @@
       "hosting": "appservice",
       "healthPath": "/_healthcheck",
       "startupAssembly": "ClearMeasure.Bootcamp.UI.Server.dll"
+    },
+    {
+      "name": "aisf",
+      "repository": "cmdemo1-aisf",
+      "port": 8080,
+      "healthPath": "/health",
+      "alwaysOn": true,
+      "alwaysOnEnvironments": [
+        "prod"
+      ],
+      "database": false,
+      "cpu": "0.5",
+      "settings": {
+        "Factory__Dashboard__Access": "SignIn",
+        "AzureAd__TenantId": "40645332-2e20-4bca-882c-b2706f93ce44",
+        "AzureAd__ClientId": "f111fb18-3749-4a5c-abde-19c507ae8338"
+      },
+      "environmentSettings": {
+        "tdd": {
+          "GitHub__UseStub": "true"
+        },
+        "uat": {
+          "GitHub__UseStub": "true"
+        }
+      },
+      "urlSetting": "Factory__PublicBaseUrl",
+      "secrets": [
+        {
+          "name": "cursor-api-key",
+          "env": "CursorAgent__ApiKey"
+        },
+        {
+          "name": "github-token",
+          "env": "GitHub__Token"
+        },
+        {
+          "name": "github-webhook-secret",
+          "env": "GitHub__WebhookSecret"
+        },
+        {
+          "name": "callback-signing-secret",
+          "env": "Callbacks__SigningSecret",
+          "generate": true
+        }
+      ]
     }
   ],
   "environments": [
