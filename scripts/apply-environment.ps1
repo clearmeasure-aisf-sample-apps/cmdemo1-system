@@ -15,6 +15,10 @@
       which the deployable projects' pin step writes.
     - The SQL administrator password is read from the environment's vault; the first apply generates it. It reaches
       the deployment through a private parameters file (mode 0600) that is removed afterwards, never a command line.
+    - Secrets of a container deployable (system.json deployables[].secrets) stay in the environment's vault. One with
+      "generate": true is kept like the SQL passwords: read from the vault, or generated on first use. The others are
+      the operator's to write (the kit's set-demo-secret.ps1, straight into the vault): this step only looks which of
+      them exist, the app references those, and a deployable with a version stops the apply while one is missing.
     - Deny settings (denyWriteAndDelete) block changes by anyone but the deploy identity: Git is the way in.
 #>
 [CmdletBinding()]
@@ -164,6 +168,56 @@ function Get-LoginPassword {
     return $result
 }
 
+function Read-VaultSecret {
+    # The value of a vault secret, or $null when the vault or the secret does not exist yet. Any other failure to read
+    # it is retried, then stops the step: taking an unreadable secret for a missing one would replace it.
+    param([hashtable] $Outputs, [Parameter(Mandatory)] [string] $Name)
+    if (-not $Outputs -or -not $Outputs.ContainsKey('keyVaultName')) { return $null }
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $read = az keyvault secret show --vault-name ([string] $Outputs.keyVaultName.value) --name $Name --query value --output tsv 2>&1
+        $code = $LASTEXITCODE
+        $PSNativeCommandUseErrorActionPreference = $true
+        if ($code -eq 0) { return ([string] $read).Trim() }
+        if ("$read" -match 'SecretNotFound|was not found') { return $null }
+        if ($attempt -eq 3) { Fail-Step "Cannot read ${Name}: the vault answered $("$read" -replace '\s+', ' ')" }
+        Write-Host "Reading $Name failed (attempt $attempt of 3); retrying in 30 seconds."
+        Start-Sleep -Seconds 30
+    }
+}
+
+function Get-DeployableSecret {
+    # The secrets the container deployables of this environment declare, by vault name <deployable>-<secret>:
+    #   Generated  name -> value, for "generate": true: the vault's value, or a new one (64 hexadecimal characters)
+    #   Present    the operator-supplied ones that exist in the vault; the app references only these
+    #   Missing    deployable -> the operator-supplied ones that do not exist yet
+    param([hashtable] $Outputs, [object[]] $Deployables)
+    $result = @{ Generated = @{}; Present = [Collections.Generic.List[string]]::new(); Missing = [ordered] @{} }
+    foreach ($deployable in $Deployables) {
+        if ($deployable.ContainsKey('hosting') -and $deployable.hosting -ne 'containerapp') { continue }
+        foreach ($secret in @($deployable['secrets'] | Where-Object { $_ })) {
+            $vaultName = "$($deployable.name)-$($secret.name)"
+            $value = Read-VaultSecret -Outputs $Outputs -Name $vaultName
+            if ($secret['generate'] -eq $true) {
+                if (-not $value) {
+                    Write-Host "Generating secret $vaultName."
+                    $value = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLowerInvariant()
+                }
+                $result.Generated[$vaultName] = $value
+            }
+            elseif ($value) {
+                $result.Present.Add($vaultName)
+            }
+            else {
+                if (-not $result.Missing.Contains([string] $deployable.name)) { $result.Missing[[string] $deployable.name] = @() }
+                $result.Missing[[string] $deployable.name] += [string] $secret.name
+            }
+            $value = $null
+        }
+    }
+    return $result
+}
+
 $template = Join-Path $root 'infra' 'main.bicep'
 if (-not (Test-Path -LiteralPath $template)) {
     Fail-Step "Package <slug>-system has no infra/main.bicep under $root."
@@ -173,7 +227,9 @@ $versions = Get-DesiredVersion
 $outputs = Get-StackOutput
 $password = Get-SqlPassword -Outputs $outputs
 $system = Get-Content -LiteralPath (Join-Path $root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
-$loginNames = @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' } | ForEach-Object { [string] $_.name })
+# deployables[].environments: a deployable may exist in some environments only; this one's are the rest of the work.
+$deployablesHere = @($system.deployables | Where-Object { -not $_.ContainsKey('environments') -or @($_.environments) -contains $environmentName })
+$loginNames = @($deployablesHere | Where-Object { $_['hosting'] -eq 'appservice' } | ForEach-Object { [string] $_.name })
 # A change of an App Service plan's size (system.planSku, or the dormant switch, which makes every plan Free) restarts
 # the apps on that plan: Azure moves them to other workers. The plans this environment owns carry its tag; one whose
 # size differs from the size system.json now declares will be resized by this apply, and the restart is then reported
@@ -189,6 +245,16 @@ if ($resizedPlans.Count -gt 0) {
     Write-Host "This apply changes a plan size ($($resizedPlans -join ', ')): the apps on it restart."
 }
 $loginPasswords = Get-LoginPassword -Outputs $outputs -Names $loginNames
+$secrets = Get-DeployableSecret -Outputs $outputs -Deployables $deployablesHere
+foreach ($name in $secrets.Missing.Keys) {
+    $absent = @($secrets.Missing[$name])
+    $how = "the operator writes each one to the vault with the kit's set-demo-secret.ps1 (-Environment $environmentName -Deployable $name -Name <secret>), then this release is deployed to $environmentName again"
+    if ($versions[$name]) {
+        # Fail fast, with the reason: the running version would restart without its secrets.
+        Fail-Step "$name runs $($versions[$name]) in $environmentName, but its secret(s) $($absent -join ', ') are not in the environment's vault: $how."
+    }
+    Write-Highlight "$name in ${environmentName}: secret(s) $($absent -join ', ') are not in the vault yet, so its app does not reference them. Before the first release of ${name}: $how."
+}
 Write-Host "Environment $environmentName, resource group $resourceGroup, stack $stackName"
 Write-Host "Versions on main: $(if ($versions.Count) { ($versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ' } else { 'none (placeholders)' })"
 
@@ -201,6 +267,8 @@ $parameters = @{
         sqlAdminPassword  = @{ value = $password }
         deployPrincipalId = @{ value = $deployPrincipalId }
         loginPasswords    = @{ value = $loginPasswords }
+        presentSecrets    = @{ value = @($secrets.Present) }
+        generatedSecrets  = @{ value = $secrets.Generated }
     }
 }
 $parametersFile = Join-Path ([IO.Path]::GetTempPath()) "stack-$([Guid]::NewGuid().ToString('N')).json"

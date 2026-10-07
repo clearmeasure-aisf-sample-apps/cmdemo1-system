@@ -19,7 +19,7 @@ resource "octopusdeploy_project" "deployable" {
   slug                              = "${local.slug}-${each.key}"
   description                       = "Deployable ${each.key} from ${local.system.system.githubOrg}/${each.value.repository}: pin, migrate, update, verify."
   project_group_id                  = octopusdeploy_project_group.system.id
-  lifecycle_id                      = octopusdeploy_lifecycle.system.id
+  lifecycle_id                      = contains(keys(local.restricted_deployables), each.key) ? octopusdeploy_lifecycle.deployable[each.key].id : octopusdeploy_lifecycle.system.id
   tenanted_deployment_participation = "Untenanted"
   default_guided_failure_mode       = "Off"
 }

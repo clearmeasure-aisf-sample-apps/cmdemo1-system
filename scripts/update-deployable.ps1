@@ -104,8 +104,20 @@ if (-not $exists) {
 # as the same PATCH "az containerapp ingress update" sends) and this script does the waiting, with a readable log.
 $current = az containerapp show --name $app --resource-group $resourceGroup --output json |
     ConvertFrom-Json -AsHashtable
-$appUri = "https://management.azure.com$($current.id)?api-version=2024-03-01"
+# The API version infra/modules/containerapps.bicep creates the app with: an older one does not know every property
+# of the app (identitySettings), and this URI is also used to change it (the ingress port).
+$appUri = "https://management.azure.com$($current.id)?api-version=2025-01-01"
 $before = [string] $current.properties.latestRevisionName
+
+# Secrets the deployable declares (system.json deployables[].secrets; variable Deployable.Secrets, the names joined by
+# commas): the environment's stack makes the app reference each one once it is in the vault. A version that starts
+# without one fails in ways its log may not explain, so stop before anything changes, with the reason.
+$declaredSecrets = @(([string] $OctopusParameters['Deployable.Secrets']) -split ',' | Where-Object { $_ })
+$referencedSecrets = @($current.properties.configuration['secrets'] | Where-Object { $_ } | ForEach-Object { [string] $_.name })
+$absentSecrets = @($declaredSecrets | Where-Object { $referencedSecrets -notcontains $_ })
+if ($absentSecrets.Count -gt 0) {
+    Fail-Step "$app does not reference the secret(s) $($absentSecrets -join ', ') that $deployable declares: the operator writes each one to the vault of $environmentName (the kit's set-demo-secret.ps1), then the latest release of $slug-system is deployed to $environmentName again, then this release."
+}
 
 # Zero downtime, measured: while this step changes the environment, a background probe asks every app's health
 # endpoint every few seconds. It follows the apps as they are, not as they were: every 15 seconds it lists the
@@ -212,7 +224,11 @@ function Stop-AvailabilityProbe {
     return $downtimes
 }
 
-$probe = Start-AvailabilityProbe -Group $resourceGroup -Environment $environmentName -Outputs $stackOutputs -Only $deployable
+# The first deployment replaces the placeholder image, which answers on another port and is not the app: between the
+# port change and the app's first start nothing can answer, and that is not downtime of anything that ran. Measured
+# from the second deployment on.
+$overPlaceholder = -not ([string] $current.properties.template.containers[0].image).StartsWith("$registry/")
+$probe = if ($overPlaceholder) { $null } else { Start-AvailabilityProbe -Group $resourceGroup -Environment $environmentName -Outputs $stackOutputs -Only $deployable }
 
 # The port changes only on the first deployment over the placeholder image.
 $currentPort = [string] $current.properties.configuration.ingress.targetPort
@@ -266,10 +282,15 @@ while ($true) {
     Write-Host "Waiting for the new revision (latest $($state.latest), ready $($state.ready), $($state.provisioning))"
     Start-Sleep -Seconds 10
 }
-# A little longer than the update: the new revision takes the traffic once it is ready.
-Start-Sleep -Seconds 30
-$downtime = Stop-AvailabilityProbe -Handle $probe
-if ($downtime -gt 0) {
-    Fail-Step "Updating $app to $version caused $downtime downtime period(s); the timeline is above."
+if ($probe) {
+    # A little longer than the update: the new revision takes the traffic once it is ready.
+    Start-Sleep -Seconds 30
+    $downtime = Stop-AvailabilityProbe -Handle $probe
+    if ($downtime -gt 0) {
+        Fail-Step "Updating $app to $version caused $downtime downtime period(s); the timeline is above."
+    }
+}
+else {
+    Write-Host "First deployment of $deployable in ${environmentName}: it replaces the placeholder, so its availability is measured from the next deployment on."
 }
 Write-Highlight "$deployable $version runs in $environmentName ($app)."

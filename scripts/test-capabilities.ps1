@@ -131,6 +131,15 @@ function Get-App([string] $Environment) {
     if (-not $name) { throw "stack-$slug-$Environment lists no container app for $deployable (a failed or unfinished apply?)" }
     az containerapp show --name $name --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
 }
+function Get-ContainerApp([string] $Environment) {
+    # Every container app of the environment, by the names the stack reports, each with the deployable it runs.
+    $entries = az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query 'outputs.deployables.value[?containerApp].{name: name, app: containerApp}' --output json | ConvertFrom-Json -AsHashtable
+    foreach ($entry in @($entries)) {
+        $app = az containerapp show --name $entry.app --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
+        $app.deployable = [string] $entry.name
+        $app
+    }
+}
 function Get-Site([string] $Environment) {
     # The App Service web app of the first deployable, by the name the stack reports, with its plan's SKU.
     $entry = az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query "outputs.deployables.value[?name=='$deployable'] | [0]" --output json | ConvertFrom-Json -AsHashtable
@@ -297,7 +306,19 @@ $checks = [ordered] @{
             if ($paid) { return "Free plans, except the declared Basic plan of $($paid -join ', '), which is Free while the system is dormant" }
             return 'every app runs on a Free plan'
         }
-        foreach ($e in $environments) { $a = Get-App $e; Assert-That ($a.properties.template.scale.minReplicas -eq 0) "$e has min replicas $($a.properties.template.scale.minReplicas)" }; 'every app scales to zero'
+        # Every container app scales to zero, except a deployable that system.json declares always on ("alwaysOn":
+        # true: a background service), which keeps exactly one replica: a declared cost, not an accident. With
+        # "alwaysOnEnvironments" it keeps that replica in those environments only and scales to zero in the others.
+        $declared = @($system.deployables | Where-Object { $_['alwaysOn'] -eq $true })
+        $alwaysOn = @($declared | ForEach-Object { [string] $_.name })
+        foreach ($e in $environments) {
+            foreach ($a in @(Get-ContainerApp $e)) {
+                $kept = @($declared | Where-Object { [string] $_.name -eq $a.deployable -and (-not $_['alwaysOnEnvironments'] -or @($_['alwaysOnEnvironments']) -ccontains $e) })
+                $want = if ($kept.Count -gt 0) { 1 } else { 0 }
+                Assert-That ($a.properties.template.scale.minReplicas -eq $want) "$($a.name) in $e has min replicas $($a.properties.template.scale.minReplicas); system.json declares $want"
+            }
+        }
+        if ($alwaysOn.Count -gt 0) { "every app scales to zero, except the declared always-on $($alwaysOn -join ', ') (one replica)" } else { 'every app scales to zero' }
     }
     'CAP-040' = { $d = Get-LastDeployment $deployableProject $first; Assert-That ($d.Log -match 'Acceptance tests passed') "the last deployment to $first ran no passing acceptance tests"; "$($d.Version) passed the acceptance tests in $first" }
     'CAP-041' = { $d = Get-LastDeployment $deployableProject $first; Assert-That ($d.Log -match 'test data was reloaded') 'no ZDataLoader'; "test data reloaded after $($d.Version)" }
@@ -399,6 +420,46 @@ $checks = [ordered] @{
     'CAP-053' = { $u = az account show --query user.type --output tsv; $me = Invoke-Octopus '/api/users/me'; Assert-That ($u -eq 'servicePrincipal' -and $me.IsService) "az $u, Octopus service $($me.IsService)"; "az as a service principal, Octopus as $($me.Username)" }
     'CAP-055' = { Assert-AppRepository; Assert-That ((Get-RequiredCheck $appRepo) -contains 'secret-scan' -and (Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'gitleaks') 'secret scanning not enforced'; 'gitleaks in env-checks and the required check secret-scan' }
     'CAP-056' = { $r = Get-RecentRun 'Rotate SQL password' 35; Assert-That ($r.Count -ge 1) 'no successful rotation in 35 days'; "rotated $($r[0].CompletedTime)" }
+    'CAP-057' = {
+        # A secret a deployable declares (system.json deployables[].secrets) reaches its app from the environment's
+        # vault by reference, as <deployable>-<name>; the app holds no secret as a stored value. The reference is read
+        # by the deployable's own identity (id-<slug>-<env>-<deployable>), not by the environment's shared runtime
+        # identity, which in that environment has no role on the vault as a whole and is closed to the app's code.
+        # Checked wherever the deployable has been deployed.
+        $with = @($system.deployables | Where-Object { @($_['secrets'] | Where-Object { $_ }).Count -gt 0 })
+        if ($with.Count -eq 0) { Skip-Check 'no deployable declares secrets yet' }
+        $shown = foreach ($entry in $with) {
+            $name = [string] $entry.name
+            foreach ($e in $environments) {
+                if ($entry.ContainsKey('environments') -and @($entry.environments) -notcontains $e) { continue }
+                if (-not (Find-LastDeployment "$slug-$name" $e)) { continue }
+                $app = @(Get-ContainerApp $e | Where-Object { $_.deployable -eq $name })[0]
+                Assert-That ($null -ne $app) "stack-$slug-$e lists no container app for $name (a failed or unfinished apply?)"
+                $shared = @($system.azure.identities.apps | Where-Object { $_.environment -eq $e })[0]
+                $held = @($app.properties.configuration['secrets'] | Where-Object { $_ })
+                $inline = @($held | Where-Object { -not $_['keyVaultUrl'] } | ForEach-Object { [string] $_.name })
+                Assert-That ($inline.Count -eq 0) "$($app.name) in $e holds $($inline -join ', ') as a stored value, not as a vault reference"
+                foreach ($secret in @($entry.secrets)) {
+                    $reference = @($held | Where-Object { $_.name -eq $secret.name })[0]
+                    Assert-That ($null -ne $reference -and ([string] $reference['keyVaultUrl']).EndsWith("/secrets/$name-$($secret.name)") -and $reference['identity']) "$($app.name) in $e does not reference the vault secret $name-$($secret.name) for $($secret.name)"
+                    Assert-That ([string] $reference.identity -like "*/userAssignedIdentities/id-$slug-$e-$name") "$($app.name) in $e reads $($secret.name) as $((([string] $reference.identity) -split '/')[-1]), not as its own identity id-$slug-$e-$name"
+                    $variable = @($app.properties.template.containers[0].env | Where-Object { $_.name -eq $secret.env })[0]
+                    Assert-That ($null -ne $variable -and $variable['secretRef'] -eq $secret.name) "$($app.name) in $e does not get $($secret.env) from the secret $($secret.name)"
+                }
+                # The shared identity pulls the image; the app's code must not be able to use it, and it must not
+                # read the vault as a whole (through the ARM API of the version that knows identitySettings).
+                $settings = @(az rest --method get --url "https://management.azure.com$($app.id)?api-version=2025-01-01" --query 'properties.configuration.identitySettings' --output json | ConvertFrom-Json -AsHashtable | Where-Object { $_ })
+                Assert-That (@($settings | Where-Object { [string] $_.identity -like "*/userAssignedIdentities/$($shared.name)" -and $_.lifecycle -eq 'None' }).Count -eq 1) "the code of $($app.name) in $e can use the shared runtime identity $($shared.name) (no identitySettings entry with lifecycle None)"
+                $vault = ([string] (az stack group show --name "stack-$slug-$e" --resource-group (Get-Group $e) --query outputs.keyVaultName.value --output tsv)).Trim()
+                $vaultId = "/subscriptions/$($system.azure.subscriptionId)/resourceGroups/$(Get-Group $e)/providers/Microsoft.KeyVault/vaults/$vault"
+                $wide = @(az role assignment list --scope $vaultId --query "[?principalId=='$($shared.principalId)'].roleDefinitionName" --output tsv | Where-Object { $_ })
+                Assert-That ($wide.Count -eq 0) "the shared runtime identity $($shared.name) holds $($wide -join ', ') on the whole vault $vault in ${e}: it could read the secrets of $name"
+                "$name in $e ($(@($entry.secrets).Count))"
+            }
+        }
+        if (-not $shown) { Skip-Check 'no deployable that declares secrets has been deployed yet' }
+        "every declared secret is a vault reference read by the deployable's own identity, out of reach of the shared runtime identity: $($shown -join ', ')"
+    }
     'CAP-060' = { $r = Get-RecentRun 'Restore test' 8; Assert-That ($r.Count -ge 1) 'no successful restore test in 8 days'; "restore test passed $($r[0].CompletedTime)" }
     'CAP-061' = { $prod = @(Get-ProdEnvironment)[0]; $d = Get-LastDeployment $deployableProject $prod; Assert-That ($d.Log -match 'Restore point before') "no restore point in the last $prod deployment"; "restore point recorded before $($d.Version) in $prod" }
     'CAP-070' = {
@@ -570,6 +631,23 @@ $checks = [ordered] @{
         }
         if (-not $shown) { Skip-Check 'no successful deployment of a deployable with a buildPath yet' }
         "every web app describes its build: $(@($shown) -join '; ')"
+    }
+    'CAP-083' = {
+        # What each environment costs, where a browser can read it: workflow delivery publishes cost.json next to
+        # delivery.json on branch status, no older than two days (Azure's cost data is a day behind), with every
+        # environment, what they share, and the system's month so far.
+        $branches = @(gh api "repos/$systemRepo/branches" --paginate --jq '.[].name')
+        if ($branches -notcontains 'status') { Skip-Check 'workflow delivery has not published branch status yet' }
+        $files = @(gh api "repos/$systemRepo/contents?ref=status" --jq '.[].name')
+        if ($files -notcontains 'cost.json') { Skip-Check 'branch status has no cost.json yet: the hourly run of workflow delivery writes it' }
+        $cost = Get-RepoFile $systemRepo 'cost.json?ref=status' | ConvertFrom-Json -AsHashtable
+        $asOf = [datetime]::ParseExact([string] $cost['asOf'], 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)
+        Assert-That ($asOf -gt [datetime]::UtcNow.AddDays(-3)) "cost.json on branch status is as of $($cost['asOf']): workflow delivery has not read the cost for more than two days"
+        $named = @($cost['environments'] | Where-Object { $_ } | ForEach-Object { [string] $_['name'] })
+        $absent = @(@($environments) + 'shared' | Where-Object { $named -notcontains $_ })
+        Assert-That ($absent.Count -eq 0) "cost.json does not list $($absent -join ', ')"
+        Assert-That ($cost['system'] -is [hashtable] -and $null -ne $cost.system['monthToDate']) 'cost.json has no cost of the system for the month: a resource group could not be read'
+        "cost as of $($cost['asOf']): $($cost['currency']) $($cost.system['monthToDate']) this month for $($named -join ', ')"
     }
     'CAP-080' = { $files = @(gh api "repos/$systemRepo/contents/docs/architecture" --jq '.[].name'); $missing = @($files | Where-Object { $_ -like '*.puml' -and $files -notcontains ($_ -replace '\.puml$', '.png') }); Assert-That ($missing.Count -eq 0 -and $files.Count -gt 0) "not rendered: $missing"; "$(@($files | Where-Object { $_ -like '*.png' }).Count) diagrams rendered" }
     'CAP-081' = {

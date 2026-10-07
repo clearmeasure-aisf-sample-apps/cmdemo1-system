@@ -43,6 +43,18 @@ locals {
     ]
   ])
 
+  # Deployable.Secrets: the names of the secrets a deployable declares (deployables[].secrets), joined by commas; step
+  # "Update deployable" stops when the app does not reference one of them yet. Only for a deployable that has some.
+  secret_variables = [
+    for name, d in local.deployables : {
+      key         = "${name}-secrets"
+      project     = octopusdeploy_project.deployable[name].id
+      name        = "Deployable.Secrets"
+      value       = join(",", [for s in d.secrets : s.name])
+      environment = null
+    } if length(try(d.secrets, [])) > 0
+  ]
+
   test_variables = flatten([
     for name, d in local.tested_deployables : [
       { key = "${name}-tests-assembly", project = octopusdeploy_project.deployable[name].id, name = "AcceptanceTests.Assembly", value = d.acceptanceTestsAssembly, environment = null },
@@ -78,7 +90,7 @@ locals {
     }
   ]
 
-  string_variables = { for v in concat(local.shared_variables, local.deployable_variables, local.test_variables, local.loader_variables, local.middle_name_variables) : v.key => v }
+  string_variables = { for v in concat(local.shared_variables, local.deployable_variables, local.secret_variables, local.test_variables, local.loader_variables, local.middle_name_variables) : v.key => v }
 }
 
 resource "octopusdeploy_variable" "string" {

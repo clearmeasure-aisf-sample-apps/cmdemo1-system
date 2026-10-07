@@ -42,6 +42,10 @@ locals {
   appservice_deployables = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "appservice" }
   static_deployables     = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "staticwebapp" }
   migrated_deployables   = { for name, d in local.deployables : name => d if try(d.databasePackage, "") != "" }
+  # deployables[].environments: a deployable that exists in some environments only (a container deployable; the rule
+  # is in scripts/test-system.ps1). It gets a lifecycle of its own with those environments, in the system's order, so
+  # Octopus offers its releases nowhere else.
+  restricted_deployables = { for name, d in local.deployables : name => d if can(d.environments) }
   # Environments whose app deployments run the acceptance tests (system.json environments[].acceptanceTests), and the
   # deployables that ship an acceptance-test package (deployables[].acceptanceTestsPackage).
   test_environments = [for name, e in local.environments : name if try(e.acceptanceTests, false)]
@@ -95,6 +99,24 @@ resource "octopusdeploy_lifecycle" "system" {
       name                         = phase.value.name
       automatic_deployment_targets = phase.key == 0 ? [octopusdeploy_environment.this[phase.value.name].id] : []
       optional_deployment_targets  = phase.key == 0 ? [] : [octopusdeploy_environment.this[phase.value.name].id]
+    }
+  }
+}
+
+# A deployable with deployables[].environments: the same order and rule (the first automatic, the others by
+# promotion), over its own environments only.
+resource "octopusdeploy_lifecycle" "deployable" {
+  for_each = local.restricted_deployables
+
+  name        = "${local.slug}-${each.key}-lifecycle"
+  description = "The environments ${each.key} exists in (system.json deployables[].environments), in the order of the system: the first is automatic, the others are promoted by a person."
+
+  dynamic "phase" {
+    for_each = [for e in local.system.environments : e.name if contains(each.value.environments, e.name)]
+    content {
+      name                         = phase.value
+      automatic_deployment_targets = phase.key == 0 ? [octopusdeploy_environment.this[phase.value].id] : []
+      optional_deployment_targets  = phase.key == 0 ? [] : [octopusdeploy_environment.this[phase.value].id]
     }
   }
 }
