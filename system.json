@@ -5,7 +5,8 @@
     "location": "southcentralus",
     "githubOrg": "clearmeasure-aisf-sample-apps",
     "repository": "cmdemo1-system",
-    "sqlLocation": "centralus"
+    "sqlLocation": "centralus",
+    "sqlSku": "Basic"
   },
   "azure": {
     "tenantId": "40645332-2e20-4bca-882c-b2706f93ce44",

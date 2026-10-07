@@ -33,6 +33,11 @@ $deployable = [string] $OctopusParameters['Deployable.Name']
 $port = [string] $OctopusParameters['Deployable.Port']
 $registry = [string] $OctopusParameters['Azure.RegistryServer']
 $version = [string] $OctopusParameters['Octopus.Release.Number']
+# A system without a container app has no registry (system.json has no azure.registry), and this step is not in its
+# projects; a container app without one cannot name its image.
+if (-not $registry) {
+    Fail-Step "Azure.RegistryServer is empty: system.json has no azure.registry, and the image of $deployable comes from the system's registry."
+}
 # The container app's name comes from the stack: a shared or moved Container Apps environment gives it a suffix.
 $stackOutputs = (az stack group show --name "stack-$slug-$environmentName" --resource-group $resourceGroup --output json | ConvertFrom-Json -AsHashtable).outputs
 $app = [string] (@($stackOutputs.deployables.value | Where-Object { $_.name -eq $deployable -and $_['hosting'] -ne 'appservice' }) | Select-Object -First 1).containerApp

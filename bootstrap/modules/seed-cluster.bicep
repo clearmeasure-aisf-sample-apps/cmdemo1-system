@@ -25,6 +25,12 @@ param planPrincipalId string
 @description('Name of the role "Deployment what-if (<slug>)" the seed defines.')
 param whatIfRoleName string
 
+@description('Principals of id-<slug>-deploy-<tier>: Octopus uploads a static site (hosting "staticwebapp") as them.')
+param deployPrincipalIds array
+
+@description('Name of the role "Static site deployment (<slug>)" the seed defines.')
+param siteDeployRoleName string
+
 resource pipeline 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-${slug}-cluster'
   location: location
@@ -58,6 +64,20 @@ module planReader 'role-assignment.bicep' = {
     description: 'id-${slug}-plan: what-if previews and drift checks of the cluster'
   }
 }
+
+// A deployable with hosting "staticwebapp" is a Static Web App of this group (infra/cluster.bicep creates it); its
+// Octopus project finds the site and reads its deployment token as the tier's deploy identity, with the seed's own
+// role for exactly that. Either tier's identity may read either tier's site: they share this group.
+module deploySites 'role-assignment.bicep' = [
+  for (principalId, i) in deployPrincipalIds: {
+    name: 'seed-${slug}-cluster-site-deploy-${i}'
+    params: {
+      principalId: principalId
+      roleDefinitionId: siteDeployRoleName
+      description: 'id-${slug}-deploy: finds the static sites of this group and reads their deployment tokens'
+    }
+  }
+]
 
 module planWhatIf 'role-assignment.bicep' = {
   name: 'seed-${slug}-cluster-what-if'

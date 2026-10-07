@@ -1,6 +1,9 @@
 # Operations runbooks of <slug>-system (environment-level work, run on a schedule):
 #   Restore test          weekly, first environment: point-in-time restore into a temporary database (CAP-060)
 #   Rotate SQL password   monthly, every environment: new administrator password through Key Vault (CAP-056)
+#   Health report         hourly, every environment: asks every node the environment's stack reports and its public
+#                         address, one line each; the last run per environment is the system's health in Octopus
+#                         (CAP-076)
 #   Failover test         only with a standby region (environments[].standbyLocation): stops the primary app and times
 #                         the Front Door endpoint's switch to the standby and back (CAP-047); it may run in every
 #                         environment with a standby, and is scheduled monthly in the nonprod ones
@@ -29,6 +32,14 @@ locals {
     }
   } : key => runbook if length(local.standby_environments) > 0 }
   runbooks = merge(local.failover_runbook, {
+    health_report = {
+      name         = "Health report"
+      description  = "Asks every node of the environment and its public address whether it answers, one line each with region, time and version; fails when one is not healthy (scripts/report-health.ps1)."
+      script       = "report-health.ps1"
+      environments = [for name, e in local.environments : name]
+      cron         = "0 ${local.schedule_minute} * * * *"
+      schedule     = "Hourly health report"
+    }
     restore_test = {
       name         = "Restore test"
       description  = "Restores the database to 15 minutes ago into a temporary database, checks it, and deletes it (scripts/test-restore.ps1)."
@@ -103,6 +114,9 @@ resource "octopusdeploy_project_scheduled_trigger" "runbook" {
   name        = each.value.schedule
   description = "${each.value.name}: ${each.value.description}"
   timezone    = "UTC"
+  # While the system is dormant (azure.frontDoor.dormant) nothing asks the apps on a schedule: a call an hour wakes
+  # each app, its message bus polls the database, and the database then never pauses.
+  is_disabled = each.key == "health_report" && try(local.system.azure.frontDoor.dormant, false)
 
   cron_expression_schedule {
     cron_expression = each.value.cron
