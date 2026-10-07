@@ -22,6 +22,10 @@
       deployable with an acceptance-test package.
     - octopus.approvers, where present, lists each person who may sign off once, by Octopus username or email address,
       without the system's service account; octopus.operator, where present, is a username.
+    - A container deployable's own keys, where present, have the shape infra/ and octopus/ read: environments (the
+      environments it exists in, the first one among them), alwaysOn and database (true or false), alwaysOnEnvironments
+      (environments of the deployable, with alwaysOn true), cpu, settings and
+      environmentSettings (environment variable to text), urlSetting, and secrets (name, env, generate; never a value).
 #>
 [CmdletBinding()]
 param(
@@ -94,6 +98,117 @@ foreach ($deployable in @($system.deployables)) {
         Test-Rule "deployable $($deployable.name) hosting" ($hostings -ccontains [string] $deployable.hosting) "'$($deployable.hosting)' is not one of $($hostings -join ', ') (containerapp when left out)"
     }
 }
+# A container deployable's own keys (infra/main.bicep and modules/containerapps.bicep read them; all optional):
+#   environments         the environments it exists in (the others get none of its resources, and its Octopus
+#                        lifecycle has only these); the system's first environment is among them, because every
+#                        release starts there
+#   alwaysOn             true: one replica that never scales to zero (a background service)
+#   alwaysOnEnvironments the environments in which alwaysOn applies (in the others the app scales to zero); left
+#                        out: every environment the deployable exists in
+#   database             false: no SQL connection string
+#   cpu                  0.5, 1, 1.5 or 2 vCPU, with twice as many GiB (the environment's appCpu when left out)
+#   settings             { "<environment variable>": "<text>" }, in every environment
+#   environmentSettings  { "<environment>": { "<environment variable>": "<text>" } }, on top of settings there
+#   urlSetting           the environment variable that gets the app's own public address
+#   secrets              [{ "name", "env", "generate" }]: environment variable <env> from the vault secret
+#                        <deployable>-<name>. The operator writes its value to the vault (the kit's
+#                        set-demo-secret.ps1); with "generate": true the deployment generates it. Never a value here.
+$environmentNamesDeclared = @($system.environments | ForEach-Object { [string] $_.name })
+$containerKeys = @('environments', 'alwaysOn', 'alwaysOnEnvironments', 'database', 'cpu', 'settings', 'environmentSettings', 'urlSetting', 'secrets')
+$variableName = '^[A-Za-z_][A-Za-z0-9_]{0,254}$'
+# Set by the template itself, or by Container Apps.
+$reservedVariables = @('ConnectionStrings__SqlConnectionString', 'OTEL_SERVICE_NAME', 'APPLICATIONINSIGHTS_CONNECTION_STRING')
+function Test-VariableName {
+    param($Name)
+    return $Name -is [string] -and $Name -cmatch $variableName -and $reservedVariables -cnotcontains $Name -and $Name -cnotmatch '^CONTAINER_APP_'
+}
+function Test-SettingMap {
+    # An object of environment variable names to text.
+    param($Map)
+    if ($Map -isnot [Collections.IDictionary]) { return $false }
+    return @($Map.GetEnumerator() | Where-Object { -not (Test-VariableName $_.Key) -or $_.Value -isnot [string] }).Count -eq 0
+}
+# The vault's own secrets (infra/modules/keyvault.bicep): a deployable's secret may not take one of their names.
+$vaultSecretNames = [Collections.Generic.List[string]] @('sql-admin-password', 'sql-connection-string')
+foreach ($login in @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' })) {
+    $vaultSecretNames.Add("$($login.name)-sql-password")
+    $vaultSecretNames.Add("$($login.name)-sql-connection-string")
+}
+foreach ($deployable in @($system.deployables)) {
+    $name = [string] $deployable.name
+    $used = @($containerKeys | Where-Object { $deployable.ContainsKey($_) })
+    if ($used.Count -eq 0) { continue }
+    $isContainer = -not $deployable.ContainsKey('hosting') -or $deployable.hosting -ceq 'containerapp'
+    Test-Rule "deployable $name $($used -join ', ') on a container app" $isContainer "these keys apply to hosting containerapp only; $name has hosting '$($deployable['hosting'])'"
+    if (-not $isContainer) { continue }
+
+    $here = $environmentNamesDeclared
+    if ($deployable.ContainsKey('environments')) {
+        $listed = $deployable.environments
+        $valid = $listed -is [array] -and $listed.Count -gt 0 -and @($listed | Where-Object { $_ -isnot [string] -or $environmentNamesDeclared -cnotcontains $_ }).Count -eq 0 -and
+            @($listed | Select-Object -Unique).Count -eq $listed.Count
+        Test-Rule "deployable $name environments" $valid "a list of environments of system.json, each once: $($environmentNamesDeclared -join ', ')"
+        if ($valid) {
+            Test-Rule "deployable $name environments with the first" ($listed -ccontains $environmentNamesDeclared[0]) "every release starts in $($environmentNamesDeclared[0]): it must be among the deployable's environments"
+            $here = @($listed)
+        }
+    }
+    foreach ($key in 'alwaysOn', 'database') {
+        if ($deployable.ContainsKey($key)) { Test-Rule "deployable $name $key" ($deployable[$key] -is [bool]) 'true or false' }
+    }
+    if ($deployable.ContainsKey('alwaysOnEnvironments')) {
+        $kept = $deployable.alwaysOnEnvironments
+        $valid = $kept -is [array] -and $kept.Count -gt 0 -and @($kept | Where-Object { $_ -isnot [string] -or $here -cnotcontains $_ }).Count -eq 0 -and
+            @($kept | Select-Object -Unique).Count -eq $kept.Count
+        Test-Rule "deployable $name alwaysOnEnvironments" $valid "a list of the deployable's environments, each once: $($here -join ', ')"
+        Test-Rule "deployable $name alwaysOnEnvironments with alwaysOn" ($deployable['alwaysOn'] -eq $true) 'alwaysOnEnvironments says where "alwaysOn": true applies: it needs that key'
+    }
+    if ($deployable.ContainsKey('cpu')) {
+        Test-Rule "deployable $name cpu" ($deployable.cpu -is [string] -and @('0.5', '1', '1.5', '2') -ccontains $deployable.cpu) 'one of "0.5", "1", "1.5", "2" (vCPU, as text; the memory is twice as many GiB)'
+    }
+
+    # Every environment variable has one source: a setting (settings, with environmentSettings on top), the app's own
+    # address (urlSetting) or a secret.
+    $settingNames = [Collections.Generic.List[string]]::new()
+    if ($deployable.ContainsKey('settings')) {
+        $valid = Test-SettingMap $deployable.settings
+        Test-Rule "deployable $name settings" $valid 'an object of environment variable names (letters, digits and _, not one the template sets itself) to text'
+        if ($valid) { $settingNames.AddRange([string[]] @($deployable.settings.Keys)) }
+    }
+    if ($deployable.ContainsKey('environmentSettings')) {
+        $perEnvironment = $deployable.environmentSettings
+        $valid = $perEnvironment -is [Collections.IDictionary] -and @($perEnvironment.GetEnumerator() | Where-Object { $here -cnotcontains $_.Key -or -not (Test-SettingMap $_.Value) }).Count -eq 0
+        Test-Rule "deployable $name environmentSettings" $valid "an object of environment ($($here -join ', ')) to an object of environment variable names to text"
+        if ($valid) { foreach ($map in $perEnvironment.Values) { $settingNames.AddRange([string[]] @($map.Keys)) } }
+    }
+    $sources = [Collections.Generic.List[string]] @($settingNames | Select-Object -Unique)
+    if ($deployable.ContainsKey('urlSetting')) {
+        Test-Rule "deployable $name urlSetting" (Test-VariableName $deployable.urlSetting) 'the name of the environment variable that gets the app''s own public address'
+        $sources.Add([string] $deployable.urlSetting)
+    }
+    if ($deployable.ContainsKey('secrets')) {
+        $secrets = $deployable.secrets
+        $valid = $secrets -is [array] -and @($secrets | Where-Object {
+                $_ -isnot [Collections.IDictionary] -or @($_.Keys | Where-Object { @('name', 'env', 'generate') -cnotcontains $_ }).Count -gt 0 -or
+                $_['name'] -isnot [string] -or $_['name'] -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?$' -or $_['name'] -cmatch '--' -or
+                -not (Test-VariableName $_['env']) -or ($_.ContainsKey('generate') -and $_.generate -isnot [bool])
+            }).Count -eq 0
+        Test-Rule "deployable $name secrets" $valid 'a list of { "name": lowercase letters, digits and inner hyphens (up to 60), "env": the environment variable, "generate": true or false }; no other key: a secret''s value never goes into system.json'
+        if ($valid) {
+            $secretNames = @($secrets | ForEach-Object { [string] $_.name })
+            Test-Rule "deployable $name secret names unique" (@($secretNames | Select-Object -Unique).Count -eq $secretNames.Count -and $secretNames -cnotcontains 'sql-connection-string') 'each name once, and not sql-connection-string (the app''s own reference to the database)'
+            foreach ($secret in $secrets) {
+                $vaultName = "$name-$($secret.name)"
+                Test-Rule "deployable $name secret $($secret.name) vault name" ($vaultSecretNames -cnotcontains $vaultName) "the vault already has a secret $vaultName (the template's own, or another deployable's)"
+                $vaultSecretNames.Add($vaultName)
+                $sources.Add([string] $secret.env)
+            }
+        }
+    }
+    $twice = @($sources | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name)
+    Test-Rule "deployable $name environment variables have one source" ($twice.Count -eq 0) "set by more than one of settings, urlSetting and secrets: $($twice -join ', ')"
+}
+
 # A container app's image comes from the system's registry (azure.registry { name, loginServer }, from the seed). A
 # system whose deployables all run on App Service or Static Web Apps has no registry, and no azure.registry.
 if (@($system.deployables | Where-Object { -not $_.ContainsKey('hosting') -or $_.hosting -ceq 'containerapp' }).Count -gt 0) {
@@ -172,6 +287,9 @@ foreach ($environment in $system.environments) {
     $versions = Get-Content -LiteralPath $versionsFile -Raw | ConvertFrom-Json -AsHashtable
     $unknown = @($versions.Keys | Where-Object { $deployableNames -notcontains $_ })
     Test-Rule "environment $name versions.json keys" ($unknown.Count -eq 0) "unknown deployables: $($unknown -join ', ')"
+    # A deployable with "environments" exists only there: another environment cannot pin a version of it.
+    $elsewhere = @($system.deployables | Where-Object { $_.ContainsKey('environments') -and $_.environments -is [array] -and $_.environments -cnotcontains $name -and $versions.ContainsKey([string] $_.name) } | ForEach-Object { [string] $_.name })
+    if ($elsewhere.Count -gt 0) { Test-Rule "environment $name versions.json pins only its own deployables" $false "$($elsewhere -join ', ') do not exist in $name (deployables[].environments)" }
 }
 
 # Optional: the size of a tier's App Service plan, { "<tier>": "F1" | "B1" } (F1, the Free plan, when left out).

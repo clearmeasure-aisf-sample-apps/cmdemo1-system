@@ -21,6 +21,19 @@ param loginPasswords object = {}
 @secure()
 param loginConnectionStrings object = {}
 
+@description('Vault names of the generated secrets of container deployables (<deployable>-<secret>).')
+param generatedSecretNames array = []
+@description('Value of each generated secret, by vault name.')
+@secure()
+param generatedSecrets object = {}
+
+@description('True in an environment with a container deployable that has an identity of its own for its secrets: the reader identities (the shared runtime identity) then read only the SQL connection string, not every secret of the vault.')
+param narrowReaders bool = false
+@description('The identity of each container deployable that declares secrets: { deployable, principalId }.')
+param secretIdentities array = []
+@description('The existing secrets of those deployables, each read by its deployable\'s identity only: { deployable, vaultName }.')
+param secretGrants array = []
+
 resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: name
   location: location
@@ -39,7 +52,7 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
 }
 
 resource readers 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for principalId in readerPrincipalIds: {
+  for principalId in (narrowReaders ? [] : readerPrincipalIds): {
     name: guid(vault.id, principalId, 'secrets-user')
     scope: vault
     properties: {
@@ -83,6 +96,21 @@ resource connectionString 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   ]
 }
 
+// With narrowReaders the shared runtime identity gets the one secret its apps reference instead of the vault: the
+// secrets of a deployable with an identity of its own are then out of its reach. The stack removes the vault-wide
+// assignment at the end of the apply that adds this one, so the apps never lack access in between.
+resource connectionStringReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for principalId in (narrowReaders ? readerPrincipalIds : []): {
+    name: guid(vault.id, principalId, 'sql-connection-string-user')
+    scope: connectionString
+    properties: {
+      principalId: principalId
+      principalType: 'ServicePrincipal'
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+    }
+  }
+]
+
 // A login's password (read by the deploy identity's grant step) and its connection string, which only the
 // deployable's own identity may read: the role is assigned on the secret, not on the vault.
 resource loginPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [
@@ -122,7 +150,47 @@ resource loginReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
   }
 ]
 
+// A secret the deployment generates for a container deployable (system.json deployables[].secrets[] with "generate":
+// true): apply-environment.ps1 keeps its value, as it keeps the SQL passwords. Operator-supplied secrets are not here:
+// the operator writes them to the vault (data plane), and the container app references them by name.
+resource generatedSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [
+  for name in generatedSecretNames: {
+    parent: vault
+    name: name
+    properties: {
+      value: generatedSecrets[name]
+      contentType: 'text/plain'
+    }
+  }
+]
+
+// Each secret of a container deployable, generated or supplied, is read by that deployable's own identity and by no
+// other runtime identity: the role is on the secret, not on the vault. A supplied secret is no resource of this stack
+// (the operator wrote it), so it is referred to as existing; its role assignment is the stack's.
+resource grantedSecrets 'Microsoft.KeyVault/vaults/secrets@2023-07-01' existing = [
+  for g in secretGrants: {
+    parent: vault
+    name: g.vaultName
+  }
+]
+
+resource secretReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (g, i) in secretGrants: {
+    name: guid(vault.id, g.vaultName, g.deployable, 'deployable-secret-user')
+    scope: grantedSecrets[i]
+    properties: {
+      principalId: first(filter(secretIdentities, s => s.deployable == g.deployable))!.principalId
+      principalType: 'ServicePrincipal'
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+    }
+    dependsOn: [
+      generatedSecret
+    ]
+  }
+]
+
 output name string = vault.name
+output vaultUri string = vault.properties.vaultUri
 output loginConnectionStringUris array = [
   for (l, i) in logins: '${vault.properties.vaultUri}secrets/${loginConnectionString[i].name}'
 ]

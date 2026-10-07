@@ -65,6 +65,19 @@ foreach ($entry in $system.environments) {
     $versionsFile = Join-Path $Root 'environments' $name 'versions.json'
     $versions = if (Test-Path -LiteralPath $versionsFile) { Get-Content -LiteralPath $versionsFile -Raw | ConvertFrom-Json -AsHashtable } else { @{} }
 
+    # Secrets of the container deployables of this environment (deployables[].secrets), by vault name
+    # <deployable>-<secret>: the preview shows the desired state, so every operator-supplied secret counts as present
+    # (an app that does not reference one yet differs from Git), and a generated one gets a throwaway value.
+    $presentSecrets = [Collections.Generic.List[string]]::new()
+    $generatedSecrets = @{}
+    foreach ($deployable in @($system.deployables | Where-Object { -not $_.ContainsKey('environments') -or @($_.environments) -contains $name })) {
+        if ($deployable.ContainsKey('hosting') -and $deployable.hosting -ne 'containerapp') { continue }
+        foreach ($secret in @($deployable['secrets'] | Where-Object { $_ })) {
+            if ($secret['generate'] -eq $true) { $generatedSecrets["$($deployable.name)-$($secret.name)"] = "Preview-$([Guid]::NewGuid().ToString('N'))" }
+            else { $presentSecrets.Add("$($deployable.name)-$($secret.name)") }
+        }
+    }
+
     $parameters = @{
         '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
         contentVersion = '1.0.0.0'
@@ -73,6 +86,8 @@ foreach ($entry in $system.environments) {
             versions          = @{ value = $versions }
             sqlAdminPassword  = @{ value = "Preview-$([Guid]::NewGuid().ToString('N'))" }
             deployPrincipalId = @{ value = [string] $system.azure.identities.deploy[[string] $entry.tier].principalId }
+            presentSecrets    = @{ value = @($presentSecrets) }
+            generatedSecrets  = @{ value = $generatedSecrets }
         }
     }
     $parametersFile = Join-Path ([IO.Path]::GetTempPath()) "preview-$name-$([Guid]::NewGuid().ToString('N')).json"

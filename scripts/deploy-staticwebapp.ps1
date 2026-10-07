@@ -36,6 +36,8 @@
                                 calls
          system.deliveryUrl     https://raw.githubusercontent.com/<githubOrg>/<repository>/status/delivery.json: the
                                 delivery facts a workflow of the system repository publishes to its branch "status"
+         system.costUrl         https://raw.githubusercontent.com/<githubOrg>/<repository>/status/cost.json: what each
+                                environment cost in Azure, which the same workflow publishes next to it
          links                  where a number or a name of the page leads, all in the Azure portal, which asks the
                                 viewer to sign in (the page holds no credential). Resource ids are conventions over
                                 system.json (azure.subscriptionId, azure.resourceGroups, the names the stack gives):
@@ -259,6 +261,9 @@ function ConvertTo-Topology {
             # repository publishes them to its branch "status"; until it has, the address answers 404 and the
             # dashboard shows no delivery.
             deliveryUrl = if ($repository) { "https://raw.githubusercontent.com/$repository/status/delivery.json" } else { $null }
+            # What each environment cost in Azure (yesterday, seven days, the month to date): the same workflow publishes
+            # it next to the delivery facts, hourly; until it has, the dashboard shows no cost.
+            costUrl     = if ($repository) { "https://raw.githubusercontent.com/$repository/status/cost.json" } else { $null }
         }
         generated    = $Generated.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
         environments = $environments
@@ -797,6 +802,9 @@ foreach ($environment in $topology.environments) {
 Write-Host "Links into the Azure portal: $linkCount (web apps, Application Insights, databases, Front Door, resource groups); the portal asks the viewer to sign in."
 if ($topology.system.deliveryUrl) {
     Write-Host "Delivery facts: the dashboard reads $($topology.system.deliveryUrl) (published by the system repository's workflow; shown once the file exists)."
+}
+if ($topology.system.costUrl) {
+    Write-Host "Cost: the dashboard reads $($topology.system.costUrl) (published by the same workflow, hourly; shown once the file exists)."
 }
 
 # The runtime diagrams, next to topology.json: one C4 deployment view per environment, rendered here (the browser has

@@ -22,6 +22,13 @@ param deployPrincipalId string
 @secure()
 param loginPasswords object = {}
 
+@description('Vault names (<deployable>-<secret>) of the operator-supplied secrets of container deployables that exist in the environment\'s vault; apply-environment.ps1 lists them. A container app references only the secrets named here.')
+param presentSecrets array = []
+
+@description('Value of each generated secret of a container deployable (deployables[].secrets[] with "generate": true), by vault name (<deployable>-<secret>); apply-environment.ps1 reads them from the vault, or generates them for a new secret.')
+@secure()
+param generatedSecrets object = {}
+
 var system = loadJsonContent('../system.json')
 var slug = system.system.slug
 var location = system.system.location
@@ -73,8 +80,64 @@ var sqlServerFqdn = '${sqlServerName}${az.environment().suffixes.sqlServerHostna
 // schema: the app creates its message queues at startup); the others share it, read and write.
 // deployables[].hosting "staticwebapp": a site of static files on Azure Static Web Apps (modules/staticwebapp.bicep):
 // the health dashboard, which has no server, no identity and no database login.
-var hostedDeployables = map(system.deployables, d => union({ hosting: 'containerapp' }, d))
-var containerDeployables = filter(hostedDeployables, d => d.hosting == 'containerapp')
+// deployables[].environments (container deployables only, scripts/test-system.ps1): the environments the deployable
+// exists in; left out, it exists in every environment. An environment it does not name gets none of its resources.
+var hostedDeployables = filter(
+  map(system.deployables, d => union({ hosting: 'containerapp', environments: [environmentName] }, d)),
+  d => contains(d.environments, environmentName)
+)
+// A container deployable may declare more (all optional, modules/containerapps.bicep): a size of its own (cpu), one
+// replica that never scales to zero (alwaysOn; only in the environments alwaysOnEnvironments names, when it names
+// any), no database (database false: no SQL connection string), plain
+// settings as environment variables (settings, and environmentSettings.<env> on top of them), its own public address
+// as a setting (urlSetting), and secrets from the environment's vault (secrets: operator-supplied, or generated).
+var containerDefaults = {
+  cpu: string(environment.appCpu)
+  alwaysOn: false
+  alwaysOnEnvironments: []
+  database: true
+  settings: {}
+  environmentSettings: {}
+  urlSetting: ''
+  secrets: []
+}
+var containerDeployables = map(
+  filter(hostedDeployables, d => d.hosting == 'containerapp'),
+  d => union(containerDefaults, d)
+)
+// A secret's vault name is <deployable>-<secret>. A generated one is a secret of this stack (modules/keyvault.bicep);
+// an operator-supplied one is written to the vault by the operator (the kit's set-demo-secret.ps1) and is no resource
+// of the stack: the app references it once it exists (presentSecrets).
+var containerSecrets = flatten(map(
+  containerDeployables,
+  d => map(d.secrets, s => union({ generate: false }, s, { deployable: d.name, vaultName: '${d.name}-${s.name}' }))
+))
+var generatedSecretNames = map(filter(containerSecrets, s => s.generate), s => s.vaultName)
+// A container deployable that declares secrets reads them as an identity of its own, id-<slug>-<env>-<deployable>,
+// which may read exactly its own secrets (a role on each secret, modules/keyvault.bicep). The environment's shared
+// runtime identity still pulls its image, but its code cannot use that identity (modules/containerapps.bicep), and in
+// an environment with such a deployable the shared identity reads only the SQL connection string, not the vault.
+var secretDeployables = filter(containerDeployables, d => !empty(d.secrets))
+var containerApps = map(containerDeployables, d => {
+  name: d.name
+  port: d.port
+  healthPath: d.healthPath
+  cpu: string(d.cpu)
+  alwaysOn: d.alwaysOn && (empty(d.alwaysOnEnvironments) || contains(d.alwaysOnEnvironments, environmentName))
+  database: d.database
+  urlSetting: d.urlSetting
+  secretIdentityId: empty(d.secrets)
+    ? ''
+    : resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', 'id-${slug}-${environmentName}-${d.name}')
+  settings: map(
+    items(union(d.settings, d.environmentSettings[?environmentName] ?? {})),
+    s => { name: s.key, value: string(s.value) }
+  )
+  secrets: filter(
+    containerSecrets,
+    s => s.deployable == d.name && (s.generate || contains(presentSecrets, s.vaultName))
+  )
+})
 var appServiceDeployables = filter(hostedDeployables, d => d.hosting == 'appservice')
 var staticDeployables = filter(hostedDeployables, d => d.hosting == 'staticwebapp')
 // The Free plan of Static Web Apps exists in a few regions only; the files are served from edge locations everywhere,
@@ -86,6 +149,15 @@ var staticLocation = union({ staticLocation: 'centralus' }, system.system).stati
 // sites of all environments, of both tiers; the endpoints it calls are public health and version endpoints that
 // answer anyone anyway; and no credentials are sent or allowed. Without a static deployable nothing is set.
 var corsAllowedOrigins = empty(staticDeployables) ? [] : ['*']
+
+// In the system's region, like the vault: a placement move of the apps leaves the identity and its roles as they are.
+resource secretIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = [
+  for d in secretDeployables: {
+    name: 'id-${slug}-${environmentName}-${d.name}'
+    location: location
+    tags: union(tags, { deployable: d.name })
+  }
+]
 
 resource loginIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = [
   for d in appServiceDeployables: {
@@ -143,6 +215,20 @@ module vault 'modules/keyvault.bicep' = {
       }
     ]
     loginPasswords: loginPasswords
+    generatedSecretNames: generatedSecretNames
+    generatedSecrets: generatedSecrets
+    narrowReaders: !empty(secretDeployables)
+    secretIdentities: [
+      for (d, i) in secretDeployables: {
+        deployable: d.name
+        principalId: secretIdentities[i].properties.principalId
+      }
+    ]
+    // Only the secrets that exist: the generated ones, and the supplied ones the operator has written.
+    secretGrants: map(
+      filter(containerSecrets, s => s.generate || contains(presentSecrets, s.vaultName)),
+      s => { deployable: s.deployable, vaultName: s.vaultName }
+    )
     loginConnectionStrings: toObject(
       appServiceDeployables,
       d => d.name,
@@ -230,16 +316,19 @@ module staticSites 'modules/staticwebapp.bicep' = if (!empty(staticDeployables))
 // no registry either (system.json then has no azure.registry: the seed creates none).
 module apps 'modules/containerapps.bicep' = if (!empty(containerDeployables)) {
   name: 'apps-${environmentName}'
+  dependsOn: [
+    secretIdentities
+  ]
   params: {
     slug: slug
     environmentName: environmentName
     managedEnvironmentName: managedEnvironmentName
     ownsManagedEnvironment: ownsManagedEnvironment
     appNameSuffix: appNameSuffix
-    appCpu: string(environment.appCpu)
     location: appLocation
     tags: tags
-    deployables: containerDeployables
+    deployables: containerApps
+    vaultUri: vault.outputs.vaultUri
     versions: versions
     registryServer: union({ registry: { loginServer: '' } }, system.azure).registry.loginServer
     identityResourceId: app.resourceId
