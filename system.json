@@ -158,6 +158,12 @@
           "generate": true
         }
       ]
+    },
+    {
+      "name": "dashboard",
+      "repository": "cmdemo1-dashboard",
+      "hosting": "staticwebapp",
+      "healthPath": "/"
     }
   ],
   "environments": [
