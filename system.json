@@ -90,6 +90,11 @@
       "port": 8080,
       "healthPath": "/_healthcheck",
       "buildPath": "/_build",
+      "telemetryPath": "/_telemetry",
+      "trafficPaths": [
+        "/",
+        "/api/work-orders/status-counts"
+      ],
       "databasePackage": "ChurchBulletin.Database",
       "databaseAssembly": "ClearMeasure.Bootcamp.Database.dll",
       "acceptanceTestsPackage": "ChurchBulletin.AcceptanceTests",
@@ -103,6 +108,11 @@
       "hosting": "appservice",
       "healthPath": "/_healthcheck",
       "buildPath": "/_build",
+      "telemetryPath": "/_telemetry",
+      "trafficPaths": [
+        "/",
+        "/api/work-orders/status-counts"
+      ],
       "startupAssembly": "ClearMeasure.Bootcamp.UI.Server.dll"
     },
     {
@@ -166,7 +176,8 @@
       "name": "dashboard",
       "repository": "cmdemo1-dashboard",
       "hosting": "staticwebapp",
-      "healthPath": "/"
+      "healthPath": "/",
+      "buildPath": "/build-facts.json"
     }
   ],
   "environments": [
