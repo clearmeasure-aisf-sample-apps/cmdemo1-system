@@ -39,6 +39,12 @@
                                 delivery facts a workflow of the system repository publishes to its branch "status"
          system.costUrl         https://raw.githubusercontent.com/<githubOrg>/<repository>/status/cost.json: what each
                                 environment cost in Azure, which the same workflow publishes next to it
+         system.dashboard       { name, buildPath }: this deployable itself, when system.json gives it a buildPath
+                                (deployables[<this deployable>].buildPath, "/build-facts.json": the file the
+                                dashboard's Build writes next to index.html) and the release has that file. The page
+                                reads it from its own address and shows the Code card of the dashboard. Without the
+                                key in system.json the topology has no such entry and is as before; a release from
+                                before the Build wrote the file gets none either, which is logged as information
          links                  where a number or a name of the page leads, all in the Azure portal, which asks the
                                 viewer to sign in (the page holds no credential). Resource ids are conventions over
                                 system.json (azure.subscriptionId, azure.resourceGroups, the names the stack gives):
@@ -149,11 +155,15 @@ function ConvertTo-Topology {
     # resource groups and the names the stack gives its resources; without azure.subscriptionId there are none. Only
     # the SQL server's name is not a convention (it ends in a generated suffix): -SqlServer gives it per environment,
     # and an environment without an entry gets no database link.
+    # -Dashboard names the deployable that is the dashboard itself (the one this step deploys): when system.json gives
+    # it a buildPath, the topology says so as system.dashboard, and the page shows its own Code card. Without the
+    # parameter, or without the buildPath, the topology has no such key.
     param(
         [Parameter(Mandatory)] [hashtable] $System,
         [hashtable] $EndpointHost = @{},
         [hashtable] $SqlServer = @{},
-        [datetime] $Generated = [datetime]::UtcNow
+        [datetime] $Generated = [datetime]::UtcNow,
+        [string] $Dashboard = ''
     )
     $slug = [string] $System.system.slug
     $location = [string] $System.system.location
@@ -261,19 +271,24 @@ function ConvertTo-Topology {
                 deployables        = $deployables
             }
         })
+    $about = [ordered] @{
+        slug        = $slug
+        name        = [string] $System.system['name']
+        repository  = if ($repository) { "https://github.com/$repository" } else { $null }
+        # The delivery facts (who deployed what when, lead time, the last failover test): a workflow of the system
+        # repository publishes them to its branch "status"; until it has, the address answers 404 and the
+        # dashboard shows no delivery.
+        deliveryUrl = if ($repository) { "https://raw.githubusercontent.com/$repository/status/delivery.json" } else { $null }
+        # What each environment cost in Azure (yesterday, seven days, the month to date): the same workflow publishes
+        # it next to the delivery facts, hourly; until it has, the dashboard shows no cost.
+        costUrl     = if ($repository) { "https://raw.githubusercontent.com/$repository/status/cost.json" } else { $null }
+    }
+    # The dashboard itself and where its site serves the facts of its own build (deployables[].buildPath of the
+    # dashboard's deployable): the page reads that file from its own address. No key without it.
+    $self = @($System.deployables | Where-Object { $Dashboard -and $_ -and [string] $_['name'] -eq $Dashboard -and $_['buildPath'] }) | Select-Object -First 1
+    if ($self) { $about.dashboard = [ordered] @{ name = [string] $self.name; buildPath = [string] $self.buildPath } }
     return [ordered] @{
-        system       = [ordered] @{
-            slug        = $slug
-            name        = [string] $System.system['name']
-            repository  = if ($repository) { "https://github.com/$repository" } else { $null }
-            # The delivery facts (who deployed what when, lead time, the last failover test): a workflow of the system
-            # repository publishes them to its branch "status"; until it has, the address answers 404 and the
-            # dashboard shows no delivery.
-            deliveryUrl = if ($repository) { "https://raw.githubusercontent.com/$repository/status/delivery.json" } else { $null }
-            # What each environment cost in Azure (yesterday, seven days, the month to date): the same workflow publishes
-            # it next to the delivery facts, hourly; until it has, the dashboard shows no cost.
-            costUrl     = if ($repository) { "https://raw.githubusercontent.com/$repository/status/cost.json" } else { $null }
-        }
+        system       = $about
         generated    = $Generated.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
         environments = $environments
     }
@@ -839,7 +854,19 @@ foreach ($tier in @($system.environments | ForEach-Object { [string] $_['tier'] 
     }
 }
 
-$topology = ConvertTo-Topology -System $system -EndpointHost $endpointHosts -SqlServer $sqlServers
+$topology = ConvertTo-Topology -System $system -EndpointHost $endpointHosts -SqlServer $sqlServers -Dashboard $name
+# The page reads its own build facts only where the release has them: a release from before the dashboard's Build wrote
+# the file would have the page ask for a file its site does not serve.
+if ($topology.system.Contains('dashboard')) {
+    $ownFacts = [string] $topology.system.dashboard.buildPath
+    if (Test-Path -LiteralPath (Join-Path $folder $ownFacts.TrimStart('/')) -PathType Leaf) {
+        Write-Host "Code metrics of $name itself: the page reads $ownFacts from its own address (system.json, buildPath of $name)."
+    }
+    else {
+        Write-Host "system.json says $name serves its code metrics at $ownFacts, and release $version has no such file (a release from before the dashboard's Build wrote it): the page shows no Code card of its own until a newer release is deployed."
+        $topology.system.Remove('dashboard')
+    }
+}
 $nodeCount = 0
 $addressCount = 0
 foreach ($environment in $topology.environments) {

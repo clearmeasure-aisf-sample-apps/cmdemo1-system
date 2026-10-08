@@ -90,7 +90,21 @@ locals {
     }
   ]
 
-  string_variables = { for v in concat(local.shared_variables, local.deployable_variables, local.secret_variables, local.test_variables, local.loader_variables, local.middle_name_variables) : v.key => v }
+  # System.HealthPaths: the health path system.json declares for each container deployable, as JSON
+  # ({ "<name>": "<path>" }), in the system project once the runbook "Restart apps" exists. The runbook asks an app that
+  # runs a release on that path: the stack's output names "/" for a deployable that had no version at the
+  # environment's last apply, and "/" answers while the app's own health check fails.
+  health_path_variables = [
+    for key in ["system-health-paths"] : {
+      key         = key
+      project     = octopusdeploy_project.system.id
+      name        = "System.HealthPaths"
+      value       = jsonencode({ for name, d in local.container_deployables : name => d.healthPath })
+      environment = null
+    } if length(local.secret_deployables) > 0
+  ]
+
+  string_variables = { for v in concat(local.shared_variables, local.deployable_variables, local.secret_variables, local.test_variables, local.loader_variables, local.middle_name_variables, local.health_path_variables) : v.key => v }
 }
 
 resource "octopusdeploy_variable" "string" {

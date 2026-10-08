@@ -8,8 +8,10 @@
 #                         the Front Door endpoint's switch to the standby and back (CAP-047); it may run in every
 #                         environment with a standby, and is scheduled monthly in the nonprod ones
 #   Restart apps          only with a deployable that declares secrets (deployables[].secrets): restarts the container
-#                         apps that read secrets of their own, so they read the values the operator wrote to the vault;
-#                         on demand in every environment, never on a schedule
+#                         apps that read secrets of their own and waits until each answers its health path. A value
+#                         the operator wrote to the vault reaches an app when Container Apps reads it, within 30
+#                         minutes of the write, not with the restart: the runbook waits that long and says what it
+#                         saw. On demand in every environment, never on a schedule
 # A schedule runs the runbook's published snapshot; the system workflow publishes one after every apply.
 # The instance's task cap is shared by every system on it, so each system's schedules start at its own time: an offset
 # of 0 to 239 minutes derived from the slug (the same on every apply), after 07:00 UTC for the restore test and after
@@ -38,7 +40,7 @@ locals {
   restart_runbook = { for key, runbook in {
     restart_apps = {
       name         = "Restart apps"
-      description  = "Restarts the latest revision of every container app that reads secrets of its own from the vault (${join(", ", local.secret_deployables)}), so it reads their current values, and checks its health (scripts/restart-apps.ps1)."
+      description  = "Restarts the latest revision of every container app that reads secrets of its own from the vault (${join(", ", local.secret_deployables)}) and waits until it answers its health path. Container Apps reads a changed vault secret within 30 minutes of the write and restarts the revision itself; the restart does not fetch it, so the run can take that long, and says when an app may still hold the earlier value (scripts/restart-apps.ps1)."
       script       = "restart-apps.ps1"
       environments = [for name, e in local.environments : name]
       scheduled_in = []
