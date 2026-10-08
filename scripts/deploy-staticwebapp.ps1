@@ -12,10 +12,18 @@
     index.html at its root), extracted. The site is the one the stack created (stack output deployables[].staticSite).
 
     1. topology.json, written next to index.html (the contract is in the dashboard repository's README): every
-       environment of system.json on main and, in each, every deployable with hosting "appservice", with its nodes by
-       naming convention: app-<slug>-<env>-<deployable> in system.location (primary) and, when the environment has a
-       standbyLocation, app-<slug>-<env>-<deployable>-<region> (standby). An environment with capability "frontdoor"
-       also gets the address of its Front Door endpoint, read from the system's profile (azure.frontDoor).
+       environment of system.json on main and, in each, the deployables whose nodes are known:
+       - hosting "appservice": its nodes by naming convention, app-<slug>-<env>-<deployable> in system.location
+         (primary) and, when the environment has a standbyLocation, app-<slug>-<env>-<deployable>-<region>
+         (standby). An environment with capability "frontdoor" also gets the address of its Front Door endpoint,
+         read from the system's profile (azure.frontDoor).
+       - hosting "own": what the application reported when it was last verified there, the deployable's entry in
+         environments/<env>/nodes.json on main (scripts/record-nodes.ps1 records it): its nodes, its paths and
+         its own public address. What system.json says of every deployable comes with it (projectUrl, telemetryPath,
+         trafficPaths, buildPath, healthDetailPath, below); a health path it did not report is the deployable's
+         healthPath of system.json. It has no links: the system does not know the application's resources. Without
+         a record in an environment the deployable is left out of that environment, and the log says so. A record
+         that breaks the rules stops the step: it would break the dashboard's page.
        Container-app deployables are left out: their address is not a convention (the platform generates it, and a
        placement changes it), so the dashboard does not show them.
        The topology also says where the dashboard finds what the deployments pinned. Every address is a convention
@@ -39,6 +47,9 @@
                                 delivery facts a workflow of the system repository publishes to its branch "status"
          system.costUrl         https://raw.githubusercontent.com/<githubOrg>/<repository>/status/cost.json: what each
                                 environment cost in Azure, which the same workflow publishes next to it
+         system.deploymentsUrl  https://raw.githubusercontent.com/<githubOrg>/<repository>/deployments/deployments.json:
+                                the deployments in flight, which workflow deployments publishes to its branch
+                                "deployments" (scripts/write-deployments.ps1)
          system.dashboard       { name, buildPath }: this deployable itself, when system.json gives it a buildPath
                                 (deployables[<this deployable>].buildPath, "/build-facts.json": the file the
                                 dashboard's Build writes next to index.html) and the release has that file. The page
@@ -67,7 +78,11 @@
        system.location, standby, the database's system.sqlLocation, the static sites' system.staticLocation) > App
        Service plan (asp-<slug>-<first environment of the tier>, asp-<slug>-<first environment of the tier with that
        standby>-<region>; size system.planSku.<tier>, F1 without it and while azure.frontDoor.dormant) > web app; the
-       Front Door endpoint in the profile; the database sqldb-<slug>-<env>; the static sites; the browser. Outside the
+       Front Door endpoint in the profile; the database sqldb-<slug>-<env>, in an environment that has one (an app in
+       it uses it: the rule of infra/main.bicep); the static sites; the browser. An application that brings its own
+       runtime (hosting "own") is drawn outside the subscription, in a boundary of its own, because the system does
+       not know where it runs: its public address when it reported one, and its nodes by the regions they name, each
+       with the tile of a web app; the browser calls the public address, or each node without one. Outside the
        subscription, one box per dependency a deployable declares (system.json deployables[].dependencies, a list of
        { "name": "LLM gateway", "healthCheck": "LlmGateway", "kind": "external" }: the name shown, the entry of the
        detailed health check that tells its state, and what it is, free text), with an arrow from each of the
@@ -84,8 +99,9 @@
        reaches the CLI through an environment variable, and is never stored, printed or passed as an argument.
     4. The proof: the site serves the topology this step wrote.
 
-    The topology is a picture of system.json at the time of the deployment. After a change to the environments, a
-    standby region or a Front Door endpoint, deploy the dashboard's release again in every environment that has it:
+    The topology is a picture of system.json and the recorded nodes at the time of the deployment. After a change to
+    the environments, a standby region or a Front Door endpoint, or a deployment of an application with hosting "own"
+    that changed its nodes, deploy the dashboard's release again in every environment that has it:
     until then its page shows the old picture, the runtime diagrams too. An environment that is in system.json but not applied yet shows its
     nodes as unreachable. The pinned versions are not part of the picture: the dashboard reads versions.json itself,
     every time it checks the nodes.
@@ -147,8 +163,10 @@ function Get-LogsAddress {
 }
 
 function ConvertTo-Topology {
-    # The dashboard's topology from system.json (parsed, as a hashtable) and the host name of each Front Door endpoint
-    # by endpoint name (<slug>-<env>-<deployable>). It asks nothing: the same input gives the same topology.
+    # The dashboard's topology from system.json (parsed, as a hashtable), the host name of each Front Door endpoint
+    # by endpoint name (<slug>-<env>-<deployable>), and the recorded nodes of the deployables with hosting "own" by
+    # environment and deployable (each as ConvertTo-NodeRecord returns it). It asks nothing: the same input gives the
+    # same topology. The deployables keep the order of system.json.
     # The addresses of the pinned versions and of the Octopus projects are conventions over system.json; one whose
     # parts system.json lacks is null, which the dashboard reads as "not there".
     # The links (where a number of the page leads in the Azure portal) are conventions too, over the subscription, the
@@ -158,16 +176,21 @@ function ConvertTo-Topology {
     # -Dashboard names the deployable that is the dashboard itself (the one this step deploys): when system.json gives
     # it a buildPath, the topology says so as system.dashboard, and the page shows its own Code card. Without the
     # parameter, or without the buildPath, the topology has no such key.
+    # A deployable with hosting "own" has the same entry as any other, from two sources: its nodes, its public
+    # address and its paths are what its application reported (-NodeRecord; a path it did not report is the
+    # deployable's healthPath of system.json, or left out, and the dashboard then asks its own default), and
+    # everything else is what system.json says of every deployable (projectUrl, telemetryPath, trafficPaths,
+    # buildPath, healthDetailPath). It has no links: the system does not know the application's resources.
     param(
         [Parameter(Mandatory)] [hashtable] $System,
         [hashtable] $EndpointHost = @{},
         [hashtable] $SqlServer = @{},
+        [hashtable] $NodeRecord = @{},
         [datetime] $Generated = [datetime]::UtcNow,
         [string] $Dashboard = ''
     )
     $slug = [string] $System.system.slug
     $location = [string] $System.system.location
-    $apps = @($System.deployables | Where-Object { $_['hosting'] -eq 'appservice' })
     $githubOrg = [string] $System.system['githubOrg']
     $repositoryName = [string] $System.system['repository']
     $repository = if ($githubOrg -and $repositoryName) { "$githubOrg/$repositoryName" } else { '' }
@@ -203,7 +226,33 @@ function ConvertTo-Topology {
                 $environmentLinks.database = Get-PortalAddress -ResourceId "$group/providers/Microsoft.Sql/servers/$server/databases/sqldb-$slug-$environmentName" -TenantId $tenantId
             }
             if ($group) { $environmentLinks.resourceGroup = Get-PortalAddress -ResourceId $group -TenantId $tenantId }
-            $deployables = @(foreach ($app in $apps) {
+            $recorded = if ($NodeRecord[$environmentName] -is [Collections.IDictionary]) { $NodeRecord[$environmentName] } else { @{} }
+            $deployables = @(foreach ($app in @($System.deployables)) {
+                    if ($app['hosting'] -eq 'own') {
+                        # What the application reported when it was last verified here; without a record it is left
+                        # out of this environment.
+                        $record = $recorded[[string] $app.name]
+                        if ($record -isnot [Collections.IDictionary]) { continue }
+                        $entry = [ordered] @{
+                            name       = [string] $app.name
+                            projectUrl = if ($projects) { "$projects/$slug-$($app.name)" } else { $null }
+                            frontDoor  = if ($record.Contains('frontDoor')) { $record['frontDoor'] } else { $null }
+                        }
+                        if ($record.Contains('healthPath')) { $entry.healthPath = $record['healthPath'] }
+                        elseif ($app['healthPath']) { $entry.healthPath = [string] $app.healthPath }
+                        foreach ($key in 'alivePath', 'versionPath') {
+                            if ($record.Contains($key)) { $entry[$key] = $record[$key] }
+                        }
+                        $entry.telemetryPath = if ($app['telemetryPath']) { [string] $app.telemetryPath } else { $null }
+                        $entry.trafficPaths = if ($app['trafficPaths']) { , @($app.trafficPaths | ForEach-Object { [string] $_ }) } else { $null }
+                        $entry.buildPath = if ($app['buildPath']) { [string] $app.buildPath } else { $null }
+                        $entry.healthDetailPath = if ($app['healthDetailPath']) { [string] $app.healthDetailPath } else { $null }
+                        $entry.links = [ordered] @{}
+                        $entry.nodes = @($record['nodes'])
+                        $entry
+                        continue
+                    }
+                    if ($app['hosting'] -ne 'appservice') { continue }
                     $primary = "app-$slug-$environmentName-$($app.name)"
                     $nodes = @([ordered] @{ name = $primary; region = $location; role = 'primary'; url = "https://$primary.azurewebsites.net" })
                     if ($standbyLocation) {
@@ -272,16 +321,19 @@ function ConvertTo-Topology {
             }
         })
     $about = [ordered] @{
-        slug        = $slug
-        name        = [string] $System.system['name']
-        repository  = if ($repository) { "https://github.com/$repository" } else { $null }
+        slug           = $slug
+        name           = [string] $System.system['name']
+        repository     = if ($repository) { "https://github.com/$repository" } else { $null }
         # The delivery facts (who deployed what when, lead time, the last failover test): a workflow of the system
         # repository publishes them to its branch "status"; until it has, the address answers 404 and the
         # dashboard shows no delivery.
-        deliveryUrl = if ($repository) { "https://raw.githubusercontent.com/$repository/status/delivery.json" } else { $null }
+        deliveryUrl    = if ($repository) { "https://raw.githubusercontent.com/$repository/status/delivery.json" } else { $null }
         # What each environment cost in Azure (yesterday, seven days, the month to date): the same workflow publishes
         # it next to the delivery facts, hourly; until it has, the dashboard shows no cost.
-        costUrl     = if ($repository) { "https://raw.githubusercontent.com/$repository/status/cost.json" } else { $null }
+        costUrl        = if ($repository) { "https://raw.githubusercontent.com/$repository/status/cost.json" } else { $null }
+        # What is being deployed (queued, running, waiting for a sign-off, just ended): workflow deployments of the
+        # system repository publishes it to its branch "deployments"; until it has, the dashboard marks nothing.
+        deploymentsUrl = if ($repository) { "https://raw.githubusercontent.com/$repository/deployments/deployments.json" } else { $null }
     }
     # The dashboard itself and where its site serves the facts of its own build (deployables[].buildPath of the
     # dashboard's deployable): the page reads that file from its own address. No key without it.
@@ -292,6 +344,184 @@ function ConvertTo-Topology {
         generated    = $Generated.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
         environments = $environments
     }
+}
+
+function ConvertTo-NodeRecord {
+    # One deployable's nodes, as its verify.ps1 reported them or as environments/<env>/nodes.json records them,
+    # reduced to the fields the dashboard's topology knows, in one order. Returns Record ($null when a rule is
+    # broken) and Problems (every broken rule, by field; never the value, which is the application's text). It asks
+    # nothing: the same input gives the same result.
+    # scripts/record-nodes.ps1, scripts/deploy-staticwebapp.ps1 and scripts/report-health.ps1 hold this function,
+    # line for line: octopus/ inlines one file per step, so they cannot share it.
+    #
+    # Every value is an application's text and ends in a public file, in the source of a diagram, in a page and in
+    # addresses that are asked. So each field has an allow-list, and a value outside it makes the record invalid:
+    # nothing is stripped or repaired.
+    #   name, region        one line: ASCII letters, digits, space and . _ - ; a letter or a digit first; at most 100
+    #                       characters for a name, 40 for a region. That holds every name Azure allows for what an
+    #                       application runs on (container apps, web apps, static sites, Front Door endpoints: letters,
+    #                       digits and hyphens; clusters and virtual machines: also _ and .), a host name, and a
+    #                       region by its name (eastus2) or its display name (East US 2). No [ ] < > % ! $ quote,
+    #                       backslash or control character can occur.
+    #   url, frontDoor      https://, a public host name, optionally a port, optionally a path of letters, digits and
+    #                       . _ ~ - /; at most 300 characters. No user name, no query, no fragment and no percent sign:
+    #                       the address is a base the dashboard adds paths to, and it is written into a diagram as a
+    #                       link. A public host name: at least two labels of letters, digits and hyphens, the last one
+    #                       starting with a letter (so no IP address in any spelling) and none of localhost, local,
+    #                       internal and svc. Not http, and no address inside a network: the record is read by a
+    #                       page in anyone's browser, which an https page does not let ask http, and by the hourly
+    #                       Health report, whose worker must not be sent to ask an address inside its own network
+    #                       (a metadata service, a container engine, a cluster's own API). The real guard there is
+    #                       https itself: a worker that checks certificates does not talk to a host that cannot
+    #                       show one for the name. The names are refused so that such a record is not written.
+    #   healthPath, alivePath, versionPath   / first, then letters, digits, . _ ~ - / ? & = and %XX; at most 200
+    #                       characters.
+    #   healthReport        true or false. false: the hourly Health report does not ask these nodes (it would wake
+    #                       a node that scaled to zero, every hour); the dashboard shows them all the same.
+    #   nodes               at most 100. An application in every Azure region has fewer; each is a tile and a box of
+    #                       a diagram that is rendered at every deployment of the dashboard.
+    # At most 20 problems are named, with the number of the others: a report of a hundred broken nodes is one line of
+    # a log, not three hundred.
+    param([AllowNull()] [object] $Value)
+    $problems = [Collections.Generic.List[string]]::new()
+    if ($Value -isnot [Collections.IDictionary]) {
+        return @{ Record = $null; Problems = [string[]] @('one JSON object is expected') }
+    }
+    $label = '^[A-Za-z0-9][A-Za-z0-9 ._-]*\z'
+    $longest = @{ name = 100; region = 40 }
+    $path = '^/(?:[A-Za-z0-9._~/?&=-]|%[0-9A-Fa-f]{2})*\z'
+    $isAddress = {
+        param([AllowNull()] [object] $Text)
+        $address = $null
+        $Text -is [string] -and $Text.Trim().Length -le 300 -and
+        $Text.Trim() -cmatch '^https://(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+(?<last>[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?)(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~/-]*)?\z' -and
+        $Matches['last'] -notin 'localhost', 'local', 'internal', 'svc' -and
+        [uri]::TryCreate($Text.Trim(), [UriKind]::Absolute, [ref] $address) -and $address.Scheme -ceq 'https' -and $address.HostNameType -eq [UriHostNameType]::Dns
+    }
+    $addressRule = 'not an https address with a public host name (https://, a host name of at least two labels whose last starts with a letter and is none of localhost, local, internal and svc, an optional port and a path of letters, digits and . _ ~ - /, at most 300 characters; no http, IP address, user name, query, fragment or percent sign)'
+    $record = [ordered] @{}
+    if ($Value.Contains('frontDoor') -and $null -ne $Value['frontDoor']) {
+        if (& $isAddress $Value['frontDoor']) { $record.frontDoor = ([string] $Value['frontDoor']).Trim() }
+        else { $problems.Add("frontDoor: $addressRule") }
+    }
+    foreach ($key in 'healthPath', 'alivePath', 'versionPath') {
+        if (-not $Value.Contains($key) -or $null -eq $Value[$key]) { continue }
+        if ($Value[$key] -is [string] -and $Value[$key].Length -le 200 -and $Value[$key] -cmatch $path) { $record[$key] = [string] $Value[$key] }
+        else { $problems.Add("${key}: not a path that starts with / (then letters, digits, . _ ~ - / ? & = and %XX; at most 200 characters)") }
+    }
+    if ($Value.Contains('healthReport') -and $null -ne $Value['healthReport']) {
+        if ($Value['healthReport'] -is [bool]) { $record.healthReport = [bool] $Value['healthReport'] }
+        else { $problems.Add('healthReport: not true or false') }
+    }
+    # Not as the value of an if: that would unroll a list of one node into the node.
+    $listed = $null
+    if ($Value.Contains('nodes')) { $listed = $Value['nodes'] }
+    if ($listed -isnot [array] -or $listed.Count -eq 0) {
+        $problems.Add('nodes: a list of at least one node is required')
+    }
+    elseif ($listed.Count -gt 100) {
+        $problems.Add("nodes: $($listed.Count) nodes, and a record holds at most 100")
+    }
+    else {
+        $nodes = [Collections.Generic.List[object]]::new()
+        $seen = @{}
+        for ($index = 0; $index -lt $listed.Count; $index++) {
+            $entry = $listed[$index]
+            if ($entry -isnot [Collections.IDictionary]) { $problems.Add("nodes[$index]: not an object"); continue }
+            $node = [ordered] @{}
+            foreach ($key in 'name', 'region', 'role') {
+                if (-not $entry.Contains($key) -or $null -eq $entry[$key]) { continue }
+                if ($entry[$key] -isnot [string] -or -not $entry[$key].Trim()) { $problems.Add("nodes[$index].${key}: not a text"); continue }
+                $text = $entry[$key].Trim()
+                if ($key -ne 'role' -and ($text.Length -gt $longest[$key] -or $text -cnotmatch $label)) {
+                    $problems.Add("nodes[$index].${key}: not one line of at most $($longest[$key]) characters of letters, digits, spaces and . _ - that starts with a letter or a digit")
+                    continue
+                }
+                $node[$key] = $text
+            }
+            if ($node.Contains('role') -and $node.role -cnotin 'primary', 'standby') { $problems.Add("nodes[$index].role: not primary or standby") }
+            if (-not $entry.Contains('url') -or -not (& $isAddress $entry['url'])) { $problems.Add("nodes[$index].url: missing or $addressRule"); continue }
+            $node.url = ([string] $entry['url']).Trim()
+            $address = $node.url.TrimEnd('/').ToLowerInvariant()
+            if ($seen.ContainsKey($address)) { $problems.Add("nodes[$index].url: the same address as nodes[$($seen[$address])]"); continue }
+            $seen[$address] = $index
+            $nodes.Add($node)
+        }
+        $record.nodes = $nodes.ToArray()
+    }
+    if ($problems.Count -gt 20) {
+        $others = $problems.Count - 20
+        $problems.RemoveRange(20, $others)
+        $problems.Add("and $others more")
+    }
+    if ($problems.Count -gt 0) { return @{ Record = $null; Problems = [string[]] $problems.ToArray() } }
+    return @{ Record = $record; Problems = [string[]] @() }
+}
+
+function Measure-Topology {
+    # What a topology holds, for the step's summary line: its environments, its nodes (those by naming convention and
+    # those an application reported) and its public addresses.
+    param([Parameter(Mandatory)] [Collections.IDictionary] $Topology)
+    $nodes = 0
+    $addresses = 0
+    foreach ($environment in @($Topology['environments'])) {
+        foreach ($deployable in @($environment['deployables'])) {
+            $nodes += @($deployable['nodes']).Count
+            if ($deployable['frontDoor']) { $addresses++ }
+        }
+    }
+    return @{ Environments = @($Topology['environments']).Count; Nodes = $nodes; Addresses = $addresses }
+}
+
+function Read-MainFile {
+    # The text of a file of the system repository on main, or $null when main has no such file (404).
+    param([Parameter(Mandatory)] [string] $Path)
+    try {
+        $file = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/contents/${Path}?ref=main" -Headers $headers
+    }
+    catch {
+        # Not every failure has a response (a name that does not resolve).
+        $response = if ($_.Exception.PSObject.Properties['Response']) { $_.Exception.Response } else { $null }
+        if ($response -and [int] $response.StatusCode -eq 404) { return $null }
+        throw
+    }
+    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($file.content -replace '\s', '')))
+}
+
+function Read-NodeRecord {
+    # The nodes of the deployables with hosting "own", by environment and deployable: only the application knows what
+    # it runs on, and its step "Record nodes" records what it reported in environments/<env>/nodes.json on main
+    # (scripts/record-nodes.ps1). Read for every environment, as the topology shows them all. A deployable
+    # without a record in an environment is left out there, with one line that says so; a record that breaks the
+    # rules stops the step, because the dashboard shows nothing at all when one entry of its topology is wrong.
+    param([Parameter(Mandatory)] [hashtable] $System)
+    $records = @{}
+    $owners = @($System.deployables | Where-Object { $_['hosting'] -eq 'own' } | ForEach-Object { [string] $_.name })
+    if ($owners.Count -eq 0) { return $records }
+    foreach ($environment in @($System.environments | ForEach-Object { [string] $_.name })) {
+        $path = "environments/$environment/nodes.json"
+        $text = Read-MainFile -Path $path
+        $recorded = $null
+        if ($null -ne $text) {
+            $recorded = try { $text | ConvertFrom-Json -AsHashtable -NoEnumerate } catch { $null }
+            if ($recorded -isnot [Collections.IDictionary]) {
+                Fail-Step "$path on main of $repository is not a JSON object: correct it by pull request, then deploy $name $version to $environmentName again."
+            }
+        }
+        $records[$environment] = @{}
+        foreach ($owner in $owners) {
+            if ($null -eq $recorded -or -not $recorded.Contains($owner)) {
+                Write-Host "No nodes of $owner are recorded for $environment ($path on main): the dashboard leaves $owner out of $environment until its application reports them there and this release is deployed again."
+                continue
+            }
+            $checked = ConvertTo-NodeRecord $recorded[$owner]
+            if ($checked.Problems.Count -gt 0) {
+                Fail-Step "$path on main of $repository records nodes of $owner that break the rules: $($checked.Problems -join '; '). The next deployment of $owner to $environment writes the record anew; then deploy $name $version to $environmentName again."
+            }
+            $records[$environment][$owner] = $checked.Record
+        }
+    }
+    return $records
 }
 
 function New-TransparentPng {
@@ -355,11 +585,23 @@ function ConvertTo-RuntimeDiagram {
     #   swa_<d>                     the Static Web App of a static deployable (the dashboard)
     #   dep_<d>_<n>                 a dependency of a deployable (system.json deployables[].dependencies), outside the
     #                               subscription; <n> is its name, written as <d> is
+    #   own_<d>                     boundary: the runtime of a deployable with hosting "own", outside the subscription,
+    #                               because the system does not know where the application runs. In it, what the
+    #                               application reported for this environment (the deployable's entry of the topology):
+    #   fd_<d>                        its public address, when it reported one
+    #   region_own_<d>_<n>            boundaries: one per region its nodes name, numbered in the order of the report
+    #                                 (nodes without a region share one)
+    #   app_<d>_<n>                   its nodes, numbered in the order of the report; kind "webapp" in the manifest, so
+    #                                 the dashboard draws the same tile as for a web app
     # Every relationship has the id "<from>-to-<to>" (PlantUML's own form): browser-to-fd_<d>, fd_<d>-to-app_<d>_primary
     # (origin, priority 1), fd_<d>-to-app_<d>_standby (priority 2), app_<d>_<role>-to-sqldb, browser-to-swa_<d>, and
     # without a Front Door endpoint browser-to-app_<d>_<role>. The id is how the SVG names the drawn link, and a web
     # app's relationship to a dependency is drawn from the dependency's side (see Add-Edge): its id is
     # dep_<d>_<n>-to-app_<d>_<role>, while its "from" is the web app and its "to" the dependency.
+    # A deployable with hosting "own": browser-to-fd_<d> and fd_<d>-to-app_<d>_<n> (origin; priority 1 for a node with
+    # the role primary, 2 for a standby: the system does not know how the application's public address routes), or
+    # browser-to-app_<d>_<n> without a public address. No relationship to the database: the system does not know
+    # what such an application stores its data in.
     #
     # Slots: every node's description is a transparent image of a fixed size, and so is the description of every
     # origin, database and dependency relationship and of every region: the dashboard draws the live values into those
@@ -385,9 +627,25 @@ function ConvertTo-RuntimeDiagram {
     $planSkus = if ($System.system['planSku']) { $System.system.planSku } else { @{} }
     $size = if (-not $dormant -and $planSkus[$tier]) { [string] $planSkus[$tier] } else { 'F1' }
     $sameTier = @($System.environments | Where-Object { [string] $_['tier'] -eq $tier })
-    $statics = @($System.deployables | Where-Object { $_['hosting'] -eq 'staticwebapp' })
+    # A static site may name the environments it exists in (deployables[].environments): it is drawn only there.
+    $statics = @($System.deployables | Where-Object { $_['hosting'] -eq 'staticwebapp' -and (-not $_['environments'] -or @($_['environments']) -contains $Environment) })
     $topologyEnvironment = @($Topology.environments | Where-Object { $_.name -eq $Environment }) | Select-Object -First 1
-    $apps = if ($topologyEnvironment) { @($topologyEnvironment.deployables) } else { @() }
+    # The deployables of the topology by their hosting in system.json: the App Service apps are drawn in the system's
+    # own resources (plans, regions, the Front Door profile), the applications that bring their own runtime (hosting
+    # "own") in a boundary of their own with what they reported.
+    $hostingOf = @{}
+    foreach ($declared in @($System.deployables)) { $hostingOf[[string] $declared.name] = if ($declared['hosting']) { [string] $declared.hosting } else { 'containerapp' } }
+    $listed = if ($topologyEnvironment) { @($topologyEnvironment.deployables) } else { @() }
+    $apps = @($listed | Where-Object { $hostingOf[[string] $_.name] -ne 'own' })
+    $owns = @($listed | Where-Object { $hostingOf[[string] $_.name] -eq 'own' })
+    # The environment has a database when an app in it uses one: the rule of infra/main.bicep (hasDatabase). A
+    # container deployable uses it unless it says "database": false, and an App Service deployable shares it; a
+    # deployable exists in every environment unless it names some (deployables[].environments).
+    $hasDatabase = @($System.deployables | Where-Object {
+            $hosting = if ($_['hosting']) { [string] $_.hosting } else { 'containerapp' }
+            $here = -not $_['environments'] -or @($_['environments']) -contains $Environment
+            $here -and (($hosting -eq 'containerapp' -and $_['database'] -ne $false) -or $hosting -eq 'appservice')
+        }).Count -gt 0
 
     $aliasOf = @{}
     function Get-DeployableAlias {
@@ -400,6 +658,34 @@ function ConvertTo-RuntimeDiagram {
         $alias
     }
     function Get-Quoted { param([string] $Text) '"' + ($Text -replace '"', "'") + '"' }
+    # What an application reported (a name, a region, an address) is not the kit's text, and PlantUML reads more than
+    # words: [[ ]] is a link, < > a tag, %name() a function of its preprocessor, a line that starts with ! a
+    # directive. ConvertTo-NodeRecord refuses such a value before it is recorded; the record on main may still be
+    # older than that rule, or written by hand, so the source is not built on trust. A reported text is written with
+    # letters, digits, space and . _ - only (the characters the record allows), every other character (a line break
+    # too) as "_", and cut at its length; a reported address becomes a link only when it is an https address with a
+    # public host name, by the rule of the record. Neither can fail: a diagram with an odd label is drawn, where a refused one would stop the dashboard's
+    # deployment.
+    function Get-Reported {
+        param([AllowNull()] [AllowEmptyString()] [string] $Text, [int] $Longest = 100)
+        $plain = "$Text" -replace '[^A-Za-z0-9 ._-]', '_'
+        if ($plain.Length -gt $Longest) { $plain = $plain.Substring(0, $Longest) }
+        $plain
+    }
+    function Get-ReportedHost {
+        # The host name of a reported address, '' when it has none that can be read.
+        param([AllowNull()] [AllowEmptyString()] [string] $Url)
+        $address = $null
+        if ([uri]::TryCreate("$Url", [UriKind]::Absolute, [ref] $address) -and $address.Scheme -cin 'http', 'https') { return Get-Reported ([string] $address.Host) 253 }
+        return ''
+    }
+    function Get-ReportedLink {
+        # A reported address as the target of a link in the diagram, '' when it is not an https address with a public
+        # host name (the rule of ConvertTo-NodeRecord).
+        param([AllowNull()] [AllowEmptyString()] [string] $Url)
+        if ("$Url".Length -le 300 -and "$Url" -cmatch '^https://(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+(?<last>[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?)(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~/-]*)?\z' -and $Matches['last'] -notin 'localhost', 'local', 'internal', 'svc') { return "$Url" }
+        return ''
+    }
 
     # Slots: the room for a tile, a region's label and a number line of a relationship (pixels; the dashboard's
     # runtime.js draws into them and assumes nothing about their size but what the SVG says).
@@ -422,7 +708,7 @@ function ConvertTo-RuntimeDiagram {
     # outside the subscription. The alias is made of both names; two that give the same alias are an error.
     $dependenciesOf = [ordered] @{}
     $dependencyAlias = @{}
-    foreach ($app in $apps) {
+    foreach ($app in @($apps) + @($owns)) {
         $declared = @($System.deployables | Where-Object { [string] $_.name -eq [string] $app.name }) | Select-Object -First 1
         if (-not $declared -or -not $declared['dependencies']) { continue }
         $position = 0
@@ -457,7 +743,7 @@ function ConvertTo-RuntimeDiagram {
         if ($standbyLocation) { Add-Region $standbyLocation 'standby' }
         Add-Region $location 'primary'
     }
-    Add-Region $sqlLocation 'data'
+    if ($hasDatabase) { Add-Region $sqlLocation 'data' }
     if ($statics.Count -gt 0) { Add-Region $staticLocation 'static' }
 
     $nodes = [Collections.Generic.List[object]]::new()
@@ -485,7 +771,7 @@ function ConvertTo-RuntimeDiagram {
         # A public address as the arrow's label: the host name, and when that is long its start, an ellipsis and the
         # registered domain, so "cmdemo2-prod-ui-a2b5hkfrchg3ckew.z02.azurefd.net" reads "cmdemo2-prod-ui-a2…azurefd.net".
         param([string] $Url, [int] $Length = 30)
-        $name = ([uri] $Url).Host
+        $name = Get-ReportedHost $Url
         if ($name.Length -le $Length) { return $name }
         $domain = ($name -split '\.' | Select-Object -Last 2) -join '.'
         $start = [Math]::Max(4, $Length - $domain.Length - 1)
@@ -585,6 +871,62 @@ function ConvertTo-RuntimeDiagram {
     $lines.Add('  }')
     $lines.Add('}')
 
+    # The applications that bring their own runtime, each in a boundary of its own outside the subscription: its public
+    # address when it reported one, and its nodes by the region they name. $webApps: the aliases of every deployable's
+    # drawn nodes, for the relationships below.
+    $webApps = [ordered] @{}
+    foreach ($app in $apps) {
+        $key = Get-DeployableAlias $app.name
+        $webApps[[string] $app.name] = @($app.nodes | ForEach-Object { [string] $_.role } | Where-Object { $_ -in 'primary', 'standby' } | ForEach-Object { "app_${key}_$_" })
+    }
+    $ownNodes = [ordered] @{}
+    foreach ($own in $owns) {
+        $key = Get-DeployableAlias $own.name
+        $boundary = "own_$key"
+        $slot = if ($own['healthDetailPath']) { $tileSlotWithChecks } else { $tileSlot }
+        $ownName = Get-Reported ([string] $own.name)
+        $lines.Add("Boundary($boundary, $(Get-Quoted $ownName), `$type=`"runtime of its own`", `$tags=`"scope`") {")
+        if ($own['frontDoor']) {
+            $address = [string] $own.frontDoor
+            $lines.Add("  Container(fd_$key, $(Get-Quoted (Get-ShortHost $address 40)), $(Get-Quoted "public address of $ownName"), $(Get-Quoted $endpointSlot))")
+            Add-Node ([ordered] @{ alias = "fd_$key"; qualifiedName = "$boundary.fd_$key"; kind = 'frontdoor'; deployable = [string] $own.name; name = Get-ReportedHost $address; url = $(if (Get-ReportedLink $address) { $address } else { $null }) })
+        }
+        # The nodes by region, in the order of the report; a node without a role is the primary when it is the first
+        # and a standby otherwise, as the dashboard reads the topology.
+        $byRegion = [ordered] @{}
+        $position = 0
+        $drawn = [Collections.Generic.List[object]]::new()
+        foreach ($node in @($own.nodes)) {
+            $position++
+            $regionName = if ($node['region']) { [string] $node.region } else { '' }
+            if (-not $byRegion.Contains($regionName)) { $byRegion[$regionName] = [Collections.Generic.List[object]]::new() }
+            $entry = [ordered] @{
+                alias = "app_${key}_$position"
+                name  = if ($node['name']) { Get-Reported ([string] $node.name) } else { Get-ReportedHost ([string] $node.url) }
+                role  = if ([string] $node['role'] -cin 'primary', 'standby') { [string] $node.role } elseif ($position -eq 1) { 'primary' } else { 'standby' }
+                url   = [string] $node.url
+            }
+            $byRegion[$regionName].Add($entry)
+            $drawn.Add($entry)
+        }
+        $number = 0
+        foreach ($regionName in $byRegion.Keys) {
+            $number++
+            $regionAlias = "region_own_${key}_$number"
+            $shown = if ($regionName) { Get-Reported $regionName 40 } else { 'region not reported' }
+            $lines.Add("  Deployment_Node($regionAlias, $(Get-Quoted $shown), $(Get-Quoted "region of $ownName"), $(Get-Quoted $regionSlot), `$tags=`"region`") {")
+            $regionManifest.Add([ordered] @{ alias = $regionAlias; qualifiedName = "$boundary.$regionAlias"; name = $shown; roles = @($byRegion[$regionName] | ForEach-Object { $_.role } | Select-Object -Unique) })
+            foreach ($entry in $byRegion[$regionName]) {
+                $lines.Add("    Container($($entry.alias), $(Get-Quoted $entry.name), $(Get-Quoted "node of $ownName"), $(Get-Quoted $slot))")
+                Add-Node ([ordered] @{ alias = $entry.alias; qualifiedName = "$boundary.$regionAlias.$($entry.alias)"; kind = 'webapp'; deployable = [string] $own.name; name = $entry.name; role = $entry.role; region = $(if ($regionName) { $shown } else { $null }); regionAlias = $regionAlias; url = $(if (Get-ReportedLink $entry.url) { $entry.url } else { $null }) })
+            }
+            $lines.Add('  }')
+        }
+        $lines.Add('}')
+        $ownNodes[[string] $own.name] = @($drawn)
+        $webApps[[string] $own.name] = @($drawn | ForEach-Object { $_.alias })
+    }
+
     # What the deployables depend on and the system does not own: outside the subscription, each with a small tile.
     foreach ($name in $dependenciesOf.Keys) {
         foreach ($dependency in $dependenciesOf[$name]) {
@@ -612,22 +954,39 @@ function ConvertTo-RuntimeDiagram {
             }
         }
     }
-    foreach ($app in $apps) {
-        $key = Get-DeployableAlias $app.name
-        foreach ($role in @($app.nodes | ForEach-Object { [string] $_.role } | Where-Object { $_ -in 'primary', 'standby' })) {
-            Add-Edge "app_${key}_$role" 'sqldb' 'sql' 'reads and writes' 'TCP 1433' $true
+    # An application with its own runtime: the browser to its public address and that to every node, or the browser
+    # to each node where it reported no public address.
+    foreach ($own in $owns) {
+        $key = Get-DeployableAlias $own.name
+        if ($own['frontDoor']) {
+            Add-Edge 'browser' "fd_$key" 'public' (Get-ShortHost ([string] $own.frontDoor)) 'HTTPS' $true 0 (Get-ReportedLink ([string] $own.frontDoor))
+            foreach ($entry in $ownNodes[[string] $own.name]) {
+                $priority = if ($entry.role -eq 'primary') { 1 } else { 2 }
+                Add-Edge "fd_$key" $entry.alias 'origin' "origin, $($entry.role)" 'HTTPS' $true $priority
+            }
+        }
+        else {
+            foreach ($entry in $ownNodes[[string] $own.name]) {
+                Add-Edge 'browser' $entry.alias 'public' (Get-ShortHost $entry.url) 'HTTPS' $true 0 (Get-ReportedLink $entry.url)
+            }
         }
     }
-    foreach ($app in $apps) {
+    if ($hasDatabase) {
+        foreach ($app in $apps) {
+            foreach ($alias in $webApps[[string] $app.name]) {
+                Add-Edge $alias 'sqldb' 'sql' 'reads and writes' 'TCP 1433' $true
+            }
+        }
+    }
+    foreach ($app in @($apps) + @($owns)) {
         if (-not $dependenciesOf.Contains([string] $app.name)) { continue }
-        $key = Get-DeployableAlias $app.name
-        foreach ($role in @($app.nodes | ForEach-Object { [string] $_.role } | Where-Object { $_ -in 'primary', 'standby' })) {
+        foreach ($alias in $webApps[[string] $app.name]) {
             foreach ($dependency in $dependenciesOf[[string] $app.name]) {
                 # Upstream: the layout engine then puts the dependency's box under the subscription, below the
                 # public addresses, and the arrows' number lines in the free column between the resource groups. A
                 # plain Rel puts the box above the subscription and the first number line onto the resource group's
                 # title.
-                Add-Edge "app_${key}_$role" $dependency.alias 'dependency' 'calls' 'HTTP' $true -Upstream
+                Add-Edge $alias $dependency.alias 'dependency' 'calls' 'HTTP' $true -Upstream
             }
         }
     }
@@ -807,6 +1166,11 @@ if (-not $entry) {
 $staticSite = [string] $entry.staticSite
 $url = ([string] $entry.url).TrimEnd('/')
 
+# GitHub.Token is scoped to the steps that read it (octopus/variables.tf, token_steps): a step that is not among them
+# reads it empty, and says so here instead of being refused by GitHub.
+if (-not [string] $OctopusParameters['GitHub.Token']) {
+    Fail-Step "GitHub.Token did not reach step '$([string] $OctopusParameters['Octopus.Step.Name'])': octopus/variables.tf hands it only to the steps of local.token_steps. A release made before a step was replaced has that step under its old id and gets no token there: make a new release."
+}
 # system.json on main, through the API (raw.githubusercontent.com caches for minutes): the current desired state of
 # the whole system, not the commit of an older release.
 $headers = @{
@@ -814,8 +1178,13 @@ $headers = @{
     Accept                 = 'application/vnd.github+json'
     'X-GitHub-Api-Version' = '2022-11-28'
 }
-$file = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/contents/system.json?ref=main" -Headers $headers
-$system = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($file.content -replace '\s', ''))) | ConvertFrom-Json -AsHashtable
+$systemText = Read-MainFile -Path 'system.json'
+if ($null -eq $systemText) {
+    Fail-Step "$repository has no system.json on main."
+}
+$system = $systemText | ConvertFrom-Json -AsHashtable
+$ownDeployables = @($system.deployables | Where-Object { $_['hosting'] -eq 'own' } | ForEach-Object { [string] $_.name })
+$nodeRecords = Read-NodeRecord -System $system
 
 # The public address of an environment with capability "frontdoor" is the host name of its endpoint
 # <slug>-<env>-<deployable> in the system's Front Door profile, which the deploy identities of both tiers may read.
@@ -854,7 +1223,7 @@ foreach ($tier in @($system.environments | ForEach-Object { [string] $_['tier'] 
     }
 }
 
-$topology = ConvertTo-Topology -System $system -EndpointHost $endpointHosts -SqlServer $sqlServers -Dashboard $name
+$topology = ConvertTo-Topology -System $system -EndpointHost $endpointHosts -SqlServer $sqlServers -NodeRecord $nodeRecords -Dashboard $name
 # The page reads its own build facts only where the release has them: a release from before the dashboard's Build wrote
 # the file would have the page ask for a file its site does not serve.
 if ($topology.system.Contains('dashboard')) {
@@ -867,21 +1236,17 @@ if ($topology.system.Contains('dashboard')) {
         $topology.system.Remove('dashboard')
     }
 }
-$nodeCount = 0
-$addressCount = 0
 foreach ($environment in $topology.environments) {
     foreach ($deployable in $environment.deployables) {
-        $nodeCount += @($deployable.nodes).Count
-        if ($deployable.frontDoor) {
-            $addressCount++
-        }
-        elseif ($withFrontDoor -contains $environment.name) {
+        # The system's Front Door serves the App Service deployables; an application's own public address is in its record.
+        if (-not $deployable['frontDoor'] -and $withFrontDoor -contains $environment.name -and $ownDeployables -notcontains $deployable.name) {
             Write-Host "No Front Door endpoint $slug-$($environment.name)-$($deployable.name) in $($frontDoor['profile']) yet: the dashboard shows $($deployable.name) in $($environment.name) without a public address until it is deployed again."
         }
     }
 }
 ($topology | ConvertTo-Json -Depth 10) + "`n" | Set-Content -LiteralPath (Join-Path $folder 'topology.json') -Encoding utf8NoBOM -NoNewline
-$summary = "$(@($topology.environments).Count) environment(s), $nodeCount node(s), $addressCount public address(es)"
+$counted = Measure-Topology -Topology $topology
+$summary = "$($counted.Environments) environment(s), $($counted.Nodes) node(s), $($counted.Addresses) public address(es)"
 Write-Host "topology.json of $($topology.generated): $summary"
 if ($topology.system.repository) {
     Write-Host "Pinned versions: the dashboard reads environments/<env>/versions.json on main of $($topology.system.repository) and compares it with what the nodes report."
@@ -900,7 +1265,7 @@ foreach ($environment in $topology.environments) {
         foreach ($node in $deployable.nodes) { if ($node.Contains('links')) { $linkCount += $node.links.Count } }
     }
 }
-Write-Host "Links into the Azure portal: $linkCount (web apps, Application Insights, databases, Front Door, resource groups); the portal asks the viewer to sign in."
+Write-Host "Links into the Azure portal: $linkCount (web apps, Application Insights, databases, Front Door, resource groups); the portal asks the viewer to sign in.$(if ($ownDeployables.Count -gt 0) { " None for $($ownDeployables -join ', '): the system does not know the resources of an application that brings its own runtime." })"
 if ($topology.system.deliveryUrl) {
     Write-Host "Delivery facts: the dashboard reads $($topology.system.deliveryUrl) (published by the system repository's workflow; shown once the file exists)."
 }

@@ -11,9 +11,9 @@ param environmentName string
 @description('Deployed version of each deployable, from environments/<env>/versions.json on main. Empty means none yet: a placeholder runs.')
 param versions object = {}
 
-@description('SQL administrator password; apply-environment.ps1 reads it from the vault, or generates it on the first apply.')
+@description('SQL administrator password; apply-environment.ps1 reads it from the vault, or generates it on the first apply. Empty in a system without a database (no deployable has one), which creates no SQL server.')
 @secure()
-param sqlAdminPassword string
+param sqlAdminPassword string = ''
 
 @description('Principal ID of the deploy identity of this tier; it may read and write the vault secrets.')
 param deployPrincipalId string
@@ -45,16 +45,23 @@ var sqlLocation = union({ sqlLocation: location }, system.system).sqlLocation
 // Azure moves neither a Container Apps environment nor an app to another region or environment, so a placement that is
 // not the default gets names of its own (a short suffix): a move is new resources next to the old ones, which the stack
 // then removes. An explicit appLocation therefore always suffixes, also when it equals location.
+//   - system.json azure.appEnvironment (the demo file's azure.appEnvironment "system"): the system owns one Container
+//     Apps environment, which the seed created in a group of its own; every environment of both tiers places its apps
+//     there, from its own tier group, and neither appLocation nor sharesAppEnvironmentWith applies
+//     (scripts/test-system.ps1).
 var rawEnvironment = first(filter(system.environments, e => e.name == environmentName))!
 var environment = union({ appLocation: location, appCpu: '0.5' }, rawEnvironment)
 var capabilities = union(['baseline'], environment.capabilities)
+var systemAppEnvironment = union({ appEnvironment: {} }, system.azure).appEnvironment
+var usesSystemAppEnvironment = !empty(systemAppEnvironment)
 var sharedWith = string(union({ sharesAppEnvironmentWith: '' }, rawEnvironment).sharesAppEnvironmentWith)
 var hostEnvironment = empty(sharedWith) ? rawEnvironment : first(filter(system.environments, e => e.name == sharedWith))!
-var appLocation = union({ appLocation: location }, hostEnvironment).appLocation
-var placementSuffix = contains(hostEnvironment, 'appLocation') ? '-${take(uniqueString(appLocation), 4)}' : ''
-var managedEnvironmentName = 'cae-${slug}-${hostEnvironment.name}${placementSuffix}'
-var ownsManagedEnvironment = hostEnvironment.name == environmentName
-var appNameSuffix = ownsManagedEnvironment && empty(placementSuffix) ? '' : '-${take(uniqueString(managedEnvironmentName), 4)}'
+var appLocation = usesSystemAppEnvironment ? string(systemAppEnvironment.location) : union({ appLocation: location }, hostEnvironment).appLocation
+var placementSuffix = !usesSystemAppEnvironment && contains(hostEnvironment, 'appLocation') ? '-${take(uniqueString(appLocation), 4)}' : ''
+var managedEnvironmentName = usesSystemAppEnvironment ? string(systemAppEnvironment.name) : 'cae-${slug}-${hostEnvironment.name}${placementSuffix}'
+var ownsManagedEnvironment = !usesSystemAppEnvironment && hostEnvironment.name == environmentName
+// In the system's environment the app names already carry the environment's name, so they need no suffix.
+var appNameSuffix = usesSystemAppEnvironment || (ownsManagedEnvironment && empty(placementSuffix)) ? '' : '-${take(uniqueString(managedEnvironmentName), 4)}'
 var app = first(filter(system.azure.identities.apps, a => a.environment == environmentName))!
 var suffix = take(uniqueString(subscription().id, resourceGroup().id, environmentName), 5)
 var tags = {
@@ -80,8 +87,10 @@ var sqlServerFqdn = '${sqlServerName}${az.environment().suffixes.sqlServerHostna
 // schema: the app creates its message queues at startup); the others share it, read and write.
 // deployables[].hosting "staticwebapp": a site of static files on Azure Static Web Apps (modules/staticwebapp.bicep):
 // the health dashboard, which has no server, no identity and no database login.
-// deployables[].environments (container deployables only, scripts/test-system.ps1): the environments the deployable
+// deployables[].environments (container deployables and static sites, scripts/test-system.ps1): the environments the deployable
 // exists in; left out, it exists in every environment. An environment it does not name gets none of its resources.
+// A deployable with hosting "own" brings its runtime (principle 007): nothing below creates anything for it, and it
+// is no entry of the output "deployables". Its own project deploys and verifies it.
 var hostedDeployables = filter(
   map(system.deployables, d => union({ hosting: 'containerapp', environments: [environmentName] }, d)),
   d => contains(d.environments, environmentName)
@@ -140,6 +149,10 @@ var containerApps = map(containerDeployables, d => {
 })
 var appServiceDeployables = filter(hostedDeployables, d => d.hosting == 'appservice')
 var staticDeployables = filter(hostedDeployables, d => d.hosting == 'staticwebapp')
+// The environment has a database when an app in it uses one: a container deployable with database (the default), or an
+// App Service deployable (which shares the first app's database). Without one (an app of the person's own,
+// app.source "repository"), the environment has no SQL server and its vault holds no SQL secret.
+var hasDatabase = !empty(filter(containerDeployables, d => d.database)) || !empty(appServiceDeployables)
 // The Free plan of Static Web Apps exists in a few regions only; the files are served from edge locations everywhere,
 // so the region of the resource need not be the system's (system.staticLocation, optional).
 var staticLocation = union({ staticLocation: 'centralus' }, system.system).staticLocation
@@ -177,7 +190,7 @@ module telemetry 'modules/telemetry.bicep' = if (contains(capabilities, 'telemet
   }
 }
 
-module sql 'modules/sql.bicep' = {
+module sql 'modules/sql.bicep' = if (hasDatabase) {
   name: 'sql-${environmentName}'
   params: {
     serverName: sqlServerName
@@ -204,8 +217,11 @@ module vault 'modules/keyvault.bicep' = {
     tags: tags
     readerPrincipalIds: [app.principalId]
     officerPrincipalIds: [deployPrincipalId]
+    database: hasDatabase
     sqlAdminPassword: sqlAdminPassword
-    sqlConnectionString: 'Server=tcp:${sqlServerFqdn},1433;Database=${databaseName};User ID=${sqlAdminLogin};Password=${sqlAdminPassword};Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;'
+    sqlConnectionString: hasDatabase
+      ? 'Server=tcp:${sqlServerFqdn},1433;Database=${databaseName};User ID=${sqlAdminLogin};Password=${sqlAdminPassword};Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;'
+      : ''
     logins: [
       for (d, i) in appServiceDeployables: {
         name: d.name
@@ -323,7 +339,11 @@ module apps 'modules/containerapps.bicep' = if (!empty(containerDeployables)) {
     slug: slug
     environmentName: environmentName
     managedEnvironmentName: managedEnvironmentName
+    // The system's Container Apps environment is in a group of its own; any other is in this environment's tier group.
+    managedEnvironmentResourceGroup: usesSystemAppEnvironment ? string(systemAppEnvironment.resourceGroup) : resourceGroup().name
     ownsManagedEnvironment: ownsManagedEnvironment
+    // The system's environment may be an express one (system.json azure.appEnvironment.mode, from the seed).
+    express: usesSystemAppEnvironment && union({ mode: 'standard' }, systemAppEnvironment).mode == 'express'
     appNameSuffix: appNameSuffix
     location: appLocation
     tags: tags
@@ -338,10 +358,13 @@ module apps 'modules/containerapps.bicep' = if (!empty(containerDeployables)) {
 }
 
 output keyVaultName string = vaultName
-output sqlServerName string = sqlServerName
-output sqlServerFqdn string = sqlServerFqdn
-output databaseName string = databaseName
-output sqlAdminLogin string = sqlAdminLogin
+// Without a database (hasDatabase false) the SQL outputs are empty: apply-environment.ps1 and the runbooks then skip
+// every SQL step.
+output hasDatabase bool = hasDatabase
+output sqlServerName string = hasDatabase ? sqlServerName : ''
+output sqlServerFqdn string = hasDatabase ? sqlServerFqdn : ''
+output databaseName string = hasDatabase ? databaseName : ''
+output sqlAdminLogin string = hasDatabase ? sqlAdminLogin : ''
 output deployables array = concat(
   empty(containerDeployables) ? [] : apps!.outputs.deployables,
   empty(appServiceDeployables) ? [] : appService!.outputs.deployables,

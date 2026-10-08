@@ -24,8 +24,14 @@ param environmentName string
 @description('Name of the Container Apps environment; main.bicep gives it a region suffix when the environment has an appLocation of its own.')
 param managedEnvironmentName string = 'cae-${slug}-${environmentName}'
 
-@description('False when the apps run in the Container Apps environment of another environment (sharesAppEnvironmentWith), which creates it.')
+@description('Resource group of the Container Apps environment: this one, unless the system owns the environment (system.json azure.appEnvironment), which is in a group of its own.')
+param managedEnvironmentResourceGroup string = resourceGroup().name
+
+@description('False when the apps run in a Container Apps environment that something else creates: an earlier environment of the tier (sharesAppEnvironmentWith), or the seed (the system\'s own).')
 param ownsManagedEnvironment bool = true
+
+@description('True when the apps run in an Azure Container Apps express environment (the system\'s own, azure.appEnvironment.mode express): an app there names no workload profile and its ingress is plain HTTP/1.1 (express has no HTTP/2).')
+param express bool = false
 
 @description('Suffix of the app names when they do not run in their own default Container Apps environment, so a move creates them anew.')
 param appNameSuffix string = ''
@@ -73,6 +79,7 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = if 
 // exists, so an app can get its own address as a setting (urlSetting) without referring to itself.
 resource hostEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' existing = if (!ownsManagedEnvironment) {
   name: managedEnvironmentName
+  scope: resourceGroup(managedEnvironmentResourceGroup)
 }
 var defaultDomain = ownsManagedEnvironment ? managedEnvironment!.properties.defaultDomain : hostEnvironment!.properties.defaultDomain
 
@@ -89,8 +96,8 @@ resource apps 'Microsoft.App/containerApps@2025-01-01' = [
       )
     }
     properties: {
-      environmentId: resourceId('Microsoft.App/managedEnvironments', managedEnvironmentName)
-      workloadProfileName: 'Consumption'
+      environmentId: resourceId(managedEnvironmentResourceGroup, 'Microsoft.App/managedEnvironments', managedEnvironmentName)
+      ...(express ? {} : { workloadProfileName: 'Consumption' })
       configuration: {
         ...(empty(d.secretIdentityId)
           ? {}
@@ -106,7 +113,7 @@ resource apps 'Microsoft.App/containerApps@2025-01-01' = [
         ingress: {
           external: true
           targetPort: empty(versions[?d.name] ?? '') ? placeholderPort : d.port
-          transport: 'auto'
+          transport: express ? 'http' : 'auto'
           allowInsecure: false
         }
         registries: [

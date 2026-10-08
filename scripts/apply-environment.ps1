@@ -49,6 +49,11 @@ $stackName = "stack-$slug-$environmentName"
 
 function Get-DesiredVersion {
     # environments/<env>/versions.json on main, through the API (raw.githubusercontent.com caches for minutes).
+    # GitHub.Token is scoped to the steps that read it (octopus/variables.tf, token_steps): a step that is not among them
+    # reads it empty, and says so here instead of being refused by GitHub.
+    if (-not [string] $OctopusParameters['GitHub.Token']) {
+        Fail-Step "GitHub.Token did not reach step '$([string] $OctopusParameters['Octopus.Step.Name'])': octopus/variables.tf hands it only to the steps of local.token_steps. A release made before a step was replaced has that step under its old id and gets no token there: make a new release."
+    }
     $headers = @{
         Authorization          = "Bearer $([string] $OctopusParameters['GitHub.Token'])"
         Accept                 = 'application/vnd.github+json'
@@ -225,10 +230,17 @@ if (-not (Test-Path -LiteralPath $template)) {
 
 $versions = Get-DesiredVersion
 $outputs = Get-StackOutput
-$password = Get-SqlPassword -Outputs $outputs
 $system = Get-Content -LiteralPath (Join-Path $root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
 # deployables[].environments: a deployable may exist in some environments only; this one's are the rest of the work.
 $deployablesHere = @($system.deployables | Where-Object { -not $_.ContainsKey('environments') -or @($_.environments) -contains $environmentName })
+# The same rule as infra/main.bicep (hasDatabase): a container deployable uses the database unless it says
+# "database": false, and an App Service deployable shares it. Without one the environment has no SQL server, and there
+# is no administrator password to read or generate.
+$hasDatabase = @($deployablesHere | Where-Object {
+        $hosting = if ($_.ContainsKey('hosting')) { [string] $_.hosting } else { 'containerapp' }
+        ($hosting -eq 'containerapp' -and -not ($_.ContainsKey('database') -and $_.database -eq $false)) -or $hosting -eq 'appservice'
+    }).Count -gt 0
+$password = if ($hasDatabase) { Get-SqlPassword -Outputs $outputs } else { Write-Host "No app in $environmentName uses a database: no SQL server, no SQL password."; '' }
 $loginNames = @($deployablesHere | Where-Object { $_['hosting'] -eq 'appservice' } | ForEach-Object { [string] $_.name })
 # A change of an App Service plan's size (system.planSku, or the dormant switch, which makes every plan Free) restarts
 # the apps on that plan: Azure moves them to other workers. The plans this environment owns carry its tag; one whose
@@ -284,7 +296,7 @@ $parameters | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $parametersFil
 # old one. A deployable is available when any of its apps answers 200. Before its first 200 (an app waking from zero,
 # a new environment) nothing counts; after it, two checks in a row (about 6 seconds) without a 200 are downtime.
 function Start-AvailabilityProbe {
-    param([Parameter(Mandatory)] [string] $Group, [Parameter(Mandatory)] [string] $Environment, [hashtable] $Outputs, [string] $Only = '')
+    param([Parameter(Mandatory)] [string] $Group, [Parameter(Mandatory)] [string] $Environment, [hashtable] $Outputs, [string] $Only = '', [string[]] $Ignore = @())
     $paths = @{}
     $static = @{}
     if ($Outputs -and $Outputs.ContainsKey('deployables')) {
@@ -298,6 +310,7 @@ function Start-AvailabilityProbe {
     if ($Only) { foreach ($name in @($static.Keys)) { if ($name -ne $Only) { $static.Remove($name) } } }
     $probeGroup = $Group
     $probeEnvironment = $Environment
+    $probeIgnore = @($Ignore)
     $job = Start-ThreadJob -ScriptBlock {
         # $using: in a thread job passes the objects themselves: $probe is the shared, synchronized table.
         $probe = $using:probe
@@ -306,6 +319,7 @@ function Start-AvailabilityProbe {
         $paths = $using:paths
         $static = $using:static
         $only = $using:Only
+        $ignore = $using:probeIgnore
         $targets = @{}
         $listed = [datetime]::MinValue
         $tick = 0
@@ -315,7 +329,7 @@ function Start-AvailabilityProbe {
                     $json = az containerapp list --resource-group $group --query "[?tags.environment=='$environment'].{name: name, deployable: tags.deployable, fqdn: properties.configuration.ingress.fqdn}" --output json 2>$null
                     if ($LASTEXITCODE -eq 0 -and $json) {
                         foreach ($app in @($json | ConvertFrom-Json)) {
-                            if ($app.fqdn -and $app.deployable -and (-not $only -or $app.deployable -eq $only)) { $targets["https://$($app.fqdn)"] = @{ Deployable = [string] $app.deployable; Name = [string] $app.name } }
+                            if ($app.fqdn -and $app.deployable -and $ignore -notcontains $app.deployable -and (-not $only -or $app.deployable -eq $only)) { $targets["https://$($app.fqdn)"] = @{ Deployable = [string] $app.deployable; Name = [string] $app.name } }
                         }
                     }
                     foreach ($name in $static.Keys) { $targets[$static[$name]] = @{ Deployable = $name; Name = $static[$name] } }
@@ -383,7 +397,12 @@ function Stop-AvailabilityProbe {
     return $downtimes
 }
 
-$probe = Start-AvailabilityProbe -Group $resourceGroup -Environment $environmentName -Outputs $outputs
+# A deployable that brings its own runtime (hosting "own") is not this step's to keep available: its own project
+# deploys and verifies it. That matters on the one apply after a deployable changes to "own": the stack removes the
+# app it created, which the application's next deployment creates again, and that is the change, not downtime.
+$ownRuntime = @($system.deployables | Where-Object { $_['hosting'] -eq 'own' } | ForEach-Object { [string] $_.name })
+if ($ownRuntime.Count -gt 0) { Write-Host "Not watched here (they bring their own runtime): $($ownRuntime -join ', ')" }
+$probe = Start-AvailabilityProbe -Group $resourceGroup -Environment $environmentName -Outputs $outputs -Ignore $ownRuntime
 function Invoke-StackApply {
     # Applies a template as a deployment stack with deny settings; returns the stack as JSON.
     # New role assignments and identities take a few minutes to propagate, and Azure sometimes reports
