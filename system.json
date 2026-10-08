@@ -125,6 +125,10 @@
         },
         "uat": {
           "GitHub__UseStub": "true"
+        },
+        "prod": {
+          "GitHubApp__AppId": "5231590",
+          "GitHubApp__InstallationId": "169074569"
         }
       },
       "urlSetting": "Factory__PublicBaseUrl",
@@ -134,8 +138,8 @@
           "env": "CursorAgent__ApiKey"
         },
         {
-          "name": "github-token",
-          "env": "GitHub__Token"
+          "name": "github-app-private-key",
+          "env": "GitHubApp__PrivateKey"
         },
         {
           "name": "github-webhook-secret",
