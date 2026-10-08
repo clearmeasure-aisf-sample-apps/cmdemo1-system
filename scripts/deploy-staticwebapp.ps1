@@ -30,10 +30,11 @@
        The dashboard compares the pinned version with the version each node reports and links to the project and to
        the history. An address whose parts system.json does not give is null, and the dashboard leaves that part out.
        What the dashboard shows beyond health comes the same way, each part optional:
-         telemetryPath, buildPath, trafficPaths
+         telemetryPath, buildPath, trafficPaths, healthDetailPath
                                 per deployable, carried from system.json (deployables[]): where a node reports its
                                 calls and its process, where it reports the build it runs, what the traffic button
-                                calls
+                                calls, and where it answers its detailed health check (one entry per dependency
+                                it checks: name, status, description, duration)
          system.deliveryUrl     https://raw.githubusercontent.com/<githubOrg>/<repository>/status/delivery.json: the
                                 delivery facts a workflow of the system repository publishes to its branch "status"
          system.costUrl         https://raw.githubusercontent.com/<githubOrg>/<repository>/status/cost.json: what each
@@ -60,10 +61,15 @@
        system.location, standby, the database's system.sqlLocation, the static sites' system.staticLocation) > App
        Service plan (asp-<slug>-<first environment of the tier>, asp-<slug>-<first environment of the tier with that
        standby>-<region>; size system.planSku.<tier>, F1 without it and while azure.frontDoor.dormant) > web app; the
-       Front Door endpoint in the profile; the database sqldb-<slug>-<env>; the static sites; the browser. Every node,
-       region and Front Door or database relationship has a slot, a transparent image of a fixed size, where the
-       dashboard draws the live values (a web app's slot holds seven lines under its badge: version, pin, traffic,
-       failures, process, uptime and role). The script downloads the PlantUML release jar of the pinned version from GitHub,
+       Front Door endpoint in the profile; the database sqldb-<slug>-<env>; the static sites; the browser. Outside the
+       subscription, one box per dependency a deployable declares (system.json deployables[].dependencies, a list of
+       { "name": "LLM gateway", "healthCheck": "LlmGateway", "kind": "external" }: the name shown, the entry of the
+       detailed health check that tells its state, and what it is, free text), with an arrow from each of the
+       deployable's web apps; the manifest lists it as a node of kind "dependency" with that entry's name. Without
+       dependencies the diagram has none of this. Every node, region and Front Door, database or dependency
+       relationship has a slot, a transparent image of a fixed size, where the dashboard draws the live values (a web
+       app's slot holds seven lines under its badge: version, pin, traffic, failures, process, uptime and role, and
+       an eighth, the marks of its detailed health check, for a deployable with healthDetailPath). The script downloads the PlantUML release jar of the pinned version from GitHub,
        verifies its SHA-256, renders every diagram in one Java process (layout engine smetana: no Graphviz; security
        profile SANDBOX) and checks that each SVG has every element the manifest names; a missing one fails the step.
        Java's output is logged as information; the download and the render are timed.
@@ -239,6 +245,9 @@ function ConvertTo-Topology {
                         # Where the primary node reports the build it runs (deployables[].buildPath): null without it,
                         # and the dashboard then shows no "Code" card.
                         buildPath   = if ($app['buildPath']) { [string] $app.buildPath } else { $null }
+                        # Where a node answers its detailed health check (deployables[].healthDetailPath): one entry
+                        # per dependency it checks. Null without it, and the dashboard then shows no such marks.
+                        healthDetailPath = if ($app['healthDetailPath']) { [string] $app.healthDetailPath } else { $null }
                         links       = $deployableLinks
                         nodes       = $nodes
                     }
@@ -329,12 +338,17 @@ function ConvertTo-RuntimeDiagram {
     #   app_<d>_primary, app_<d>_standby   its web apps
     #   sqldb                       the environment's Azure SQL database
     #   swa_<d>                     the Static Web App of a static deployable (the dashboard)
+    #   dep_<d>_<n>                 a dependency of a deployable (system.json deployables[].dependencies), outside the
+    #                               subscription; <n> is its name, written as <d> is
     # Every relationship has the id "<from>-to-<to>" (PlantUML's own form): browser-to-fd_<d>, fd_<d>-to-app_<d>_primary
     # (origin, priority 1), fd_<d>-to-app_<d>_standby (priority 2), app_<d>_<role>-to-sqldb, browser-to-swa_<d>, and
-    # without a Front Door endpoint browser-to-app_<d>_<role>.
+    # without a Front Door endpoint browser-to-app_<d>_<role>. The id is how the SVG names the drawn link, and a web
+    # app's relationship to a dependency is drawn from the dependency's side (see Add-Edge): its id is
+    # dep_<d>_<n>-to-app_<d>_<role>, while its "from" is the web app and its "to" the dependency.
     #
     # Slots: every node's description is a transparent image of a fixed size, and so is the description of every
-    # origin and database relationship and of every region: the dashboard draws the live values into those rectangles.
+    # origin, database and dependency relationship and of every region: the dashboard draws the live values into those
+    # rectangles.
     param(
         [Parameter(Mandatory)] [hashtable] $System,
         [Parameter(Mandatory)] [System.Collections.IDictionary] $Topology,
@@ -375,14 +389,45 @@ function ConvertTo-RuntimeDiagram {
     # Slots: the room for a tile, a region's label and a number line of a relationship (pixels; the dashboard's
     # runtime.js draws into them and assumes nothing about their size but what the SVG says).
     # A web app's tile: the badge, seven lines 15 px apart (version, pin, traffic, failures, process, uptime, role)
-    # and the history strip. A Front Door endpoint's has three lines.
-    $tileSlot = "<img:$(New-TransparentPng -Width 250 -Height 146)>"
-    $endpointSlot = "<img:$(New-TransparentPng -Width 250 -Height 98)>"
-    $smallTileSlot = "<img:$(New-TransparentPng -Width 250 -Height 46)>"
+    # and the history strip; one line more, the marks of the detailed health check, for a deployable with
+    # healthDetailPath. A Front Door endpoint's has three lines; a database's, a static site's and a dependency's one.
+    # The widths are what the widest line needs and no more: the diagram of an environment with a standby is five
+    # boxes and three number lines wide, and every pixel here is paid for by the page's scale.
+    $tileWidth = 232
+    $tileSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height 146)>"
+    $tileSlotWithChecks = "<img:$(New-TransparentPng -Width $tileWidth -Height 161)>"
+    $endpointSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height 98)>"
+    $smallTileSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height 46)>"
     $regionSlot = "<img:$(New-TransparentPng -Width 190 -Height 22)>"
     # A relationship's number line (the number, its unit and its trend in a frame) and, under it, its role in words
-    # ("queries of the app · 55 background").
-    $edgeSlot = "<img:$(New-TransparentPng -Width 160 -Height 34)>"
+    # ("app queries · 55 background").
+    $edgeSlot = "<img:$(New-TransparentPng -Width 144 -Height 34)>"
+
+    # The dependencies the deployables declare (system.json deployables[].dependencies), by deployable: each is drawn
+    # outside the subscription. The alias is made of both names; two that give the same alias are an error.
+    $dependenciesOf = [ordered] @{}
+    $dependencyAlias = @{}
+    foreach ($app in $apps) {
+        $declared = @($System.deployables | Where-Object { [string] $_.name -eq [string] $app.name }) | Select-Object -First 1
+        if (-not $declared -or -not $declared['dependencies']) { continue }
+        $position = 0
+        $dependenciesOf[[string] $app.name] = @(foreach ($dependency in @($declared.dependencies)) {
+                $dependencyName = if ($dependency -is [System.Collections.IDictionary]) { ([string] $dependency['name']).Trim() } else { '' }
+                if (-not $dependencyName) { throw "system.json: deployables '$($app.name)', dependencies[$position] has no name." }
+                $alias = "dep_$(Get-DeployableAlias $app.name)_$($dependencyName -replace '[^A-Za-z0-9]', '_')"
+                if ($dependencyAlias.ContainsKey($alias)) {
+                    throw "Dependencies '$($dependencyAlias[$alias])' and '$dependencyName' of $($app.name) have the same alias $alias in the runtime diagram: rename one."
+                }
+                $dependencyAlias[$alias] = $dependencyName
+                $position++
+                [ordered] @{
+                    alias       = $alias
+                    name        = $dependencyName
+                    healthCheck = if ($dependency['healthCheck']) { ([string] $dependency.healthCheck).Trim() } else { $null }
+                    kind        = if ($dependency['kind']) { ([string] $dependency.kind).Trim() } else { 'external' }
+                }
+            })
+    }
 
     # The regions, a region with two roles once, named after its first role. The standby is declared before the
     # primary: PlantUML's layout engine (smetana) stacks the last declared on top, and the primary belongs there.
@@ -409,14 +454,17 @@ function ConvertTo-RuntimeDiagram {
         $nodes.Add($Node)
     }
     function Add-Edge {
-        param([string] $From, [string] $To, [string] $Kind, [string] $Label, [string] $Technology, [bool] $Slot, [int] $Priority = 0, [string] $Link = '')
-        $id = "$From-to-$To"
+        # -Upstream draws the relationship with Rel_U: in this left-to-right layout the target is then ranked before
+        # the source (to its left), and PlantUML names the link by that order, so the id is "<to>-to-<from>".
+        param([string] $From, [string] $To, [string] $Kind, [string] $Label, [string] $Technology, [bool] $Slot, [int] $Priority = 0, [string] $Link = '', [switch] $Upstream)
+        $id = if ($Upstream) { "$To-to-$From" } else { "$From-to-$To" }
+        $macro = if ($Upstream) { 'Rel_U' } else { 'Rel' }
         $edge = [ordered] @{ id = $id; from = $From; to = $To; kind = $Kind }
         if ($Priority) { $edge.priority = $Priority }
         $edges.Add($edge)
         $description = if ($Slot) { $edgeSlot + '\n<U+00A0>' } else { '' }
         $address = if ($Link) { ", `$link=$(Get-Quoted $Link)" } else { '' }
-        $edgeLines.Add("Rel($From, $To, $(Get-Quoted $Label), $(Get-Quoted $Technology), $(Get-Quoted $description)$address)")
+        $edgeLines.Add("$macro($From, $To, $(Get-Quoted $Label), $(Get-Quoted $Technology), $(Get-Quoted $description)$address)")
     }
     function Get-ShortHost {
         # A public address as the arrow's label: the host name, and when that is long its start, an ellipsis and the
@@ -447,6 +495,9 @@ function ConvertTo-RuntimeDiagram {
     # The look before the dashboard updates it (and of a diagram opened on its own): neutral, nothing claims a state.
     $lines.Add('UpdateElementStyle("container", $bgColor="#607d8b", $fontColor="#ffffff", $borderColor="#455a64")')
     $lines.Add('UpdateElementStyle("person", $bgColor="#37474f", $fontColor="#ffffff", $borderColor="#263238")')
+    if ($dependenciesOf.Count -gt 0) {
+        $lines.Add('UpdateElementStyle("external_system", $bgColor="#607d8b", $fontColor="#ffffff", $borderColor="#455a64")')
+    }
     $lines.Add('AddBoundaryTag("scope", $bgColor="#ffffff", $fontColor="#263238", $borderColor="#78909c", $borderStyle=DottedLine())')
     $lines.Add('AddNodeTag("region", $bgColor="#fafafa", $fontColor="#37474f", $borderColor="#90a4ae", $borderStyle=DashedLine())')
     $lines.Add('AddNodeTag("plan", $bgColor="#ffffff", $fontColor="#37474f", $borderColor="#b0bec5")')
@@ -494,7 +545,8 @@ function ConvertTo-RuntimeDiagram {
                 $node = @($app.nodes | Where-Object { $_.role -eq $role }) | Select-Object -First 1
                 if (-not $node) { continue }
                 $alias = "app_$(Get-DeployableAlias $app.name)_$role"
-                $lines.Add("        Container($alias, $(Get-Quoted $node.name), $(Get-Quoted "web app: $($app.name)"), $(Get-Quoted $tileSlot))")
+                $slot = if ($app['healthDetailPath']) { $tileSlotWithChecks } else { $tileSlot }
+                $lines.Add("        Container($alias, $(Get-Quoted $node.name), $(Get-Quoted "web app: $($app.name)"), $(Get-Quoted $slot))")
                 Add-Node ([ordered] @{ alias = $alias; qualifiedName = "sub.rg_tier.$($region.alias).plan_$role.$alias"; kind = 'webapp'; deployable = [string] $app.name; name = [string] $node.name; role = $role; region = [string] $node.region; regionAlias = $region.alias; url = [string] $node.url })
             }
             $lines.Add('      }')
@@ -518,8 +570,16 @@ function ConvertTo-RuntimeDiagram {
     $lines.Add('  }')
     $lines.Add('}')
 
+    # What the deployables depend on and the system does not own: outside the subscription, each with a small tile.
+    foreach ($name in $dependenciesOf.Keys) {
+        foreach ($dependency in $dependenciesOf[$name]) {
+            $lines.Add("System_Ext($($dependency.alias), $(Get-Quoted $dependency.name), $(Get-Quoted $smallTileSlot), `$type=$(Get-Quoted "$($dependency.kind) dependency of $name"))")
+            Add-Node ([ordered] @{ alias = $dependency.alias; qualifiedName = $dependency.alias; kind = 'dependency'; deployable = $name; name = $dependency.name; healthCheck = $dependency.healthCheck; dependencyKind = $dependency.kind; url = $null })
+        }
+    }
+
     # The relationships, after the boundaries: the browser to the public addresses, Front Door to its origins, every
-    # web app to the database.
+    # web app to the database and to what its deployable depends on.
     foreach ($app in $apps) {
         $key = Get-DeployableAlias $app.name
         $roles = @($app.nodes | ForEach-Object { [string] $_.role } | Where-Object { $_ -in 'primary', 'standby' })
@@ -543,6 +603,19 @@ function ConvertTo-RuntimeDiagram {
             Add-Edge "app_${key}_$role" 'sqldb' 'sql' 'reads and writes' 'TCP 1433' $true
         }
     }
+    foreach ($app in $apps) {
+        if (-not $dependenciesOf.Contains([string] $app.name)) { continue }
+        $key = Get-DeployableAlias $app.name
+        foreach ($role in @($app.nodes | ForEach-Object { [string] $_.role } | Where-Object { $_ -in 'primary', 'standby' })) {
+            foreach ($dependency in $dependenciesOf[[string] $app.name]) {
+                # Upstream: the layout engine then puts the dependency's box under the subscription, below the
+                # public addresses, and the arrows' number lines in the free column between the resource groups. A
+                # plain Rel puts the box above the subscription and the first number line onto the resource group's
+                # title.
+                Add-Edge "app_${key}_$role" $dependency.alias 'dependency' 'calls' 'HTTP' $true -Upstream
+            }
+        }
+    }
     foreach ($static in $statics) {
         Add-Edge 'browser' "swa_$(Get-DeployableAlias $static.name)" 'dashboard' 'loads the dashboard' 'HTTPS' $false
     }
@@ -563,8 +636,9 @@ function ConvertTo-RuntimeDiagram {
 
 function Test-RuntimeSvg {
     # The handles the dashboard relies on, in an SVG PlantUML rendered: one <g class="entity"> per node (with its slot
-    # image), one <g class="cluster"> per region and one <g class="link"> per relationship, by the manifest. They are not a documented contract of PlantUML (they changed in 1.2026.3 and 1.2026.4), so every render
-    # is checked. Returns what is missing, as text; nothing when all is there.
+    # image; a dependency outside the subscription is such a node too), one <g class="cluster"> per region and one
+    # <g class="link"> per relationship, by the manifest. They are not a documented contract of PlantUML (they changed
+    # in 1.2026.3 and 1.2026.4), so every render is checked. Returns what is missing, as text; nothing when all is there.
     param(
         [Parameter(Mandatory)] [string] $Svg,
         [Parameter(Mandatory)] [System.Collections.IDictionary] $Manifest
