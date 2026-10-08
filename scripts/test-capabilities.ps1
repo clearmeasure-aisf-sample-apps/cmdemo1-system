@@ -619,7 +619,7 @@ $checks = [ordered] @{
         # count of its lines of code. The quality sections (tests, coverage, complexity, CRAP, analysis) may be null:
         # the Build run's artifacts expire.
         $described = @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' -and $_['buildPath'] })
-        if ($described.Count -eq 0) { Skip-Check 'no App Service deployable has a buildPath in system.json' }
+        if ($described.Count -eq 0 -and @($system.deployables | Where-Object { $_['hosting'] -eq 'staticwebapp' -and $_['buildPath'] }).Count -eq 0) { Skip-Check 'no deployable has a buildPath in system.json' }
         $shown = foreach ($app in $described) {
             foreach ($entry in $system.environments) {
                 $deployment = Find-LastDeployment "$slug-$($app.name)" ([string] $entry.name)
@@ -638,8 +638,31 @@ $checks = [ordered] @{
                 }
             }
         }
+        # A static deployable (the dashboard) with a buildPath serves its build facts from its own site, and the
+        # topology it serves names the path, so the page shows its own Code card. No CORS: the page reads its own origin.
+        $sites = @($system.deployables | Where-Object { $_['hosting'] -eq 'staticwebapp' -and $_['buildPath'] })
+        $shownSites = foreach ($site in $sites) {
+            foreach ($e in $environments) {
+                $deployment = Find-LastDeployment "$slug-$($site.name)" $e
+                if (-not $deployment) { continue }
+                $url = "$(az stack group show --name "stack-$slug-$e" --resource-group (Get-Group $e) --query "outputs.deployables.value[?name=='$($site.name)'].url | [0]" --output tsv)".Trim()
+                Assert-That ([bool] $url) "stack-$slug-$e lists no site for $($site.name)"
+                $answer = Invoke-WebRequest -Uri "$url$($site.buildPath)" -TimeoutSec 120 -SkipHttpErrorCheck
+                Assert-That ($answer.StatusCode -eq 200) "$($site.name) in $e answers $($site.buildPath) with HTTP $($answer.StatusCode): deploy a release of $slug-$($site.name) whose build writes the file"
+                $facts = $(if ($answer.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($answer.Content) } else { [string] $answer.Content }) | ConvertFrom-Json -AsHashtable
+                Assert-That ([string] $facts['version'] -eq $deployment.Version) "$($site.name) in $e says it is build $($facts['version']), Octopus deployed $($deployment.Version)"
+                Assert-That ([string] $facts['commit'] -match '^[0-9a-f]{40}$') "$($site.name) in $e names no commit at $($site.buildPath)"
+                Assert-That ($facts['code'] -is [hashtable] -and [int] $facts.code['linesOfCode'] -gt 0) "$($site.name) in $e counts no lines of code at $($site.buildPath)"
+                $content = (Invoke-WebRequest -Uri "$url/topology.json" -TimeoutSec 120).Content
+                $topology = $(if ($content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($content) } else { [string] $content }) | ConvertFrom-Json -AsHashtable
+                $named = if ($topology['system'] -is [hashtable] -and $topology.system['dashboard'] -is [hashtable]) { [string] $topology.system.dashboard['buildPath'] } else { '' }
+                Assert-That ($named -eq [string] $site.buildPath) "the topology $($site.name) serves in $e does not name its build facts ($($site.buildPath)): deploy the release of $slug-$($site.name) to $e again"
+                "$($site.name) in $e $($facts['version']) $(([string] $facts['commit']).Substring(0, 7))"
+            }
+        }
+        $shown = @($shown) + @($shownSites) | Where-Object { $_ }
         if (-not $shown) { Skip-Check 'no successful deployment of a deployable with a buildPath yet' }
-        "every web app describes its build: $(@($shown) -join '; ')"
+        "every deployed application describes its build: $(@($shown) -join '; ')"
     }
     'CAP-083' = {
         # What each environment costs, where a browser can read it: workflow delivery publishes cost.json next to
