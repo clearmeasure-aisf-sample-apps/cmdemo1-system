@@ -56,6 +56,9 @@ if (-not $ListChecks) {
     # The first app runs as a container app, or on App Service (deployables[].hosting "appservice"): the checks of
     # the artifact, the size, the idle cost and the placement ask the hosting it has.
     $onAppService = $system.deployables[0]['hosting'] -eq 'appservice'
+    # ... or brings its own runtime (hosting "own"): the system's infra/ creates nothing for it, so the checks of what
+    # the stack creates for the first app do not apply; its release's package and its own verify step answer for it.
+    $ownRuntime = $system.deployables[0]['hosting'] -eq 'own'
 }
 
 function Write-Pass { param([string] $Message) Write-Host "PASS $Message" }
@@ -67,6 +70,47 @@ function Invoke-Octopus([string] $Path) {
 function Get-RepoFile([string] $Repo, [string] $Path) {
     $content = gh api "repos/$Repo/contents/$Path" --jq .content
     [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((($content -join '') -replace '\s', '')))
+}
+function Find-RepoFile([string] $Repo, [string] $Path) {
+    # The text of a file on the repository's default branch, or nothing when the branch has no such file (404).
+    $PSNativeCommandUseErrorActionPreference = $false
+    $answer = @(gh api "repos/$Repo/contents/$Path" --jq .content 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+    $PSNativeCommandUseErrorActionPreference = $true
+    if ($code -eq 0) { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((($answer -join '') -replace '\s', ''))) }
+    if (($answer -join ' ') -notmatch 'HTTP 404') { throw "cannot read $Path of ${Repo}: $($answer -join ' ')" }
+}
+function Find-PublicFile([string] $Repo, [string] $Path) {
+    # The text of a file on main as anyone reads it: from the repository's public address, without a credential and
+    # without following a redirect. Nothing when that address has none (404: no such file, or a private repository).
+    # This is how the runbook "Health report" reads environments/<env>/nodes.json (scripts/report-health.ps1), and a
+    # check of what the runbook asked reads the same way: gh would also read a private repository, which the
+    # runbook cannot.
+    $answer = Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$Repo/main/$Path" -Method Get -TimeoutSec 60 -MaximumRedirection 0 -SkipHttpErrorCheck -ErrorAction SilentlyContinue
+    $status = [int] $answer.StatusCode
+    if ($status -eq 404) { return }
+    if ($status -ne 200) { throw "cannot read $Path of $Repo at its public address: HTTP $status" }
+    if ($answer.Content -is [byte[]]) { return [Text.Encoding]::UTF8.GetString($answer.Content) }
+    return [string] $answer.Content
+}
+function Get-HealthQuestion([hashtable] $System, [string[]] $Environment, [hashtable] $Recorded = @{}) {
+    # Which applications that bring their own runtime the hourly health report asks, and which not, each as
+    # "<deployable> in <environment>": asked where the environment's record (environments/<env>/nodes.json as the
+    # runbook reads it; $Recorded: environment to that file, parsed, no entry where it reads none) has an entry for
+    # the deployable that does not say "healthReport": false. It asks nothing: the same input gives the same lists.
+    $own = @($System.deployables | Where-Object { $_['hosting'] -eq 'own' } | ForEach-Object { [string] $_.name })
+    $asked = [Collections.Generic.List[string]]::new()
+    $notAsked = [Collections.Generic.List[string]]::new()
+    foreach ($e in $Environment) {
+        $record = $Recorded[$e]
+        foreach ($name in $own) {
+            $entry = if ($record -is [Collections.IDictionary]) { $record[$name] } else { $null }
+            if ($entry -isnot [Collections.IDictionary]) { $notAsked.Add("$name in $e (no record of nodes)") }
+            elseif ($entry['healthReport'] -eq $false) { $notAsked.Add("$name in $e (its record says healthReport false)") }
+            else { $asked.Add("$name in $e") }
+        }
+    }
+    return @{ Own = $own; Asked = [string[]] $asked.ToArray(); NotAsked = [string[]] $notAsked.ToArray(); Every = $own.Count -gt 0 -and $own.Count -eq @($System.deployables).Count }
 }
 function Get-RequiredCheck([string] $Repo) {
     $id = gh api "repos/$Repo/rulesets" --jq '.[] | select(.name=="default-branch") | .id'
@@ -108,6 +152,19 @@ function Assert-AppRepository {
     $PSNativeCommandUseErrorActionPreference = $true
     if (-not $exists) { Skip-Check "app repository $appRepo does not exist yet" }
 }
+# A system without a database (no app uses one: an app of the person's own, app.source "repository") has nothing to
+# migrate, restore or rotate, and a first app without an acceptance-test package runs its tests in its own Build. Those
+# are facts of the system's design: their checks say so instead of failing.
+function Assert-Database {
+    $uses = @($system.deployables | Where-Object {
+            $hosting = if ($_.ContainsKey('hosting')) { [string] $_.hosting } else { 'containerapp' }
+            ($hosting -eq 'containerapp' -and -not ($_.ContainsKey('database') -and $_.database -eq $false)) -or $hosting -eq 'appservice'
+        })
+    if ($uses.Count -eq 0) { Skip-Check 'the system has no database: no app uses one' }
+}
+function Assert-AcceptanceTestPackage {
+    if (-not $system.deployables[0]['acceptanceTestsPackage']) { Skip-Check "$deployable has no acceptance-test package: it runs its tests in its own Build" }
+}
 function Get-SystemAge {
     # Days since the system's first release: a runbook on a schedule cannot have run before its first due date.
     $project = Get-Project $systemProject
@@ -135,6 +192,7 @@ function Get-Group([string] $Environment) {
     [string] $system.azure.resourceGroups[$tier]
 }
 function Get-App([string] $Environment) {
+    if ($ownRuntime) { Skip-Check "$deployable brings its own runtime: the system creates no app for it to inspect" }
     # By the name the stack reports: a shared or moved Container Apps environment gives the app a suffix.
     $name = "$(az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query "outputs.deployables.value[?name=='$deployable'].containerApp | [0]" --output tsv)".Trim()
     if (-not $name) { throw "stack-$slug-$Environment lists no container app for $deployable (a failed or unfinished apply?)" }
@@ -164,8 +222,9 @@ function Get-DeployedPackage([string] $Environment) {
     # The version of the app package (the zip in the Octopus built-in feed) the environment's current release deploys.
     $deployment = Get-LastDeployment $deployableProject $Environment
     $release = Invoke-Octopus "/api/$space/releases/$($deployment.ReleaseId)"
-    $package = @($release.SelectedPackages | Where-Object { $_.ActionName -eq 'Update deployable' })[0]
-    @{ release = [string] $release.Version; package = [string] $package.Version }
+    # A release made before the deployable had a package (it changed to hosting "own" later) selects none.
+    $package = @($release.SelectedPackages | Where-Object { $_.ActionName -eq 'Update deployable' }) | Select-Object -First 1
+    @{ release = [string] $release.Version; package = if ($package) { [string] $package.Version } else { '' } }
 }
 function Get-StandbyPlan([string] $Environment) {
     # The plan size of the first deployable's standby app, or $null without a standby region.
@@ -205,6 +264,42 @@ function Get-RecentRun([string] $Runbook, [int] $Days) {
     $runs
 }
 function Assert-That([bool] $Condition, [string] $Message) { if (-not $Condition) { throw $Message } }
+function Get-ContainerDeployable([hashtable] $System) {
+    # The names of the deployables that run as container apps the system's infra/ creates (hosting "containerapp",
+    # also when left out).
+    @($System.deployables | Where-Object { -not $_.ContainsKey('hosting') -or $_.hosting -eq 'containerapp' } | ForEach-Object { [string] $_.name })
+}
+function Get-ExpectedNode([hashtable] $System, [hashtable] $Recorded = @{}) {
+    # The nodes the dashboard's topology must list, each as "<environment>/<deployable>/<node>". An App Service
+    # deployable: the names the naming convention gives (primary, and standby where the environment has a
+    # standbyLocation). A deployable with hosting "own": the addresses its application reported, from
+    # environments/<env>/nodes.json on main ($Recorded: environment to that file, parsed; no entry where main has
+    # none). It asks nothing: the same input gives the same list.
+    foreach ($entry in @($System.environments)) {
+        $e = [string] $entry.name
+        foreach ($d in @($System.deployables)) {
+            $name = [string] $d.name
+            if ($d['hosting'] -eq 'appservice') {
+                "$e/$name/app-$($System.system.slug)-$e-$name"
+                if ($entry['standbyLocation']) { "$e/$name/app-$($System.system.slug)-$e-$name-$($entry.standbyLocation)" }
+            }
+            elseif ($d['hosting'] -eq 'own' -and $Recorded[$e] -is [Collections.IDictionary] -and $Recorded[$e][$name] -is [Collections.IDictionary]) {
+                foreach ($node in @($Recorded[$e][$name]['nodes'] | Where-Object { $_ -is [Collections.IDictionary] })) { "$e/$name/$(([string] $node['url']).TrimEnd('/'))" }
+            }
+        }
+    }
+}
+function Get-ListedNode([hashtable] $Topology) {
+    # The nodes a served topology lists, in the same form: each one by its name and by its address.
+    foreach ($entry in @($Topology['environments'] | Where-Object { $_ })) {
+        foreach ($d in @($entry['deployables'] | Where-Object { $_ })) {
+            foreach ($node in @($d['nodes'] | Where-Object { $_ })) {
+                "$($entry['name'])/$($d['name'])/$($node['name'])"
+                "$($entry['name'])/$($d['name'])/$(([string] $node['url']).TrimEnd('/'))"
+            }
+        }
+    }
+}
 
 $checks = [ordered] @{
     'CAP-001' = { $rules = gh api "repos/$systemRepo/rulesets" --jq '[.[] | select(.name=="default-branch" and .enforcement=="active")] | length'; Assert-That ([int] $rules -eq 1) 'no active default-branch ruleset'; 'ruleset default-branch active' }
@@ -221,12 +316,38 @@ $checks = [ordered] @{
         if ($checked.Count -eq 0) { Skip-Check "no successful $deployableProject deployment yet" }
         "versions.json equals the deployed release in $($checked -join ', ')"
     }
-    'CAP-005' = { $step = @(Get-ProcessStep $deployableProject | Where-Object Name -eq 'Revert pin'); Assert-That ($step.Count -eq 1 -and $step[0].Condition -eq 'Failure') 'no Revert pin on failure'; 'Revert pin runs on failure' }
+    'CAP-005' = {
+        $steps = @(Get-ProcessStep $deployableProject)
+        $step = @($steps | Where-Object Name -eq 'Revert pin')
+        Assert-That ($step.Count -eq 1 -and $step[0].Condition -eq 'Failure') 'no Revert pin on failure'
+        if (-not $ownRuntime) { return 'Revert pin runs on failure' }
+        # An application that brings its own runtime: nothing of the system's puts the version before back, so its
+        # own deploy.ps1 does, in a step of its own that stands before "Revert pin".
+        $names = @($steps | ForEach-Object { [string] $_.Name })
+        $revert = @($steps | Where-Object Name -eq 'Revert deployable')
+        Assert-That ($revert.Count -eq 1 -and $revert[0].Condition -eq 'Failure') 'no Revert deployable on failure'
+        Assert-That ($names.IndexOf('Revert deployable') -lt $names.IndexOf('Revert pin')) 'Revert deployable does not stand before Revert pin'
+        # A rollback is verified like an update (decision 0018): the application's verify.ps1 right after the revert,
+        # on failure only, waiting for it; then the nodes it reported, and the pin last.
+        $verify = @($steps | Where-Object Name -eq 'Verify revert')
+        Assert-That ($verify.Count -eq 1 -and $verify[0].Condition -eq 'Failure' -and [string] $verify[0].StartTrigger -ne 'StartWithPrevious') 'no Verify revert on failure that waits for the revert'
+        Assert-That ($names.IndexOf('Verify revert') -eq $names.IndexOf('Revert deployable') + 1) 'Verify revert does not stand right after Revert deployable'
+        $record = @($steps | Where-Object Name -eq 'Record nodes after revert')
+        Assert-That ($record.Count -eq 1 -and $record[0].Condition -eq 'Failure') 'no Record nodes after revert on failure'
+        Assert-That ($names.IndexOf('Verify revert') -lt $names.IndexOf('Record nodes after revert') -and $names.IndexOf('Record nodes after revert') -lt $names.IndexOf('Revert pin')) 'the failure steps are not in the order revert, verify, record, pin'
+        'Revert deployable, Verify revert, Record nodes after revert, then Revert pin, run on failure'
+    }
     'CAP-010' = { Assert-AppRepository; Assert-That ((Get-RequiredCheck $appRepo) -contains 'Build result') 'Build result not required'; 'Build result required on the app' }
     'CAP-011' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the current deployment of every project and environment logged no warning or error' }
     'CAP-012' = { Assert-That ((Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'head\.repo\.full_name == github\.repository') 'preview runs for forks'; 'the credentialed preview runs only for branches of the repository' }
     'CAP-013' = {
         $v = (Get-LastDeployment $deployableProject $first).Version
+        if ($ownRuntime) {
+            # The release's package (the application's deploy and verify code) carries the release's number; the
+            # application's own verify step compares it with what runs.
+            Assert-That ((Get-DeployedPackage $first).package -eq $v) "release $v deploys package $((Get-DeployedPackage $first).package)"
+            return "release $v = package version in $first; $deployable verifies the running version itself"
+        }
         if ($onAppService) {
             # The build stamps the version into the app, which reports it; the release's package carries the same number.
             $running = [string] (Invoke-RestMethod -Uri "$((Get-Site $first).url)/_version" -TimeoutSec 120).version
@@ -242,9 +363,16 @@ $checks = [ordered] @{
         "$($files.Count) step scripts stop on errors"
     }
     'CAP-020' = {
-        if ($onAppService) {
+        if ($onAppService -or $ownRuntime) {
             # One zip per version in the built-in feed; every environment's release deploys the package of its own number.
-            $shown = foreach ($e in $environments) { if (-not (Find-LastDeployment $deployableProject $e)) { continue }; $p = Get-DeployedPackage $e; Assert-That ($p.release -eq $p.package) "$e runs release $($p.release) with package $($p.package)"; "$e $($p.package)" }
+            $shown = foreach ($e in $environments) {
+                if (-not (Find-LastDeployment $deployableProject $e)) { continue }
+                $p = Get-DeployedPackage $e
+                # An environment still on a release from before the application brought its runtime has no package yet.
+                if ($ownRuntime -and -not $p.package) { "$e $($p.release) (released before $deployable had a package)"; continue }
+                Assert-That ($p.release -eq $p.package) "$e runs release $($p.release) with package $($p.package)"
+                "$e $($p.package)"
+            }
             if (-not $shown) { Skip-Check "no successful $deployableProject deployment yet" }
             return "one package per version: $($shown -join ', ')"
         }
@@ -253,7 +381,7 @@ $checks = [ordered] @{
         "one image per version across $($environments -join ', ')"
     }
     'CAP-021' = {
-        if ($onAppService) {
+        if ($onAppService -or $ownRuntime) {
             # The package feed keeps the first upload of a version: the release workflow pushes with IgnoreIfExists only.
             Assert-AppRepository
             $modes = @([regex]::Matches((Get-RepoFile $appRepo '.github/workflows/release.yml'), 'overwrite_mode:\s*(\S+)') | ForEach-Object { $_.Groups[1].Value })
@@ -279,7 +407,7 @@ $checks = [ordered] @{
         }
         foreach ($entry in $system.environments) { $want = if ($entry.ContainsKey('appCpu')) { [double] $entry.appCpu } else { 0.5 }; $got = [double] (Get-App $entry.name).properties.template.containers[0].resources.cpu; Assert-That ($want -eq $got) "$($entry.name) has $got vCPU, system.json $want" }; 'app sizes follow system.json'
     }
-    'CAP-034' = { $n = @(Get-ProcessStep $deployableProject | ForEach-Object Name); Assert-That ($n.IndexOf('Migrate database') -lt $n.IndexOf('Update deployable')) 'Update before Migrate'; 'Migrate database before Update deployable' }
+    'CAP-034' = { Assert-Database; $n = @(Get-ProcessStep $deployableProject | ForEach-Object Name); Assert-That ($n.IndexOf('Migrate database') -lt $n.IndexOf('Update deployable')) 'Update before Migrate'; 'Migrate database before Update deployable' }
     'CAP-035' = { foreach ($f in 'update-deployable.ps1', 'verify-environment.ps1') { Assert-That ((Get-RepoFile $systemRepo "scripts/$f") -match 'Get-RevisionProblem') "$f does not fail fast" }; 'Update and Verify fail fast on a revision that cannot start' }
     'CAP-036' = { Assert-That (@(Get-ProcessStep $systemProject | Where-Object Name -eq 'Verify environment').Count -eq 1 -and @(Get-ProcessStep $deployableProject | Where-Object Name -eq 'Verify deployable').Count -eq 1) 'a verify step is missing'; 'both projects end with a verify step' }
     'CAP-037' = {
@@ -315,6 +443,9 @@ $checks = [ordered] @{
             if ($paid) { return "Free plans, except the declared Basic plan of $($paid -join ', '), which is Free while the system is dormant" }
             return 'every app runs on a Free plan'
         }
+        # Nothing to ask where no deployable is a container app of the system's: an application with its own runtime,
+        # alone or next to the dashboard (a static site on the Free plan).
+        if ($ownRuntime -and @(Get-ContainerDeployable $system).Count -eq 0) { Skip-Check "$deployable brings its own runtime, and no other deployable is a container app: the system creates no app whose idle cost it could declare" }
         # Every container app scales to zero, except a deployable that system.json declares always on ("alwaysOn":
         # true: a background service), which keeps exactly one replica: a declared cost, not an accident. With
         # "alwaysOnEnvironments" it keeps that replica in those environments only and scales to zero in the others.
@@ -329,10 +460,10 @@ $checks = [ordered] @{
         }
         if ($alwaysOn.Count -gt 0) { "every app scales to zero, except the declared always-on $($alwaysOn -join ', ') (one replica)" } else { 'every app scales to zero' }
     }
-    'CAP-040' = { $d = Get-LastDeployment $deployableProject $first; Assert-That ($d.Log -match 'Acceptance tests passed') "the last deployment to $first ran no passing acceptance tests"; "$($d.Version) passed the acceptance tests in $first" }
-    'CAP-041' = { $d = Get-LastDeployment $deployableProject $first; Assert-That ($d.Log -match 'test data was reloaded') 'no ZDataLoader'; "test data reloaded after $($d.Version)" }
-    'CAP-042' = { $d = Get-LastDeployment $deployableProject $first; $m = [regex]::Match($d.Log, 'effective parallelism ([\d.]+)'); Assert-That $m.Success 'no parallelism reported'; "effective parallelism $($m.Groups[1].Value)" }
-    'CAP-043' = { $d = Get-LastDeployment $deployableProject $first; $a = @((Invoke-Octopus "/api/$space/artifacts?regarding=$($d.TaskId)").Items | Where-Object Filename -like '*.trx'); Assert-That ($a.Count -ge 1) 'no TRX artifact'; "$($a[0].Filename)" }
+    'CAP-040' = { Assert-AcceptanceTestPackage; $d = Get-LastDeployment $deployableProject $first; Assert-That ($d.Log -match 'Acceptance tests passed') "the last deployment to $first ran no passing acceptance tests"; "$($d.Version) passed the acceptance tests in $first" }
+    'CAP-041' = { Assert-AcceptanceTestPackage; $d = Get-LastDeployment $deployableProject $first; Assert-That ($d.Log -match 'test data was reloaded') 'no ZDataLoader'; "test data reloaded after $($d.Version)" }
+    'CAP-042' = { Assert-AcceptanceTestPackage; $d = Get-LastDeployment $deployableProject $first; $m = [regex]::Match($d.Log, 'effective parallelism ([\d.]+)'); Assert-That $m.Success 'no parallelism reported'; "effective parallelism $($m.Groups[1].Value)" }
+    'CAP-043' = { Assert-AcceptanceTestPackage; $d = Get-LastDeployment $deployableProject $first; $a = @((Invoke-Octopus "/api/$space/artifacts?regarding=$($d.TaskId)").Items | Where-Object Filename -like '*.trx'); Assert-That ($a.Count -ge 1) 'no TRX artifact'; "$($a[0].Filename)" }
     'CAP-044' = {
         # Every current deployment that ran the availability probe logged no downtime.
         $measured = 0
@@ -355,6 +486,17 @@ $checks = [ordered] @{
         if ($onAppService) {
             foreach ($e in $environments) { $actual = (([string] (Get-Site $e).location) -replace '\s', '').ToLowerInvariant(); Assert-That ($actual -eq [string] $system.system.location) "$e runs in $actual; system.json places it in $($system.system.location)" }
             return "every environment's apps run where system.json places them"
+        }
+        # azure.appEnvironment: the system owns one Container Apps environment, and every environment runs there.
+        if ($system.azure.ContainsKey('appEnvironment')) {
+            $owned = $system.azure.appEnvironment
+            foreach ($e in $environments) {
+                $app = Get-App $e
+                Assert-That ([string] $app.properties.environmentId -eq [string] $owned.id) "$e runs in $($app.properties.environmentId); system.json places it in $($owned.id)"
+                $actual = (([string] $app.location) -replace '\s', '').ToLowerInvariant()
+                Assert-That ($actual -eq [string] $owned.location) "$e runs in $($app.location); the system's Container Apps environment is in $($owned.location)"
+            }
+            return "every environment's apps run in the system's Container Apps environment $($owned.name)"
         }
         foreach ($entry in $system.environments) {
             $e = [string] $entry.name
@@ -428,7 +570,7 @@ $checks = [ordered] @{
     'CAP-052' = { $prod = @(Get-ProdEnvironment); Assert-That ($prod.Count -ge 1) 'no prod-tier environment'; "$($prod -join ', ') in $($system.azure.resourceGroups.prod) with id-$($slug)-deploy-prod" }
     'CAP-053' = { $u = az account show --query user.type --output tsv; $me = Invoke-Octopus '/api/users/me'; Assert-That ($u -eq 'servicePrincipal' -and $me.IsService) "az $u, Octopus service $($me.IsService)"; "az as a service principal, Octopus as $($me.Username)" }
     'CAP-055' = { Assert-AppRepository; Assert-That ((Get-RequiredCheck $appRepo) -contains 'secret-scan' -and (Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'gitleaks') 'secret scanning not enforced'; 'gitleaks in env-checks and the required check secret-scan' }
-    'CAP-056' = { $r = Get-RecentRun 'Rotate SQL password' 35; Assert-That ($r.Count -ge 1) 'no successful rotation in 35 days'; "rotated $($r[0].CompletedTime)" }
+    'CAP-056' = { Assert-Database; $r = Get-RecentRun 'Rotate SQL password' 35; Assert-That ($r.Count -ge 1) 'no successful rotation in 35 days'; "rotated $($r[0].CompletedTime)" }
     'CAP-057' = {
         # A secret a deployable declares (system.json deployables[].secrets) reaches its app from the environment's
         # vault by reference, as <deployable>-<name>; the app holds no secret as a stored value. The reference is read
@@ -469,8 +611,8 @@ $checks = [ordered] @{
         if (-not $shown) { Skip-Check 'no deployable that declares secrets has been deployed yet' }
         "every declared secret is a vault reference read by the deployable's own identity, out of reach of the shared runtime identity: $($shown -join ', ')"
     }
-    'CAP-060' = { $r = Get-RecentRun 'Restore test' 8; Assert-That ($r.Count -ge 1) 'no successful restore test in 8 days'; "restore test passed $($r[0].CompletedTime)" }
-    'CAP-061' = { $prod = @(Get-ProdEnvironment)[0]; $d = Get-LastDeployment $deployableProject $prod; Assert-That ($d.Log -match 'Restore point before') "no restore point in the last $prod deployment"; "restore point recorded before $($d.Version) in $prod" }
+    'CAP-060' = { Assert-Database; $r = Get-RecentRun 'Restore test' 8; Assert-That ($r.Count -ge 1) 'no successful restore test in 8 days'; "restore test passed $($r[0].CompletedTime)" }
+    'CAP-061' = { Assert-Database; $prod = @(Get-ProdEnvironment)[0]; $d = Get-LastDeployment $deployableProject $prod; Assert-That ($d.Log -match 'Restore point before') "no restore point in the last $prod deployment"; "restore point recorded before $($d.Version) in $prod" }
     'CAP-070' = {
         # Telemetry is proven where it lands: in every environment with the capability, the app gets the Application
         # Insights connection string, and requests under its own name (OTEL_SERVICE_NAME, <slug>-<deployable>) arrived
@@ -510,19 +652,22 @@ $checks = [ordered] @{
     'CAP-075' = {
         # One page shows every node: the dashboard (the deployable with hosting "staticwebapp") serves the topology its
         # deployment wrote, and in every environment it runs in, that topology lists every environment of system.json
-        # and, for each App Service deployable, the nodes the naming convention gives (primary, and standby where the
-        # environment has a standbyLocation). A topology older than system.json fails: deploy the dashboard again.
+        # and every node that is known: for each App Service deployable the nodes the naming convention gives (primary,
+        # and standby where the environment has a standbyLocation), and for each deployable with hosting "own" the
+        # nodes its application reported (environments/<env>/nodes.json on main). A topology older than system.json or
+        # than that record fails: deploy the dashboard again.
         # Its Runtime view has, in runtime/index.json, every environment with a manifest and an SVG the site serves.
         $dashboard = @($system.deployables | Where-Object { $_['hosting'] -eq 'staticwebapp' }) | Select-Object -First 1
         if (-not $dashboard) { Skip-Check 'no deployable with hosting staticwebapp yet' }
         $dashboardName = [string] $dashboard.name
-        $apps = @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' } | ForEach-Object { [string] $_.name })
-        $want = @(foreach ($entry in $system.environments) {
-                foreach ($app in $apps) {
-                    "$($entry.name)/$app/app-$slug-$($entry.name)-$app"
-                    if ($entry['standbyLocation']) { "$($entry.name)/$app/app-$slug-$($entry.name)-$app-$($entry.standbyLocation)" }
-                }
-            })
+        $recorded = @{}
+        if (@($system.deployables | Where-Object { $_['hosting'] -eq 'own' }).Count -gt 0) {
+            foreach ($e in $environments) {
+                $text = Find-RepoFile $systemRepo "environments/$e/nodes.json"
+                if ($text) { $recorded[$e] = $text | ConvertFrom-Json -AsHashtable }
+            }
+        }
+        $want = @(Get-ExpectedNode $system $recorded)
         $shown = foreach ($e in $environments) {
             if (-not (Find-LastDeployment "$slug-$dashboardName" $e)) { continue }
             $url = "$(az stack group show --name "stack-$slug-$e" --resource-group (Get-Group $e) --query "outputs.deployables.value[?name=='$dashboardName'].url | [0]" --output tsv)".Trim()
@@ -532,7 +677,7 @@ $checks = [ordered] @{
             $listed = @($topology['environments'] | Where-Object { $_ })
             $absent = @($environments | Where-Object { @($listed | ForEach-Object { [string] $_['name'] }) -notcontains $_ })
             Assert-That ($absent.Count -eq 0) "the dashboard in $e does not list $($absent -join ', '): deploy the release of $slug-$dashboardName to $e again"
-            $got = @(foreach ($entry in $listed) { foreach ($d in @($entry['deployables'] | Where-Object { $_ })) { foreach ($node in @($d['nodes'] | Where-Object { $_ })) { "$($entry['name'])/$($d['name'])/$($node['name'])" } } })
+            $got = @(Get-ListedNode $topology)
             $lost = @($want | Where-Object { $got -notcontains $_ })
             Assert-That ($lost.Count -eq 0) "the dashboard in $e does not list the node(s) $($lost -join ', '): deploy the release of $slug-$dashboardName to $e again"
             $content = (Invoke-WebRequest -Uri "$url/runtime/index.json" -TimeoutSec 120 -SkipHttpErrorCheck)
@@ -554,7 +699,22 @@ $checks = [ordered] @{
     }
     'CAP-076' = {
         # The delivery tool shows each environment's health: a "Health report" run of the last three hours succeeded
-        # in every environment (the runbook is hourly, and fails when a node does not answer).
+        # in every environment (the runbook is hourly, and fails when a node does not answer). The report asks the
+        # nodes of the stack and, for an application that brings its own runtime (hosting "own"), the nodes it
+        # recorded in environments/<env>/nodes.json on main, unless that record says "healthReport": false. One
+        # without a record in an environment is not asked there. The record is read here as the runbook reads it,
+        # from the repository's public address: for a private repository both read none. A system of nothing but
+        # such applications, none of them asked anywhere, has no node the report asks, and its green runs prove
+        # nothing about health: the check skips.
+        $recorded = @{}
+        if (@($system.deployables | Where-Object { $_['hosting'] -eq 'own' }).Count -gt 0) {
+            foreach ($e in $environments) {
+                $text = Find-PublicFile $systemRepo "environments/$e/nodes.json"
+                if ($text) { $recorded[$e] = try { $text | ConvertFrom-Json -AsHashtable -NoEnumerate } catch { $null } }
+            }
+        }
+        $question = Get-HealthQuestion $system $environments $recorded
+        if ($question.Every -and $question.Asked.Count -eq 0) { Skip-Check "every deployable brings its own runtime ($($question.Own -join ', ')) and the health report asks none of them: $($question.NotAsked -join ', ') (environments/<env>/nodes.json on main, read from the repository's public address as the runbook reads it)" }
         if ($system.azure.ContainsKey('frontDoor') -and $system.azure.frontDoor['dormant']) { Skip-Check 'the system is dormant: the hourly health report is off so the apps and their databases can sleep' }
         $since = [datetimeoffset]::UtcNow.AddHours(-3)
         $runs = @((Invoke-Octopus "/api/$space/tasks?name=RunbookRun&take=200").Items | Where-Object { $_.Description -like '*Health report*' -and [datetimeoffset] $_.QueueTime -gt $since })
@@ -565,7 +725,7 @@ $checks = [ordered] @{
             Assert-That ($last.State -eq 'Success') "the last Health report in $e is $($last.State)"
             "$e $(([datetimeoffset] $last.QueueTime).ToString('HH:mm'))"
         }
-        "the last hourly health report succeeded in $($shown -join ', ') (UTC)"
+        "the last hourly health report succeeded in $($shown -join ', ') (UTC)$(if ($question.Asked.Count -gt 0) { "; asked from its record of nodes: $($question.Asked -join ', ')" })$(if ($question.NotAsked.Count -gt 0) { "; not asked: $($question.NotAsked -join ', ')" })"
     }
     'CAP-077' = {
         # Calls are counted where they happen: every web app of an App Service deployable with a telemetryPath (primary
@@ -727,6 +887,33 @@ $checks = [ordered] @{
         if (-not $shown) { Skip-Check "no successful $slug-$($dashboard.name) deployment yet" }
         "$($declared -join ', ') on the runtime diagrams served in $(@($shown) -join ', ')"
     }
+    'CAP-088' = {
+        # Deployments in flight where a browser can read them: workflow deployments publishes deployments.json on
+        # branch deployments (one commit, none on main) when a deployment pins its version and on a five-minute
+        # schedule, and only when something changed, so the file's own time says nothing about its age. It is
+        # compared with Octopus both ways instead, with an hour for the schedule (GitHub started it every twenty to
+        # thirty minutes on 2026-10-08): every deployment task of the space that has been in flight that long is in
+        # the file, and nothing the file calls in flight ended that long ago.
+        $branches = @(gh api "repos/$systemRepo/branches" --paginate --jq '.[].name')
+        if ($branches -notcontains 'deployments') { Skip-Check 'workflow deployments has not published branch deployments yet' }
+        $published = Get-RepoFile $systemRepo 'deployments.json?ref=deployments' | ConvertFrom-Json -AsHashtable
+        Assert-That ([string] $published['system'] -eq $slug) "deployments.json on branch deployments is of system '$($published['system'])', not $slug"
+        $listed = @($published['deployments'] | Where-Object { $_ })
+        $states = 'queued', 'executing', 'waiting', 'succeeded', 'failed', 'canceled'
+        $unreadable = @($listed | Where-Object { $states -notcontains [string] $_['state'] -or -not $_['project'] -or -not $_['environment'] -or [string] $_['url'] -notmatch '/tasks/ServerTasks-\d+$' })
+        Assert-That ($unreadable.Count -eq 0) "deployments.json has $($unreadable.Count) entr(ies) without a project, an environment, a task or one of the states $($states -join ', ')"
+        $inFlight = @($listed | Where-Object { -not $_['finished'] })
+        $limit = [datetimeoffset]::UtcNow.AddMinutes(-60)
+        foreach ($task in @((Invoke-Octopus "/api/$space/tasks?name=Deploy&states=Queued,Executing,Cancelling&take=100").Items | Where-Object { $_ })) {
+            if ([datetimeoffset] $task.QueueTime -gt $limit) { continue }
+            Assert-That (@($inFlight | Where-Object { [string] $_['url'] -like "*/tasks/$($task.Id)" }).Count -eq 1) "deployments.json does not list '$($task.Description)', in flight in Octopus for over an hour ($($task.Id)): run workflow deployments"
+        }
+        foreach ($entry in $inFlight) {
+            $task = Invoke-Octopus "/api/tasks/$(([string] $entry['url']) -replace '^.*/tasks/', '')"
+            Assert-That (-not $task.IsCompleted -or [datetimeoffset] $task.CompletedTime -gt $limit) "deployments.json calls $($entry['project']) $($entry['release']) to $($entry['environment']) $($entry['state']); in Octopus it ended over an hour ago ($($task.Id)): run workflow deployments"
+        }
+        "deployments.json on branch deployments: $($inFlight.Count) in flight, as in Octopus; $($listed.Count - $inFlight.Count) ended in the last half hour"
+    }
     'CAP-080' = { $files = @(gh api "repos/$systemRepo/contents/docs/architecture" --jq '.[].name'); $missing = @($files | Where-Object { $_ -like '*.puml' -and $files -notcontains ($_ -replace '\.puml$', '.png') }); Assert-That ($missing.Count -eq 0 -and $files.Count -gt 0) "not rendered: $missing"; "$(@($files | Where-Object { $_ -like '*.png' }).Count) diagrams rendered" }
     'CAP-081' = {
         $build = Get-RepoFile $systemRepo '.github/workflows/system.yml'; $nightly = Get-RepoFile $systemRepo '.github/workflows/capabilities.yml'
@@ -742,21 +929,38 @@ if ($ListChecks) {
 }
 # Checks compare Git, Octopus and Azure; in the middle of a deployment or runbook run they differ by design, so the
 # run waits until the space is quiet.
+function Test-WaitsForPerson($Task) {
+    # A task Octopus paused at a sign-off, which a person answers (a pending interruption of type ManualIntervention):
+    # at rest. The task's own flag does not decide by itself: Octopus also pauses a task with interruptions it answers
+    # itself (runtime aks-argocd: the wait for Argo CD to sync), and such a task is changing the environment.
+    if (-not $Task.HasPendingInterruptions) { return $false }
+    @((Invoke-Octopus "/api/$space/interruptions?regarding=$($Task.Id)&take=100").Items | Where-Object { $_.IsPending -and $_.Type -eq 'ManualIntervention' }).Count -gt 0
+}
 function Wait-QuietSpace([int] $Minutes) {
-    # $true once no task of the space runs or waits; $false when that takes longer than $Minutes. One read a minute.
+    # $true once no task of the space runs or waits for Octopus; $false when that takes longer than $Minutes. One read
+    # a minute. A task that waits for a person (a deployment at its sign-off) is at rest: nothing changes until
+    # somebody answers, which can take a night, and what the environment runs meanwhile is what the checks read
+    # (write-delivery.ps1 waits the same way).
     $deadline = [datetimeoffset]::UtcNow.AddMinutes($Minutes)
-    while (@((Invoke-Octopus "/api/$space/tasks?states=Executing,Queued,Cancelling&take=10").Items).Count -gt 0) {
+    $said = $false
+    while ($true) {
+        $tasks = @((Invoke-Octopus "/api/$space/tasks?states=Executing,Queued,Cancelling&take=10").Items)
+        $atSignOff = @($tasks | Where-Object { Test-WaitsForPerson $_ })
+        if ($atSignOff.Count -gt 0 -and -not $said) {
+            $said = $true
+            Write-Host "At rest, waiting for a person: $(@($atSignOff | ForEach-Object { "$($_.Description) ($($_.Id))" }) -join '; ')."
+        }
+        if ($tasks.Count -eq $atSignOff.Count) { return $true }
         if ([datetimeoffset]::UtcNow -gt $deadline) { return $false }
         Write-Host 'Waiting for running Octopus tasks to finish.'
         Start-Sleep -Seconds 60
     }
-    $true
 }
 function Get-TaskSince([datetimeoffset] $Since) {
     # The deployments and runbook runs of the space that run now or ended after $Since, newest first: one read of the
-    # space's latest tasks.
+    # space's latest tasks. One that waits for a person changes nothing meanwhile (Wait-QuietSpace) and does not count.
     @((Invoke-Octopus "/api/$space/tasks?take=50").Items | Where-Object {
-            $_.Name -in 'Deploy', 'RunbookRun' -and (-not $_.IsCompleted -or ($_.CompletedTime -and [datetimeoffset] $_.CompletedTime -ge $Since))
+            $_.Name -in 'Deploy', 'RunbookRun' -and ((-not $_.IsCompleted -and -not (Test-WaitsForPerson $_)) -or ($_.CompletedTime -and [datetimeoffset] $_.CompletedTime -ge $Since))
         })
 }
 function Invoke-Check([string] $Id) {

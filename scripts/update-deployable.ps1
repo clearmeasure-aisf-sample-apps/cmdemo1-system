@@ -81,8 +81,24 @@ function Get-RevisionProblem {
     return $null
 }
 
+function Test-SystemAppEnvironment {
+    # Whether a container app runs in the system's own Container Apps environment (system.json azure.appEnvironment:
+    # the seed creates it in a resource group of its own) and not in one its environments create, which is in the
+    # app's own group, the tier's. From the two names alone: it asks nothing.
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $EnvironmentId, [Parameter(Mandatory)] [string] $ResourceGroup)
+    return [bool] ($EnvironmentId -and $EnvironmentId -notmatch "/resourceGroups/$([regex]::Escape($ResourceGroup))/")
+}
+
 function Write-RevisionLog {
     param([Parameter(Mandatory)] [string] $App)
+    if ($express) {
+        # An express environment has no console log stream for the Azure CLI; the app itself says why it failed.
+        $PSNativeCommandUseErrorActionPreference = $false
+        $errors = az rest --method get --url $expressAppUri --query properties.deploymentErrors --output tsv 2>$null
+        $PSNativeCommandUseErrorActionPreference = $true
+        Write-Host "Deployment errors of ${App}: $(if ($errors) { $errors } else { 'none reported' })"
+        return
+    }
     $PSNativeCommandUseErrorActionPreference = $false
     $lines = az containerapp logs show --name $App --resource-group $resourceGroup --type console --tail 40 --format text 2>&1
     $PSNativeCommandUseErrorActionPreference = $true
@@ -108,6 +124,26 @@ $current = az containerapp show --name $app --resource-group $resourceGroup --ou
 # of the app (identitySettings), and this URI is also used to change it (the ingress port).
 $appUri = "https://management.azure.com$($current.id)?api-version=2025-01-01"
 $before = [string] $current.properties.latestRevisionName
+
+# An Azure Container Apps express environment (system.json azure.appEnvironment.mode "express") behaves differently
+# in three ways this step depends on (seen on the first express system, jpcom, 2026-10-06):
+#   - the app keeps no registry setting: the identity that pulls the image must come in the request that changes the
+#     image, or the pull fails ("Authentication failed when pulling container image ... Provide ... 'managedIdentityClientId'");
+#   - there is one revision, always named <app>--latest, and latestReadyRevisionName stays empty: the image the app
+#     shows and its provisioning state say when the change is done;
+#   - "az containerapp logs show" fails there; the app reports the reason of a failed change as deploymentErrors.
+# Only the system's own environment can be an express one: an environment the system's environments create is always
+# a standard one. So the mode is asked only for an app in the system's own environment, and for every other app this
+# step makes the calls it always made.
+$expressAppUri = "https://management.azure.com$($current.id)?api-version=2026-07-01"
+$environmentId = [string] $current.properties.environmentId
+$express = $false
+if (Test-SystemAppEnvironment -EnvironmentId $environmentId -ResourceGroup $resourceGroup) {
+    # "$( )": an environment without the property prints nothing, which is an empty text here. ([string] of a command
+    # that prints nothing is null, and a method called on it ends the step: "You cannot call a method on a
+    # null-valued expression".)
+    $express = "$(az rest --method get --url "https://management.azure.com${environmentId}?api-version=2026-07-01" --query properties.environmentMode --output tsv)".Trim() -eq 'Express'
+}
 
 # Secrets the deployable declares (system.json deployables[].secrets; variable Deployable.Secrets, the names joined by
 # commas): the environment's stack makes the app reference each one once it is in the vault. A version that starts
@@ -253,16 +289,34 @@ if ($currentImage -eq $image) {
 }
 else {
     Write-Host "Updating $app from $currentImage to $image"
-    az containerapp update --name $app --resource-group $resourceGroup --image $image --no-wait --output none
+    if ($express) {
+        # The environment's shared identity pulls the image (the seed gave it AcrPull); the app carries it already.
+        $pullIdentity = [string] (@($current.identity.userAssignedIdentities.Keys | Where-Object { $_ -match "/id-$([regex]::Escape($slug))-$([regex]::Escape($environmentName))-app$" }) | Select-Object -First 1)
+        if (-not $pullIdentity) { Fail-Step "$app carries no identity id-$slug-$environmentName-app to pull $image with: deploy the latest release of $slug-system to $environmentName first." }
+        $containers = @($current.properties.template.containers)
+        $containers[0].image = $image
+        $bodyFile = Join-Path ([IO.Path]::GetTempPath()) "update-$app-$([Guid]::NewGuid().ToString('N')).json"
+        @{ properties = @{ configuration = @{ registries = @(@{ server = $registry; identity = $pullIdentity }) }; template = @{ containers = $containers } } } |
+            ConvertTo-Json -Depth 20 -Compress | Set-Content -LiteralPath $bodyFile -Encoding utf8NoBOM
+        try { az rest --method patch --url $appUri --body "@$bodyFile" --headers 'Content-Type=application/json' --output none }
+        finally { Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue }
+        # The change is accepted at once; a moment later the app shows it as in progress.
+        Start-Sleep -Seconds 5
+    }
+    else {
+        az containerapp update --name $app --resource-group $resourceGroup --image $image --no-wait --output none
+    }
 }
 
 # Ready when a new revision (or, for an unchanged image, the current one) is the latest and the latest ready one; a
 # revision that cannot start fails at once.
 $deadline = (Get-Date).AddMinutes(10)
 while ($true) {
-    $state = az containerapp show --name $app --resource-group $resourceGroup --query '{latest: properties.latestRevisionName, ready: properties.latestReadyRevisionName, provisioning: properties.provisioningState}' --output json | ConvertFrom-Json -AsHashtable
-    $isNew = $currentImage -eq $image -or $state.latest -ne $before
-    if ($isNew -and $state.provisioning -eq 'Succeeded' -and $state.latest -and $state.latest -eq $state.ready) {
+    $state = az containerapp show --name $app --resource-group $resourceGroup --query '{latest: properties.latestRevisionName, ready: properties.latestReadyRevisionName, provisioning: properties.provisioningState, image: properties.template.containers[0].image}' --output json | ConvertFrom-Json -AsHashtable
+    # Express: the one revision keeps its name and is never listed as the latest ready one (above).
+    $isNew = $currentImage -eq $image -or $state.latest -ne $before -or ($express -and $state.image -eq $image)
+    $isReady = if ($express) { $state.image -eq $image } else { $state.latest -and $state.latest -eq $state.ready }
+    if ($isNew -and $state.provisioning -eq 'Succeeded' -and $isReady) {
         Write-Host "Revision $($state.latest) is ready"
         break
     }

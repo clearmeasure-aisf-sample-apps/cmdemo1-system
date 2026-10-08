@@ -8,7 +8,7 @@ variable "octopus_access_token" {
 }
 
 variable "github_token" {
-  description = "GitHub token the pin step commits environments/<env>/versions.json with (repository secret OCTOPUS_GITHUB_TOKEN)."
+  description = "GitHub token the deployments commit environments/<env>/versions.json (the pin) and nodes.json (the nodes of an application with its own runtime) with (repository secret OCTOPUS_GITHUB_TOKEN)."
   type        = string
   sensitive   = true
 }
@@ -41,8 +41,12 @@ locals {
   container_deployables  = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "containerapp" }
   appservice_deployables = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "appservice" }
   static_deployables     = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "staticwebapp" }
-  migrated_deployables   = { for name, d in local.deployables : name => d if try(d.databasePackage, "") != "" }
-  # deployables[].environments: a deployable that exists in some environments only (a container deployable; the rule
+  # deployables[].hosting "own": the application brings its runtime (principle 007). infra/ creates nothing for it;
+  # its release carries a package with deploy.ps1 and verify.ps1, which its project runs in every environment
+  # (scripts/invoke-application.ps1).
+  own_deployables      = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "own" }
+  migrated_deployables = { for name, d in local.deployables : name => d if try(d.databasePackage, "") != "" }
+  # deployables[].environments: a deployable that exists in some environments only (a container or a static site; the rule
   # is in scripts/test-system.ps1). It gets a lifecycle of its own with those environments, in the system's order, so
   # Octopus offers its releases nowhere else.
   restricted_deployables = { for name, d in local.deployables : name => d if can(d.environments) }
@@ -105,8 +109,22 @@ resource "octopusdeploy_lifecycle" "system" {
 
 # A deployable with deployables[].environments: the same order and rule (the first automatic, the others by
 # promotion), over its own environments only.
+# create_before_destroy: when a deployable stops naming its environments, its project goes back to the system's
+# lifecycle and this one is deleted. Octopus refuses to delete a lifecycle a project still uses, and without this
+# setting Terraform deletes it first ("This lifecycle cannot be deleted because it is being used by the following
+# projects": jpcom's dashboard, 2026-10-08). With it, the deletion waits until the project has been changed.
+# Caution: Terraform takes the order of a deletion from what it recorded in its state when the resource was last
+# applied, not from this file as it is when the resource is gone from it. A lifecycle that was last applied before
+# this setting was here is still deleted first. Such a system needs one apply with the lifecycle still present (it
+# records the setting and changes nothing else) before "environments" is taken away from the deployable. When it was
+# taken away too early, octopus-apply fails with the message above and no system release is made: put "environments"
+# back, apply, then remove it (jpcom, 2026-10-08, system pull requests 19 to 22; reference.md, troubleshooting).
 resource "octopusdeploy_lifecycle" "deployable" {
   for_each = local.restricted_deployables
+
+  lifecycle {
+    create_before_destroy = true
+  }
 
   name        = "${local.slug}-${each.key}-lifecycle"
   description = "The environments ${each.key} exists in (system.json deployables[].environments), in the order of the system: the first is automatic, the others are promoted by a person."

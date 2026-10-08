@@ -1,9 +1,15 @@
 # Operations runbooks of <slug>-system (environment-level work, run on a schedule):
-#   Restore test          weekly, first environment: point-in-time restore into a temporary database (CAP-060)
-#   Rotate SQL password   monthly, every environment: new administrator password through Key Vault (CAP-056)
+#   Restore test          weekly, first environment: point-in-time restore into a temporary database (CAP-060);
+#                         only in a system with a database
+#   Rotate SQL password   monthly, every environment: new administrator password through Key Vault (CAP-056); only
+#                         in a system with a database
 #   Health report         hourly, every environment: asks every node the environment's stack reports and its public
 #                         address, one line each; the last run per environment is the system's health in Octopus
-#                         (CAP-076)
+#                         (CAP-076). A deployable with hosting "own" is no node of the stack: the report asks the
+#                         nodes its application recorded (environments/<env>/nodes.json, read from the repository's
+#                         public address, without a token), once an hour, which wakes a node that scaled to zero; a
+#                         record with "healthReport": false is left alone. An environment with nothing to ask says
+#                         so and succeeds
 #   Failover test         only with a standby region (environments[].standbyLocation): stops the primary app and times
 #                         the Front Door endpoint's switch to the standby and back (CAP-047); it may run in every
 #                         environment with a standby, and is scheduled monthly in the nonprod ones
@@ -48,7 +54,7 @@ locals {
       schedule     = ""
     }
   } : key => runbook if length(local.secret_deployables) > 0 }
-  runbooks = merge(local.failover_runbook, local.restart_runbook, {
+  health_runbook = {
     health_report = {
       name         = "Health report"
       description  = "Asks every node of the environment and its public address whether it answers, one line each with region, time and version; fails when one is not healthy (scripts/report-health.ps1)."
@@ -57,6 +63,15 @@ locals {
       cron         = "0 ${local.schedule_minute} * * * *"
       schedule     = "Hourly health report"
     }
+  }
+  # The database runbooks exist only in a system with a database: a container deployable that uses one (database is
+  # true unless it says false) or an App Service deployable (which shares it), the rule of infra/main.bicep. An app of
+  # the person's own (app.source "repository") has none, so there is nothing to restore or rotate.
+  has_database = length([
+    for name, d in local.deployables : name
+    if(try(d.hosting, "containerapp") == "containerapp" && try(d.database, true)) || try(d.hosting, "containerapp") == "appservice"
+  ]) > 0
+  database_runbooks = { for key, runbook in {
     restore_test = {
       name         = "Restore test"
       description  = "Restores the database to 15 minutes ago into a temporary database, checks it, and deletes it (scripts/test-restore.ps1)."
@@ -73,7 +88,8 @@ locals {
       cron         = "0 ${local.schedule_minute} ${8 + local.schedule_hours} 1 * *"
       schedule     = "Monthly SQL password rotation"
     }
-  })
+  } : key => runbook if local.has_database }
+  runbooks = merge(local.failover_runbook, local.restart_runbook, local.health_runbook, local.database_runbooks)
   # A runbook is scheduled in the environments it may run in, unless it names fewer (scheduled_in); none: no trigger.
   scheduled_runbooks = { for key, r in local.runbooks : key => merge(r, { scheduled_in = try(r.scheduled_in, r.environments) }) if length(try(r.scheduled_in, r.environments)) > 0 }
 }

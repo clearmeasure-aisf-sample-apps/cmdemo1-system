@@ -1,5 +1,7 @@
 // Capability "baseline": the environment's vault (RBAC authorization, no purge protection so a torn-down demo can be
-// purged) with the SQL secrets. The runtime identity reads secrets; the deploy identity reads and writes them.
+// purged) with the SQL secrets. The runtime identity reads secrets; the deploy identity reads and writes them. In an
+// environment without a database (database false: no app in it has one) the vault holds no SQL secret, only the
+// secrets of the container deployables.
 targetScope = 'resourceGroup'
 
 param name string
@@ -7,10 +9,12 @@ param location string
 param tags object
 param readerPrincipalIds array
 param officerPrincipalIds array
+@description('False in an environment without a database: no SQL secrets.')
+param database bool = true
 @secure()
-param sqlAdminPassword string
+param sqlAdminPassword string = ''
 @secure()
-param sqlConnectionString string
+param sqlConnectionString string = ''
 
 @description('Database logins of App Service deployables: name, and the principal ID of the one identity that may read its connection string.')
 param logins array = []
@@ -75,7 +79,7 @@ resource officers 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
   }
 ]
 
-resource adminPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource adminPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (database) {
   parent: vault
   name: 'sql-admin-password'
   properties: {
@@ -84,7 +88,7 @@ resource adminPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
-resource connectionString 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource connectionString 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (database) {
   parent: vault
   name: 'sql-connection-string'
   properties: {
@@ -100,7 +104,7 @@ resource connectionString 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
 // secrets of a deployable with an identity of its own are then out of its reach. The stack removes the vault-wide
 // assignment at the end of the apply that adds this one, so the apps never lack access in between.
 resource connectionStringReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for principalId in (narrowReaders ? readerPrincipalIds : []): {
+  for principalId in (narrowReaders && database ? readerPrincipalIds : []): {
     name: guid(vault.id, principalId, 'sql-connection-string-user')
     scope: connectionString
     properties: {
@@ -194,5 +198,5 @@ output vaultUri string = vault.properties.vaultUri
 output loginConnectionStringUris array = [
   for (l, i) in logins: '${vault.properties.vaultUri}secrets/${loginConnectionString[i].name}'
 ]
-// Versionless URI: the container app picks up a rotated value without a new revision.
-output connectionStringSecretUri string = '${vault.properties.vaultUri}secrets/${connectionString.name}'
+// Versionless URI: the container app picks up a rotated value without a new revision. Empty without a database.
+output connectionStringSecretUri string = database ? '${vault.properties.vaultUri}secrets/sql-connection-string' : ''
