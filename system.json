@@ -185,7 +185,8 @@
       "port": 8080,
       "healthPath": "/health",
       "environments": [
-        "tdd"
+        "tdd",
+        "uat"
       ],
       "database": false,
       "secrets": [

@@ -61,13 +61,13 @@ Test-That "container $deployable is private" ([string] $container.publicAccess -
 
 $identity = az identity show --resource-group $group --name "id-$slug-$Environment-$deployable" --output json | ConvertFrom-Json
 $containerScope = "$($account.id)/blobServices/default/containers/$deployable"
-$roles = @(az role assignment list --assignee $identity.principalId --scope $account.id --include-inherited false --output json | ConvertFrom-Json) +
+$roles = @(az role assignment list --assignee $identity.principalId --scope $account.id --output json | ConvertFrom-Json) +
     @(az role assignment list --assignee $identity.principalId --scope $containerScope --output json | ConvertFrom-Json | Where-Object { $_.scope -eq $containerScope })
 $atContainer = @($roles | Where-Object { $_.scope -eq $containerScope })
 $elsewhere = @($roles | Where-Object { $_.scope -ne $containerScope -and $_.scope -like "$($account.id)*" })
 Test-That "the identity of $deployable holds Storage Blob Data Contributor at the container's scope" (@($atContainer | Where-Object { $_.roleDefinitionName -eq 'Storage Blob Data Contributor' }).Count -eq 1)
-Test-That 'it holds no other role on the container' ($atContainer.Count -eq 1) "$(@($atContainer.roleDefinitionName) -join ', ')"
-Test-That 'it holds no role on the account itself' ($elsewhere.Count -eq 0) "$(@($elsewhere.roleDefinitionName) -join ', ')"
+Test-That 'it holds no other role on the container' ($atContainer.Count -eq 1) "$(($atContainer | ForEach-Object { $_.roleDefinitionName }) -join ', ')"
+Test-That 'it holds no role on the account itself' ($elsewhere.Count -eq 0) "$(($elsewhere | ForEach-Object { $_.roleDefinitionName }) -join ', ')"
 
 $apps = @(az containerapp list --resource-group $group --query "[?contains(name, '-$Environment-$deployable')]" --output json | ConvertFrom-Json)
 Test-That "one container app of $deployable in $Environment" ($apps.Count -eq 1) "$($apps.Count) found"
@@ -79,7 +79,7 @@ if ($apps.Count -eq 1) {
     Test-That "the app gets the client id of its own identity" ($client.Count -eq 1 -and [string] $client[0].value -eq [string] $identity.clientId)
     # A storage key or a connection string in a setting would be the key the store is built to do without.
     $keyLike = @($settings | Where-Object { $_.PSObject.Properties['value'] -and [string] $_.value -match 'AccountKey=|SharedAccessSignature=|[?&]sig=' })
-    Test-That 'no setting of the app holds a storage key or a signed address' ($keyLike.Count -eq 0) "$(@($keyLike.name) -join ', ')"
+    Test-That 'no setting of the app holds a storage key or a signed address' ($keyLike.Count -eq 0) "$(($keyLike | ForEach-Object { $_.name }) -join ', ')"
 }
 
 if ($failed -gt 0) { Write-Host "$failed check(s) of the blob store failed in $Environment."; exit 1 }
