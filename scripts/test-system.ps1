@@ -162,7 +162,7 @@ foreach ($deployable in @($system.deployables)) {
 #                        <deployable>-<name>. The operator writes its value to the vault (the kit's
 #                        set-demo-secret.ps1); with "generate": true the deployment generates it. Never a value here.
 $environmentNamesDeclared = @($system.environments | ForEach-Object { [string] $_.name })
-$containerKeys = @('environments', 'alwaysOn', 'alwaysOnEnvironments', 'database', 'cpu', 'settings', 'environmentSettings', 'urlSetting', 'secrets')
+$containerKeys = @('environments', 'alwaysOn', 'alwaysOnEnvironments', 'database', 'cpu', 'settings', 'environmentSettings', 'urlSetting', 'secrets', 'dashboardLink')
 $variableName = '^[A-Za-z_][A-Za-z0-9_]{0,254}$'
 # Set by the template itself, or by Container Apps.
 $reservedVariables = @('ConnectionStrings__SqlConnectionString', 'OTEL_SERVICE_NAME', 'APPLICATIONINSIGHTS_CONNECTION_STRING')
@@ -219,6 +219,17 @@ foreach ($deployable in @($system.deployables)) {
     }
     if ($deployable.ContainsKey('cpu')) {
         Test-Rule "deployable $name cpu" ($deployable.cpu -is [string] -and @('0.5', '1', '1.5', '2') -ccontains $deployable.cpu) 'one of "0.5", "1", "1.5", "2" (vCPU, as text; the memory is twice as many GiB)'
+    }
+
+    # A page of this app that the system's dashboard leads to, in every environment the app exists in: the words of
+    # the link, and the path under the app's address there (scripts/deploy-staticwebapp.ps1 writes it into the
+    # dashboard's topology as environments[].pages).
+    if ($deployable.ContainsKey('dashboardLink')) {
+        $link = $deployable.dashboardLink
+        $valid = $link -is [Collections.IDictionary] -and @($link.Keys | Where-Object { @('text', 'path') -cnotcontains $_ }).Count -eq 0 -and
+            $link['text'] -is [string] -and $link['text'].Trim().Length -ge 1 -and $link['text'].Length -le 40 -and $link['text'] -ceq $link['text'].Trim() -and
+            $link['path'] -is [string] -and $link['path'] -cmatch '^/(?!/)[A-Za-z0-9._~!$&''()*+,;=:@%/?#-]*$'
+        Test-Rule "deployable $name dashboardLink" $valid 'an object { "text": the words of the link (1 to 40 characters, no space at either end), "path": a path under the app''s address that starts with one / (for example "/" or "/scorecard") }; no other key'
     }
 
     # Every environment variable has one source: a setting (settings, with environmentSettings on top), the app's own

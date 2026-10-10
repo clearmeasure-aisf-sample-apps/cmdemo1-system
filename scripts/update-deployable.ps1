@@ -152,7 +152,11 @@ $declaredSecrets = @(([string] $OctopusParameters['Deployable.Secrets']) -split 
 $referencedSecrets = @($current.properties.configuration['secrets'] | Where-Object { $_ } | ForEach-Object { [string] $_.name })
 $absentSecrets = @($declaredSecrets | Where-Object { $referencedSecrets -notcontains $_ })
 if ($absentSecrets.Count -gt 0) {
-    Fail-Step "$app does not reference the secret(s) $($absentSecrets -join ', ') that $deployable declares: the operator writes each one to the vault of $environmentName (the kit's set-demo-secret.ps1), then the latest release of $slug-system is deployed to $environmentName again, then this release."
+    $reason = "$app does not reference the secret(s) $($absentSecrets -join ', ') that $deployable declares: the operator writes each one to the vault of $environmentName (the kit's set-demo-secret.ps1), then the latest release of $slug-system is deployed to $environmentName again, then this release."
+    # Said as a line of the log too: on 2026-10-10 this step ended here with exit code 255 and nothing of the
+    # reason given to Fail-Step in the task's log (cmdemo1, scorecard in uat, ServerTasks-12010105).
+    Write-Highlight $reason
+    Fail-Step $reason
 }
 
 # Zero downtime, measured: while this step changes the environment, a background probe asks every app's health

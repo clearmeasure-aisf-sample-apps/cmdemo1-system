@@ -65,6 +65,9 @@
                                                        dependency calls of role <slug>-<deployable>)
                                   deployables[].links  frontDoor (the profile azure.frontDoor, where the environment
                                                        has an endpoint) and logs (a Logs query of the role's requests)
+                                  environments[].pages a page of the system itself, per deployable that names one
+                                                       (dashboardLink in system.json): its words and the address the
+                                                       deployable has in that environment, read from the stack
                                   environments[].links resourceGroup, applicationInsights and applicationMap (with
                                                        "telemetry") and database (sqldb-<slug>-<env>)
                                 The database's server has a generated suffix, so its name is read from Azure
@@ -205,11 +208,17 @@ function ConvertTo-Topology {
     # deployable's healthPath of system.json, or left out, and the dashboard then asks its own default), and
     # everything else is what system.json says of every deployable (projectUrl, telemetryPath, trafficPaths,
     # buildPath, healthDetailPath). It has no links: the system does not know the application's resources.
+    # A deployable that names a page of its own for the dashboard (deployables[].dashboardLink: text and path) gives
+    # each environment it exists in an entry of "pages": the words, the deployable, and the path under the address the
+    # deployable has in that environment (-PageAddress, by environment and deployable: the address the environment's
+    # stack reports). Without an address there, the environment has no such entry; an environment without any has no
+    # key "pages".
     param(
         [Parameter(Mandatory)] [hashtable] $System,
         [hashtable] $EndpointHost = @{},
         [hashtable] $SqlServer = @{},
         [hashtable] $NodeRecord = @{},
+        [hashtable] $PageAddress = @{},
         [datetime] $Generated = [datetime]::UtcNow,
         [string] $Dashboard = ''
     )
@@ -335,7 +344,16 @@ function ConvertTo-Topology {
                         nodes       = $nodes
                     }
                 })
-            [ordered] @{
+            $addresses = if ($PageAddress[$environmentName] -is [Collections.IDictionary]) { $PageAddress[$environmentName] } else { @{} }
+            $pages = @(foreach ($app in @($System.deployables)) {
+                    $link = $app['dashboardLink']
+                    if ($link -isnot [Collections.IDictionary] -or -not $link['text'] -or -not $link['path']) { continue }
+                    if ($app['environments'] -and @($app.environments) -notcontains $environmentName) { continue }
+                    $address = ([string] $addresses[[string] $app.name]).TrimEnd('/')
+                    if ($address -notmatch '^https?://') { continue }
+                    [ordered] @{ name = [string] $link.text; url = "$address/$(([string] $link.path).TrimStart('/'))"; deployable = [string] $app.name }
+                })
+            $listed = [ordered] @{
                 name               = $environmentName
                 tier               = [string] $environment['tier']
                 versionsUrl        = if ($repository) { "https://raw.githubusercontent.com/$repository/$versionsPath" } else { $null }
@@ -343,6 +361,8 @@ function ConvertTo-Topology {
                 links              = $environmentLinks
                 deployables        = $deployables
             }
+            if ($pages.Count -gt 0) { $listed.pages = $pages }
+            $listed
         })
     $about = [ordered] @{
         slug           = $slug
@@ -1307,7 +1327,41 @@ foreach ($tier in @($system.environments | ForEach-Object { [string] $_['tier'] 
     }
 }
 
-$topology = ConvertTo-Topology -System $system -EndpointHost $endpointHosts -SqlServer $sqlServers -NodeRecord $nodeRecords -Dashboard $name
+# The address of each deployable that names a page for the dashboard (deployables[].dashboardLink), in every
+# environment it exists in: what that environment's stack reports for it (a container app's address is generated).
+# This environment's stack is read already; another tier's group may be closed to this tier's deploy identity, and an
+# environment may not have the deployable yet: a read that gives no address is information, and the dashboard then
+# shows that environment without the link.
+$pageAddresses = @{}
+$withPage = @($system.deployables | Where-Object { $_['dashboardLink'] -is [Collections.IDictionary] })
+if ($withPage.Count -gt 0) {
+    foreach ($environment in @($system.environments)) {
+        $pageEnvironment = [string] $environment.name
+        $wanted = @($withPage | Where-Object { -not $_['environments'] -or @($_.environments) -contains $pageEnvironment } | ForEach-Object { [string] $_.name })
+        if ($wanted.Count -eq 0) { continue }
+        $reported = @()
+        $reason = ''
+        if ($pageEnvironment -eq $environmentName) { $reported = @($outputs.deployables.value) }
+        else {
+            $pageGroup = [string] $tierGroups[[string] $environment['tier']]
+            $PSNativeCommandUseErrorActionPreference = $false
+            $read = @(az stack group show --name "stack-$slug-$pageEnvironment" --resource-group $pageGroup --query 'outputs.deployables.value' --only-show-errors --output json 2>&1 | ForEach-Object { "$_" })
+            $readCode = $LASTEXITCODE
+            $PSNativeCommandUseErrorActionPreference = $true
+            if ($readCode -eq 0 -and ($read -join '').Trim()) { $reported = @(($read -join "`n") | ConvertFrom-Json -AsHashtable) }
+            else { $reason = if ($read.Count -gt 0) { ($read[0] -split "`n")[0] } else { "exit code $readCode" } }
+        }
+        $pageAddresses[$pageEnvironment] = @{}
+        foreach ($deployableName in $wanted) {
+            $found = @($reported | Where-Object { $_ -is [Collections.IDictionary] -and $_['name'] -eq $deployableName -and $_['url'] }) | Select-Object -First 1
+            if ($found) { $pageAddresses[$pageEnvironment][$deployableName] = [string] $found.url }
+            elseif ($reason) { Write-Host "The stack of $pageEnvironment could not be read ($reason): the dashboard shows no link to $deployableName there." }
+            else { Write-Host "The stack of $pageEnvironment reports no address for ${deployableName}: the dashboard shows no link to it there until the environment has it and the dashboard is deployed again." }
+        }
+    }
+}
+
+$topology = ConvertTo-Topology -System $system -EndpointHost $endpointHosts -SqlServer $sqlServers -NodeRecord $nodeRecords -PageAddress $pageAddresses -Dashboard $name
 # The page reads its own build facts only where the release has them: a release from before the dashboard's Build wrote
 # the file would have the page ask for a file its site does not serve.
 if ($topology.system.Contains('dashboard')) {
