@@ -90,10 +90,15 @@
        dependencies the diagram has none of this. Every node, region and Front Door, database or dependency
        relationship has a slot, a transparent image of a fixed size, where the dashboard draws the live values (a web
        app's slot holds seven lines under its badge: version, pin, traffic, failures, process, uptime and role, and
-       an eighth, the marks of its detailed health check, for a deployable with healthDetailPath). The script downloads the PlantUML release jar of the pinned version from GitHub,
+       an eighth, the marks of its detailed health check, for a deployable with healthDetailPath; then two more, as
+       the slot of every node a deployment changes has: what is being deployed there and what just happened, in
+       words, from deployments.json). The script downloads the PlantUML release jar of the pinned version from GitHub,
        verifies its SHA-256, renders every diagram in one Java process (layout engine smetana: no Graphviz; security
        profile SANDBOX) and checks that each SVG has every element the manifest names; a missing one fails the step.
        Java's output is logged as information; the download and the render are timed.
+       The manifest also says where each box leads that topology.json has no link for (the frames, the regions, the
+       Static Web App, the browser: "links", see ConvertTo-RuntimeDiagram), so a click on any box of the page's
+       runtime view opens what the box stands for.
     3. The deployment, with the Static Web Apps CLI and the site's deployment token. The token is read from Azure
        when the step runs (the deploy identity may; the stack's deny settings keep everyone else from listing it),
        reaches the CLI through an environment variable, and is never stored, printed or passed as an argument.
@@ -159,6 +164,26 @@ function Get-LogsAddress {
     $packed = [Uri]::EscapeDataString([Convert]::ToBase64String($buffer.ToArray()))
     $directory = if ($TenantId) { "@$TenantId/" } else { '' }
     return "https://portal.azure.com/#${directory}blade/Microsoft_Azure_Monitoring_Logs/LogsBlade/resourceId/$([Uri]::EscapeDataString($ResourceId))/source/LogsBlade.AnalyticsShareLinkToQuery/q/$packed/timespan/$Timespan"
+}
+
+function Get-ResourcesAddress {
+    # The address of Azure Resource Graph Explorer with a query filled in: the resources of one resource group in one
+    # region, by type and name. A region is no resource and has no page of its own in the portal; this list is what
+    # the region's frame of the runtime diagram stands for.
+    param(
+        [Parameter(Mandatory)] [string] $SubscriptionId,
+        [Parameter(Mandatory)] [string] $ResourceGroup,
+        [Parameter(Mandatory)] [string] $Location,
+        [string] $TenantId = ''
+    )
+    $query = @(
+        'resources'
+        "| where subscriptionId == `"$SubscriptionId`" and resourceGroup =~ `"$ResourceGroup`" and location =~ `"$Location`""
+        '| project name, type, location, id'
+        '| order by type asc, name asc'
+    ) -join "`n"
+    $directory = if ($TenantId) { "@$TenantId/" } else { '' }
+    return "https://portal.azure.com/#${directory}blade/HubsExtension/ArgQueryBlade/query/$([Uri]::EscapeDataString($query))"
 }
 
 function ConvertTo-Topology {
@@ -605,6 +630,18 @@ function ConvertTo-RuntimeDiagram {
     # Slots: every node's description is a transparent image of a fixed size, and so is the description of every
     # origin, database and dependency relationship and of every region: the dashboard draws the live values into those
     # rectangles.
+    #
+    # Links: where a box leads when the topology has no link for it. The manifest lists every frame that is no region
+    # ("frames": alias, qualifiedName, kind, name) and gives a frame, a region or a node "links", a map of one key:
+    #   portal     the resource's page in the Azure portal, from its id: the subscription, a resource group, the Front
+    #              Door profile, an App Service plan, a Static Web App. Without azure.subscriptionId there is none.
+    #   resources  a region of the system: the resources of the tier's resource group in that region, a query in Azure
+    #              Resource Graph Explorer (Get-ResourcesAddress)
+    #   project    the boundary of an application with its own runtime: its Octopus project (the topology's projectUrl)
+    #   site       an address a browser opens: the browser's box (the first public address of the diagram), and the
+    #              public address and the nodes of an application with its own runtime
+    # A web app, a Front Door endpoint and the database have their links in topology.json, as before; a dependency
+    # and the region of an application with its own runtime have none: the system knows no address for them.
     param(
         [Parameter(Mandatory)] [hashtable] $System,
         [Parameter(Mandatory)] [System.Collections.IDictionary] $Topology,
@@ -623,6 +660,12 @@ function ConvertTo-RuntimeDiagram {
     $frontDoor = if ($System.azure.ContainsKey('frontDoor')) { $System.azure.frontDoor } else { @{} }
     $dormant = [bool] $frontDoor['dormant']
     $hasFrontDoor = (@($entry['capabilities']) -contains 'frontdoor') -and $frontDoor['profile'] -and -not $dormant
+    # The ids the links are made of: empty where system.json does not say enough to name the resource.
+    $tenantId = [string] $System.azure['tenantId']
+    $subscriptionId = [string] $System.azure['subscriptionId']
+    $subscription = if ($subscriptionId) { "/subscriptions/$subscriptionId" } else { '' }
+    $tierGroupId = if ($subscription -and $tierGroup) { "$subscription/resourceGroups/$tierGroup" } else { '' }
+    $edgeGroupId = if ($subscription -and $frontDoor['resourceGroup']) { "$subscription/resourceGroups/$([string] $frontDoor.resourceGroup)" } else { '' }
     $planSkus = if ($System.system['planSku']) { $System.system.planSku } else { @{} }
     $size = if (-not $dormant -and $planSkus[$tier]) { [string] $planSkus[$tier] } else { 'F1' }
     $sameTier = @($System.environments | Where-Object { [string] $_['tier'] -eq $tier })
@@ -691,13 +734,19 @@ function ConvertTo-RuntimeDiagram {
     # A web app's tile: the badge, seven lines 15 px apart (version, pin, traffic, failures, process, uptime, role)
     # and the history strip; one line more, the marks of the detailed health check, for a deployable with
     # healthDetailPath. A Front Door endpoint's has three lines; a database's, a static site's and a dependency's one.
+    # A node a deployment changes (a web app, a Front Door endpoint, a static site: every node with a deployable) has
+    # two lines more, 30 px: the activity lines, where the dashboard says in words what is being deployed there, a
+    # deployment freeze and the last deployment that ended (deployments.json). They are the last lines of a tile, so
+    # a diagram rendered before them has no row for them and loses nothing else.
     # The widths are what the widest line needs and no more: the diagram of an environment with a standby is five
     # boxes and three number lines wide, and every pixel here is paid for by the page's scale.
     $tileWidth = 232
-    $tileSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height 146)>"
-    $tileSlotWithChecks = "<img:$(New-TransparentPng -Width $tileWidth -Height 161)>"
-    $endpointSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height 98)>"
+    $activityRows = 30
+    $tileSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height (146 + $activityRows))>"
+    $tileSlotWithChecks = "<img:$(New-TransparentPng -Width $tileWidth -Height (161 + $activityRows))>"
+    $endpointSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height (98 + $activityRows))>"
     $smallTileSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height 46)>"
+    $siteSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height (46 + $activityRows))>"
     $regionSlot = "<img:$(New-TransparentPng -Width 190 -Height 22)>"
     # A relationship's number line (the number, its unit and its trend in a frame) and, under it, its role in words
     # ("app queries · 55 background").
@@ -748,10 +797,31 @@ function ConvertTo-RuntimeDiagram {
     $nodes = [Collections.Generic.List[object]]::new()
     $edges = [Collections.Generic.List[object]]::new()
     $regionManifest = [Collections.Generic.List[object]]::new()
+    $frames = [Collections.Generic.List[object]]::new()
+    $publicAddress = [Collections.Generic.List[string]]::new()
     $edgeLines = [Collections.Generic.List[string]]::new()
+    function Get-PortalLink {
+        # The "links" of a resource by its id: its page in the Azure portal; nothing without the id.
+        param([AllowEmptyString()] [string] $ResourceId)
+        if (-not $ResourceId) { return $null }
+        return [ordered] @{ portal = Get-PortalAddress -ResourceId $ResourceId -TenantId $tenantId }
+    }
     function Add-Node {
-        param([System.Collections.Specialized.OrderedDictionary] $Node)
+        param([System.Collections.Specialized.OrderedDictionary] $Node, [AllowNull()] [System.Collections.IDictionary] $Links = $null)
+        if ($Links -and $Links.Count -gt 0) { $Node.links = $Links }
         $nodes.Add($Node)
+    }
+    function Add-Frame {
+        # A frame that is no region: the dashboard knows it by its alias, and its name leads where "links" says.
+        param([string] $Alias, [string] $QualifiedName, [string] $Kind, [string] $Name, [AllowNull()] [System.Collections.IDictionary] $Links = $null)
+        $frame = [ordered] @{ alias = $Alias; qualifiedName = $QualifiedName; kind = $Kind; name = $Name }
+        if ($Links -and $Links.Count -gt 0) { $frame.links = $Links }
+        $frames.Add($frame)
+    }
+    function Add-RegionFrame {
+        param([System.Collections.Specialized.OrderedDictionary] $Region, [AllowNull()] [System.Collections.IDictionary] $Links = $null)
+        if ($Links -and $Links.Count -gt 0) { $Region.links = $Links }
+        $regionManifest.Add($Region)
     }
     function Add-Edge {
         # -Upstream draws the relationship with Rel_U: in this left-to-right layout the target is then ranked before
@@ -762,6 +832,7 @@ function ConvertTo-RuntimeDiagram {
         $edge = [ordered] @{ id = $id; from = $From; to = $To; kind = $Kind }
         if ($Priority) { $edge.priority = $Priority }
         $edges.Add($edge)
+        if ($Kind -eq 'public' -and $Link) { $publicAddress.Add($Link) }
         $description = if ($Slot) { $edgeSlot + '\n<U+00A0>' } else { '' }
         $address = if ($Link) { ", `$link=$(Get-Quoted $Link)" } else { '' }
         $edgeLines.Add("$macro($From, $To, $(Get-Quoted $Label), $(Get-Quoted $Technology), $(Get-Quoted $description)$address)")
@@ -806,11 +877,14 @@ function ConvertTo-RuntimeDiagram {
     $lines.Add('Person(browser, "Browser", "a user, or this dashboard")')
     $nodes.Add([ordered] @{ alias = 'browser'; qualifiedName = 'browser'; kind = 'person'; name = 'Browser' })
     $lines.Add('Boundary(sub, "Azure subscription", $type="subscription", $tags="scope") {')
+    Add-Frame 'sub' 'sub' 'subscription' 'Azure subscription' (Get-PortalLink $subscription)
 
     if ($hasFrontDoor -and $apps.Count -gt 0) {
         $profileName = [string] $frontDoor.profile
         $lines.Add("  Boundary(rg_edge, $(Get-Quoted ([string] $frontDoor.resourceGroup)), `$type=`"resource group`", `$tags=`"scope`") {")
+        Add-Frame 'rg_edge' 'sub.rg_edge' 'resourceGroup' ([string] $frontDoor.resourceGroup) (Get-PortalLink $edgeGroupId)
         $lines.Add("    Deployment_Node(afd, $(Get-Quoted $profileName), `"Front Door profile, Standard: global`", `$tags=`"plan`") {")
+        Add-Frame 'afd' 'sub.rg_edge.afd' 'frontDoorProfile' $profileName (Get-PortalLink $(if ($edgeGroupId) { "$edgeGroupId/providers/Microsoft.Cdn/profiles/$profileName" } else { '' }))
         foreach ($app in $apps) {
             $alias = "fd_$(Get-DeployableAlias $app.name)"
             $endpoint = "$slug-$Environment-$($app.name)"
@@ -822,11 +896,13 @@ function ConvertTo-RuntimeDiagram {
     }
 
     $lines.Add("  Boundary(rg_tier, $(Get-Quoted $tierGroup), `$type=`"resource group`", `$tags=`"scope`") {")
+    Add-Frame 'rg_tier' 'sub.rg_tier' 'resourceGroup' $tierGroup (Get-PortalLink $tierGroupId)
     foreach ($region in $regions.Values) {
         $roles = @($region.roles | ForEach-Object { switch ($_) { 'static' { 'static sites' } default { $_ } } })
         $type = "Azure region: $($roles -join ', ')"
         $lines.Add("    Deployment_Node($($region.alias), $(Get-Quoted $region.name), $(Get-Quoted $type), $(Get-Quoted $regionSlot), `$tags=`"region`") {")
-        $regionManifest.Add([ordered] @{ alias = $region.alias; qualifiedName = "sub.rg_tier.$($region.alias)"; name = $region.name; roles = @($region.roles) })
+        $regionLinks = if ($tierGroupId) { [ordered] @{ resources = Get-ResourcesAddress -SubscriptionId $subscriptionId -ResourceGroup $tierGroup -Location $region.name -TenantId $tenantId } } else { $null }
+        Add-RegionFrame ([ordered] @{ alias = $region.alias; qualifiedName = "sub.rg_tier.$($region.alias)"; name = $region.name; roles = @($region.roles) }) $regionLinks
         foreach ($role in 'primary', 'standby') {
             if (-not $region.roles.Contains($role)) { continue }
             if ($role -eq 'primary') {
@@ -841,6 +917,7 @@ function ConvertTo-RuntimeDiagram {
             }
             $shared = if ($sharing.Count -gt 1) { "shared by $($sharing -join ', ')" } else { '' }
             $lines.Add("      Deployment_Node(plan_$role, $(Get-Quoted $plan), `"App Service plan, $size`", $(Get-Quoted $shared), `$tags=`"plan`") {")
+            Add-Frame "plan_$role" "sub.rg_tier.$($region.alias).plan_$role" 'plan' $plan (Get-PortalLink $(if ($tierGroupId) { "$tierGroupId/providers/Microsoft.Web/serverfarms/$plan" } else { '' }))
             foreach ($app in $apps) {
                 $node = @($app.nodes | Where-Object { $_.role -eq $role }) | Select-Object -First 1
                 if (-not $node) { continue }
@@ -860,9 +937,9 @@ function ConvertTo-RuntimeDiagram {
             foreach ($static in $statics) {
                 $alias = "swa_$(Get-DeployableAlias $static.name)"
                 $site = "swa-$slug-$Environment-$($static.name)"
-                $lines.Add("      Container($alias, $(Get-Quoted $site), $(Get-Quoted "Static Web App: $($static.name)"), $(Get-Quoted $smallTileSlot))")
+                $lines.Add("      Container($alias, $(Get-Quoted $site), $(Get-Quoted "Static Web App: $($static.name)"), $(Get-Quoted $siteSlot))")
                 $address = if ($DashboardUrl[$Environment]) { [string] $DashboardUrl[$Environment] } else { $null }
-                Add-Node ([ordered] @{ alias = $alias; qualifiedName = "sub.rg_tier.$($region.alias).$alias"; kind = 'staticsite'; deployable = [string] $static.name; name = $site; region = $region.name; regionAlias = $region.alias; url = $address })
+                Add-Node ([ordered] @{ alias = $alias; qualifiedName = "sub.rg_tier.$($region.alias).$alias"; kind = 'staticsite'; deployable = [string] $static.name; name = $site; region = $region.name; regionAlias = $region.alias; url = $address }) (Get-PortalLink $(if ($tierGroupId) { "$tierGroupId/providers/Microsoft.Web/staticSites/$site" } else { '' }))
             }
         }
         $lines.Add('    }')
@@ -885,10 +962,13 @@ function ConvertTo-RuntimeDiagram {
         $slot = if ($own['healthDetailPath']) { $tileSlotWithChecks } else { $tileSlot }
         $ownName = Get-Reported ([string] $own.name)
         $lines.Add("Boundary($boundary, $(Get-Quoted $ownName), `$type=`"runtime of its own`", `$tags=`"scope`") {")
+        # The system knows no resource of such an application: its boundary leads to the project that deploys it,
+        # and its public address and its nodes to themselves.
+        Add-Frame $boundary $boundary 'runtime' $ownName $(if ($own['projectUrl']) { [ordered] @{ project = [string] $own.projectUrl } } else { $null })
         if ($own['frontDoor']) {
             $address = [string] $own.frontDoor
             $lines.Add("  Container(fd_$key, $(Get-Quoted (Get-ShortHost $address 40)), $(Get-Quoted "public address of $ownName"), $(Get-Quoted $endpointSlot))")
-            Add-Node ([ordered] @{ alias = "fd_$key"; qualifiedName = "$boundary.fd_$key"; kind = 'frontdoor'; deployable = [string] $own.name; name = Get-ReportedHost $address; url = $(if (Get-ReportedLink $address) { $address } else { $null }) })
+            Add-Node ([ordered] @{ alias = "fd_$key"; qualifiedName = "$boundary.fd_$key"; kind = 'frontdoor'; deployable = [string] $own.name; name = Get-ReportedHost $address; url = $(if (Get-ReportedLink $address) { $address } else { $null }) }) $(if (Get-ReportedLink $address) { [ordered] @{ site = $address } } else { $null })
         }
         # The nodes by region, in the order of the report; a node without a role is the primary when it is the first
         # and a standby otherwise, as the dashboard reads the topology.
@@ -914,10 +994,10 @@ function ConvertTo-RuntimeDiagram {
             $regionAlias = "region_own_${key}_$number"
             $shown = if ($regionName) { Get-Reported $regionName 40 } else { 'region not reported' }
             $lines.Add("  Deployment_Node($regionAlias, $(Get-Quoted $shown), $(Get-Quoted "region of $ownName"), $(Get-Quoted $regionSlot), `$tags=`"region`") {")
-            $regionManifest.Add([ordered] @{ alias = $regionAlias; qualifiedName = "$boundary.$regionAlias"; name = $shown; roles = @($byRegion[$regionName] | ForEach-Object { $_.role } | Select-Object -Unique) })
+            Add-RegionFrame ([ordered] @{ alias = $regionAlias; qualifiedName = "$boundary.$regionAlias"; name = $shown; roles = @($byRegion[$regionName] | ForEach-Object { $_.role } | Select-Object -Unique) })
             foreach ($entry in $byRegion[$regionName]) {
                 $lines.Add("    Container($($entry.alias), $(Get-Quoted $entry.name), $(Get-Quoted "node of $ownName"), $(Get-Quoted $slot))")
-                Add-Node ([ordered] @{ alias = $entry.alias; qualifiedName = "$boundary.$regionAlias.$($entry.alias)"; kind = 'webapp'; deployable = [string] $own.name; name = $entry.name; role = $entry.role; region = $(if ($regionName) { $shown } else { $null }); regionAlias = $regionAlias; url = $(if (Get-ReportedLink $entry.url) { $entry.url } else { $null }) })
+                Add-Node ([ordered] @{ alias = $entry.alias; qualifiedName = "$boundary.$regionAlias.$($entry.alias)"; kind = 'webapp'; deployable = [string] $own.name; name = $entry.name; role = $entry.role; region = $(if ($regionName) { $shown } else { $null }); regionAlias = $regionAlias; url = $(if (Get-ReportedLink $entry.url) { $entry.url } else { $null }) }) $(if (Get-ReportedLink $entry.url) { [ordered] @{ site = [string] $entry.url } } else { $null })
             }
             $lines.Add('  }')
         }
@@ -994,6 +1074,8 @@ function ConvertTo-RuntimeDiagram {
     }
     $lines.AddRange($edgeLines)
     $lines.Add('@enduml')
+    # The browser's box leads where a browser goes first: the first public address the diagram draws an arrow to.
+    if ($publicAddress.Count -gt 0) { $nodes[0].links = [ordered] @{ site = $publicAddress[0] } }
 
     return [ordered] @{
         puml     = ($lines -join "`n") + "`n"
@@ -1002,6 +1084,7 @@ function ConvertTo-RuntimeDiagram {
             svg         = "$Environment.svg"
             nodes       = @($nodes)
             regions     = @($regionManifest)
+            frames      = @($frames)
             edges       = @($edges)
         }
     }
@@ -1009,7 +1092,7 @@ function ConvertTo-RuntimeDiagram {
 
 function Test-RuntimeSvg {
     # The handles the dashboard relies on, in an SVG PlantUML rendered: one <g class="entity"> per node (with its slot
-    # image; a dependency outside the subscription is such a node too), one <g class="cluster"> per region and one
+    # image; a dependency outside the subscription is such a node too), one <g class="cluster"> per region and frame and one
     # <g class="link"> per relationship, by the manifest. They are not a documented contract of PlantUML (they changed
     # in 1.2026.3 and 1.2026.4), so every render is checked. Returns what is missing, as text; nothing when all is there.
     param(
@@ -1040,6 +1123,10 @@ function Test-RuntimeSvg {
     }
     foreach ($region in $Manifest.regions) {
         if ($clusters -notcontains $region.qualifiedName) { $missing.Add("region $($region.qualifiedName)") }
+    }
+    # A manifest from before the frames were listed has none.
+    foreach ($frame in @($Manifest['frames'])) {
+        if ($frame -and $clusters -notcontains $frame.qualifiedName) { $missing.Add("frame $($frame.qualifiedName)") }
     }
     foreach ($edge in $Manifest.edges) {
         if ($paths -notcontains $edge.id) { $missing.Add("relationship $($edge.id)") }
