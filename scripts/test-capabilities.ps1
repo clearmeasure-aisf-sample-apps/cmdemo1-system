@@ -112,8 +112,14 @@ function Get-HealthQuestion([hashtable] $System, [string[]] $Environment, [hasht
     }
     return @{ Own = $own; Asked = [string[]] $asked.ToArray(); NotAsked = [string[]] $notAsked.ToArray(); Every = $own.Count -gt 0 -and $own.Count -eq @($System.deployables).Count }
 }
+function Find-Ruleset([string] $Repo) {
+    # The id of the repository's ruleset default-branch, or nothing when it has none. An answer that is not the list of
+    # its rulesets (403, no network) is an error of the check, not "no ruleset": gh ends with a non-zero exit code.
+    gh api "repos/$Repo/rulesets" --jq '.[] | select(.name=="default-branch") | .id'
+}
 function Get-RequiredCheck([string] $Repo) {
-    $id = gh api "repos/$Repo/rulesets" --jq '.[] | select(.name=="default-branch") | .id'
+    $id = Find-Ruleset $Repo
+    if (-not $id) { throw "$Repo has no ruleset default-branch" }
     @(gh api "repos/$Repo/rulesets/$id" --jq '.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context')
 }
 function Get-Project([string] $Slug) { Invoke-Octopus "/api/$space/projects/$Slug" }
@@ -151,6 +157,21 @@ function Assert-AppRepository {
     $exists = $LASTEXITCODE -eq 0
     $PSNativeCommandUseErrorActionPreference = $true
     if (-not $exists) { Skip-Check "app repository $appRepo does not exist yet" }
+}
+# An application of the person's own (app.source "repository") has its repository before phase 4, which gives it the
+# ruleset default-branch, and its default branch has no release.yml until the pull request with the delivery files
+# is merged. Until then the precondition of the checks that read them does not exist: they say which fact is missing
+# instead of failing (adameve, 2026-10-09: the first run of workflow system was red on CAP-003, CAP-010, CAP-021 and
+# CAP-055). Only that fact skips: a ruleset without the required check, or a release.yml that replaces a package,
+# fails, and so does an answer that is not "there is none" (403, no network).
+function Get-AppRequiredCheck {
+    if (-not (Find-Ruleset $appRepo)) { Skip-Check "the application's repository $appRepo has no ruleset default-branch yet: phase 4 sets it" }
+    Get-RequiredCheck $appRepo
+}
+function Get-ReleaseWorkflow {
+    $workflow = Find-RepoFile $appRepo '.github/workflows/release.yml'
+    if ($null -eq $workflow) { Skip-Check "the default branch of the application's repository $appRepo has no .github/workflows/release.yml yet: the adoption pull request is not merged" }
+    $workflow
 }
 # A system without a database (no app uses one: an app of the person's own, app.source "repository") has nothing to
 # migrate, restore or rotate, and a first app without an acceptance-test package runs its tests in its own Build. Those
@@ -304,7 +325,7 @@ function Get-ListedNode([hashtable] $Topology) {
 $checks = [ordered] @{
     'CAP-001' = { $rules = gh api "repos/$systemRepo/rulesets" --jq '[.[] | select(.name=="default-branch" and .enforcement=="active")] | length'; Assert-That ([int] $rules -eq 1) 'no active default-branch ruleset'; 'ruleset default-branch active' }
     'CAP-002' = { Assert-That ((Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'preview-environment\.ps1') 'env-checks has no preview'; 'env-checks previews every environment' }
-    'CAP-003' = { Assert-AppRepository; $s = Get-RequiredCheck $systemRepo; $a = Get-RequiredCheck $appRepo; Assert-That ($s -contains 'env-checks' -and $a -contains 'Build result') "required: $s / $a"; "system: $($s -join ', '); app: $($a -join ', ')" }
+    'CAP-003' = { Assert-AppRepository; $s = Get-RequiredCheck $systemRepo; $a = Get-AppRequiredCheck; Assert-That ($s -contains 'env-checks' -and $a -contains 'Build result') "required: $s / $a"; "system: $($s -join ', '); app: $($a -join ', ')" }
     'CAP-004' = {
         $checked = @(foreach ($e in $environments) {
                 $deployment = Find-LastDeployment $deployableProject $e
@@ -337,7 +358,7 @@ $checks = [ordered] @{
         Assert-That ($names.IndexOf('Verify revert') -lt $names.IndexOf('Record nodes after revert') -and $names.IndexOf('Record nodes after revert') -lt $names.IndexOf('Revert pin')) 'the failure steps are not in the order revert, verify, record, pin'
         'Revert deployable, Verify revert, Record nodes after revert, then Revert pin, run on failure'
     }
-    'CAP-010' = { Assert-AppRepository; Assert-That ((Get-RequiredCheck $appRepo) -contains 'Build result') 'Build result not required'; 'Build result required on the app' }
+    'CAP-010' = { Assert-AppRepository; Assert-That ((Get-AppRequiredCheck) -contains 'Build result') 'Build result not required'; 'Build result required on the app' }
     'CAP-011' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the current deployment of every project and environment logged no warning or error' }
     'CAP-012' = { Assert-That ((Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'head\.repo\.full_name == github\.repository') 'preview runs for forks'; 'the credentialed preview runs only for branches of the repository' }
     'CAP-013' = {
@@ -384,7 +405,7 @@ $checks = [ordered] @{
         if ($onAppService -or $ownRuntime) {
             # The package feed keeps the first upload of a version: the release workflow pushes with IgnoreIfExists only.
             Assert-AppRepository
-            $modes = @([regex]::Matches((Get-RepoFile $appRepo '.github/workflows/release.yml'), 'overwrite_mode:\s*(\S+)') | ForEach-Object { $_.Groups[1].Value })
+            $modes = @([regex]::Matches((Get-ReleaseWorkflow), 'overwrite_mode:\s*(\S+)') | ForEach-Object { $_.Groups[1].Value })
             Assert-That ($modes.Count -gt 0 -and @($modes | Where-Object { $_ -ne 'IgnoreIfExists' }).Count -eq 0) "release.yml pushes with $($modes -join ', ')"
             return "release.yml never replaces a pushed package ($($modes.Count) pushes, IgnoreIfExists)"
         }
@@ -569,7 +590,7 @@ $checks = [ordered] @{
     }
     'CAP-052' = { $prod = @(Get-ProdEnvironment); Assert-That ($prod.Count -ge 1) 'no prod-tier environment'; "$($prod -join ', ') in $($system.azure.resourceGroups.prod) with id-$($slug)-deploy-prod" }
     'CAP-053' = { $u = az account show --query user.type --output tsv; $me = Invoke-Octopus '/api/users/me'; Assert-That ($u -eq 'servicePrincipal' -and $me.IsService) "az $u, Octopus service $($me.IsService)"; "az as a service principal, Octopus as $($me.Username)" }
-    'CAP-055' = { Assert-AppRepository; Assert-That ((Get-RequiredCheck $appRepo) -contains 'secret-scan' -and (Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'gitleaks') 'secret scanning not enforced'; 'gitleaks in env-checks and the required check secret-scan' }
+    'CAP-055' = { Assert-AppRepository; Assert-That ((Get-AppRequiredCheck) -contains 'secret-scan' -and (Get-RepoFile $systemRepo '.github/workflows/env-checks.yml') -match 'gitleaks') 'secret scanning not enforced'; 'gitleaks in env-checks and the required check secret-scan' }
     'CAP-056' = { Assert-Database; $r = Get-RecentRun 'Rotate SQL password' 35; Assert-That ($r.Count -ge 1) 'no successful rotation in 35 days'; "rotated $($r[0].CompletedTime)" }
     'CAP-057' = {
         # A secret a deployable declares (system.json deployables[].secrets) reaches its app from the environment's
@@ -912,9 +933,30 @@ $checks = [ordered] @{
             $task = Invoke-Octopus "/api/tasks/$(([string] $entry['url']) -replace '^.*/tasks/', '')"
             Assert-That (-not $task.IsCompleted -or [datetimeoffset] $task.CompletedTime -gt $limit) "deployments.json calls $($entry['project']) $($entry['release']) to $($entry['environment']) $($entry['state']); in Octopus it ended over an hour ago ($($task.Id)): run workflow deployments"
         }
-        "deployments.json on branch deployments: $($inFlight.Count) in flight, as in Octopus; $($listed.Count - $inFlight.Count) ended in the last half hour"
+        # What the file says in words (a file from before these lists has none, and is checked as before): a
+        # deployment that waits says what for, every last deployment has its result and its task, every freeze its
+        # name and its end, and what could not be read is named, not left out silently.
+        $says = ''
+        if ($published.ContainsKey('missing')) {
+            $waits = @($inFlight | Where-Object { [string] $_['state'] -eq 'waiting' -and -not ($_['waitsFor'] -and $_['waitsFor']['kind']) })
+            Assert-That ($waits.Count -eq 0) "deployments.json has $($waits.Count) deployment(s) that wait for a person without saying what for (waitsFor.kind)"
+            $recent = @($published['recent'] | Where-Object { $_ })
+            $unsaid = @($recent | Where-Object { 'succeeded', 'failed', 'canceled' -notcontains [string] $_['result'] -or -not $_['project'] -or -not $_['environment'] -or -not $_['finished'] -or [string] $_['url'] -notmatch '/tasks/ServerTasks-\d+$' })
+            Assert-That ($unsaid.Count -eq 0) "deployments.json has $($unsaid.Count) entr(ies) of recent without a project, an environment, a result, the time it ended or its task"
+            $freezes = @($published['freezes'] | Where-Object { $_ })
+            Assert-That (@($freezes | Where-Object { -not $_['name'] -or -not $_['to'] }).Count -eq 0) 'deployments.json has a deployment freeze without a name or the time it ends'
+            $notRead = @($published['missing'] | Where-Object { $_ })
+            $says = "; the last deployment of $($recent.Count) project(s) and environment(s), $($freezes.Count) deployment freeze(s)$(if ($notRead.Count -gt 0) { "; not read: $($notRead -join ', ')" })"
+        }
+        "deployments.json on branch deployments: $($inFlight.Count) in flight, as in Octopus; $($listed.Count - $inFlight.Count) ended in the last half hour$says"
     }
     'CAP-080' = { $files = @(gh api "repos/$systemRepo/contents/docs/architecture" --jq '.[].name'); $missing = @($files | Where-Object { $_ -like '*.puml' -and $files -notcontains ($_ -replace '\.puml$', '.png') }); Assert-That ($missing.Count -eq 0 -and $files.Count -gt 0) "not rendered: $missing"; "$(@($files | Where-Object { $_ -like '*.png' }).Count) diagrams rendered" }
+    'CAP-089' = {
+        $main = Get-RepoFile $systemRepo 'infra/main.bicep'; $own = Find-RepoFile $systemRepo 'infra/own/main.bicep'
+        Assert-That ($main -match "(?m)^module own 'own/main\.bicep'" -and $own) 'infra/main.bicep does not call infra/own/main.bicep, or the system repository has no such file'
+        $adds = @([regex]::Matches($own, '(?m)^(resource|module) ')).Count
+        "every environment calls the system's own module, which declares $adds resource(s) or module(s) of the system's"
+    }
     'CAP-081' = {
         $build = Get-RepoFile $systemRepo '.github/workflows/system.yml'; $nightly = Get-RepoFile $systemRepo '.github/workflows/capabilities.yml'
         Assert-That ($build -match 'uses: \./\.github/workflows/capabilities\.yml' -and $nightly -match 'schedule:') 'the checks do not run with every system build and nightly'

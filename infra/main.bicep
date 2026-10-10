@@ -328,6 +328,30 @@ module staticSites 'modules/staticwebapp.bicep' = if (!empty(staticDeployables))
   }
 }
 
+// What the system adds to the environment itself (own/main.bicep, the system's file: the kit creates it empty once and
+// no template sync changes it; principle 007). It gets the environment and the identity of each container deployable
+// that has one of its own, and returns settings for container deployables, which reach their apps as environment
+// variables. Its resources are resources of this stack.
+module own 'own/main.bicep' = {
+  name: 'own-${environmentName}'
+  params: {
+    stack: {
+      slug: slug
+      environmentName: environmentName
+      location: location
+      tags: tags
+      identities: [
+        for (d, i) in secretDeployables: {
+          deployable: d.name
+          principalId: secretIdentities[i].properties.principalId
+          clientId: secretIdentities[i].properties.clientId
+          resourceId: secretIdentities[i].id
+        }
+      ]
+    }
+  }
+}
+
 // Only with a container deployable: a system whose apps all run on App Service has no Container Apps environment, and
 // no registry either (system.json then has no azure.registry: the seed creates none).
 module apps 'modules/containerapps.bicep' = if (!empty(containerDeployables)) {
@@ -348,6 +372,7 @@ module apps 'modules/containerapps.bicep' = if (!empty(containerDeployables)) {
     location: appLocation
     tags: tags
     deployables: containerApps
+    ownSettings: own.outputs.settings
     vaultUri: vault.outputs.vaultUri
     versions: versions
     registryServer: union({ registry: { loginServer: '' } }, system.azure).registry.loginServer
