@@ -305,5 +305,13 @@
         "mpond": "James"
       }
     }
-  ]
+  ],
+  "github": {
+    "app": {
+      "id": 5274931,
+      "slug": "cmdemo1-system",
+      "clientId": "Iv23liIF6wjD00NKJCIQ",
+      "installationId": 170295030
+    }
+  }
 }
