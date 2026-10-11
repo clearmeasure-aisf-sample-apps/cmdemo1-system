@@ -1073,3 +1073,6 @@ if ($failed -gt 0) {
     exit 1
 }
 Write-Host "All $($ids.Count - $skipped) checked capabilities are proven$skippedNote."
+# Said as an exit code: a workflow step in GitHub's pwsh shell ends with the exit code of the last program the script
+# ran, which may be one whose refusal was expected and handled (write-delivery.ps1 failed its workflow that way).
+exit 0
