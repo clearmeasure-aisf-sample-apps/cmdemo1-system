@@ -217,7 +217,8 @@
       "healthPath": "/health",
       "environments": [
         "tdd",
-        "uat"
+        "uat",
+        "prod"
       ],
       "database": false,
       "cpu": "0.5",
@@ -230,6 +231,9 @@
         },
         "uat": {
           "FACTORY_ENVIRONMENT": "uat"
+        },
+        "prod": {
+          "FACTORY_ENVIRONMENT": "prod"
         }
       },
       "urlSetting": "FACTORY_PUBLIC_URL",
@@ -260,7 +264,11 @@
       "dashboardLink": {
         "text": "Factory",
         "path": "/dashboard"
-      }
+      },
+      "alwaysOn": true,
+      "alwaysOnEnvironments": [
+        "prod"
+      ]
     }
   ],
   "environments": [
