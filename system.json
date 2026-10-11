@@ -209,6 +209,49 @@
           "env": "Scorecard__HarvestKey"
         }
       ]
+    },
+    {
+      "name": "fworker",
+      "repository": "cmdemo1-fworker",
+      "port": 8080,
+      "healthPath": "/health",
+      "environments": [
+        "tdd"
+      ],
+      "database": false,
+      "cpu": "0.5",
+      "settings": {
+        "FACTORY_OWNER_MODE": "1"
+      },
+      "environmentSettings": {
+        "tdd": {
+          "FACTORY_ENVIRONMENT": "tdd"
+        }
+      },
+      "urlSetting": "FACTORY_PUBLIC_URL",
+      "secrets": [
+        {
+          "name": "dev-token",
+          "env": "FACTORY_DEV_TOKEN"
+        },
+        {
+          "name": "webhook-secret",
+          "env": "FACTORY_WEBHOOK_SECRET"
+        },
+        {
+          "name": "token-secret",
+          "env": "FACTORY_TOKEN_SECRET",
+          "generate": true
+        },
+        {
+          "name": "octopus-api-key",
+          "env": "OCTOPUS_API_KEY"
+        },
+        {
+          "name": "github-token",
+          "env": "GH_TOKEN"
+        }
+      ]
     }
   ],
   "environments": [
