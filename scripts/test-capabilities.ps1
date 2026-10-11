@@ -80,6 +80,14 @@ function Find-RepoFile([string] $Repo, [string] $Path) {
     if ($code -eq 0) { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((($answer -join '') -replace '\s', ''))) }
     if (($answer -join ' ') -notmatch 'HTTP 404') { throw "cannot read $Path of ${Repo}: $($answer -join ' ')" }
 }
+function Find-StatusFile([string] $Repo, [string] $Path) {
+    # The text of a file on branch status (what workflow delivery publishes), or nothing when the branch has none.
+    $PSNativeCommandUseErrorActionPreference = $false
+    $answer = @(gh api "repos/$Repo/contents/${Path}?ref=status" --jq .content 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+    $PSNativeCommandUseErrorActionPreference = $true
+    if ($code -eq 0) { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((($answer -join '') -replace '\s', ''))) }
+}
 function Find-PublicFile([string] $Repo, [string] $Path) {
     # The text of a file on main as anyone reads it: from the repository's public address, without a credential and
     # without following a redirect. Nothing when that address has none (404: no such file, or a private repository).
@@ -707,11 +715,30 @@ $checks = [ordered] @{
             $drawn = @($index['environments'] | Where-Object { $_ })
             $undrawn = @($environments | Where-Object { @($drawn | ForEach-Object { [string] $_['name'] }) -notcontains $_ })
             Assert-That ($undrawn.Count -eq 0) "the Runtime view in $e has no diagram of $($undrawn -join ', '): deploy the release of $slug-$dashboardName to $e again"
+            # The dashboard's deployment reads the container apps' addresses from the stacks its deploy identity may
+            # read (its own tier's) and, for the others, from containers.json on branch status, which workflow delivery
+            # writes as the plan identity. A diagram of another tier's environment is held to the stack when that file
+            # has the environment, and not before (a system whose delivery has not written it yet).
+            $tierOfE = [string] (@($system.environments | Where-Object { [string] $_.name -eq $e }) | Select-Object -First 1).tier
+            $statusContainers = $null
+            $statusText = Find-StatusFile $systemRepo 'containers.json'
+            if ($statusText) { $statusContainers = try { $statusText | ConvertFrom-Json -AsHashtable } catch { $null } }
             foreach ($entry in $drawn) {
                 foreach ($file in @([string] $entry['manifest'], [string] $entry['svg'])) {
                     $answer = Invoke-WebRequest -Uri "$url/runtime/$file" -TimeoutSec 120 -SkipHttpErrorCheck
                     Assert-That ($answer.StatusCode -eq 200 -and $answer.RawContentLength -gt 0) "the Runtime view in $e does not serve runtime/$file (HTTP $($answer.StatusCode))"
                 }
+                $drawnEnvironment = [string] $entry['name']
+                $drawnTier = [string] (@($system.environments | Where-Object { [string] $_.name -eq $drawnEnvironment }) | Select-Object -First 1).tier
+                $published = $statusContainers -and $statusContainers['environments'] -is [System.Collections.IDictionary] -and $statusContainers.environments.Contains($drawnEnvironment)
+                if ($drawnTier -ne $tierOfE -and -not $published) { continue }
+                # Every container app the environment's stack has is a box of its diagram.
+                $manifestAnswer = Invoke-WebRequest -Uri "$url/runtime/$([string] $entry['manifest'])" -TimeoutSec 120
+                $manifest = $(if ($manifestAnswer.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($manifestAnswer.Content) } else { [string] $manifestAnswer.Content }) | ConvertFrom-Json -AsHashtable
+                $inStack = @(az stack group show --name "stack-$slug-$drawnEnvironment" --resource-group (Get-Group $drawnEnvironment) --query "outputs.deployables.value[?hosting=='containerapp'].name" --output json | ConvertFrom-Json)
+                $boxed = @($manifest['nodes'] | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['kind'] -eq 'containerapp' } | ForEach-Object { [string] $_['deployable'] })
+                $unboxed = @($inStack | Where-Object { $boxed -notcontains $_ })
+                Assert-That ($unboxed.Count -eq 0) "the runtime diagram of $drawnEnvironment in $e has no box for the container app(s) $($unboxed -join ', '): deploy the release of $slug-$dashboardName to $e again"
             }
             "$e $url"
         }

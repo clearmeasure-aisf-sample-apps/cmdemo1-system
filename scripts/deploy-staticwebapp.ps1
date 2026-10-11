@@ -518,10 +518,10 @@ function Measure-Topology {
 }
 
 function Read-MainFile {
-    # The text of a file of the system repository on main, or $null when main has no such file (404).
-    param([Parameter(Mandatory)] [string] $Path)
+    # The text of a file of the system repository on main (-Ref: another branch), or $null when it has no such file (404).
+    param([Parameter(Mandatory)] [string] $Path, [string] $Ref = 'main')
     try {
-        $file = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/contents/${Path}?ref=main" -Headers $headers
+        $file = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/contents/${Path}?ref=$Ref" -Headers $headers
     }
     catch {
         # Not every failure has a response (a name that does not resolve).
@@ -662,11 +662,24 @@ function ConvertTo-RuntimeDiagram {
     #              public address and the nodes of an application with its own runtime
     # A web app, a Front Door endpoint and the database have their links in topology.json, as before; a dependency
     # and the region of an application with its own runtime have none: the system knows no address for them.
+    #
+    # The container apps the system creates (hosting "containerapp", the default) are drawn too, from -ContainerApp
+    # (environment, then deployable, to the address the environment's stack reports: their addresses are generated, no
+    # convention names them). A Container Apps environment is a box under the subscription, named after its address
+    # (the part of the host name the platform generates) and its region, with a box per app:
+    #   cae_<n>                     the Container Apps environment, numbered in the order system.json lists the apps
+    #   ca_<d>                      a container app; kind "containerapp" in the manifest, its address in "url" and in
+    #                               its "links" (site). The page draws it as a box it does not probe ("Not probed"):
+    #                               a container app scales to zero, and a probe from the page would start it and hold it
+    #   browser-to-ca_<d>           its public address (kind "direct": the page marks no number on it)
+    #   ca_<d>-to-sqldb             where the app uses the database (kind "sql", as a web app's)
+    # An app without an address (the environment has none yet, or its stack is not readable from here) is not drawn.
     param(
         [Parameter(Mandatory)] [hashtable] $System,
         [Parameter(Mandatory)] [System.Collections.IDictionary] $Topology,
         [Parameter(Mandatory)] [string] $Environment,
-        [hashtable] $DashboardUrl = @{}
+        [hashtable] $DashboardUrl = @{},
+        [hashtable] $ContainerApp = @{}
     )
     $slug = [string] $System.system.slug
     $location = [string] $System.system.location
@@ -965,6 +978,42 @@ function ConvertTo-RuntimeDiagram {
         $lines.Add('    }')
     }
     $lines.Add('  }')
+
+    # The container apps the system creates, in the Container Apps environment the platform made for them: named as the
+    # platform names it in the apps' addresses, <app>.<environment>.<region>.azurecontainerapps.io.
+    $containerAddresses = if ($ContainerApp[$Environment] -is [System.Collections.IDictionary]) { $ContainerApp[$Environment] } else { @{} }
+    $containers = @($System.deployables | Where-Object {
+            (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
+            (-not $_['environments'] -or @($_['environments']) -contains $Environment) -and
+            ([string] $containerAddresses[[string] $_.name]) -match '^https://[^/]+'
+        } | ForEach-Object {
+            $address = ([string] $containerAddresses[[string] $_.name]).TrimEnd('/')
+            $hostName = ([uri] $address).Host
+            $parts = $hostName -split '\.', 2
+            $domain = if ($parts.Count -gt 1) { $parts[1] } else { $hostName }
+            $region = ''
+            if ($domain -match '^(?<environment>[^.]+)\.(?<region>[^.]+)\.azurecontainerapps\.io$') { $domain = $Matches.environment; $region = $Matches.region }
+            [pscustomobject] @{ Deployable = [string] $_.name; Address = $address; App = $parts[0]; Environment = $domain; Region = $region; Database = ($_['database'] -ne $false) }
+        })
+    $containerBoxes = [ordered] @{}
+    $caeNumber = 0
+    foreach ($group in @($containers | Group-Object Environment)) {
+        $caeNumber++
+        $cae = "cae_$caeNumber"
+        $region = [string] $group.Group[0].Region
+        $type = if ($region) { "Container Apps environment, $region" } else { 'Container Apps environment' }
+        $caeName = Get-Reported $group.Name 60
+        $lines.Add("  Deployment_Node($cae, $(Get-Quoted $caeName), $(Get-Quoted $type), `"`", `$tags=`"region`") {")
+        Add-Frame $cae "sub.$cae" 'containerAppsEnvironment' $caeName $null
+        foreach ($container in $group.Group) {
+            $alias = "ca_$(Get-DeployableAlias $container.Deployable)"
+            $appName = Get-Reported $container.App 60
+            $lines.Add("    Container($alias, $(Get-Quoted $appName), $(Get-Quoted "container app: $($container.Deployable)"), $(Get-Quoted $siteSlot))")
+            Add-Node ([ordered] @{ alias = $alias; qualifiedName = "sub.$cae.$alias"; kind = 'containerapp'; deployable = $container.Deployable; name = $appName; url = $container.Address }) ([ordered] @{ site = $container.Address })
+            $containerBoxes[$container.Deployable] = $alias
+        }
+        $lines.Add('  }')
+    }
     $lines.Add('}')
 
     # The applications that bring their own runtime, each in a boundary of its own outside the subscription: its public
@@ -1092,9 +1141,18 @@ function ConvertTo-RuntimeDiagram {
     foreach ($static in $statics) {
         Add-Edge 'browser' "swa_$(Get-DeployableAlias $static.name)" 'dashboard' 'loads the dashboard' 'HTTPS' $false
     }
+    # A container app: the browser to its address, and the app to the database it uses. Kind "direct" for the first:
+    # the page has no number for an app it does not probe, and draws the arrow as it is.
+    foreach ($container in $containers) {
+        $alias = $containerBoxes[$container.Deployable]
+        Add-Edge 'browser' $alias 'direct' 'public address' 'HTTPS' $false 0 $container.Address
+        if ($hasDatabase -and $container.Database) { Add-Edge $alias 'sqldb' 'sql' 'reads and writes' 'TCP 1433' $true }
+    }
     $lines.AddRange($edgeLines)
     $lines.Add('@enduml')
     # The browser's box leads where a browser goes first: the first public address the diagram draws an arrow to.
+    # With no App Service app (a system of container apps only) it is the first container app's address.
+    if ($publicAddress.Count -eq 0 -and $containers.Count -gt 0) { $publicAddress.Add([string] $containers[0].Address) }
     if ($publicAddress.Count -gt 0) { $nodes[0].links = [ordered] @{ site = $publicAddress[0] } }
 
     return [ordered] @{
@@ -1187,7 +1245,8 @@ function Write-RuntimeDiagram {
         [Parameter(Mandatory)] [string] $Folder,
         [Parameter(Mandatory)] [string] $Jar,
         [Parameter(Mandatory)] [string] $Version,
-        [hashtable] $DashboardUrl = @{}
+        [hashtable] $DashboardUrl = @{},
+        [hashtable] $ContainerApp = @{}
     )
     # The package carries the sample's runtime/ (and so may an older release): none of it may outlive this deployment.
     $runtime = Join-Path $Folder 'runtime'
@@ -1196,7 +1255,7 @@ function Write-RuntimeDiagram {
     $diagrams = [ordered] @{}
     foreach ($environment in @($System.environments)) {
         $name = [string] $environment.name
-        $diagram = ConvertTo-RuntimeDiagram -System $System -Topology $Topology -Environment $name -DashboardUrl $DashboardUrl
+        $diagram = ConvertTo-RuntimeDiagram -System $System -Topology $Topology -Environment $name -DashboardUrl $DashboardUrl -ContainerApp $ContainerApp
         $diagram.manifest.generated = $Topology.generated
         $diagram.manifest.plantuml = $Version
         $diagrams[$name] = $diagram
@@ -1327,17 +1386,20 @@ foreach ($tier in @($system.environments | ForEach-Object { [string] $_['tier'] 
     }
 }
 
-# The address of each deployable that names a page for the dashboard (deployables[].dashboardLink), in every
-# environment it exists in: what that environment's stack reports for it (a container app's address is generated).
-# This environment's stack is read already; another tier's group may be closed to this tier's deploy identity, and an
-# environment may not have the deployable yet: a read that gives no address is information, and the dashboard then
-# shows that environment without the link.
+# The address of each container app of the system, in every environment it exists in: what that environment's stack
+# reports for it (a container app's address is generated by the platform, so no convention names it). Two uses: the
+# link of a deployable that names a page of its own for the dashboard (deployables[].dashboardLink), and the box of
+# every container app in the runtime diagram. This environment's stack is read already; another tier's group may be
+# closed to this tier's deploy identity, and an environment may not have the app yet: a read that gives no address is
+# information, and the dashboard then shows that environment without the link and the box.
 $pageAddresses = @{}
-$withPage = @($system.deployables | Where-Object { $_['dashboardLink'] -is [Collections.IDictionary] })
-if ($withPage.Count -gt 0) {
+$status = $null
+$statusRead = $false
+$containerApps = @($system.deployables | Where-Object { -not $_['hosting'] -or $_['hosting'] -eq 'containerapp' })
+if ($containerApps.Count -gt 0) {
     foreach ($environment in @($system.environments)) {
         $pageEnvironment = [string] $environment.name
-        $wanted = @($withPage | Where-Object { -not $_['environments'] -or @($_.environments) -contains $pageEnvironment } | ForEach-Object { [string] $_.name })
+        $wanted = @($containerApps | Where-Object { -not $_['environments'] -or @($_.environments) -contains $pageEnvironment } | ForEach-Object { [string] $_.name })
         if ($wanted.Count -eq 0) { continue }
         $reported = @()
         $reason = ''
@@ -1351,12 +1413,35 @@ if ($withPage.Count -gt 0) {
             if ($readCode -eq 0 -and ($read -join '').Trim()) { $reported = @(($read -join "`n") | ConvertFrom-Json -AsHashtable) }
             else { $reason = if ($read.Count -gt 0) { ($read[0] -split "`n")[0] } else { "exit code $readCode" } }
         }
+        # A stack this identity may not read: what the workflow delivery published of it (containers.json on branch
+        # status, written as the plan identity, which reads every environment's stack; as old as its last run).
+        if ($reason) {
+            if (-not $statusRead) {
+                $statusRead = $true
+                try {
+                    $statusText = Read-MainFile -Path 'containers.json' -Ref 'status'
+                    if ($statusText) { $status = $statusText | ConvertFrom-Json -AsHashtable }
+                    else { Write-Host 'Branch status of the system repository has no containers.json yet (workflow delivery writes it hourly).' }
+                }
+                catch { Write-Host "containers.json of branch status could not be read ($($_.Exception.Message))." }
+            }
+            if ($status -and $status['environments'] -is [Collections.IDictionary] -and $status.environments[$pageEnvironment] -is [Collections.IDictionary]) {
+                $reported = @($status.environments[$pageEnvironment].GetEnumerator() | ForEach-Object { @{ name = [string] $_.Key; url = [string] $_.Value } })
+                Write-Host "The stack of $pageEnvironment could not be read ($reason): its container apps are those of containers.json on branch status, written $($status['generated'])."
+                $reason = ''
+            }
+        }
         $pageAddresses[$pageEnvironment] = @{}
+        $without = [Collections.Generic.List[string]]::new()
         foreach ($deployableName in $wanted) {
             $found = @($reported | Where-Object { $_ -is [Collections.IDictionary] -and $_['name'] -eq $deployableName -and $_['url'] }) | Select-Object -First 1
-            if ($found) { $pageAddresses[$pageEnvironment][$deployableName] = [string] $found.url }
-            elseif ($reason) { Write-Host "The stack of $pageEnvironment could not be read ($reason): the dashboard shows no link to $deployableName there." }
-            else { Write-Host "The stack of $pageEnvironment reports no address for ${deployableName}: the dashboard shows no link to it there until the environment has it and the dashboard is deployed again." }
+            if ($found) { $pageAddresses[$pageEnvironment][$deployableName] = [string] $found.url } else { $without.Add($deployableName) }
+        }
+        if ($without.Count -gt 0 -and $reason) {
+            Write-Host "The stack of $pageEnvironment could not be read ($reason): the runtime diagram and the links show no box or link for $($without -join ', ') there."
+        }
+        elseif ($without.Count -gt 0) {
+            Write-Host "The stack of $pageEnvironment reports no address for $($without -join ', '): the diagram shows no box and the page no link for $(if ($without.Count -eq 1) { 'it' } else { 'them' }) there until the environment has $(if ($without.Count -eq 1) { 'it' } else { 'them' }) and the dashboard is deployed again."
         }
     }
 }
@@ -1457,7 +1542,7 @@ $runtimeProblem = $null
 try {
     $jar = Get-PlantUmlJar -Version $plantUmlVersion -Sha256 $plantUmlSha256 -Folder $tools
     Write-Host ('PlantUML {0} downloaded from GitHub in {1:0.0} s ({2:0.0} MB, SHA-256 as pinned); {3}' -f $plantUmlVersion, $jar.seconds, $jar.megabytes, $javaVersion)
-    $rendered = Write-RuntimeDiagram -System $system -Topology $topology -Folder $folder -Jar $jar.path -Version $plantUmlVersion -DashboardUrl @{ $environmentName = $url }
+    $rendered = Write-RuntimeDiagram -System $system -Topology $topology -Folder $folder -Jar $jar.path -Version $plantUmlVersion -DashboardUrl @{ $environmentName = $url } -ContainerApp $pageAddresses
     $rendered.log | ForEach-Object { Write-Host $_ }
     Write-Host ('runtime/: {0} diagram(s) rendered and checked in {1:0.0} s ({2:0} KB of SVG)' -f $rendered.count, $rendered.seconds, $rendered.kilobytes)
 }
