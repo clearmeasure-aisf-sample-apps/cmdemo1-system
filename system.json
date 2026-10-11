@@ -113,6 +113,7 @@
         "/",
         "/api/work-orders/status-counts"
       ],
+      "healthDetailPath": "/_healthcheck/detailed",
       "startupAssembly": "ClearMeasure.Bootcamp.UI.Server.dll"
     },
     {
