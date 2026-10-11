@@ -216,7 +216,8 @@
       "port": 8080,
       "healthPath": "/health",
       "environments": [
-        "tdd"
+        "tdd",
+        "uat"
       ],
       "database": false,
       "cpu": "0.5",
@@ -226,6 +227,9 @@
       "environmentSettings": {
         "tdd": {
           "FACTORY_ENVIRONMENT": "tdd"
+        },
+        "uat": {
+          "FACTORY_ENVIRONMENT": "uat"
         }
       },
       "urlSetting": "FACTORY_PUBLIC_URL",
@@ -251,7 +255,12 @@
           "name": "github-token",
           "env": "GH_TOKEN"
         }
-      ]
+      ],
+      "buildPath": "/_build",
+      "dashboardLink": {
+        "text": "Factory",
+        "path": "/dashboard"
+      }
     }
   ],
   "environments": [
