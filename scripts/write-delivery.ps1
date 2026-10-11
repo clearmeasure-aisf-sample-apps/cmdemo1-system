@@ -247,8 +247,8 @@ function Get-PersonSignOff($Project, [string] $Environment) {
 }
 
 function Get-Commit($Release, [bool] $IsSystem) {
-    # The release workflows write "Build <run> of <sha>" (an app) or "Commit <sha>: <message>" (the system) into the
-    # release notes. Build information, when a release has it, names the commit too. A version-controlled project's
+    # The release workflows write "Build <run> of <sha>, committed <time>" (an app) or "Commit <sha>: <message>" (the
+    # system) into the release notes. Build information, when a release has it, names the commit too. A version-controlled project's
     # reference is the commit of its process in this repository, so it counts for the system project only.
     $sha = [regex]::Match([string] (Get-Field $Release 'ReleaseNotes'), '\b[0-9a-f]{40}\b').Value
     if (-not $sha) {
@@ -256,6 +256,15 @@ function Get-Commit($Release, [bool] $IsSystem) {
     }
     if (-not $sha -and $IsSystem) { $sha = [string] (Get-Field (Get-Field $Release 'VersionControlReference') 'GitCommit') }
     if ($sha) { $sha } else { $null }
+}
+function Get-ReleaseCommitTime($Release) {
+    # The commit's time as the application's own release workflow wrote it into the release notes ("Build <run> of
+    # <sha>, committed <time>"): no credential is needed for it, and it is there for a private repository too. $null
+    # for a release without it (one from before the workflows wrote it, or the system's own), or with a time that
+    # cannot be read.
+    $text = [regex]::Match([string] (Get-Field $Release 'ReleaseNotes'), '\bcommitted (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))').Groups[1].Value
+    if (-not $text) { return $null }
+    try { ConvertTo-Moment $text } catch { $null }
 }
 $commitTime = @{}
 function Get-CommitTime([string] $Repository, [string] $Sha) {
@@ -442,7 +451,10 @@ $document = [ordered] @{
                         if (-not $fact.commit) { $unknown++; Write-Skip "$($project.Project) $($current.Version): its release names no commit" }
                         else {
                             try {
-                                $committed = Get-CommitTime $project.Repository $fact.commit
+                                # What the release says of its commit, first; GitHub is asked only for a release
+                                # that does not say (the system's own, or one from before the workflows wrote it).
+                                $committed = Get-ReleaseCommitTime $current.Release
+                                if ($null -eq $committed) { $committed = Get-CommitTime $project.Repository $fact.commit }
                                 $fact.commitAt = Format-Moment $committed
                                 $fact.leadTimeHours = [Math]::Round(($current.Finished - $committed).TotalHours, 1)
                             }
