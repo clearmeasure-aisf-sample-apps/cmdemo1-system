@@ -223,7 +223,11 @@
       "database": false,
       "cpu": "0.5",
       "settings": {
-        "FACTORY_OWNER_MODE": "1"
+        "FACTORY_OWNER_MODE": "1",
+        "FACTORY_AUTHOR_APP": "1",
+        "FACTORY_APP_AUTHOR_ID": "5275650",
+        "FACTORY_APP_AUTHOR_INSTALLATION": "170316342",
+        "FACTORY_APP_AUTHOR_SLUG": "factory-worker-author"
       },
       "environmentSettings": {
         "tdd": {
@@ -257,7 +261,7 @@
         },
         {
           "name": "github-token",
-          "env": "GH_TOKEN"
+          "env": "FACTORY_APP_AUTHOR_KEY"
         }
       ],
       "buildPath": "/_build",
