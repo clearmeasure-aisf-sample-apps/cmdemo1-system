@@ -184,13 +184,15 @@
       "repository": "cmdemo1-scorecard",
       "port": 8080,
       "healthPath": "/health",
+      "buildPath": "/_build",
       "dashboardLink": {
         "text": "Scorecard",
         "path": "/"
       },
       "environments": [
         "tdd",
-        "uat"
+        "uat",
+        "prod"
       ],
       "database": false,
       "secrets": [
