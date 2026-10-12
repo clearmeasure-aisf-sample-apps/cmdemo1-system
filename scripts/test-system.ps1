@@ -339,6 +339,14 @@ foreach ($environment in $system.environments) {
         Test-Rule "environment $name employee middle names" $valid 'an object of user name to middle name, 1 to 100 characters each'
     }
 
+    # Optional: how long, in seconds, the step "Update deployable" keeps measuring availability after the new revision is
+    # ready (30 when left out: the full window). A shorter tail in the first environment makes a deployment there
+    # faster and its measurement shorter; uat and prod keep the full one.
+    if ($environment.ContainsKey('availabilityTailSeconds')) {
+        $tail = $environment.availabilityTailSeconds
+        Test-Rule "environment $name availabilityTailSeconds" ($tail -is [long] -and $tail -ge 5 -and $tail -le 30) 'a whole number of seconds from 5 to 30 (30 when left out)'
+    }
+
     foreach ($capability in @($environment.capabilities)) {
         $known = $capability -eq 'baseline' -or (Test-Path -LiteralPath (Join-Path $modules "$capability.bicep"))
         Test-Rule "environment $name capability $capability" $known "no module infra/modules/$capability.bicep"
