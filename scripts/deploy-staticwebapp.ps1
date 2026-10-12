@@ -674,12 +674,26 @@ function ConvertTo-RuntimeDiagram {
     #   browser-to-ca_<d>           its public address (kind "direct": the page marks no number on it)
     #   ca_<d>-to-sqldb             where the app uses the database (kind "sql", as a web app's)
     # An app without an address (the environment has none yet, or its stack is not readable from here) is not drawn.
+    #
+    # Everything else the environment's resource group holds is drawn too, from -Resource (tier, then the resources the
+    # group lists: type, name, environment tag, location, id), so that the diagram shows what runs and not only what
+    # the kit knows by name: the vault, the identities, the telemetry, the SQL server, a storage account the system
+    # added in infra/own, whatever else is there. The resources of this environment (its tag) and those without a tag
+    # of an environment (the tier's own: the registry, the deploy identity) are listed; what is drawn already (the web
+    # apps, the plans, the database, the static site, the container apps and their environment) and what is a child of
+    # another resource (a database of the SQL server, a secret) is not. One box per type, named after the resource
+    # when there is one and "<type> (<n>)" with the names below when there are several:
+    #   supporting                  the box that holds them, inside the resource group's boundary
+    #   res_<n>                     one box per type, numbered in the order of the types' names; kind "resource" in the
+    #                               manifest, with its "names" and, for a single resource, its page in the Azure portal
+    # The page draws them as boxes and does not probe them.
     param(
         [Parameter(Mandatory)] [hashtable] $System,
         [Parameter(Mandatory)] [System.Collections.IDictionary] $Topology,
         [Parameter(Mandatory)] [string] $Environment,
         [hashtable] $DashboardUrl = @{},
-        [hashtable] $ContainerApp = @{}
+        [hashtable] $ContainerApp = @{},
+        [hashtable] $Resource = @{}
     )
     $slug = [string] $System.system.slug
     $location = [string] $System.system.location
@@ -785,11 +799,29 @@ function ConvertTo-RuntimeDiagram {
     # ("app queries · 55 background").
     $edgeSlot = "<img:$(New-TransparentPng -Width 144 -Height 34)>"
 
+    # The container apps the system creates, in the Container Apps environment the platform made for them: named as the
+    # platform names it in the apps' addresses, <app>.<environment>.<region>.azurecontainerapps.io.
+    $containerAddresses = if ($ContainerApp[$Environment] -is [System.Collections.IDictionary]) { $ContainerApp[$Environment] } else { @{} }
+    $containers = @($System.deployables | Where-Object {
+            (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
+            (-not $_['environments'] -or @($_['environments']) -contains $Environment) -and
+            ([string] $containerAddresses[[string] $_.name]) -match '^https://[^/]+'
+        } | ForEach-Object {
+            $address = ([string] $containerAddresses[[string] $_.name]).TrimEnd('/')
+            $hostName = ([uri] $address).Host
+            $parts = $hostName -split '\.', 2
+            $domain = if ($parts.Count -gt 1) { $parts[1] } else { $hostName }
+            $region = ''
+            if ($domain -match '^(?<environment>[^.]+)\.(?<region>[^.]+)\.azurecontainerapps\.io$') { $domain = $Matches.environment; $region = $Matches.region }
+            [pscustomobject] @{ Deployable = [string] $_.name; Address = $address; App = $parts[0]; Environment = $domain; Region = $region; Database = ($_['database'] -ne $false) }
+        })
+    $containerApps = @($containers | ForEach-Object { [pscustomobject] @{ name = $_.Deployable } })
+
     # The dependencies the deployables declare (system.json deployables[].dependencies), by deployable: each is drawn
     # outside the subscription. The alias is made of both names; two that give the same alias are an error.
     $dependenciesOf = [ordered] @{}
     $dependencyAlias = @{}
-    foreach ($app in @($apps) + @($owns)) {
+    foreach ($app in @($apps) + @($owns) + @($containerApps)) {
         $declared = @($System.deployables | Where-Object { [string] $_.name -eq [string] $app.name }) | Select-Object -First 1
         if (-not $declared -or -not $declared['dependencies']) { continue }
         $position = 0
@@ -977,24 +1009,88 @@ function ConvertTo-RuntimeDiagram {
         }
         $lines.Add('    }')
     }
+
+    # Everything else of the resource group (see -Resource above): one box per type, inside one box that holds them.
+    $drawnNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($drawn in $nodes) { if ($drawn['name']) { $null = $drawnNames.Add([string] $drawn['name']) } }
+    foreach ($drawn in $frames) { if ($drawn['name']) { $null = $drawnNames.Add([string] $drawn['name']) } }
+    foreach ($container in $containers) { $null = $drawnNames.Add([string] $container.App) }
+    $typeLabel = @{
+        'microsoft.keyvault/vaults'                              = 'Key Vault'
+        'microsoft.managedidentity/userassignedidentities'       = 'Managed identity'
+        'microsoft.insights/components'                          = 'Application Insights'
+        'microsoft.operationalinsights/workspaces'               = 'Log Analytics workspace'
+        'microsoft.storage/storageaccounts'                      = 'Storage account'
+        'microsoft.containerregistry/registries'                 = 'Container registry'
+        'microsoft.sql/servers'                                  = 'Azure SQL server'
+        'microsoft.app/managedenvironments'                      = 'Container Apps environment'
+        'microsoft.app/containerapps'                            = 'Container app'
+        'microsoft.web/sites'                                    = 'Web app'
+        'microsoft.web/serverfarms'                              = 'App Service plan'
+        'microsoft.web/staticsites'                              = 'Static Web App'
+        'microsoft.cdn/profiles'                                 = 'Front Door profile'
+        'microsoft.alertsmanagement/smartdetectoralertrules'     = 'Smart Detector alert rule'
+        'microsoft.cognitiveservices/accounts'                   = 'Azure AI services account'
+        'microsoft.servicebus/namespaces'                        = 'Service Bus namespace'
+        'microsoft.cache/redis'                                  = 'Azure Cache for Redis'
+    }
+    $listedResources = if ($Resource.ContainsKey($tier) -and $Resource[$tier] -is [System.Collections.IEnumerable] -and $Resource[$tier] -isnot [string]) { @($Resource[$tier]) } else { @() }
+    $resourceGroups = [ordered] @{}
+    foreach ($item in $listedResources) {
+        if ($item -isnot [System.Collections.IDictionary]) { continue }
+        $type = [string] $item['type']
+        $resourceName = [string] $item['name']
+        if (-not $type -or -not $resourceName) { continue }
+        # A child of another resource (a database of a server, a secret of a vault) is part of its parent.
+        if (@($type -split '/').Count -ne 2) { continue }
+        # Another environment's, in the same group; what carries no environment is the tier's and is drawn in each.
+        $taggedFor = [string] $item['environment']
+        if ($taggedFor -and $taggedFor -cne $Environment) { continue }
+        if ($drawnNames.Contains($resourceName)) { continue }
+        if ($type -ieq 'Microsoft.Authorization/roleAssignments') { continue }
+        if ($containers.Count -gt 0 -and $type -ieq 'Microsoft.App/managedEnvironments') { continue }
+        $key = $type.ToLowerInvariant()
+        if (-not $resourceGroups.Contains($key)) { $resourceGroups[$key] = [Collections.Generic.List[object]]::new() }
+        $resourceGroups[$key].Add($item)
+    }
+    if ($resourceGroups.Count -gt 0) {
+        $labelOf = {
+            param([string] $Key)
+            if ($typeLabel.ContainsKey($Key)) { return [string] $typeLabel[$Key] }
+            $segments = $Key -split '/'
+            return "$(($segments[0] -replace '^microsoft\.', ''))/$($segments[1])"
+        }
+        $total = 0
+        foreach ($members in $resourceGroups.Values) { $total += $members.Count }
+        $holder = "$total resource(s) of $Environment and of the tier"
+        $lines.Add("    Deployment_Node(supporting, `"Supporting resources`", $(Get-Quoted $holder), `"`", `$tags=`"region`") {")
+        Add-Frame 'supporting' 'sub.rg_tier.supporting' 'supportingResources' 'Supporting resources' (Get-PortalLink $tierGroupId)
+        $number = 0
+        foreach ($key in @($resourceGroups.Keys | Sort-Object { & $labelOf $_ }, { $_ })) {
+            $number++
+            $alias = "res_$number"
+            $members = @($resourceGroups[$key] | Sort-Object { [string] $_['name'] })
+            $label = & $labelOf $key
+            $names = @($members | ForEach-Object { Get-Reported ([string] $_['name']) 60 })
+            if ($members.Count -eq 1) {
+                $title = $names[0]
+                $detail = Get-Reported ([string] $members[0]['location']) 40
+                $link = Get-PortalLink ([string] $members[0]['id'])
+            }
+            else {
+                $title = "$label ($($members.Count))"
+                $shown = @($names | Select-Object -First 8)
+                if ($names.Count -gt $shown.Count) { $shown += "and $($names.Count - $shown.Count) more" }
+                $detail = $shown -join '\n'
+                $link = Get-PortalLink $tierGroupId
+            }
+            $lines.Add("      Container($alias, $(Get-Quoted $title), $(Get-Quoted $label), $(Get-Quoted $detail))")
+            Add-Node ([ordered] @{ alias = $alias; qualifiedName = "sub.rg_tier.supporting.$alias"; kind = 'resource'; name = $title; type = $label; count = $members.Count; names = @($names) }) $link
+        }
+        $lines.Add('    }')
+    }
     $lines.Add('  }')
 
-    # The container apps the system creates, in the Container Apps environment the platform made for them: named as the
-    # platform names it in the apps' addresses, <app>.<environment>.<region>.azurecontainerapps.io.
-    $containerAddresses = if ($ContainerApp[$Environment] -is [System.Collections.IDictionary]) { $ContainerApp[$Environment] } else { @{} }
-    $containers = @($System.deployables | Where-Object {
-            (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
-            (-not $_['environments'] -or @($_['environments']) -contains $Environment) -and
-            ([string] $containerAddresses[[string] $_.name]) -match '^https://[^/]+'
-        } | ForEach-Object {
-            $address = ([string] $containerAddresses[[string] $_.name]).TrimEnd('/')
-            $hostName = ([uri] $address).Host
-            $parts = $hostName -split '\.', 2
-            $domain = if ($parts.Count -gt 1) { $parts[1] } else { $hostName }
-            $region = ''
-            if ($domain -match '^(?<environment>[^.]+)\.(?<region>[^.]+)\.azurecontainerapps\.io$') { $domain = $Matches.environment; $region = $Matches.region }
-            [pscustomobject] @{ Deployable = [string] $_.name; Address = $address; App = $parts[0]; Environment = $domain; Region = $region; Database = ($_['database'] -ne $false) }
-        })
     $containerBoxes = [ordered] @{}
     $caeNumber = 0
     foreach ($group in @($containers | Group-Object Environment)) {
@@ -1126,9 +1222,11 @@ function ConvertTo-RuntimeDiagram {
             }
         }
     }
-    foreach ($app in @($apps) + @($owns)) {
+    foreach ($app in @($apps) + @($owns) + @($containerApps)) {
         if (-not $dependenciesOf.Contains([string] $app.name)) { continue }
-        foreach ($alias in $webApps[[string] $app.name]) {
+        # A container app is one box; the others have a node per region.
+        $callers = if ($containerBoxes.Contains([string] $app.name)) { @($containerBoxes[[string] $app.name]) } else { $webApps[[string] $app.name] }
+        foreach ($alias in $callers) {
             foreach ($dependency in $dependenciesOf[[string] $app.name]) {
                 # Upstream: the layout engine then puts the dependency's box under the subscription, below the
                 # public addresses, and the arrows' number lines in the free column between the resource groups. A
@@ -1197,7 +1295,8 @@ function Test-RuntimeSvg {
     $missing = [Collections.Generic.List[string]]::new()
     foreach ($node in $Manifest.nodes) {
         if (-not $entities.ContainsKey($node.qualifiedName)) { $missing.Add("node $($node.qualifiedName)") }
-        elseif ($node.kind -ne 'person' -and $entities[$node.qualifiedName] -lt 1) { $missing.Add("slot of $($node.qualifiedName)") }
+        # A person and a supporting resource are drawn as they are: nothing is drawn into them, so they have no slot.
+        elseif ($node.kind -notin 'person', 'resource' -and $entities[$node.qualifiedName] -lt 1) { $missing.Add("slot of $($node.qualifiedName)") }
     }
     foreach ($region in $Manifest.regions) {
         if ($clusters -notcontains $region.qualifiedName) { $missing.Add("region $($region.qualifiedName)") }
@@ -1246,7 +1345,8 @@ function Write-RuntimeDiagram {
         [Parameter(Mandatory)] [string] $Jar,
         [Parameter(Mandatory)] [string] $Version,
         [hashtable] $DashboardUrl = @{},
-        [hashtable] $ContainerApp = @{}
+        [hashtable] $ContainerApp = @{},
+        [hashtable] $Resource = @{}
     )
     # The package carries the sample's runtime/ (and so may an older release): none of it may outlive this deployment.
     $runtime = Join-Path $Folder 'runtime'
@@ -1255,7 +1355,7 @@ function Write-RuntimeDiagram {
     $diagrams = [ordered] @{}
     foreach ($environment in @($System.environments)) {
         $name = [string] $environment.name
-        $diagram = ConvertTo-RuntimeDiagram -System $System -Topology $Topology -Environment $name -DashboardUrl $DashboardUrl -ContainerApp $ContainerApp
+        $diagram = ConvertTo-RuntimeDiagram -System $System -Topology $Topology -Environment $name -DashboardUrl $DashboardUrl -ContainerApp $ContainerApp -Resource $Resource
         $diagram.manifest.generated = $Topology.generated
         $diagram.manifest.plantuml = $Version
         $diagrams[$name] = $diagram
@@ -1395,6 +1495,20 @@ foreach ($tier in @($system.environments | ForEach-Object { [string] $_['tier'] 
 $pageAddresses = @{}
 $status = $null
 $statusRead = $false
+function Get-PublishedStatus {
+    # containers.json of branch status (workflow delivery writes it as the plan identity, which reads every group), read
+    # once; $null when the branch has none yet or it could not be read, with a line saying which.
+    if (-not $script:statusRead) {
+        $script:statusRead = $true
+        try {
+            $statusText = Read-MainFile -Path 'containers.json' -Ref 'status'
+            if ($statusText) { $script:status = $statusText | ConvertFrom-Json -AsHashtable }
+            else { Write-Host 'Branch status of the system repository has no containers.json yet (workflow delivery writes it hourly).' }
+        }
+        catch { Write-Host "containers.json of branch status could not be read ($($_.Exception.Message))." }
+    }
+    return $script:status
+}
 $containerApps = @($system.deployables | Where-Object { -not $_['hosting'] -or $_['hosting'] -eq 'containerapp' })
 if ($containerApps.Count -gt 0) {
     foreach ($environment in @($system.environments)) {
@@ -1416,18 +1530,10 @@ if ($containerApps.Count -gt 0) {
         # A stack this identity may not read: what the workflow delivery published of it (containers.json on branch
         # status, written as the plan identity, which reads every environment's stack; as old as its last run).
         if ($reason) {
-            if (-not $statusRead) {
-                $statusRead = $true
-                try {
-                    $statusText = Read-MainFile -Path 'containers.json' -Ref 'status'
-                    if ($statusText) { $status = $statusText | ConvertFrom-Json -AsHashtable }
-                    else { Write-Host 'Branch status of the system repository has no containers.json yet (workflow delivery writes it hourly).' }
-                }
-                catch { Write-Host "containers.json of branch status could not be read ($($_.Exception.Message))." }
-            }
-            if ($status -and $status['environments'] -is [Collections.IDictionary] -and $status.environments[$pageEnvironment] -is [Collections.IDictionary]) {
-                $reported = @($status.environments[$pageEnvironment].GetEnumerator() | ForEach-Object { @{ name = [string] $_.Key; url = [string] $_.Value } })
-                Write-Host "The stack of $pageEnvironment could not be read ($reason): its container apps are those of containers.json on branch status, written $($status['generated'])."
+            $published = Get-PublishedStatus
+            if ($published -and $published['environments'] -is [Collections.IDictionary] -and $published.environments[$pageEnvironment] -is [Collections.IDictionary]) {
+                $reported = @($published.environments[$pageEnvironment].GetEnumerator() | ForEach-Object { @{ name = [string] $_.Key; url = [string] $_.Value } })
+                Write-Host "The stack of $pageEnvironment could not be read ($reason): its container apps are those of containers.json on branch status, written $($published['generated'])."
                 $reason = ''
             }
         }
@@ -1444,6 +1550,38 @@ if ($containerApps.Count -gt 0) {
             Write-Host "The stack of $pageEnvironment reports no address for $($without -join ', '): the diagram shows no box and the page no link for $(if ($without.Count -eq 1) { 'it' } else { 'them' }) there until the environment has $(if ($without.Count -eq 1) { 'it' } else { 'them' }) and the dashboard is deployed again."
         }
     }
+}
+
+# What else the resource groups hold, for the runtime diagram (everything that runs, not only what the kit names): the
+# group of this environment's tier is listed here, as this identity may read it; the other tier's is what workflow
+# delivery published of it (containers.json, "resources"). A group that cannot be read leaves the diagram without
+# the supporting resources of that tier, and the log says so.
+$tierResources = @{}
+$ownTier = [string] (@($system.environments | Where-Object { [string] $_.name -eq $environmentName }) | Select-Object -First 1).tier
+foreach ($tier in @($system.environments | ForEach-Object { [string] $_['tier'] } | Where-Object { $_ } | Select-Object -Unique)) {
+    $group = [string] $tierGroups[$tier]
+    if (-not $group) { continue }
+    $listed = $null
+    $why = ''
+    if ($tier -eq $ownTier) {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $read = @(az resource list --resource-group $group --query '[].{id:id,type:type,name:name,location:location,environment:tags.environment}' --only-show-errors --output json 2>&1 | ForEach-Object { "$_" })
+        $readCode = $LASTEXITCODE
+        $PSNativeCommandUseErrorActionPreference = $true
+        if ($readCode -eq 0) { $listed = @(($read -join "`n") | ConvertFrom-Json -AsHashtable) }
+        else { $why = if ($read.Count -gt 0) { ($read[0] -split "`n")[0] } else { "exit code $readCode" } }
+    }
+    if ($null -eq $listed) {
+        $published = Get-PublishedStatus
+        if ($published -and $published['resources'] -is [Collections.IDictionary] -and $published.resources[$tier] -is [System.Collections.IEnumerable] -and $published.resources[$tier] -isnot [string]) {
+            $listed = @($published.resources[$tier])
+            Write-Host "The resources of $group$(if ($why) { " could not be listed ($why)" } else { ' are not read by this identity' }): the diagram uses those of containers.json on branch status, written $($published['generated'])."
+        }
+        else {
+            Write-Host "The resources of $group are not known here$(if ($why) { " ($why)" } else { '' }) and containers.json of branch status has none: the diagrams of $tier show no supporting resources."
+        }
+    }
+    if ($null -ne $listed) { $tierResources[$tier] = @($listed) }
 }
 
 $topology = ConvertTo-Topology -System $system -EndpointHost $endpointHosts -SqlServer $sqlServers -NodeRecord $nodeRecords -PageAddress $pageAddresses -Dashboard $name
@@ -1542,7 +1680,7 @@ $runtimeProblem = $null
 try {
     $jar = Get-PlantUmlJar -Version $plantUmlVersion -Sha256 $plantUmlSha256 -Folder $tools
     Write-Host ('PlantUML {0} downloaded from GitHub in {1:0.0} s ({2:0.0} MB, SHA-256 as pinned); {3}' -f $plantUmlVersion, $jar.seconds, $jar.megabytes, $javaVersion)
-    $rendered = Write-RuntimeDiagram -System $system -Topology $topology -Folder $folder -Jar $jar.path -Version $plantUmlVersion -DashboardUrl @{ $environmentName = $url } -ContainerApp $pageAddresses
+    $rendered = Write-RuntimeDiagram -System $system -Topology $topology -Folder $folder -Jar $jar.path -Version $plantUmlVersion -DashboardUrl @{ $environmentName = $url } -ContainerApp $pageAddresses -Resource $tierResources
     $rendered.log | ForEach-Object { Write-Host $_ }
     Write-Host ('runtime/: {0} diagram(s) rendered and checked in {1:0.0} s ({2:0} KB of SVG)' -f $rendered.count, $rendered.seconds, $rendered.kilobytes)
 }

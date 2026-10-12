@@ -739,6 +739,22 @@ $checks = [ordered] @{
                 $boxed = @($manifest['nodes'] | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['kind'] -eq 'containerapp' } | ForEach-Object { [string] $_['deployable'] })
                 $unboxed = @($inStack | Where-Object { $boxed -notcontains $_ })
                 Assert-That ($unboxed.Count -eq 0) "the runtime diagram of $drawnEnvironment in $e has no box for the container app(s) $($unboxed -join ', '): deploy the release of $slug-$dashboardName to $e again"
+                # Everything else the environment's resource group holds is on it too: named by a box, or in the list of
+                # a box that stands for several of one type (the supporting resources).
+                $accounted = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                foreach ($shown in @($manifest['nodes'] | Where-Object { $_ -is [System.Collections.IDictionary] })) {
+                    if ($shown['name']) { $null = $accounted.Add([string] $shown['name']) }
+                    foreach ($member in @($shown['names'] | Where-Object { $_ })) { $null = $accounted.Add([string] $member) }
+                }
+                foreach ($frame in @($manifest['frames'] | Where-Object { $_ -is [System.Collections.IDictionary] })) { if ($frame['name']) { $null = $accounted.Add([string] $frame['name']) } }
+                $hasEnvironmentFrame = @($manifest['frames'] | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['kind'] -eq 'containerAppsEnvironment' }).Count -gt 0
+                $inGroup = @(az resource list --resource-group (Get-Group $drawnEnvironment) --query "[?tags.environment=='$drawnEnvironment'].{type:type,name:name}" --output json | ConvertFrom-Json)
+                $missing = @($inGroup | Where-Object {
+                        @($_.type -split '/').Count -eq 2 -and $_.type -ne 'Microsoft.Authorization/roleAssignments' -and
+                        -not ($hasEnvironmentFrame -and $_.type -ieq 'Microsoft.App/managedEnvironments') -and
+                        -not $accounted.Contains([string] $_.name)
+                    } | ForEach-Object { $_.name })
+                Assert-That ($missing.Count -eq 0) "the runtime diagram of $drawnEnvironment in $e does not show $($missing -join ', '): deploy the release of $slug-$dashboardName to $e again"
             }
             "$e $url"
         }

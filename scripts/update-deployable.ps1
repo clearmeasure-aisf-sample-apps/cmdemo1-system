@@ -341,8 +341,14 @@ while ($true) {
     Start-Sleep -Seconds 10
 }
 if ($probe) {
-    # A little longer than the update: the new revision takes the traffic once it is ready.
-    Start-Sleep -Seconds 30
+    # A little longer than the update: the new revision takes the traffic once it is ready. 30 seconds, or what the
+    # environment declares (system.json environments[].availabilityTailSeconds, 5 to 30: the variable
+    # Availability.TailSeconds): a shorter tail in the first environment is a shorter measurement there.
+    $tail = 30
+    $declaredTail = [string] $OctopusParameters['Availability.TailSeconds']
+    if ($declaredTail -match '^\d+$' -and [int] $declaredTail -ge 5 -and [int] $declaredTail -le 30) { $tail = [int] $declaredTail }
+    if ($tail -ne 30) { Write-Host "Availability is measured $tail seconds after the revision is ready (environments[].availabilityTailSeconds of $environmentName; 30 where it is not set)." }
+    Start-Sleep -Seconds $tail
     $downtime = Stop-AvailabilityProbe -Handle $probe
     if ($downtime -gt 0) {
         Fail-Step "Updating $app to $version caused $downtime downtime period(s); the timeline is above."
