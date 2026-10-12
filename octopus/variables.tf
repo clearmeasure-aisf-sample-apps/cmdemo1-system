@@ -201,6 +201,7 @@ locals {
       for name in keys(local.deployables) : name => concat(
         [octopusdeploy_process_step.pin[name].action_id, octopusdeploy_process_step.revert_pin[name].action_id],
         contains(keys(local.static_deployables), name) ? [octopusdeploy_process_step.deploy_staticwebapp[name].action_id] : [],
+        contains(keys(local.storage_deployables), name) ? [octopusdeploy_process_step.deploy_storagewebsite[name].action_id] : [],
         contains(keys(local.own_deployables), name) ? [octopusdeploy_process_step.record_nodes[name].action_id, octopusdeploy_process_step.record_reverted_nodes[name].action_id] : [],
       )
     }

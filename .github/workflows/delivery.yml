@@ -9,6 +9,8 @@
 # Cost, in the same commit: scripts/write-cost.ps1 reads Azure Cost Management for the system's resource groups (per
 # environment by the tag "environment": yesterday, seven days, the month to date) and the result is cost.json next to
 # delivery.json. Hourly and on demand only: Azure's cost changes by the day, and Cost Management throttles its readers.
+# Also next to it, health-reports.json: what the logs of the hourly runbook "Health report" said of each container
+# app, by run, which write-delivery.ps1 reads back from the branch so that each log is read once.
 # A file whose content did not change, apart from its time of generation, stays as published, so "generated" of each
 # file is the time of its last change; a run that changes neither pushes nothing.
 # Credentials: GitHub OIDC to Octopus as the system's service account and to Azure as id-<slug>-plan (environment
@@ -96,8 +98,10 @@ jobs:
         run: ./scripts/write-cost.ps1 -Path "${{ runner.temp }}/cost.json" -Published "${{ runner.temp }}/cost.published.json" -EveryHours ${{ github.event_name == 'schedule' && 6 || 1 }}
 
       # The addresses of the container apps, which only each environment's stack knows and the dashboard of another
-      # tier may not read: published next to delivery.json, and read by the dashboard's deployment. It never holds
-      # back the other files: when it fails, the published one stays.
+      # tier may not read: published next to delivery.json, and read by the dashboard's deployment. With what Azure
+      # Resource Health says of every resource of the system's groups (Reader), which the dashboard's page shows on the
+      # runtime diagram; its time of reading changes the file every run. It never holds back the other files: when it
+      # fails, the published one stays.
       - name: Write containers.json
         if: steps.azure.outcome == 'success'
         continue-on-error: true
@@ -122,7 +126,7 @@ jobs:
           mkdir -p "$PUBLISHED"
           if [ -n "$(git ls-remote --heads origin status)" ]; then
             git fetch --quiet --depth=1 origin status
-            for file in delivery.json cost.json containers.json; do
+            for file in delivery.json cost.json containers.json health-reports.json; do
               if git cat-file -e "FETCH_HEAD:$file" 2>/dev/null; then
                 git show "FETCH_HEAD:$file" > "$PUBLISHED/$file"
               fi
@@ -130,7 +134,7 @@ jobs:
           fi
           entries=""
           changed=""
-          for file in delivery.json cost.json containers.json; do
+          for file in delivery.json cost.json containers.json health-reports.json; do
             if [ ! -s "$WRITTEN/$file" ]; then
               source="$PUBLISHED/$file"
             elif [ -f "$PUBLISHED/$file" ] && [ "$(facts "$WRITTEN/$file")" = "$(facts "$PUBLISHED/$file" 2>/dev/null || true)" ]; then
@@ -145,7 +149,7 @@ jobs:
             fi
           done
           if [ -z "$changed" ]; then
-            echo "delivery.json, cost.json and containers.json are unchanged: nothing to publish."
+            echo "delivery.json, cost.json, containers.json and health-reports.json are unchanged: nothing to publish."
             exit 0
           fi
           tree=$(printf '%s' "$entries" | git mktree)

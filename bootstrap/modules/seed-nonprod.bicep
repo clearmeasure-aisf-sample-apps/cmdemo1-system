@@ -22,12 +22,16 @@ param acrPushSubjects array
 param deploySubjects array
 param appEnvironments array
 
+@description('Names of every environment of the system, of both tiers: those that pull from the registry.')
+param servedEnvironments array = []
+
 var suffix = take(uniqueString(resourceGroup().id, slug), 6)
 
 resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = if (containerRegistry) {
   name: 'acr${slug}${suffix}'
   location: location
-  tags: tags
+  // The environments that pull from it, as a list: the runtime diagram draws it in each of them.
+  tags: empty(servedEnvironments) ? tags : union(tags, { environment: join(servedEnvironments, ',') })
   sku: {
     name: 'Basic'
   }
