@@ -52,6 +52,9 @@ param vaultUri string
 @description('Application Insights connection string when the environment has capability "telemetry" (not a secret: it identifies where to send telemetry).')
 param applicationInsightsConnectionString string = ''
 
+@description('Origins whose pages may read the apps\' answers (CORS), GET only and without credentials; empty: no CORS policy. main.bicep passes * when the system has a dashboard, whose page probes each app\'s health path from the browser while it shows the app.')
+param corsAllowedOrigins array = []
+
 var placeholderImage = 'mcr.microsoft.com/k8se/quickstart:latest'
 var placeholderPort = 80
 // Telemetry: the app's OpenTelemetry SDK exports to Application Insights with the Azure Monitor exporter whenever it
@@ -120,6 +123,14 @@ resource apps 'Microsoft.App/containerApps@2025-01-01' = [
           targetPort: empty(versions[?d.name] ?? '') ? placeholderPort : d.port
           transport: express ? 'http' : 'auto'
           allowInsecure: false
+          ...(empty(corsAllowedOrigins)
+            ? {}
+            : {
+                corsPolicy: {
+                  allowedOrigins: corsAllowedOrigins
+                  allowedMethods: ['GET']
+                }
+              })
         }
         registries: [
           {

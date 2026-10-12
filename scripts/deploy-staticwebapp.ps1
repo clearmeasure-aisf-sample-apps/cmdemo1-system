@@ -106,6 +106,8 @@
        when the step runs (the deploy identity may; the stack's deny settings keep everyone else from listing it),
        reaches the CLI through an environment variable, and is never stored, printed or passed as an argument.
     4. The proof: the site serves the topology this step wrote.
+    With hosting "storagewebsite", 3 and 4 are Publish-StorageWebsite of scripts/deploy-storagewebsite.ps1, which
+    octopus/projects.tf joins in before this script: the static website of the storage account the stack created.
 
     The topology is a picture of system.json and the recorded nodes at the time of the deployment. After a change to
     the environments, a standby region or a Front Door endpoint, or a deployment of an application with hosting "own"
@@ -121,6 +123,16 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandArgumentPassing = 'Standard'
 $PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
+
+# An Azure step can drop the result message of Fail-Step (exit code 255, no reason): the reason is a plain line too.
+$octopusFailStep = if (Test-Path -LiteralPath function:Fail-Step) { ${function:Fail-Step} } else { $null }
+function Fail-Step {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '')]
+    param([string] $Message)
+    Write-Host $Message
+    if ($octopusFailStep) { & $octopusFailStep $Message }
+    exit -1
+}
 
 # Every step starts in a fresh worker container. The Azure CLI writes progress spinners and, when it installs Bicep,
 # a WARNING line to stderr, which Octopus logs as errors ("SuccessWithWarning"): turn both off.
@@ -669,24 +681,42 @@ function ConvertTo-RuntimeDiagram {
     # (the part of the host name the platform generates) and its region, with a box per app:
     #   cae_<n>                     the Container Apps environment, numbered in the order system.json lists the apps
     #   ca_<d>                      a container app; kind "containerapp" in the manifest, its address in "url" and in
-    #                               its "links" (site). The page draws it as a box it does not probe ("Not probed"):
-    #                               a container app scales to zero, and a probe from the page would start it and hold it
+    #                               its "links" (site), its deployable's "healthPath" (a plain path only), and "ids"
+    #                               (its resource id) where the groups' list has it. The page probes it once a minute
+    #                               while it shows the diagram (decision 0038). Its slot also has rows for what the
+    #                               hourly health report last found there
     #   browser-to-ca_<d>           its public address (kind "direct": the page marks no number on it)
     #   ca_<d>-to-sqldb             where the app uses the database (kind "sql", as a web app's)
-    # An app without an address (the environment has none yet, or its stack is not readable from here) is not drawn.
+    # A declared app without an address (the environment has none yet, or its stack is not readable from here) is not
+    # drawn from the stack.
     #
-    # Everything else the environment's resource group holds is drawn too, from -Resource (tier, then the resources the
-    # group lists: type, name, environment tag, location, id), so that the diagram shows what runs and not only what
-    # the kit knows by name: the vault, the identities, the telemetry, the SQL server, a storage account the system
-    # added in infra/own, whatever else is there. The resources of this environment (its tag) and those without a tag
-    # of an environment (the tier's own: the registry, the deploy identity) are listed; what is drawn already (the web
-    # apps, the plans, the database, the static site, the container apps and their environment) and what is a child of
-    # another resource (a database of the SQL server, a secret) is not. One box per type, named after the resource
-    # when there is one and "<type> (<n>)" with the names below when there are several:
-    #   supporting                  the box that holds them, inside the resource group's boundary
-    #   res_<n>                     one box per type, numbered in the order of the types' names; kind "resource" in the
-    #                               manifest, with its "names" and, for a single resource, its page in the Azure portal
-    # The page draws them as boxes and does not probe them.
+    # Everything else the system's resource groups hold is drawn too, from -Resource (the key of azure.resourceGroups,
+    # then what its group lists: type, name, environment tag, location, id, group, and for a container app its address
+    # and its Container Apps environment), so that the diagram shows the entire system and not only what the registry
+    # declares: the vault, the identities, the telemetry, the SQL server, a container app nobody declared, a storage
+    # account the system added in infra/own, whatever else is there, in every group and whatever its tag. Left out: a
+    # child of another resource (a database of the SQL server, a secret), a role assignment, what another environment
+    # of the system carries as its tag (its own diagram draws it), and what the diagram draws already, by type and
+    # name: the web apps, the plans, the static sites, the Front Door profile, the container apps, and the Container
+    # Apps environment of a drawn app (the database is a child of its server). One box per type, named after the
+    # resource when there is one and "<type> (<n>)" with the names below when there are several:
+    #   supporting                  this environment's resources of the tier's group, inside its boundary
+    #   supporting_edge             those of the Front Door's group, inside rg_edge
+    #   rg_<n>, supporting_<n>      those of any other group: its boundary, and the box inside it
+    #   unplaced                    "In no environment": the system's resources with no environment tag, or a tag
+    #                               that names no environment of system.json, in every diagram; each box says its
+    #                               group and its tag (or that it has none)
+    #   res_<n>                     one box per type (in "unplaced", per type, group and tag), numbered in the order of
+    #                               the types' names; kind "resource" in the manifest, with its "names", "group",
+    #                               "environmentTag" in "unplaced", "ids" (the members' resource ids), and its page in
+    #                               the Azure portal (for several, the group's)
+    #   cax_<n>                     a container app system.json does not declare, from the list: kind "containerapp",
+    #                               no deployable and no health path, its address where it has a public one, and its
+    #                               id; in its Container Apps environment's box when it is of this environment, in
+    #                               "unplaced" otherwise. The page probes its address as a declared one's
+    # The browser cannot ask a resource: its box has a slot of one line, where the page says what Azure Resource Health
+    # last said of its members (containers.json on branch status, by "ids"). The static sites and the database get
+    # "ids" too, from the same list (the database is a child of its server, found by its name).
     param(
         [Parameter(Mandatory)] [hashtable] $System,
         [Parameter(Mandatory)] [System.Collections.IDictionary] $Topology,
@@ -780,7 +810,9 @@ function ConvertTo-RuntimeDiagram {
     # runtime.js draws into them and assumes nothing about their size but what the SVG says).
     # A web app's tile: the badge, seven lines 15 px apart (version, pin, traffic, failures, process, uptime, role)
     # and the history strip; one line more, the marks of the detailed health check, for a deployable with
-    # healthDetailPath. A Front Door endpoint's has three lines; a database's, a static site's and a dependency's one.
+    # healthDetailPath. A Front Door endpoint's has three lines; a database's, a static site's and a dependency's one;
+    # a container app's three: its address, and what the pipeline's hourly health report last found there and counted
+    # (delivery.json), which the page shows in place of a probe of its own.
     # A node a deployment changes (a web app, a Front Door endpoint, a static site: every node with a deployable) has
     # two lines more, 30 px: the activity lines, where the dashboard says in words what is being deployed there, a
     # deployment freeze and the last deployment that ended (deployments.json). They are the last lines of a tile, so
@@ -794,6 +826,9 @@ function ConvertTo-RuntimeDiagram {
     $endpointSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height (98 + $activityRows))>"
     $smallTileSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height 46)>"
     $siteSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height (46 + $activityRows))>"
+    $containerSlot = "<img:$(New-TransparentPng -Width $tileWidth -Height (76 + $activityRows))>"
+    # A resource's: the badge and one line of Resource Health, under the box's own words.
+    $resourceSlot = "<img:$(New-TransparentPng -Width 200 -Height 46)>"
     $regionSlot = "<img:$(New-TransparentPng -Width 190 -Height 22)>"
     # A relationship's number line (the number, its unit and its trend in a frame) and, under it, its role in words
     # ("app queries · 55 background").
@@ -813,7 +848,8 @@ function ConvertTo-RuntimeDiagram {
             $domain = if ($parts.Count -gt 1) { $parts[1] } else { $hostName }
             $region = ''
             if ($domain -match '^(?<environment>[^.]+)\.(?<region>[^.]+)\.azurecontainerapps\.io$') { $domain = $Matches.environment; $region = $Matches.region }
-            [pscustomobject] @{ Deployable = [string] $_.name; Address = $address; App = $parts[0]; Environment = $domain; Region = $region; Database = ($_['database'] -ne $false) }
+            $healthPath = if ([string] $_['healthPath'] -cmatch '^/(?!/)[A-Za-z0-9._~/-]{0,199}\z') { [string] $_.healthPath } else { '' }
+            [pscustomobject] @{ Deployable = [string] $_.name; Address = $address; App = $parts[0]; Environment = $domain; Region = $region; Database = ($_['database'] -ne $false); Alias = "ca_$(Get-DeployableAlias ([string] $_.name))"; Words = "container app: $([string] $_.name)"; Links = $null; Group = $domain; EnvironmentId = ''; Tag = ''; Id = ''; HealthPath = $healthPath }
         })
     $containerApps = @($containers | ForEach-Object { [pscustomobject] @{ name = $_.Deployable } })
 
@@ -944,6 +980,7 @@ function ConvertTo-RuntimeDiagram {
     $lines.Add('Boundary(sub, "Azure subscription", $type="subscription", $tags="scope") {')
     Add-Frame 'sub' 'sub' 'subscription' 'Azure subscription' (Get-PortalLink $subscription)
 
+    $edgeGroupEnd = -1
     if ($hasFrontDoor -and $apps.Count -gt 0) {
         $profileName = [string] $frontDoor.profile
         $lines.Add("  Boundary(rg_edge, $(Get-Quoted ([string] $frontDoor.resourceGroup)), `$type=`"resource group`", `$tags=`"scope`") {")
@@ -957,6 +994,8 @@ function ConvertTo-RuntimeDiagram {
             Add-Node ([ordered] @{ alias = $alias; qualifiedName = "sub.rg_edge.afd.$alias"; kind = 'frontdoor'; deployable = [string] $app.name; name = $endpoint; url = $app.frontDoor })
         }
         $lines.Add('    }')
+        # Where this environment's other resources of the Front Door's group go, once they are known (below).
+        $edgeGroupEnd = $lines.Count
         $lines.Add('  }')
     }
 
@@ -1010,11 +1049,18 @@ function ConvertTo-RuntimeDiagram {
         $lines.Add('    }')
     }
 
-    # Everything else of the resource group (see -Resource above): one box per type, inside one box that holds them.
-    $drawnNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($drawn in $nodes) { if ($drawn['name']) { $null = $drawnNames.Add([string] $drawn['name']) } }
-    foreach ($drawn in $frames) { if ($drawn['name']) { $null = $drawnNames.Add([string] $drawn['name']) } }
-    foreach ($container in $containers) { $null = $drawnNames.Add([string] $container.App) }
+    # Everything else the resource groups hold (see -Resource above), placed by its environment tag.
+    # What the diagram draws already, by type and name, is not drawn twice: the web apps, the plans, the static sites,
+    # the Front Door profile and the container apps (their environment below). The database is a child of its server,
+    # and is left out with every child.
+    $drawnResource = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($drawn in $nodes) {
+        if ($drawn['kind'] -eq 'webapp') { $null = $drawnResource.Add("microsoft.web/sites/$([string] $drawn['name'])") }
+        if ($drawn['kind'] -eq 'staticsite') { $null = $drawnResource.Add("microsoft.web/staticsites/$([string] $drawn['name'])") }
+    }
+    foreach ($drawn in @($frames | Where-Object { $_['kind'] -eq 'plan' })) { $null = $drawnResource.Add("microsoft.web/serverfarms/$([string] $drawn['name'])") }
+    if ($edgeGroupEnd -ge 0) { $null = $drawnResource.Add("microsoft.cdn/profiles/$([string] $frontDoor.profile)") }
+    foreach ($container in $containers) { $null = $drawnResource.Add("microsoft.app/containerapps/$([string] $container.App)") }
     $typeLabel = @{
         'microsoft.keyvault/vaults'                              = 'Key Vault'
         'microsoft.managedidentity/userassignedidentities'       = 'Managed identity'
@@ -1034,80 +1080,221 @@ function ConvertTo-RuntimeDiagram {
         'microsoft.servicebus/namespaces'                        = 'Service Bus namespace'
         'microsoft.cache/redis'                                  = 'Azure Cache for Redis'
     }
-    $listedResources = if ($Resource.ContainsKey($tier) -and $Resource[$tier] -is [System.Collections.IEnumerable] -and $Resource[$tier] -isnot [string]) { @($Resource[$tier]) } else { @() }
-    $resourceGroups = [ordered] @{}
-    foreach ($item in $listedResources) {
-        if ($item -isnot [System.Collections.IDictionary]) { continue }
-        $type = [string] $item['type']
-        $resourceName = [string] $item['name']
-        if (-not $type -or -not $resourceName) { continue }
-        # A child of another resource (a database of a server, a secret of a vault) is part of its parent.
-        if (@($type -split '/').Count -ne 2) { continue }
-        # Another environment's, in the same group; what carries no environment is the tier's and is drawn in each.
-        $taggedFor = [string] $item['environment']
-        if ($taggedFor -and $taggedFor -cne $Environment) { continue }
-        if ($drawnNames.Contains($resourceName)) { continue }
-        if ($type -ieq 'Microsoft.Authorization/roleAssignments') { continue }
-        if ($containers.Count -gt 0 -and $type -ieq 'Microsoft.App/managedEnvironments') { continue }
-        $key = $type.ToLowerInvariant()
-        if (-not $resourceGroups.Contains($key)) { $resourceGroups[$key] = [Collections.Generic.List[object]]::new() }
-        $resourceGroups[$key].Add($item)
+    $labelOf = {
+        param([string] $Key)
+        if ($typeLabel.ContainsKey($Key)) { return [string] $typeLabel[$Key] }
+        $segments = $Key -split '/'
+        return "$(($segments[0] -replace '^microsoft\.', ''))/$($segments[1])"
     }
-    if ($resourceGroups.Count -gt 0) {
-        $labelOf = {
-            param([string] $Key)
-            if ($typeLabel.ContainsKey($Key)) { return [string] $typeLabel[$Key] }
-            $segments = $Key -split '/'
-            return "$(($segments[0] -replace '^microsoft\.', ''))/$($segments[1])"
+    # Every group's list, once per resource. A resource tagged with another environment of the system is drawn in that
+    # environment's diagram; one with no environment tag, or a tag that names no environment, in every diagram, in the
+    # frame of the system that is in no environment ("unplaced").
+    $environmentNames = @($System.environments | ForEach-Object { [string] $_.name })
+    $groupOfKey = if ($System.azure['resourceGroups'] -is [System.Collections.IDictionary]) { $System.azure.resourceGroups } else { @{} }
+    $seenResource = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $listedResources = [Collections.Generic.List[object]]::new()
+    foreach ($groupKey in @($Resource.Keys | ForEach-Object { [string] $_ } | Sort-Object)) {
+        $value = $Resource[$groupKey]
+        if ($value -isnot [System.Collections.IEnumerable] -or $value -is [string]) { continue }
+        foreach ($item in @($value)) {
+            if ($item -isnot [System.Collections.IDictionary]) { continue }
+            $type = [string] $item['type']
+            $resourceName = [string] $item['name']
+            if (-not $type -or -not $resourceName) { continue }
+            # A child of another resource (a database of a server, a secret of a vault) is part of its parent.
+            if (@($type -split '/').Count -ne 2) { continue }
+            if ($type -ieq 'Microsoft.Authorization/roleAssignments') { continue }
+            $group = if ($item['group']) { [string] $item['group'] } else { [string] $groupOfKey[$groupKey] }
+            if (-not $seenResource.Add("$group/$type/$resourceName")) { continue }
+            # The tag is a set: a shared resource (the cluster, a tier's identity, the registry) names every environment
+            # it serves, "tdd,uat", and is drawn in each of them.
+            $tag = [string] $item['environment']
+            $served = @($tag -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $environmentNames -icontains $_ })
+            $placement = if (-not $tag.Trim()) { 'none' } elseif ($served -icontains $Environment) { 'here' } elseif ($served.Count -gt 0) { 'elsewhere' } else { 'unknown' }
+            if ($placement -eq 'elsewhere') { continue }
+            $words = switch ($placement) { 'none' { 'no environment tag' } 'unknown' { "tagged $((@($tag -split ',' | ForEach-Object { Get-Reported $_.Trim() 40 } | Where-Object { $_ }) -join ', ')): no such environment" } default { '' } }
+            $listedResources.Add([pscustomobject] @{
+                    Key = $type.ToLowerInvariant(); Name = $resourceName; Group = $group; Tag = $tag; Placement = $placement; Words = $words
+                    Location = [string] $item['location']; Id = [string] $item['id']; Address = [string] $item['address']; ManagedEnvironment = [string] $item['managedEnvironment']
+                    Box = if ($placement -eq 'here') { $type.ToLowerInvariant() } else { "$($type.ToLowerInvariant())|$($group.ToLowerInvariant())|$($tag.ToLowerInvariant())" }
+                })
         }
-        $total = 0
-        foreach ($members in $resourceGroups.Values) { $total += $members.Count }
-        $holder = "$total resource(s) of $Environment and of the tier"
-        $lines.Add("    Deployment_Node(supporting, `"Supporting resources`", $(Get-Quoted $holder), `"`", `$tags=`"region`") {")
-        Add-Frame 'supporting' 'sub.rg_tier.supporting' 'supportingResources' 'Supporting resources' (Get-PortalLink $tierGroupId)
-        $number = 0
-        foreach ($key in @($resourceGroups.Keys | Sort-Object { & $labelOf $_ }, { $_ })) {
-            $number++
-            $alias = "res_$number"
-            $members = @($resourceGroups[$key] | Sort-Object { [string] $_['name'] })
-            $label = & $labelOf $key
-            $names = @($members | ForEach-Object { Get-Reported ([string] $_['name']) 60 })
+    }
+
+    # The ids of the drawn static sites and of the database, by which the page finds what Resource Health said of them.
+    foreach ($drawn in @($nodes | Where-Object { $_['kind'] -in 'staticsite', 'sql' })) {
+        $drawnIds = @(@(if ($drawn['kind'] -eq 'staticsite') {
+                    $listedResources | Where-Object { $_.Key -eq 'microsoft.web/staticsites' -and $_.Name -ieq [string] $drawn['name'] -and $_.Id } | ForEach-Object { $_.Id }
+                }
+                else {
+                    foreach ($listedGroup in @($Resource.Values | Where-Object { $_ -is [System.Collections.IEnumerable] -and $_ -isnot [string] })) {
+                        @($listedGroup) | Where-Object { $_ -is [System.Collections.IDictionary] -and [string] $_['type'] -ieq 'Microsoft.Sql/servers/databases' -and ([string] $_['name']) -like "*/$([string] $drawn['name'])" -and $_['id'] } | ForEach-Object { [string] $_['id'] }
+                    }
+                }) | Select-Object -Unique)
+        if ($drawnIds.Count -gt 0) { $drawn.ids = @($drawnIds) }
+    }
+
+    # The container apps: those the system declares are drawn from the stacks (above), and every other one the groups
+    # hold from the list alone, with its address where it has a public one; the page probes each address it has. One
+    # of this environment joins its Container Apps environment; one in no environment is drawn in the system's frame. A
+    # box of a Container Apps environment is the environment's resource: it is not drawn again.
+    foreach ($container in $containers) {
+        $record = @($listedResources | Where-Object { $_.Key -eq 'microsoft.app/containerapps' -and $_.Name -ieq $container.App -and $_.ManagedEnvironment }) | Select-Object -First 1
+        if ($record) { $container.EnvironmentId = $record.ManagedEnvironment }
+        $listedApp = @($listedResources | Where-Object { $_.Key -eq 'microsoft.app/containerapps' -and $_.Name -ieq $container.App -and $_.Id }) | Select-Object -First 1
+        if ($listedApp) { $container.Id = $listedApp.Id }
+    }
+    # A declared app whose stack gave no address, found in the list by the name the infrastructure gives it.
+    $declaredHere = @($System.deployables | Where-Object { (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and (-not $_['environments'] -or @($_['environments']) -contains $Environment) } | ForEach-Object { [string] $_.name })
+    $unplacedApps = [Collections.Generic.List[object]]::new()
+    $undeclared = 0
+    foreach ($record in @($listedResources | Where-Object { $_.Key -eq 'microsoft.app/containerapps' -and -not $drawnResource.Contains("$($_.Key)/$($_.Name)") } | Sort-Object Name)) {
+        $undeclared++
+        $null = $drawnResource.Add("$($record.Key)/$($record.Name)")
+        $address = if ($record.Address -match '^https://[^/\s]+$') { $record.Address.TrimEnd('/') } else { '' }
+        $domain = if ($record.ManagedEnvironment) { ($record.ManagedEnvironment -split '/')[-1] } else { 'Container Apps environment not known' }
+        $region = $record.Location
+        if ($address) {
+            $parts = ([uri] $address).Host -split '\.', 2
+            if ($parts.Count -gt 1 -and $parts[1] -match '^(?<environment>[^.]+)\.(?<region>[^.]+)\.azurecontainerapps\.io$') { $domain = $Matches.environment; $region = $Matches.region }
+        }
+        $declaredAs = if ($record.Placement -eq 'here') { @($declaredHere | Where-Object { $record.Name -match "^ca-$([regex]::Escape($slug))-$([regex]::Escape($Environment))-$([regex]::Escape($_))(-[a-z0-9]{4})?$" }) | Select-Object -First 1 } else { $null }
+        $words = if ($record.Placement -ne 'here') { "container app, $(Get-Reported $record.Group 90): $($record.Words)" } elseif ($declaredAs) { "container app: $declaredAs, address not read" } else { 'container app, not in system.json' }
+        $box = [pscustomobject] @{
+            Deployable = ''; Address = $address; App = $record.Name; Environment = $domain; Region = $region; Database = $false; Alias = "cax_$undeclared"
+            Words = $words; Links = $(if ($address) { [ordered] @{ site = $address } } else { Get-PortalLink $record.Id }); EnvironmentId = $record.ManagedEnvironment; Group = ''; Tag = $record.Tag
+            Id = $record.Id; HealthPath = ''
+        }
+        if ($record.Placement -eq 'here') { $containers = @($containers) + $box } else { $unplacedApps.Add($box) }
+    }
+    # One box per Container Apps environment: by its id where the list gives it (also to an app of the same address
+    # whose list does not), by the generated part of the address otherwise. Where a declared app's environment is not
+    # known (a list from before it said), every Container Apps environment of this environment and with no tag is taken
+    # for its box, as before.
+    $idOfDomain = @{}
+    foreach ($container in $containers) { if ($container.EnvironmentId -and $container.Address) { $idOfDomain[$container.Environment] = $container.EnvironmentId } }
+    $environmentIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $environmentUnknown = $false
+    foreach ($container in $containers) {
+        $known = if ($container.EnvironmentId) { $container.EnvironmentId } elseif ($container.Address -and $idOfDomain[$container.Environment]) { $idOfDomain[$container.Environment] } else { '' }
+        $container.Group = if ($known) { $known } else { $container.Environment }
+        if ($known) { $null = $environmentIds.Add($known) } elseif ($container.Deployable) { $environmentUnknown = $true }
+    }
+
+    # What is left: this environment's, by group, and the system's in no environment. A Container Apps environment
+    # whose apps are drawn is their box; where the list does not say which environment an app is in (a list from before
+    # it did), every one of this environment and with no tag is taken for theirs.
+    $placed = [ordered] @{}
+    $unplaced = [Collections.Generic.List[object]]::new()
+    foreach ($record in $listedResources) {
+        if ($drawnResource.Contains("$($record.Key)/$($record.Name)")) { continue }
+        if ($record.Key -eq 'microsoft.app/managedenvironments') {
+            if ($environmentIds.Contains($record.Id)) { continue }
+            if ($environmentUnknown -and $record.Placement -in 'here', 'none') { continue }
+        }
+        if ($record.Placement -ne 'here') { $unplaced.Add($record); continue }
+        if (-not $placed.Contains($record.Group)) { $placed[$record.Group] = [Collections.Generic.List[object]]::new() }
+        $placed[$record.Group].Add($record)
+    }
+    $boxNumber = @{ n = 0 }
+    function Add-ResourceBox {
+        # One box per type of $Member (in no environment, per type, group and tag), as PlantUML lines into $Into at the
+        # indent, each a node of kind "resource" in the frame $Parent, numbered on from the boxes before.
+        param([System.Collections.Generic.List[string]] $Into, [string] $Indent, [string] $Parent, [object[]] $Member)
+        foreach ($set in @($Member | Group-Object Box | Sort-Object { & $labelOf $_.Group[0].Key }, Name)) {
+            $boxNumber.n++
+            $alias = "res_$($boxNumber.n)"
+            $members = @($set.Group | Sort-Object Name)
+            $first = $members[0]
+            $label = & $labelOf $first.Key
+            $names = @($members | ForEach-Object { Get-Reported $_.Name 60 })
+            $where = if ($first.Placement -eq 'here') { '' } else { "\n$(Get-Reported $first.Group 90): $($first.Words)" }
             if ($members.Count -eq 1) {
                 $title = $names[0]
-                $detail = Get-Reported ([string] $members[0]['location']) 40
-                $link = Get-PortalLink ([string] $members[0]['id'])
+                $detail = (Get-Reported $first.Location 40) + $where
+                $link = Get-PortalLink $first.Id
             }
             else {
                 $title = "$label ($($members.Count))"
                 $shown = @($names | Select-Object -First 8)
                 if ($names.Count -gt $shown.Count) { $shown += "and $($names.Count - $shown.Count) more" }
-                $detail = $shown -join '\n'
-                $link = Get-PortalLink $tierGroupId
+                $detail = ($shown -join '\n') + $where
+                $link = Get-PortalLink $(if ($subscription -and $first.Group) { "$subscription/resourceGroups/$($first.Group)" } else { '' })
             }
-            $lines.Add("      Container($alias, $(Get-Quoted $title), $(Get-Quoted $label), $(Get-Quoted $detail))")
-            Add-Node ([ordered] @{ alias = $alias; qualifiedName = "sub.rg_tier.supporting.$alias"; kind = 'resource'; name = $title; type = $label; count = $members.Count; names = @($names) }) $link
+            $description = if ($detail) { "$detail\n$resourceSlot" } else { $resourceSlot }
+            $Into.Add("$Indent      Container($alias, $(Get-Quoted $title), $(Get-Quoted $label), $(Get-Quoted $description))")
+            $node = [ordered] @{ alias = $alias; qualifiedName = "$Parent.$alias"; kind = 'resource'; name = $title; type = $label; count = $members.Count; names = @($names); group = $first.Group }
+            if ($first.Placement -ne 'here') { $node.environmentTag = $(if ($first.Tag) { $first.Tag } else { $null }) }
+            $memberIds = @($members | ForEach-Object { [string] $_.Id } | Where-Object { $_ })
+            if ($memberIds.Count -gt 0) { $node.ids = $memberIds }
+            Add-Node $node $link
         }
-        $lines.Add('    }')
     }
+    function Add-SupportingBox {
+        # The box that holds this environment's resources of one group, inside that group's boundary.
+        param([System.Collections.Generic.List[string]] $Into, [string] $Indent, [string] $Alias, [string] $Parent, [string] $Group, [object[]] $Member)
+        $holder = "$($Member.Count) resource(s) of $Environment"
+        $Into.Add("$Indent    Deployment_Node($Alias, `"Supporting resources`", $(Get-Quoted $holder), `"`", `$tags=`"region`") {")
+        Add-Frame $Alias "$Parent.$Alias" 'supportingResources' 'Supporting resources' (Get-PortalLink $(if ($subscription -and $Group) { "$subscription/resourceGroups/$Group" } else { '' }))
+        Add-ResourceBox $Into $Indent "$Parent.$Alias" $Member
+        $Into.Add("$Indent    }")
+    }
+    $tierMembers = @(foreach ($groupName in @($placed.Keys)) { if ($groupName -ieq $tierGroup) { $placed[$groupName] } })
+    if ($tierMembers.Count -gt 0) { Add-SupportingBox $lines '' 'supporting' 'sub.rg_tier' $tierGroup $tierMembers }
     $lines.Add('  }')
+    $groupNumber = 0
+    foreach ($groupName in @($placed.Keys | Where-Object { $_ -ine $tierGroup })) {
+        if ($edgeGroupEnd -ge 0 -and $groupName -ieq [string] $frontDoor.resourceGroup) {
+            $edgeGroupLines = [Collections.Generic.List[string]]::new()
+            Add-SupportingBox $edgeGroupLines '' 'supporting_edge' 'sub.rg_edge' $groupName @($placed[$groupName])
+            $lines.InsertRange($edgeGroupEnd, $edgeGroupLines)
+            continue
+        }
+        $groupNumber++
+        $groupAlias = "rg_$groupNumber"
+        $lines.Add("  Boundary($groupAlias, $(Get-Quoted $groupName), `$type=`"resource group`", `$tags=`"scope`") {")
+        Add-Frame $groupAlias "sub.$groupAlias" 'resourceGroup' $groupName (Get-PortalLink $(if ($subscription) { "$subscription/resourceGroups/$groupName" } else { '' }))
+        Add-SupportingBox $lines '' "supporting_$groupNumber" "sub.$groupAlias" $groupName @($placed[$groupName])
+        $lines.Add('  }')
+    }
 
     $containerBoxes = [ordered] @{}
     $caeNumber = 0
-    foreach ($group in @($containers | Group-Object Environment)) {
+    foreach ($group in @($containers | Group-Object Group)) {
         $caeNumber++
         $cae = "cae_$caeNumber"
-        $region = [string] $group.Group[0].Region
+        $named = @($group.Group | Where-Object { $_.Address }) | Select-Object -First 1
+        if (-not $named) { $named = $group.Group[0] }
+        $region = [string] $named.Region
         $type = if ($region) { "Container Apps environment, $region" } else { 'Container Apps environment' }
-        $caeName = Get-Reported $group.Name 60
+        $caeName = Get-Reported $named.Environment 60
         $lines.Add("  Deployment_Node($cae, $(Get-Quoted $caeName), $(Get-Quoted $type), `"`", `$tags=`"region`") {")
         Add-Frame $cae "sub.$cae" 'containerAppsEnvironment' $caeName $null
         foreach ($container in $group.Group) {
-            $alias = "ca_$(Get-DeployableAlias $container.Deployable)"
             $appName = Get-Reported $container.App 60
-            $lines.Add("    Container($alias, $(Get-Quoted $appName), $(Get-Quoted "container app: $($container.Deployable)"), $(Get-Quoted $siteSlot))")
-            Add-Node ([ordered] @{ alias = $alias; qualifiedName = "sub.$cae.$alias"; kind = 'containerapp'; deployable = $container.Deployable; name = $appName; url = $container.Address }) ([ordered] @{ site = $container.Address })
-            $containerBoxes[$container.Deployable] = $alias
+            $lines.Add("    Container($($container.Alias), $(Get-Quoted $appName), $(Get-Quoted $container.Words), $(Get-Quoted $containerSlot))")
+            $node = [ordered] @{ alias = $container.Alias; qualifiedName = "sub.$cae.$($container.Alias)"; kind = 'containerapp'; name = $appName; url = $(if ($container.Address) { $container.Address } else { $null }) }
+            if ($container.Deployable) { $node.deployable = $container.Deployable; $containerBoxes[$container.Deployable] = $container.Alias }
+            if ($container.HealthPath) { $node.healthPath = $container.HealthPath }
+            if ($container.Id) { $node.ids = @($container.Id) }
+            Add-Node $node $(if ($container.Links) { $container.Links } else { [ordered] @{ site = $container.Address } })
         }
+        $lines.Add('  }')
+    }
+
+    # The system's resources in no environment, in every environment's diagram, each saying its group and its tag.
+    if ($unplaced.Count -gt 0 -or $unplacedApps.Count -gt 0) {
+        $holder = "$($unplaced.Count + $unplacedApps.Count) resource(s) of the system that no environment tag places"
+        $lines.Add("  Deployment_Node(unplaced, `"In no environment`", $(Get-Quoted $holder), `"`", `$tags=`"region`") {")
+        Add-Frame 'unplaced' 'sub.unplaced' 'systemResources' 'In no environment' (Get-PortalLink $subscription)
+        foreach ($container in $unplacedApps) {
+            $appName = Get-Reported $container.App 60
+            $lines.Add("    Container($($container.Alias), $(Get-Quoted $appName), $(Get-Quoted $container.Words), $(Get-Quoted $containerSlot))")
+            $node = [ordered] @{ alias = $container.Alias; qualifiedName = "sub.unplaced.$($container.Alias)"; kind = 'containerapp'; name = $appName; url = $(if ($container.Address) { $container.Address } else { $null }); environmentTag = $(if ($container.Tag) { $container.Tag } else { $null }) }
+            if ($container.Id) { $node.ids = @($container.Id) }
+            Add-Node $node $container.Links
+        }
+        Add-ResourceBox $lines '  ' 'sub.unplaced' @($unplaced)
         $lines.Add('  }')
     }
     $lines.Add('}')
@@ -1240,17 +1427,18 @@ function ConvertTo-RuntimeDiagram {
         Add-Edge 'browser' "swa_$(Get-DeployableAlias $static.name)" 'dashboard' 'loads the dashboard' 'HTTPS' $false
     }
     # A container app: the browser to its address, and the app to the database it uses. Kind "direct" for the first:
-    # the page has no number for an app it does not probe, and draws the arrow as it is.
+    # the app reports no calls to the page, which draws the arrow as it is.
+    # One the system does not declare has no relationship to the database: the system does not know what it uses.
     foreach ($container in $containers) {
-        $alias = $containerBoxes[$container.Deployable]
-        Add-Edge 'browser' $alias 'direct' 'public address' 'HTTPS' $false 0 $container.Address
-        if ($hasDatabase -and $container.Database) { Add-Edge $alias 'sqldb' 'sql' 'reads and writes' 'TCP 1433' $true }
+        if ($container.Address) { Add-Edge 'browser' $container.Alias 'direct' 'public address' 'HTTPS' $false 0 $container.Address }
+        if ($hasDatabase -and $container.Database) { Add-Edge $container.Alias 'sqldb' 'sql' 'reads and writes' 'TCP 1433' $true }
     }
     $lines.AddRange($edgeLines)
     $lines.Add('@enduml')
     # The browser's box leads where a browser goes first: the first public address the diagram draws an arrow to.
     # With no App Service app (a system of container apps only) it is the first container app's address.
-    if ($publicAddress.Count -eq 0 -and $containers.Count -gt 0) { $publicAddress.Add([string] $containers[0].Address) }
+    $firstContainer = @($containers | Where-Object { $_.Address }) | Select-Object -First 1
+    if ($publicAddress.Count -eq 0 -and $firstContainer) { $publicAddress.Add([string] $firstContainer.Address) }
     if ($publicAddress.Count -gt 0) { $nodes[0].links = [ordered] @{ site = $publicAddress[0] } }
 
     return [ordered] @{
@@ -1295,8 +1483,8 @@ function Test-RuntimeSvg {
     $missing = [Collections.Generic.List[string]]::new()
     foreach ($node in $Manifest.nodes) {
         if (-not $entities.ContainsKey($node.qualifiedName)) { $missing.Add("node $($node.qualifiedName)") }
-        # A person and a supporting resource are drawn as they are: nothing is drawn into them, so they have no slot.
-        elseif ($node.kind -notin 'person', 'resource' -and $entities[$node.qualifiedName] -lt 1) { $missing.Add("slot of $($node.qualifiedName)") }
+        # A person is drawn as it is: nothing is drawn into it, so it has no slot. A resource has one for its health.
+        elseif ($node.kind -ne 'person' -and $entities[$node.qualifiedName] -lt 1) { $missing.Add("slot of $($node.qualifiedName)") }
     }
     foreach ($region in $Manifest.regions) {
         if ($clusters -notcontains $region.qualifiedName) { $missing.Add("region $($region.qualifiedName)") }
@@ -1424,7 +1612,7 @@ if ([int] ($nodeVersion -replace '^v(\d+).*$', '$1') -lt $swaCliNodeVersion) {
 }
 
 $outputs = (az stack group show --name "stack-$slug-$environmentName" --resource-group $resourceGroup --output json | ConvertFrom-Json -AsHashtable).outputs
-$entry = @($outputs.deployables.value | Where-Object { $_.name -eq $name -and $_['hosting'] -eq 'staticwebapp' }) | Select-Object -First 1
+$entry = @($outputs.deployables.value | Where-Object { $_.name -eq $name -and $_['hosting'] -in 'staticwebapp', 'storagewebsite' }) | Select-Object -First 1
 if (-not $entry) {
     Fail-Step "Stack stack-$slug-$environmentName has no static site named ${name}: deploy the latest $slug-system release to $environmentName first."
 }
@@ -1552,36 +1740,73 @@ if ($containerApps.Count -gt 0) {
     }
 }
 
-# What else the resource groups hold, for the runtime diagram (everything that runs, not only what the kit names): the
-# group of this environment's tier is listed here, as this identity may read it; the other tier's is what workflow
-# delivery published of it (containers.json, "resources"). A group that cannot be read leaves the diagram without
-# the supporting resources of that tier, and the log says so.
+# Everything the resource groups of the system hold, for the runtime diagram (the entire system, not only what the
+# kit names): every group of azure.resourceGroups, whatever the environment tag of what it holds. The group of this
+# environment's tier, and a group of no tier, are listed here, as this identity may read them; another tier's, and a
+# group this identity may not list, is what workflow delivery published of it (containers.json, "resources"). A group
+# that cannot be read leaves the diagram without what it holds, and the log says so.
+function Add-ContainerAppFact {
+    # The public address and the Container Apps environment of the container apps among the listed resources, in one
+    # read (as write-containers.ps1 records them); a refused read leaves them without.
+    param([object[]] $Item, [string] $Group)
+    $ids = @($Item | Where-Object { [string] $_['type'] -ieq 'Microsoft.App/containerApps' -and $_['id'] } | ForEach-Object { [string] $_['id'] })
+    if ($ids.Count -eq 0) { return }
+    $PSNativeCommandUseErrorActionPreference = $false
+    $answer = @(az resource show --ids $ids --only-show-errors --output json 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
+    $PSNativeCommandUseErrorActionPreference = $true
+    if ($code -ne 0 -or -not ($answer -join '').Trim()) {
+        Write-Host "The container apps of $Group could not be read ($(if ($answer.Count -gt 0) { ($answer[0] -split "`n")[0] } else { "exit code $code" })): the diagram draws them without their addresses."
+        return
+    }
+    $byId = @{}
+    foreach ($shown in @(($answer -join "`n") | ConvertFrom-Json -AsHashtable | Where-Object { $_ -is [Collections.IDictionary] })) {
+        $properties = if ($shown['properties'] -is [Collections.IDictionary]) { $shown['properties'] } else { @{} }
+        $configuration = if ($properties['configuration'] -is [Collections.IDictionary]) { $properties['configuration'] } else { @{} }
+        $ingress = if ($configuration['ingress'] -is [Collections.IDictionary]) { $configuration['ingress'] } else { @{} }
+        $byId[([string] $shown['id']).ToLowerInvariant()] = @{
+            address            = if ($ingress['external'] -eq $true -and $ingress['fqdn']) { "https://$([string] $ingress['fqdn'])" } else { '' }
+            managedEnvironment = if ($properties['managedEnvironmentId']) { [string] $properties['managedEnvironmentId'] } elseif ($properties['environmentId']) { [string] $properties['environmentId'] } else { '' }
+        }
+    }
+    foreach ($entry in $Item) {
+        $fact = $byId[([string] $entry['id']).ToLowerInvariant()]
+        if (-not $fact) { continue }
+        $entry['address'] = $fact.address
+        $entry['managedEnvironment'] = $fact.managedEnvironment
+    }
+}
 $tierResources = @{}
 $ownTier = [string] (@($system.environments | Where-Object { [string] $_.name -eq $environmentName }) | Select-Object -First 1).tier
-foreach ($tier in @($system.environments | ForEach-Object { [string] $_['tier'] } | Where-Object { $_ } | Select-Object -Unique)) {
-    $group = [string] $tierGroups[$tier]
+$tierNames = @($system.environments | ForEach-Object { [string] $_['tier'] } | Where-Object { $_ } | Select-Object -Unique)
+foreach ($groupKey in @($tierGroups.Keys | ForEach-Object { [string] $_ } | Sort-Object)) {
+    $group = [string] $tierGroups[$groupKey]
     if (-not $group) { continue }
     $listed = $null
     $why = ''
-    if ($tier -eq $ownTier) {
+    if ($groupKey -eq $ownTier -or $tierNames -notcontains $groupKey) {
         $PSNativeCommandUseErrorActionPreference = $false
         $read = @(az resource list --resource-group $group --query '[].{id:id,type:type,name:name,location:location,environment:tags.environment}' --only-show-errors --output json 2>&1 | ForEach-Object { "$_" })
         $readCode = $LASTEXITCODE
         $PSNativeCommandUseErrorActionPreference = $true
-        if ($readCode -eq 0) { $listed = @(($read -join "`n") | ConvertFrom-Json -AsHashtable) }
+        if ($readCode -eq 0) {
+            $listed = @(($read -join "`n") | ConvertFrom-Json -AsHashtable | Where-Object { $_ -is [Collections.IDictionary] })
+            foreach ($item in $listed) { $item['group'] = $group }
+            Add-ContainerAppFact -Item $listed -Group $group
+        }
         else { $why = if ($read.Count -gt 0) { ($read[0] -split "`n")[0] } else { "exit code $readCode" } }
     }
     if ($null -eq $listed) {
         $published = Get-PublishedStatus
-        if ($published -and $published['resources'] -is [Collections.IDictionary] -and $published.resources[$tier] -is [System.Collections.IEnumerable] -and $published.resources[$tier] -isnot [string]) {
-            $listed = @($published.resources[$tier])
+        if ($published -and $published['resources'] -is [Collections.IDictionary] -and $published.resources[$groupKey] -is [System.Collections.IEnumerable] -and $published.resources[$groupKey] -isnot [string]) {
+            $listed = @($published.resources[$groupKey])
             Write-Host "The resources of $group$(if ($why) { " could not be listed ($why)" } else { ' are not read by this identity' }): the diagram uses those of containers.json on branch status, written $($published['generated'])."
         }
         else {
-            Write-Host "The resources of $group are not known here$(if ($why) { " ($why)" } else { '' }) and containers.json of branch status has none: the diagrams of $tier show no supporting resources."
+            Write-Host "The resources of $group are not known here$(if ($why) { " ($why)" } else { '' }) and containers.json of branch status has none: the diagrams show nothing of what it holds."
         }
     }
-    if ($null -ne $listed) { $tierResources[$tier] = @($listed) }
+    if ($null -ne $listed) { $tierResources[$groupKey] = @($listed) }
 }
 
 $topology = ConvertTo-Topology -System $system -EndpointHost $endpointHosts -SqlServer $sqlServers -NodeRecord $nodeRecords -PageAddress $pageAddresses -Dashboard $name
@@ -1695,6 +1920,12 @@ if ($runtimeProblem) {
     # but the exit code, as the first deployment of the runtime view on cmdemo2 showed.
     @("$runtimeProblem" -split '\r?\n') | Where-Object { $_.Trim() } | ForEach-Object { Write-Host $_ }
     Fail-Step "The dashboard's runtime diagrams could not be made: $((@("$runtimeProblem" -split '\r?\n'))[0]) (the full output is above)"
+}
+
+if ($entry['hosting'] -eq 'storagewebsite') {
+    Publish-StorageWebsite -Account ([string] $entry.storageAccount) -Folder $folder -Url $url -Generated ([string] $topology.generated)
+    Write-Highlight "$name $version deployed to the static website of $($entry.storageAccount) in ${environmentName}: $url ($summary)"
+    return
 }
 
 # The deployment token of the site: read now, kept in this variable only, handed to the CLI through its environment
