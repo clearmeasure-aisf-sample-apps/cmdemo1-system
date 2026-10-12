@@ -792,20 +792,23 @@ $checks = [ordered] @{
                         az resource list --resource-group $systemGroup --query '[].{type:type,name:name,environment:tags.environment}' --output json | ConvertFrom-Json
                     })
                 # The tag is a set ("tdd,uat"): a shared resource is drawn in each environment it names.
-                $missing = @($inGroup | Where-Object {
+                $placed = @($inGroup | Where-Object {
                         $served = @(([string] $_.environment) -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $environments -icontains $_ })
                         $served.Count -eq 0 -or $served -icontains $drawnEnvironment
-                    } | Where-Object {
+                    })
+                $missing = @($placed | Where-Object {
                         @($_.type -split '/').Count -eq 2 -and $_.type -ne 'Microsoft.Authorization/roleAssignments' -and
                         -not ($hasEnvironmentFrame -and $_.type -ieq 'Microsoft.App/managedEnvironments') -and
                         -not $accounted.Contains([string] $_.name)
                     } | ForEach-Object { $_.name })
                 Assert-That ($missing.Count -eq 0) "the runtime diagram of $drawnEnvironment in $e does not show $($missing -join ', '): deploy the release of $slug-$dashboardName to $e again"
                 # A container app runs, whatever made it (the stack, or infra/own): a box of its own, never one name in
-                # the list of a box of several.
+                # the list of a box of several. Only the apps this diagram places: an app tagged with another environment
+                # is a box of that environment's diagram (cmdemo1, 2026-10-12: tdd's diagram was asked for uat's and
+                # prod's apps).
                 $boxNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
                 foreach ($node in @($manifest['nodes'] | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['name'] })) { $null = $boxNames.Add([string] $node['name']) }
-                $listedOnly = @($inGroup | Where-Object { $_.type -ieq 'Microsoft.App/containerApps' -and -not $boxNames.Contains([string] $_.name) } | ForEach-Object { $_.name })
+                $listedOnly = @($placed | Where-Object { $_.type -ieq 'Microsoft.App/containerApps' -and -not $boxNames.Contains([string] $_.name) } | ForEach-Object { $_.name })
                 Assert-That ($listedOnly.Count -eq 0) "the runtime diagram of $drawnEnvironment in $e has no box of its own for the container app(s) $($listedOnly -join ', '): deploy the release of $slug-$dashboardName to $e again"
                 # Every box shows that what it stands for is online: the page's own probe, or a health line (decision 0038).
                 $unwatched = @(Get-UnwatchedBox $manifest $topology $statusContainers $url)
