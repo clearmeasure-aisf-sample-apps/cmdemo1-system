@@ -113,8 +113,9 @@
        "architecture", the public address where the repository of its deployable (deployables[].repository) publishes
        the logical architecture of each release (https://raw.githubusercontent.com/<org>/<repository>/architecture/
        <deployable>; <version>.json and <version>.svg, written by workflow Architecture of that repository). The page
-       zooms from the box into the diagram of the version that runs. Nothing is read or drawn here for it;
-       "applicationView": false on "system" in system.json leaves the address out.
+       zooms from the box into the diagram of the version that runs. Nothing is drawn here for it. A repository the
+       public cannot read (github.com answers 404 to a request without a credential) gets no address: its box is as
+       before. "applicationView": false on "system" in system.json leaves the address out of every box.
     3. The deployment, with the Static Web Apps CLI and the site's deployment token. The token is read from Azure
        when the step runs (the deploy identity may; the stack's deny settings keep everyone else from listing it),
        reaches the CLI through an environment variable, and is never stored, printed or passed as an argument.
@@ -716,17 +717,15 @@ function ConvertTo-RuntimeDiagram {
     #   supporting                  this environment's resources of the tier's group, inside its boundary
     #   supporting_edge             those of the Front Door's group, inside rg_edge
     #   rg_<n>, supporting_<n>      those of any other group: its boundary, and the box inside it
-    #   unplaced                    "In no environment": the system's resources with no environment tag, or a tag
-    #                               that names no environment of system.json, in every diagram; each box says its
-    #                               group and its tag (or that it has none)
-    #   res_<n>                     one box per type (in "unplaced", per type, group and tag), numbered in the order of
-    #                               the types' names; kind "resource" in the manifest, with its "names", "group",
-    #                               "environmentTag" in "unplaced", "ids" (the members' resource ids), and its page in
-    #                               the Azure portal (for several, the group's)
-    #   cax_<n>                     a container app system.json does not declare, from the list: kind "containerapp",
-    #                               no deployable and no health path, its address where it has a public one, and its
-    #                               id; in its Container Apps environment's box when it is of this environment, in
-    #                               "unplaced" otherwise. The page probes its address as a declared one's
+    #   res_<n>                     one box per type, numbered in the order of the types' names; kind "resource" in
+    #                               the manifest, with its "names", "group", "ids" (the members' resource ids), and its
+    #                               page in the Azure portal (for several, the group's)
+    #   cax_<n>                     a container app of this environment that system.json does not declare, from the
+    #                               list: kind "containerapp", no deployable and no health path, its address where it
+    #                               has a public one, and its id, in its Container Apps environment's box. The page
+    #                               probes its address as a declared one's
+    # The system's resources with no environment tag, or a tag that names no environment of system.json, are no box:
+    # the manifest lists them as "unplaced", in every environment's, and the page writes the list under the diagram.
     # The browser cannot ask a resource: its box has a slot of one line, where the page says what Azure Resource Health
     # last said of its members (containers.json on branch status, by "ids"). The static sites and the database get
     # "ids" too, from the same list (the database is a child of its server, found by its name).
@@ -736,7 +735,9 @@ function ConvertTo-RuntimeDiagram {
         [Parameter(Mandatory)] [string] $Environment,
         [hashtable] $DashboardUrl = @{},
         [hashtable] $ContainerApp = @{},
-        [hashtable] $Resource = @{}
+        [hashtable] $Resource = @{},
+        # Repositories of deployables that the public cannot read: their boxes name no architecture (decision 0041).
+        [string[]] $PrivateRepository = @()
     )
     $slug = [string] $System.system.slug
     $location = [string] $System.system.location
@@ -1197,7 +1198,7 @@ function ConvertTo-RuntimeDiagram {
         $box = [pscustomobject] @{
             Deployable = ''; Address = $address; App = $record.Name; Environment = $domain; Region = $region; Database = $false; Alias = "cax_$undeclared"
             Words = $words; Links = $(if ($address) { [ordered] @{ site = $address } } else { Get-PortalLink $record.Id }); EnvironmentId = $record.ManagedEnvironment; Group = ''; Tag = $record.Tag
-            Id = $record.Id; HealthPath = ''
+            Id = $record.Id; HealthPath = ''; ResourceGroup = $record.Group; Why = $record.Words
         }
         if ($record.Placement -eq 'here') { $containers = @($containers) + $box } else { $unplacedApps.Add($box) }
     }
@@ -1316,20 +1317,26 @@ function ConvertTo-RuntimeDiagram {
         $lines.Add('  }')
     }
 
-    # The system's resources in no environment, in every environment's diagram, each saying its group and its tag.
-    if ($unplaced.Count -gt 0 -or $unplacedApps.Count -gt 0) {
-        $holder = "$($unplaced.Count + $unplacedApps.Count) resource(s) of the system that no environment tag places"
-        $lines.Add("  Deployment_Node(unplaced, `"In no environment`", $(Get-Quoted $holder), `"`", `$tags=`"region`") {")
-        Add-Frame 'unplaced' 'sub.unplaced' 'systemResources' 'In no environment' (Get-PortalLink $subscription)
-        foreach ($container in $unplacedApps) {
-            $appName = Get-Reported $container.App 60
-            $lines.Add("    Container($($container.Alias), $(Get-Quoted $appName), $(Get-Quoted $container.Words), $(Get-Quoted $containerSlot))")
-            $node = [ordered] @{ alias = $container.Alias; qualifiedName = "sub.unplaced.$($container.Alias)"; kind = 'containerapp'; name = $appName; url = $(if ($container.Address) { $container.Address } else { $null }); environmentTag = $(if ($container.Tag) { $container.Tag } else { $null }) }
-            if ($container.Id) { $node.ids = @($container.Id) }
-            Add-Node $node $container.Links
-        }
-        Add-ResourceBox $lines '  ' 'sub.unplaced' @($unplaced)
-        $lines.Add('  }')
+    # The system's resources in no environment are no part of the picture: the manifest lists them ("unplaced"), and the
+    # page writes the list under the diagram of every environment (decision 0042). As boxes they were a frame that
+    # no line reaches, as large as the system itself, and the layout engine pushed the picture out of shape around it.
+    # Each entry: the resource's name, what it is, its group, why it is in no environment (no tag, or a tag that
+    # names none), its id for what Resource Health said of it, its page in the portal, and a container app's address.
+    $unplacedList = [Collections.Generic.List[object]]::new()
+    foreach ($container in $unplacedApps) {
+        $entry = [ordered] @{ name = Get-Reported $container.App 60; type = [string] (& $labelOf 'microsoft.app/containerapps'); group = Get-Reported $container.ResourceGroup 90; words = [string] $container.Why }
+        if ($container.Id) { $entry.ids = @($container.Id) }
+        if ($container.Address) { $entry.url = $container.Address }
+        $links = [ordered] @{}
+        if ($container.Id) { $links.portal = Get-PortalAddress -ResourceId $container.Id -TenantId $tenantId }
+        if ($container.Address) { $links.site = $container.Address }
+        if ($links.Count -gt 0) { $entry.links = $links }
+        $unplacedList.Add($entry)
+    }
+    foreach ($record in @($unplaced | Sort-Object { & $labelOf $_.Key }, Name)) {
+        $entry = [ordered] @{ name = Get-Reported $record.Name 60; type = [string] (& $labelOf $record.Key); group = Get-Reported $record.Group 90; words = [string] $record.Words }
+        if ($record.Id) { $entry.ids = @($record.Id); $entry.links = [ordered] @{ portal = Get-PortalAddress -ResourceId $record.Id -TenantId $tenantId } }
+        $unplacedList.Add($entry)
     }
     $lines.Add('}')
 
@@ -1479,6 +1486,22 @@ function ConvertTo-RuntimeDiagram {
         if ($hasDatabase -and $container.Database) { Add-Edge $container.Alias 'sqldb' 'sql' 'reads and writes' 'TCP 1433' $true }
     }
     $lines.AddRange($edgeLines)
+    # The frames that no line reaches (the supporting resources, what is in no environment, a group's resources) are
+    # laid out by a hidden line each, from the last thing the browser calls to the frame's first box. Without it the
+    # layout engine ranks their boxes with the browser, pushes the browser to the bottom of the picture, far from the
+    # address it calls, and leads its line around the frames (cmdemo2, 2026-10-12). With it the frames stand under the
+    # system, and the browser beside what it calls. A hidden line is no relationship of the manifest.
+    $called = @($edges | Where-Object { $_.from -eq 'browser' -and -not $_.id.StartsWith("$($_.to)-to-") } | ForEach-Object { [string] $_.to })
+    if ($called.Count -gt 0) {
+        $connected = [Collections.Generic.HashSet[string]]::new([string[]] @($edges | ForEach-Object { [string] $_.from; [string] $_.to }))
+        $hinted = [Collections.Generic.HashSet[string]]::new()
+        foreach ($box in @($nodes | Where-Object { $_['kind'] -in 'resource', 'containerapp' -and -not $connected.Contains([string] $_['alias']) })) {
+            $frame = ([string] $box['qualifiedName']) -replace '\.[^.]+$', ''
+            # One line per frame; a frame that holds a box a line reaches is placed by that line.
+            if (@($nodes | Where-Object { ([string] $_['qualifiedName']) -replace '\.[^.]+$', '' -eq $frame -and $connected.Contains([string] $_['alias']) }).Count -gt 0) { continue }
+            if ($hinted.Add($frame)) { $lines.Add("Lay_D($($called[-1]), $([string] $box['alias']))") }
+        }
+    }
     $lines.Add('@enduml')
     # The browser's box leads where a browser goes first: the first public address the diagram draws an arrow to.
     # With no App Service app (a system of container apps only) it is the first container app's address.
@@ -1489,12 +1512,14 @@ function ConvertTo-RuntimeDiagram {
     # The application view (decision 0041): a web app's and a container app's box says where the repository of its
     # deployable publishes the logical architecture of each release (branch "architecture", workflow Architecture of
     # templates/app), and the page zooms from the box into the diagram of the version that runs. Only for a deployable
-    # that names its repository, with names GitHub allows; "applicationView": false on "system" leaves it out.
+    # that names its repository, with names GitHub allows, and whose repository the public can read (the page reads it
+    # as anyone does: a private one answers 404, cmdemo1-scorecard, 2026-10-12); "applicationView": false on "system"
+    # leaves it out.
     $organization = [string] $System.system['githubOrg']
     if ($System.system['applicationView'] -ne $false -and $organization -cmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$') {
         $repositoryOf = @{}
         foreach ($declared in @($System.deployables | Where-Object { $_ -is [System.Collections.IDictionary] })) {
-            if ([string] $declared['name'] -cmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' -and [string] $declared['repository'] -cmatch '^[A-Za-z0-9._-]{1,100}$' -and [string] $declared['repository'] -notin '.', '..') {
+            if ([string] $declared['name'] -cmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' -and [string] $declared['repository'] -cmatch '^[A-Za-z0-9._-]{1,100}$' -and [string] $declared['repository'] -notin '.', '..' -and $PrivateRepository -inotcontains [string] $declared['repository']) {
                 $repositoryOf[[string] $declared['name']] = [string] $declared['repository']
             }
         }
@@ -1503,16 +1528,18 @@ function ConvertTo-RuntimeDiagram {
         }
     }
 
+    $manifest = [ordered] @{
+        environment = $Environment
+        svg         = "$Environment.svg"
+        nodes       = @($nodes)
+        regions     = @($regionManifest)
+        frames      = @($frames)
+        edges       = @($edges)
+    }
+    if ($unplacedList.Count -gt 0) { $manifest.unplaced = @($unplacedList) }
     return [ordered] @{
         puml     = ($lines -join "`n") + "`n"
-        manifest = [ordered] @{
-            environment = $Environment
-            svg         = "$Environment.svg"
-            nodes       = @($nodes)
-            regions     = @($regionManifest)
-            frames      = @($frames)
-            edges       = @($edges)
-        }
+        manifest = $manifest
     }
 }
 
@@ -1778,6 +1805,23 @@ function Write-DatabaseDiagram {
     return $result
 }
 
+function Find-PrivateRepository {
+    # The repositories of the system's applications that the public cannot read, by name: the page reads an
+    # application's architecture from its repository's public address, so a private one has no application view.
+    # Asked as anyone asks, with no credential: github.com answers 200 for a public repository and 404 for one that is
+    # private or does not exist. Any other answer, and no answer, tells nothing: the repository is then taken as
+    # public, and its view says that no diagram is published.
+    param([Parameter(Mandatory)] [hashtable] $System)
+    $organization = [string] $System.system['githubOrg']
+    if ($organization -cnotmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$') { return @() }
+    $names = @($System.deployables | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['hosting'] -notin 'staticwebapp', 'storagewebsite' -and [string] $_['repository'] -cmatch '^[A-Za-z0-9._-]{1,100}$' -and [string] $_['repository'] -notin '.', '..' } | ForEach-Object { [string] $_['repository'] } | Select-Object -Unique)
+    return @(foreach ($name in $names) {
+            $status = 0
+            try { $status = [int] (Invoke-WebRequest -Uri "https://github.com/$organization/$name" -Method Head -TimeoutSec 30 -SkipHttpErrorCheck -MaximumRedirection 0 -ErrorAction Stop).StatusCode } catch { $status = 0 }
+            if ($status -eq 404) { $name }
+        })
+}
+
 function Get-PlantUmlJar {
     # The PlantUML release jar of the pinned version, from the project's GitHub releases, into the folder; it fails when
     # its SHA-256 is not the pinned one. Returns the path and the seconds the download took.
@@ -1813,7 +1857,8 @@ function Write-RuntimeDiagram {
         [Parameter(Mandatory)] [string] $Version,
         [hashtable] $DashboardUrl = @{},
         [hashtable] $ContainerApp = @{},
-        [hashtable] $Resource = @{}
+        [hashtable] $Resource = @{},
+        [string[]] $PrivateRepository = @()
     )
     # The package carries the sample's runtime/ (and so may an older release): none of it may outlive this deployment.
     $runtime = Join-Path $Folder 'runtime'
@@ -1822,7 +1867,7 @@ function Write-RuntimeDiagram {
     $diagrams = [ordered] @{}
     foreach ($environment in @($System.environments)) {
         $name = [string] $environment.name
-        $diagram = ConvertTo-RuntimeDiagram -System $System -Topology $Topology -Environment $name -DashboardUrl $DashboardUrl -ContainerApp $ContainerApp -Resource $Resource
+        $diagram = ConvertTo-RuntimeDiagram -System $System -Topology $Topology -Environment $name -DashboardUrl $DashboardUrl -ContainerApp $ContainerApp -Resource $Resource -PrivateRepository $PrivateRepository
         $diagram.manifest.generated = $Topology.generated
         $diagram.manifest.plantuml = $Version
         $diagrams[$name] = $diagram
@@ -2184,7 +2229,9 @@ $runtimeProblem = $null
 try {
     $jar = Get-PlantUmlJar -Version $plantUmlVersion -Sha256 $plantUmlSha256 -Folder $tools
     Write-Host ('PlantUML {0} downloaded from GitHub in {1:0.0} s ({2:0.0} MB, SHA-256 as pinned); {3}' -f $plantUmlVersion, $jar.seconds, $jar.megabytes, $javaVersion)
-    $rendered = Write-RuntimeDiagram -System $system -Topology $topology -Folder $folder -Jar $jar.path -Version $plantUmlVersion -DashboardUrl @{ $environmentName = $url } -ContainerApp $pageAddresses -Resource $tierResources
+    $privateRepositories = @(if ($system.system['applicationView'] -ne $false) { Find-PrivateRepository -System $system })
+    if ($privateRepositories.Count -gt 0) { Write-Host "runtime/: no application view for $($privateRepositories -join ', '): the public cannot read the repository, and the page reads the architecture from its public address." }
+    $rendered = Write-RuntimeDiagram -System $system -Topology $topology -Folder $folder -Jar $jar.path -Version $plantUmlVersion -DashboardUrl @{ $environmentName = $url } -ContainerApp $pageAddresses -Resource $tierResources -PrivateRepository $privateRepositories
     $rendered.log | ForEach-Object { Write-Host $_ }
     Write-Host ('runtime/: {0} diagram(s) rendered and checked in {1:0.0} s ({2:0} KB of SVG)' -f $rendered.count, $rendered.seconds, $rendered.kilobytes)
 
