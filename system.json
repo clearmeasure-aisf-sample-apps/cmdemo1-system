@@ -146,7 +146,9 @@
           "GitHubApp__AppId": "5231590",
           "GitHubApp__InstallationId": "169074569",
           "Octopus__PollSeconds": "120",
-          "HealthCheckMonitor__TargetApplicationUrl": "https://ca-cmdemo1-prod-ui-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io"
+          "HealthCheckMonitor__TargetApplicationUrl": "https://ca-cmdemo1-prod-ui-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
+          "HealthCheckMonitor__Enabled": "true",
+          "HealthCheckMonitor__ActiveMinutesAfterDashboardUse": "10"
         }
       },
       "urlSetting": "Factory__PublicBaseUrl",
