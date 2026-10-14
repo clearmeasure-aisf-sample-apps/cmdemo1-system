@@ -29,7 +29,7 @@
 # A flagged release is not deployed: no Sign-off waits in the environment and holds it for the other deployables. One
 # issue "ui <version> held before <env>" (label release-held, no assignee) lists each flag with its evidence; it closes
 # when the release has a deployment there or a newer release replaces it. A person promotes it in Octopus as today.
-# Credentials: GitHub OIDC to Octopus as the system's service account (environment "capabilities"; it must create
+# Credentials: GitHub OIDC to Octopus as the system's service account (environment "octopus"; it must create
 # deployments of cmdemo1-ui and answer their Sign-off: it is a Space Manager of the space), and this workflow's token
 # for issues and the state branch. The application repository is public. No stored secret.
 name: ui-auto-promote
@@ -56,7 +56,7 @@ concurrency:
 jobs:
   promote:
     runs-on: ubuntu-24.04
-    environment: capabilities
+    environment: octopus
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6.0.1

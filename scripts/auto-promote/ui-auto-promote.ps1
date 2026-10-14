@@ -53,7 +53,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $Root = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
+    [string] $Root = '',
     [string] $Deployable = 'ui',
     [string] $StatePath = '',
     [string] $RunUrl = '',
@@ -323,6 +323,9 @@ function Get-Utc($v) {
     [datetimeoffset]::Parse([string] $v, [cultureinfo]::InvariantCulture).UtcDateTime
 }
 
+# The repository root: two folders above this script. Resolved here, not as the parameter's default: in the
+# workflow's pwsh step $PSScriptRoot was empty while the parameters were bound (run 38516692223).
+if (-not $Root) { $Root = if ($PSScriptRoot) { Split-Path -Parent (Split-Path -Parent $PSScriptRoot) } else { (Get-Location).Path } }
 $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
 $slug = [string] $system.system.slug
 $octopus = ([string] $system.octopus.url).TrimEnd('/')
