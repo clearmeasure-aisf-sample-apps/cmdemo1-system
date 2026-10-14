@@ -101,6 +101,7 @@
       "acceptanceTestsAssembly": "ClearMeasure.Bootcamp.AcceptanceTests.dll",
       "dataLoaderAssembly": "ClearMeasure.Bootcamp.IntegrationTests.dll",
       "acceptanceTestsFilter": "TestCategory=Smoke",
+      "pipelineSignOff": true,
       "settings": {
         "AI_OpenAI_Url": "https://jeffr-mlq3cayr-swedencentral.openai.azure.com/",
         "AI_OpenAI_Model": "gpt-5.2-chat"
