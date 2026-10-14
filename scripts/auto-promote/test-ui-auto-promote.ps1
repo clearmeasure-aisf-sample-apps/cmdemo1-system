@@ -63,6 +63,7 @@ Test-Case 'Directory.Build.props in src flags' (Flags (New-Facts @{ Paths = @('s
 Test-Case 'global.json flags' (Flags (New-Facts @{ Paths = @('global.json') })) @('Pipeline or infra change')
 Test-Case 'database migration does not flag' (Flags (New-Facts @{ Paths = @('src/Database/scripts/Update/033_Risks.sql') })) @()
 Test-Case 'database project file does not flag' (Flags (New-Facts @{ Paths = @('src/Database/Database.csproj') })) @()
+Test-Case 'kit private-build script does not flag' (Flags (New-Facts @{ Paths = @('.github/private-build/add-private-build.ps1') })) @()
 Test-Case 'docs folder does not flag' (Flags (New-Facts @{ Paths = @('docs/a/b.png') })) @()
 Test-Case 'arch folder does not flag' (Flags (New-Facts @{ Paths = @('arch/x.puml') })) @()
 Test-Case 'root markdown does not flag' (Flags (New-Facts @{ Paths = @('CLAUDE.md') })) @()

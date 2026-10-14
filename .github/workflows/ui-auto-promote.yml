@@ -18,7 +18,7 @@
 #      auto-promote (one commit, force-pushed, no history; ui-auto-promote.json: reads per deployment, two days).
 #   3. Pipeline or infra change: compared with the commit running in the next environment (/_build "commit"), a
 #      changed path outside src/ or a build/project file in src/ (Directory.Build.*, global.json, nuget.config, *.csproj,
-#      *.sln, *.props, *.targets, Dockerfile*). Never a flag: src/Database/ (migrations; owner, 2026-10-14) and
+#      *.sln, *.props, *.targets, Dockerfile*). Never a flag: src/Database/ (migrations; owner, 2026-10-14), .github/private-build/ (the kit's script; owner, 2026-10-14) and
 #      documentation (docs/**, arch/**, *.md anywhere: proposed, one list in the script for the owner to edit). A
 #      comparison that is incomplete (no base commit, over 250 commits, 300 files or more) flags.
 #   4. Hold label: a pull request in those commits, or an issue they close or reference (also owner/repo#N), labelled

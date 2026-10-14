@@ -36,7 +36,7 @@
       3 pipeline  Compared with the commit running in the next environment (/_build "commit", else the commit in the notes of
                  the release running there), a changed path (a renamed file counts both names) outside src/, or a build
                  or project file anywhere in src/ (BuildFiles list), unless it is documentation (DocumentationPaths list:
-                 docs/**, arch/**, *.md anywhere, including .github/x.md). src/Database/ never flags (owner, 2026-10-14).
+                 docs/**, arch/**, *.md anywhere, including .github/x.md). src/Database/ and .github/private-build/ (the kit's script) never flag (owner, 2026-10-14).
                  A comparison that is unknown or incomplete (no base commit, more than 250 commits, 300 files or more, a
                  read failed) flags as "comparison incomplete".
       4 hold      Flag: a pull request in the commits between those two, or an issue they close or reference (#N and
@@ -74,8 +74,9 @@ $DocumentationPaths = @('docs/**', 'arch/**', '*.md', '**/*.md')
 # Build and project files that flag wherever they are in src/ (file names, or *.ext).
 $BuildFiles = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props', 'global.json', 'nuget.config',
     '*.csproj', '*.sln', '*.slnx', '*.props', '*.targets', 'Dockerfile*')
-# Under src/, never a flag.
-$UnflaggedFolders = @('src/Database/')
+# Never a flag (prefixes of the repository path).
+# .github/private-build/ holds the kit's own script, synced by the kit (owner's decision 2026-10-14).
+$UnflaggedFolders = @('src/Database/', '.github/private-build/')
 $PromotionMarker = 'Promoted by workflow ui-auto-promote'
 
 function ConvertTo-GlobRegex([string] $Glob) {
