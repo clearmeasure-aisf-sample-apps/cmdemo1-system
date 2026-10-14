@@ -331,7 +331,7 @@ $slug = [string] $system.system.slug
 $octopus = ([string] $system.octopus.url).TrimEnd('/')
 $space = [string] $system.octopus.spaceId
 $ownRepo = "$($system.system.githubOrg)/$($system.system.repository)"
-$app = @($system.deployables | Where-Object { $_.name -eq $Deployable })[0]
+$app = (@($system.deployables | Where-Object { $_.name -eq $Deployable }) | Select-Object -First 1)
 $appRepo = "$($system.system.githubOrg)/$($app.repository)"
 if (-not $env:OCTOPUS_ACCESS_TOKEN -and -not $env:OCTOPUS_API_KEY) { throw 'no Octopus credential: OCTOPUS_ACCESS_TOKEN (OctopusDeploy/login) or OCTOPUS_API_KEY' }
 
@@ -374,7 +374,7 @@ function Submit-SignOff {
 
 # Environments, project, releases.
 $envs = @(Invoke-Octopus "/api/$space/environments/all" | Sort-Object SortOrder)
-$project = @(Invoke-Octopus "/api/$space/projects/all" | Where-Object { $_.Name -eq "$slug-$Deployable" })[0]
+$project = (@(Invoke-Octopus "/api/$space/projects/all" | Where-Object { $_.Name -eq "$slug-$Deployable" }) | Select-Object -First 1)
 if (-not $project) { throw "project $slug-$Deployable not found" }
 $first = $envs[0]
 $releases = @((Invoke-Octopus "/api/$space/projects/$($project.Id)/releases?take=40").Items)
@@ -413,7 +413,7 @@ function Get-Evaluation {
     if ($s.total_count -gt @($s.statuses).Count) { $checks.Add(@{ Name = 'status list incomplete'; State = 'pending'; Url = '' }) }
 
     # 2. Previous deployment: state, log, health
-    $prevDeployment = @(Get-ReleaseDeployments $Release.Id | Where-Object { $_.EnvironmentId -eq $Previous.Id } | Sort-Object { Get-Utc $_.Created } -Descending)[0]
+    $prevDeployment = (@(Get-ReleaseDeployments $Release.Id | Where-Object { $_.EnvironmentId -eq $Previous.Id } | Sort-Object { Get-Utc $_.Created } -Descending) | Select-Object -First 1)
     $prevTask = Invoke-Octopus "/api/tasks/$($prevDeployment.TaskId)"
     $finished = Get-Utc $prevTask.CompletedTime
     $warned = @((Invoke-Octopus "/api/tasks/$($prevTask.Id)/details?verbose=false").ActivityLogs[0].Children | Where-Object { $_.Status -eq 'SuccessWithWarning' } | ForEach-Object Name)
@@ -482,7 +482,7 @@ function Set-HeldIssue {
     Say $evidence
     if ($DryRun) { return }
     & gh label create release-held --color B60205 --description 'A release is held before an environment by the automatic promotion' -R $ownRepo --force | Out-Null
-    $existing = @($heldIssues | Where-Object { $_.title -eq $title })[0]
+    $existing = (@($heldIssues | Where-Object { $_.title -eq $title }) | Select-Object -First 1)
     if (-not $existing) { & gh issue create -R $ownRepo --title $title --label release-held --body $body | Out-Null }
     elseif ($existing.body -notmatch "evidence:$hash") { & gh issue edit $existing.number -R $ownRepo --body $body | Out-Null }
     else { Say "Issue #$($existing.number) already says this." }
@@ -496,8 +496,8 @@ function Close-HeldIssues {
         if ($i.title -notmatch '^ui (\S+) held before (\S+)$') { continue }
         $version = $Matches[1]; $envName = $Matches[2]
         if ($Candidate.Release -and $Candidate.Release.Version -eq $version -and $Candidate.Target.Name -eq $envName) { continue }
-        $rel = @($releases | Where-Object Version -eq $version)[0]
-        $env = @($envs | Where-Object Name -eq $envName)[0]
+        $rel = (@($releases | Where-Object Version -eq $version) | Select-Object -First 1)
+        $env = (@($envs | Where-Object Name -eq $envName) | Select-Object -First 1)
         $why = $null
         if ($rel -and $env) {
             $deps = @(Get-ReleaseDeployments $rel.Id | Where-Object { $_.EnvironmentId -eq $env.Id })
@@ -523,7 +523,7 @@ try {
 foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.ProjectId -eq $project.Id -and $_.EnvironmentId -ne $first.Id -and "$($_.Deployment.Comments)".StartsWith($PromotionMarker) })) {
     $pending = Get-SignOffAction -Interruptions @((Invoke-Octopus "/api/$space/interruptions?regarding=$($b.TaskId)").Items) -TaskId $b.TaskId
     if ($pending.Action -ne 'answer') { continue }
-    $rel = @($releases | Where-Object Id -eq $b.Deployment.ReleaseId)[0]
+    $rel = (@($releases | Where-Object Id -eq $b.Deployment.ReleaseId) | Select-Object -First 1)
     $tIndex = [array]::IndexOf(@($envs | ForEach-Object Id), $b.EnvironmentId)
     $target = $envs[$tIndex]; $previous = $envs[$tIndex - 1]
     Say "Recovery: ui $($rel.Version) waits at its Sign-off in $($target.Name) ($($b.TaskId))."
@@ -547,7 +547,7 @@ $busy = Get-BusyReason -Items $busyItems -TargetEnvironmentId $target.Id -FirstE
 if ($busy) { Say "Nothing to do: $busy."; return }
 Say "Candidate: ui $($release.Version) to $($target.Name) (commit $(Get-Commit $release))"
 
-$running = @($releases | Where-Object Id -eq $candidate.RunningReleaseId)[0]
+$running = (@($releases | Where-Object Id -eq $candidate.RunningReleaseId) | Select-Object -First 1)
 $ev = Get-Evaluation -Release $release -Target $target -Previous $previous -RunningRelease $running
 if ($ev.Behind) { Say "commit $($ev.Sha) is behind the running $($ev.BaseSha): not promoted."; return }
 $decision = $ev.Decision
