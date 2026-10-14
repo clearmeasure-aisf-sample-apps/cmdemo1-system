@@ -1,0 +1,216 @@
+#!/usr/bin/env pwsh
+#Requires -Version 7.4
+
+<#
+.SYNOPSIS
+    Tests the decision rules of ui-auto-promote.ps1 (pure functions, no network). PASS or FAIL per case; exit 1 on a FAIL.
+.EXAMPLE
+    pwsh -NoProfile -File scripts/auto-promote/test-ui-auto-promote.ps1
+#>
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly
+
+$failures = 0
+function Test-Case([string] $Name, $Actual, $Expected) {
+    $a = ConvertTo-Json -InputObject @($Actual | Where-Object { $null -ne $_ }) -Compress -Depth 5; $e = ConvertTo-Json -InputObject @($Expected | Where-Object { $null -ne $_ }) -Compress -Depth 5
+    if ($a -ceq $e) { Write-Host "PASS $Name" }
+    else { Write-Host "FAIL ${Name}: expected $e, got $a"; $script:failures++ }
+}
+$t0 = [datetime]::Parse('2026-10-14T04:00:00Z').ToUniversalTime()
+function New-Facts([hashtable] $Override = @{}) {
+    $f = @{
+        Checks = @(@{ Name = 'Build result'; State = 'success'; Url = 'u1' }, @{ Name = 'Security Scan'; State = 'skipped'; Url = 'u2' })
+        PathsKnown = $true; Paths = @('src/UI/Server/Program.cs'); HoldItems = @(@{ Number = 5; Url = 'i5'; Labels = @('bug') })
+        PreviousState = 'Success'; LogFindings = @(); Finished = $t0; Now = $t0.AddMinutes(12)
+        HealthReads = @(@{ At = $t0.AddMinutes(3); Status = 'Healthy' }, @{ At = $t0.AddMinutes(11); Status = 'Healthy' })
+        HoldUnknown = @(); HealthAddressKnown = $true; PathsReason = $null
+    }
+    foreach ($k in $Override.Keys) { $f[$k] = $Override[$k] }
+    $f
+}
+function Flags($facts) { @((Get-PromotionDecision -Facts $facts).Flags | ForEach-Object Flag) }
+
+Test-Case 'nothing flags: promote' (Get-PromotionDecision -Facts (New-Facts)).Decision 'promote'
+Test-Case 'skipped check passes' (Flags (New-Facts)) @()
+
+# Flag 1
+Test-Case 'failed check flags' (Flags (New-Facts @{ Checks = @(@{ Name = 'CRAP'; State = 'failure'; Url = 'x' }) })) @('Red build or tests')
+Test-Case 'pending check waits, no flag' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @(@{ Name = 'Qodana'; State = 'pending'; Url = 'x' }) })).Decision 'wait'
+Test-Case 'no check at all waits' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @() })).Decision 'wait'
+Test-Case 'failed and pending: hold' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @(@{ Name = 'a'; State = 'failure'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' }) })).Decision 'hold'
+Test-Case 'cancelled run maps to failure' (ConvertTo-CheckState 'completed' 'cancelled') 'failure'
+Test-Case 'in progress maps to pending' (ConvertTo-CheckState 'in_progress' '') 'pending'
+Test-Case 'neutral maps to skipped' (ConvertTo-CheckState 'completed' 'neutral') 'skipped'
+
+# Flag 2
+Test-Case 'previous deployment failed flags' (Flags (New-Facts @{ PreviousState = 'Failed' })) @('Deployment or health failed')
+Test-Case 'log warning flags' (Flags (New-Facts @{ LogFindings = @('04:01 Warning | x') })) @('Deployment or health failed')
+Test-Case 'unhealthy read flags' (Flags (New-Facts @{ HealthReads = @(@{ At = $t0.AddMinutes(2); Status = 'Degraded' }, @{ At = $t0.AddMinutes(11); Status = 'Healthy' }) })) @('Deployment or health failed')
+Test-Case 'unhealthy read before the deployment finished is ignored' (Flags (New-Facts @{ HealthReads = @(@{ At = $t0.AddMinutes(-3); Status = 'Unhealthy' }, @{ At = $t0.AddMinutes(4); Status = 'Healthy' }, @{ At = $t0.AddMinutes(11); Status = 'Healthy' }) })) @()
+Test-Case 'health: only 8 minutes since finish waits' (Get-HealthVerdict $t0 $t0.AddMinutes(8) @(@{ At = $t0.AddMinutes(1); Status = 'Healthy' }, @{ At = $t0.AddMinutes(8); Status = 'Healthy' })) 'wait'
+Test-Case 'health: one read waits' (Get-HealthVerdict $t0 $t0.AddMinutes(12) @(@{ At = $t0.AddMinutes(12); Status = 'Healthy' })) 'wait'
+Test-Case 'health: reads 3 minutes apart wait' (Get-HealthVerdict $t0 $t0.AddMinutes(12) @(@{ At = $t0.AddMinutes(9); Status = 'Healthy' }, @{ At = $t0.AddMinutes(12); Status = 'Healthy' })) 'wait'
+Test-Case 'health: two reads 5 minutes apart, last after 10 minutes: ok' (Get-HealthVerdict $t0 $t0.AddMinutes(15) @(@{ At = $t0.AddMinutes(10); Status = 'Healthy' }, @{ At = $t0.AddMinutes(15); Status = 'Healthy' })) 'ok'
+Test-Case 'health: waiting is not a flag' (Get-PromotionDecision -Facts (New-Facts @{ Now = $t0.AddMinutes(6); HealthReads = @(@{ At = $t0.AddMinutes(6); Status = 'Healthy' }) })).Decision 'wait'
+
+# Flag 3
+Test-Case 'workflow change flags' (Flags (New-Facts @{ Paths = @('.github/workflows/build.yml') })) @('Pipeline or infra change')
+Test-Case 'Dockerfile at root flags' (Flags (New-Facts @{ Paths = @('Dockerfile') })) @('Pipeline or infra change')
+Test-Case 'script outside src flags' (Flags (New-Facts @{ Paths = @('build.ps1', 'src/UI/Server/Program.cs') })) @('Pipeline or infra change')
+Test-Case 'csproj in src flags' (Flags (New-Facts @{ Paths = @('src/UI/Server/Server.csproj') })) @('Pipeline or infra change')
+Test-Case 'Directory.Build.props in src flags' (Flags (New-Facts @{ Paths = @('src/Directory.Build.props') })) @('Pipeline or infra change')
+Test-Case 'global.json flags' (Flags (New-Facts @{ Paths = @('global.json') })) @('Pipeline or infra change')
+Test-Case 'database migration does not flag' (Flags (New-Facts @{ Paths = @('src/Database/scripts/Update/033_Risks.sql') })) @()
+Test-Case 'database project file does not flag' (Flags (New-Facts @{ Paths = @('src/Database/Database.csproj') })) @()
+Test-Case 'docs folder does not flag' (Flags (New-Facts @{ Paths = @('docs/a/b.png') })) @()
+Test-Case 'arch folder does not flag' (Flags (New-Facts @{ Paths = @('arch/x.puml') })) @()
+Test-Case 'root markdown does not flag' (Flags (New-Facts @{ Paths = @('CLAUDE.md') })) @()
+Test-Case 'markdown in src does not flag' (Flags (New-Facts @{ Paths = @('src/UI/README.md') })) @()
+Test-Case 'markdown plus a workflow flags once' (Get-PipelineEvidence -Paths @('README.md', '.github/x.yml')) @('.github/x.yml (outside src/)')
+Test-Case 'application code and tests do not flag' (Flags (New-Facts @{ Paths = @('src/Core/A.cs', 'src/UnitTests/ATests.cs') })) @()
+Test-Case 'no change at all does not flag' (Flags (New-Facts @{ Paths = @() })) @()
+Test-Case 'unknown comparison flags' (Flags (New-Facts @{ PathsKnown = $false })) @('Pipeline or infra change')
+
+# Flag 4
+Test-Case 'Hold label flags' (Flags (New-Facts @{ HoldItems = @(@{ Number = 7; Url = 'i7'; Labels = @('Hold') }) })) @('Hold label')
+Test-Case 'hold label ignores case' (Flags (New-Facts @{ HoldItems = @(@{ Number = 7; Url = 'i7'; Labels = @('hold') }) })) @('Hold label')
+Test-Case 'other labels do not flag' (Flags (New-Facts @{ HoldItems = @(@{ Number = 7; Url = 'i7'; Labels = @('Holding', 'on hold') }) })) @()
+Test-Case 'no items does not flag' (Flags (New-Facts @{ HoldItems = @() })) @()
+
+# Several flags are all listed.
+Test-Case 'two flags listed' (Flags (New-Facts @{ PreviousState = 'Failed'; Paths = @('Dockerfile') })) @('Deployment or health failed', 'Pipeline or infra change')
+
+
+# --- Added after the pre-commit review ---
+# Check states
+Test-Case 'timed_out maps to failure' (ConvertTo-CheckState 'completed' 'timed_out') 'failure'
+Test-Case 'action_required maps to failure' (ConvertTo-CheckState 'completed' 'action_required') 'failure'
+Test-Case 'stale maps to failure' (ConvertTo-CheckState 'completed' 'stale') 'failure'
+Test-Case 'completed without conclusion maps to failure' (ConvertTo-CheckState 'completed' $null) 'failure'
+Test-Case 'null status and conclusion map to pending' (ConvertTo-CheckState $null $null) 'pending'
+Test-Case 'status pending is pending' (ConvertTo-StatusState 'pending') 'pending'
+Test-Case 'status failure is failure' (ConvertTo-StatusState 'failure') 'failure'
+Test-Case 'status error is failure' (ConvertTo-StatusState 'error') 'failure'
+Test-Case 'status success is success' (ConvertTo-StatusState 'success') 'success'
+Test-Case 'failed commit status flags' (Flags (New-Facts @{ Checks = @(@{ Name = 'ci/x'; State = (ConvertTo-StatusState 'error'); Url = '' }) })) @('Red build or tests')
+Test-Case 'pending commit status waits' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @(@{ Name = 'ci/x'; State = (ConvertTo-StatusState 'pending'); Url = '' }) })).Decision 'wait'
+Test-Case 'wait plus flag together: hold with the wait listed' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @(@{ Name = 'a'; State = 'failure'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' }) })).Waiting.Count 1
+
+# Globs
+Test-Case 'docs/x.ps1 is exempt' (Get-PipelineEvidence -Paths @('docs/x.ps1')) @()
+Test-Case '.github/x.md is exempt (*.md anywhere)' (Get-PipelineEvidence -Paths @('.github/x.md')) @()
+Test-Case '.github/x.yml is not exempt' (Get-PipelineEvidence -Paths @('.github/x.yml')) @('.github/x.yml (outside src/)')
+Test-Case 'a docs-like name outside docs/ is not exempt' (Get-PipelineEvidence -Paths @('mydocs/x.ps1')) @('mydocs/x.ps1 (outside src/)')
+
+# Health address and hold lookup
+Test-Case 'unknown health address waits with its reason' (Get-PromotionDecision -Facts (New-Facts @{ HealthAddressKnown = $false })).Waiting @('health address unknown: the address of ui in the previous environment could not be read')
+Test-Case 'unknown health address does not flag' (Flags (New-Facts @{ HealthAddressKnown = $false })) @()
+Test-Case 'unreadable hold lookup waits' (Get-PromotionDecision -Facts (New-Facts @{ HoldUnknown = @('#4 not read') })).Decision 'wait'
+Test-Case 'incomplete comparison flags with its reason' (Get-PromotionDecision -Facts (New-Facts @{ PathsKnown = $false; PathsReason = '300 files' })).Flags[0].Evidence @('comparison incomplete: 300 files')
+
+# Task log
+$logLines = (1..30 | ForEach-Object { "12:00:0$($_ % 10)   Info     |   line $_" }) -join "`n"
+$okLog = "Task ID:        ServerTasks-1`nTask status:    Success`n$logLines"
+Test-Case 'clean log has no finding' (Get-LogFindings -Raw $okLog -TaskId 'ServerTasks-1') @()
+Test-Case 'empty log is unreadable' (Get-LogFindings -Raw '' -TaskId 'ServerTasks-1') @('task log unreadable')
+Test-Case 'short log is unreadable' (Get-LogFindings -Raw "Task ID:        ServerTasks-1`nx" -TaskId 'ServerTasks-1') @('task log unreadable')
+Test-Case 'log of another task is unreadable' (Get-LogFindings -Raw $okLog -TaskId 'ServerTasks-2') @('task log unreadable')
+Test-Case 'Warning line is found' (Get-LogFindings -Raw "$okLog`n12:01:00   Warning  |   careful" -TaskId 'ServerTasks-1') @('12:01:00   Warning  |   careful')
+Test-Case 'Fatal line is found (a real failed ui task logs it)' (Get-LogFindings -Raw "$okLog`n12:01:00   Fatal    |   boom" -TaskId 'ServerTasks-1') @('12:01:00   Fatal    |   boom')
+Test-Case 'Error word inside a Verbose line is not a finding' (Get-LogFindings -Raw "$okLog`n12:01:00   Verbose  |   Error handling is on" -TaskId 'ServerTasks-1') @()
+Test-Case 'SuccessWithWarning step is a finding' (Get-LogFindings -Raw $okLog -TaskId 'ServerTasks-1' -WarnedSteps @('Seed')) @('steps SuccessWithWarning: Seed')
+
+# Busy detection
+$busyA = @{ Kind = 'deployment'; ProjectId = 'P-other'; EnvironmentId = 'E-prod' }
+Test-Case 'another project to the target blocks' ([bool] (Get-BusyReason @($busyA) 'E-prod' 'E-tdd' 'P-ui')) $true
+Test-Case 'a runbook run to the target blocks' ([bool] (Get-BusyReason @(@{ Kind = 'runbook'; ProjectId = 'P-other'; EnvironmentId = 'E-uat' }) 'E-uat' 'E-tdd' 'P-ui')) $true
+Test-Case 'ui in uat blocks a prod promotion' ([bool] (Get-BusyReason @(@{ Kind = 'deployment'; ProjectId = 'P-ui'; EnvironmentId = 'E-uat' }) 'E-prod' 'E-tdd' 'P-ui')) $true
+Test-Case 'ui in tdd does not block' ([bool] (Get-BusyReason @(@{ Kind = 'deployment'; ProjectId = 'P-ui'; EnvironmentId = 'E-tdd' }) 'E-uat' 'E-tdd' 'P-ui')) $false
+Test-Case 'another project elsewhere does not block' ([bool] (Get-BusyReason @($busyA) 'E-uat' 'E-tdd' 'P-ui')) $false
+Test-Case 'nothing active does not block' ([bool] (Get-BusyReason @() 'E-uat' 'E-tdd' 'P-ui')) $false
+
+# Candidate selection
+$envs3 = @(@{ Id = 'E1'; Name = 'tdd' }, @{ Id = 'E2'; Name = 'uat' }, @{ Id = 'E3'; Name = 'prod' })
+function New-Rel($id, $ver, $hour) { @{ Id = $id; Version = $ver; Assembled = "2026-10-14T0${hour}:00:00+00:00" } }
+function New-Dep($rel, $env, $min, $task) { @{ Id = "D-$rel-$env-$task"; ReleaseId = $rel; EnvironmentId = $env; TaskId = $task; Created = "2026-10-14T05:$min`:00+00:00" } }
+function Select-With($rels, $deps, $states) {
+    Select-Candidate -Environments $envs3 -Releases $rels -GetDeployments { param($id) @($deps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState { param($d) $states[$d.TaskId] }.GetNewClosure()
+}
+$r1 = New-Rel 'R1' '1' 1; $r2 = New-Rel 'R2' '2' 2; $r3 = New-Rel 'R3' '3' 3
+$c = Select-With @($r1, $r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '20' 't2u'), (New-Dep 'R2' 'E3' '30' 't2p')) @{ t3 = 'Success'; t2 = 'Success'; t2u = 'Success'; t2p = 'Success' }
+Test-Case 'newest in tdd goes to uat' @($c.Release.Id, $c.Target.Name) @('R3', 'uat')
+$c = Select-With @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '06' 't2u')) @{ t3 = 'Success'; t3u = 'Success'; t2 = 'Success'; t2u = 'Success' }
+Test-Case 'a release through uat goes to prod' @($c.Release.Id, $c.Target.Name) @('R3', 'prod')
+$c = Select-With @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R3' 'E3' '30' 't3p')) @{ t3 = 'Success'; t3u = 'Success'; t3p = 'Success' }
+Test-Case 'everything promoted: no candidate' $c.Release $null
+$c = Select-With @($r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u')) @{ t3 = 'Success'; t3u = 'Canceled' }
+Test-Case 'a canceled uat deployment is not recreated' $c.Release $null
+$c = Select-With @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R2' 'E1' '05' 't2')) @{ t3 = 'Failed'; t2 = 'Success' }
+Test-Case 'older release is promoted when the newest failed, and the note says so' @($c.Release.Id, $c.Notes.Count, ($c.Notes[0] -like '*3 ended Failed in tdd*')) @('R2', 1, $true)
+$c = Select-With @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '06' 't2u'), (New-Dep 'R2' 'E3' '07' 't2p')) @{ t3 = 'Success'; t2 = 'Success'; t2u = 'Success'; t2p = 'Success' }
+Test-Case 'R3 goes to uat even though R2 is in prod' $c.Release.Id 'R3'
+$c = Select-With @($r2, $r3) @((New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '11' 't3u'), (New-Dep 'R3' 'E3' '12' 't3p')) @{ t2 = 'Success'; t3 = 'Success'; t3u = 'Success'; t3p = 'Success' }
+Test-Case 'a release older than the one running is not promoted' $c.Release $null
+$c = Select-With @($r3, $r1, $r2) @((New-Dep 'R1' 'E1' '05' 't1')) @{ t1 = 'Success' }
+Test-Case 'releases are sorted by Assembled, not by the order given' $c.Release.Id 'R1'
+$c = Select-With @($r3) @((New-Dep 'R3' 'E1' '10' 't3')) @{ t3 = 'Running' }
+Test-Case 'a deployment still running in tdd is not a success' $c.Release $null
+
+function Merge-Hash($a, $b) { $c = $a.Clone(); foreach ($k in $b.Keys) { $c[$k] = $b[$k] }; $c }
+# Sign-off targeting
+$so = @{ Type = 'ManualIntervention'; TaskId = 'T1'; Title = 'Sign-off'; IsPending = $true; ResponsibleUserId = $null; HasResponsibility = $false; Id = 'I1' }
+Test-Case 'pending Sign-off is answered' (Get-SignOffAction @($so) 'T1').Action 'answer'
+Test-Case 'a guided failure is never answered' (Get-SignOffAction @(@{ Type = 'GuidedFailure'; TaskId = 'T1'; Title = 'Sign-off'; IsPending = $true; ResponsibleUserId = $null; HasResponsibility = $false; Id = 'I2' }) 'T1').Action 'none'
+Test-Case 'another manual step is never answered' (Get-SignOffAction @(@{ Type = 'ManualIntervention'; TaskId = 'T1'; Title = 'Approve cost'; IsPending = $true; ResponsibleUserId = $null; HasResponsibility = $false; Id = 'I3' }) 'T1').Action 'none'
+Test-Case 'a Sign-off of another task is never answered' (Get-SignOffAction @($so) 'T2').Action 'none'
+Test-Case 'a person holding responsibility is yielded to' (Get-SignOffAction @((Merge-Hash $so @{ ResponsibleUserId = 'Users-9'; HasResponsibility = $false })) 'T1').Action 'yield'
+Test-Case 'our own responsibility is answered' (Get-SignOffAction @((Merge-Hash $so @{ ResponsibleUserId = 'Users-8'; HasResponsibility = $true })) 'T1').Action 'answer'
+Test-Case 'answered Sign-off is not answered again' (Get-SignOffAction @((Merge-Hash $so @{ IsPending = $false })) 'T1').Action 'answered'
+
+# Compare pages
+function New-Page($n, $files, $total, $status = 'ahead') { @{ status = $status; total_commits = $total; files = @($files | ForEach-Object { [pscustomobject] @{ filename = $_ } }); commits = @(1..$n | ForEach-Object { [pscustomobject] @{ sha = "s$($_)p$($files.Count)$total" } }) } }
+$m = Merge-ComparePages @((New-Page 3 @('src/a.cs') 3))
+Test-Case 'complete comparison is known' @($m.Known, $m.Paths) @($true, @('src/a.cs'))
+$m = Merge-ComparePages @((New-Page 100 @('src/a.cs') 120))
+Test-Case 'half-read commits are unknown' $m.Known $false
+$m = Merge-ComparePages @((New-Page 100 @('src/a.cs') 251))
+Test-Case 'more than 250 commits is unknown' $m.Reason '251 commits (more than 250)'
+$m = Merge-ComparePages @((New-Page 3 (1..300 | ForEach-Object { "src/f$_.cs" }) 3))
+Test-Case '300 files is unknown' $m.Known $false
+$page = @{ status = 'ahead'; total_commits = 1; files = @([pscustomobject] @{ filename = 'new.cs'; previous_filename = 'old.cs' }); commits = @([pscustomobject] @{ sha = 'a' }) }
+Test-Case 'a rename counts both names' (Merge-ComparePages @($page)).Paths @('new.cs', 'old.cs')
+
+# References and hold extraction
+Test-Case 'plain and cross-repository references' @(Get-ReferencedNumbers 'Closes #5, org/other#7 and AB#60 in http://x/y#8' 'org/app' | ForEach-Object { "$($_.Repo)#$($_.Number)" }) @('org/app#5', 'org/other#7')
+$commit = [pscustomobject] @{ sha = 'c1'; commit = [pscustomobject] @{ message = 'Change (#58) refs #16' } }
+$pr = [pscustomobject] @{ number = 58; title = 't'; body = 'Closes #16'; html_url = 'pr58'; labels = @([pscustomobject] @{ name = 'Hold' }) }
+$h = Get-HoldFacts -Commits @($commit) -Repo 'org/app' -GetPulls { param($s) @($pr) } -GetClosing { param($n) @(@{ Repo = 'org/app'; Number = 16 }) } -GetItem { param($r, $n) @{ Number = $n; Url = "i$n"; Labels = @('ok') } }
+Test-Case 'hold facts: pull request and issue collected, nothing unknown' @($h.Items.Count, $h.Unknown.Count) @(2, 0)
+Test-Case 'hold facts: the PR label is kept' (@($h.Items | Where-Object Number -eq 58)[0].Labels) @('Hold')
+$h = Get-HoldFacts -Commits @($commit) -Repo 'org/app' -GetPulls { param($s) throw 'x' } -GetClosing { param($n) @() } -GetItem { param($r, $n) @{ Number = $n; Url = ''; Labels = @() } }
+Test-Case 'hold facts: failed pulls read is unknown' $h.Unknown @('pull requests of c1 not read')
+$h = Get-HoldFacts -Commits @($commit) -Repo 'org/app' -GetPulls { param($s) @($pr) } -GetClosing { param($n) throw 'x' } -GetItem { param($r, $n) @{ Number = $n; Url = ''; Labels = @() } }
+Test-Case 'hold facts: failed closing references are unknown' $h.Unknown @('closing references of #58 not read')
+$h = Get-HoldFacts -Commits @($commit) -Repo 'org/app' -GetPulls { param($s) @() } -GetClosing { param($n) @() } -GetItem { param($r, $n) throw 'gone' }
+Test-Case 'hold facts: unreadable issue is unknown' $h.Unknown @('org/app#16 not read', 'org/app#58 not read')
+$cross = [pscustomobject] @{ sha = 'c2'; commit = [pscustomobject] @{ message = 'see org/other#9' } }
+$seen = [Collections.Generic.List[string]]::new()
+$h = Get-HoldFacts -Commits @($cross) -Repo 'org/app' -GetPulls { param($s) @() } -GetClosing { param($n) @() } -GetItem { param($r, $n) $seen.Add("$r#$n"); @{ Number = $n; Url = ''; Labels = @('Hold') } }
+Test-Case 'hold facts: cross-repository reference is read in its own repository' @($seen) @('org/other#9')
+$many = [pscustomobject] @{ sha = 'c3'; commit = [pscustomobject] @{ message = ((1..5 | ForEach-Object { "#$_" }) -join ' ') } }
+$h = Get-HoldFacts -Commits @($many) -Repo 'org/app' -GetPulls { param($s) @() } -GetClosing { param($n) @() } -GetItem { param($r, $n) @{ Number = $n; Url = ''; Labels = @() } } -Max 3
+Test-Case 'hold facts: more than the cap is unknown' @($h.Items.Count, $h.Unknown.Count) @(3, 1)
+
+# State
+$tmp = Join-Path ([IO.Path]::GetTempPath()) "uap-$([guid]::NewGuid()).json"
+Test-Case 'missing state file is empty' (Read-State $tmp).Count 0
+'not json {' | Set-Content $tmp
+Test-Case 'corrupt state file is empty' (Read-State $tmp).Count 0
+'{"D-1":[{"at":"2026-10-14T05:00:00Z","status":"Healthy"}]}' | Set-Content $tmp
+Test-Case 'good state file is read' (Read-State $tmp).ContainsKey('D-1') $true
+Remove-Item $tmp
+Test-Case 'evidence hash is stable' (Get-EvidenceHash 'a') (Get-EvidenceHash 'a')
+
+if ($failures -gt 0) { Write-Host "$failures case(s) failed."; exit 1 }
+Write-Host 'All cases passed.'

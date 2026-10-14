@@ -1,0 +1,143 @@
+# Automatic promotion of the work-order app's releases (deployable ui), by the owner's decision of 2026-10-14 (Jeffrey
+# Palermo): "release candidates automatically deployed to production if there is nothing to flag them. don't let them
+# stop in release queue". Only ui: every other deployable keeps a person's sign-off. scripts/auto-promote/ui-auto-promote.ps1
+# finds the newest ui release that succeeded in the previous environment (tdd before uat, uat before prod) and has no
+# deployment yet to the next, one environment step per run, never while a deployment of ui to uat or prod is queued,
+# running or waiting. It promotes it, and answers its Sign-off as the system's service account with a reason that names
+# this run, unless something flags it. The flags (every rule is a function, tested by scripts/auto-promote/test-ui-auto-promote.ps1,
+# which this workflow runs first; the owner's lists of documentation paths and build files are at the top of the script):
+#   1. Red build or tests: a failed check run or commit status on the release's commit in the application repository
+#      (pending: the run waits and flags nothing yet).
+#   2. Deployment or health failed: the deployment to the previous environment did not succeed, its task log has an
+#      Error or Warning line or a step SuccessWithWarning (the rule of the kit's test-deployment-logs.ps1), or
+#      /_healthcheck/detailed was not Healthy in a read taken since it finished (a single unreachable read flags: the
+#      safe side), or the task log is unreadable. Health rule, exactly: no read since the deployment finished is not
+#      Healthy, at least two reads are Healthy and at least 5 minutes apart, and the later one is at least 10 minutes
+#      after the deployment finished; otherwise the run waits (a ui address that is not known: wait, "health address
+#      unknown"). Each run adds one read (two, 5 minutes apart, when the first one comes late), kept in branch
+#      auto-promote (one commit, force-pushed, no history; ui-auto-promote.json: reads per deployment, two days).
+#   3. Pipeline or infra change: compared with the commit running in the next environment (/_build "commit"), a
+#      changed path outside src/ or a build/project file in src/ (Directory.Build.*, global.json, nuget.config, *.csproj,
+#      *.sln, *.props, *.targets, Dockerfile*). Never a flag: src/Database/ (migrations; owner, 2026-10-14) and
+#      documentation (docs/**, arch/**, *.md anywhere: proposed, one list in the script for the owner to edit). A
+#      comparison that is incomplete (no base commit, over 250 commits, 300 files or more) flags.
+#   4. Hold label: a pull request in those commits, or an issue they close or reference (also owner/repo#N), labelled
+#      Hold. A read of that chain that fails or is cut makes the run wait.
+# A deployment this workflow created that waits at its Sign-off (its Comments say so) is evaluated again by a later run: no
+# flag, it is answered; a flag, it stays waiting and the issue says so. Any unfinished deployment or runbook run to the
+# target environment, of any project, stops the run; so does a task listing that fails or is incomplete.
+# A flagged release is not deployed: no Sign-off waits in the environment and holds it for the other deployables. One
+# issue "ui <version> held before <env>" (label release-held, no assignee) lists each flag with its evidence; it closes
+# when the release has a deployment there or a newer release replaces it. A person promotes it in Octopus as today.
+# Credentials: GitHub OIDC to Octopus as the system's service account (environment "capabilities"; it must create
+# deployments of cmdemo1-ui and answer their Sign-off: it is a Space Manager of the space), and this workflow's token
+# for issues and the state branch. The application repository is public. No stored secret.
+name: ui-auto-promote
+
+on:
+  schedule:
+    - cron: "3-59/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Decide and print, change nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+concurrency:
+  group: ui-auto-promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    environment: capabilities
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test the decision rules
+        shell: pwsh
+        run: ./scripts/auto-promote/test-ui-auto-promote.ps1
+
+      - name: Sign in to Octopus
+        uses: OctopusDeploy/login@v2
+        with:
+          server: ${{ vars.OCTOPUS_URL }}
+          service_account_id: ${{ vars.OCTOPUS_SERVICE_ACCOUNT_ID }}
+
+      - name: Fetch the health reads
+        run: |
+          set -euo pipefail
+          echo '{}' > "$RUNNER_TEMP/ui-auto-promote.json"
+          if [ -n "$(git ls-remote --heads origin auto-promote)" ]; then
+            git fetch --quiet --depth=1 origin auto-promote
+            git show FETCH_HEAD:ui-auto-promote.json > "$RUNNER_TEMP/ui-auto-promote.json" || echo '{}' > "$RUNNER_TEMP/ui-auto-promote.json"
+          fi
+
+      - name: Promote or hold
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          $run = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $extra = if ($env:DRY_RUN -eq 'true') { @('-DryRun') } else { @() }
+          ./scripts/auto-promote/ui-auto-promote.ps1 -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run @extra
+
+      - name: Keep the health reads for the next job
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-auto-promote-state
+          path: ${{ runner.temp }}/ui-auto-promote.json
+          if-no-files-found: ignore
+
+  publish:
+    # Its own job: the step that runs PowerShell has no write token for the repository.
+    needs: promote
+    if: ${{ always() && inputs.dry_run != true }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-auto-promote-state
+          path: ${{ runner.temp }}/new
+        continue-on-error: true
+
+      - name: Publish the health reads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_AUTHOR_NAME: "github-actions[bot]"
+          GIT_AUTHOR_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com"
+          GIT_COMMITTER_NAME: "github-actions[bot]"
+          GIT_COMMITTER_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com"
+        run: |
+          set -euo pipefail
+          new="$RUNNER_TEMP/new/ui-auto-promote.json"
+          if [ ! -f "$new" ]; then echo "No state file was written: nothing to publish."; exit 0; fi
+          old="$RUNNER_TEMP/old.json"; echo '{}' > "$old"
+          if [ -n "$(git ls-remote --heads origin auto-promote)" ]; then
+            git fetch --quiet --depth=1 origin auto-promote
+            git show FETCH_HEAD:ui-auto-promote.json > "$old" 2>/dev/null || echo '{}' > "$old"
+          fi
+          if [ "$(jq -S . "$new")" = "$(jq -S . "$old")" ]; then echo "The health reads are unchanged."; exit 0; fi
+          blob=$(git hash-object -w "$new")
+          tree=$(printf '100644 blob %s\tui-auto-promote.json\n' "$blob" | git mktree)
+          commit=$(git commit-tree "$tree" -m "Health reads of $(date -u +%Y-%m-%dT%H:%M:%SZ)")
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push --quiet --force origin "$commit:refs/heads/auto-promote"
