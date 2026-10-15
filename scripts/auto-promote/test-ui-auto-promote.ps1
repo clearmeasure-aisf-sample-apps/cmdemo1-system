@@ -54,6 +54,25 @@ Test-Case 'health: reads 3 minutes apart wait' (Get-HealthVerdict $t0 $t0.AddMin
 Test-Case 'health: two reads 5 minutes apart, last after 10 minutes: ok' (Get-HealthVerdict $t0 $t0.AddMinutes(15) @(@{ At = $t0.AddMinutes(10); Status = 'Healthy' }, @{ At = $t0.AddMinutes(15); Status = 'Healthy' })) 'ok'
 Test-Case 'health: waiting is not a flag' (Get-PromotionDecision -Facts (New-Facts @{ Now = $t0.AddMinutes(6); HealthReads = @(@{ At = $t0.AddMinutes(6); Status = 'Healthy' }) })).Decision 'wait'
 
+# Health read retry (a fake reader: $null is unreachable or timed out, a throw too)
+function New-Reader([object[]] $Answers) {
+    $q = [Collections.Generic.Queue[object]]::new(); foreach ($x in $Answers) { $q.Enqueue($x) }
+    $calls = [ref] 0
+    @{ Calls = $calls; Reader = { $calls.Value++; $x = $q.Dequeue(); if ($x -eq 'throw') { throw 'timed out' }; $x }.GetNewClosure() }
+}
+$pauses = [ref] 0; $noPause = { $pauses.Value++ }.GetNewClosure()
+$f = New-Reader @($null, 'throw', 'Healthy')
+$r = Invoke-HealthRead -Reader $f.Reader -Pause $noPause
+Test-Case 'health read: unreachable then Healthy records Healthy' @($r.Status, $r.Attempts, $pauses.Value) @('Healthy', 3, 2)
+$pauses.Value = 0; $f = New-Reader @($null, 'throw', $null, '')
+$r = Invoke-HealthRead -Reader $f.Reader -Pause $noPause
+Test-Case 'health read: four unreachable attempts record Unreachable' @($r.Status, $f.Calls.Value, $pauses.Value) @('Unreachable', 4, 3)
+$pauses.Value = 0; $f = New-Reader @('Unhealthy', 'Healthy')
+$r = Invoke-HealthRead -Reader $f.Reader -Pause $noPause
+Test-Case 'health read: an answered Unhealthy is not retried' @($r.Status, $f.Calls.Value, $pauses.Value) @('Unhealthy', 1, 0)
+$pauses.Value = 0; $f = New-Reader @('Healthy')
+Test-Case 'health read: Healthy at once' @((Invoke-HealthRead -Reader $f.Reader -Pause $noPause).Status, $pauses.Value) @('Healthy', 0)
+
 # Flag 3
 Test-Case 'workflow change flags' (Flags (New-Facts @{ Paths = @('.github/workflows/build.yml') })) @('Pipeline or infra change')
 Test-Case 'Dockerfile at root flags' (Flags (New-Facts @{ Paths = @('Dockerfile') })) @('Pipeline or infra change')
@@ -155,6 +174,24 @@ $c = Select-With @($r2, $r3) @((New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R3' 'E1'
 Test-Case 'a release older than the one running is not promoted' $c.Release $null
 $c = Select-With @($r3, $r1, $r2) @((New-Dep 'R1' 'E1' '05' 't1')) @{ t1 = 'Success' }
 Test-Case 'releases are sorted by Assembled, not by the order given' $c.Release.Id 'R1'
+# Release order: version first (releases can be assembled out of order), Assembled when versions are equal.
+$late = @{ Id = 'R459'; Version = '2.4.459'; Assembled = '2026-10-14T22:53:00+00:00' }
+$early = @{ Id = 'R467'; Version = '2.4.467'; Assembled = '2026-10-14T22:51:00+00:00' }
+Test-Case 'a higher version assembled earlier sorts first' @(Get-ReleasesNewestFirst @($late, $early) | ForEach-Object Id) @('R467', 'R459')
+$c = Select-With @($late, $early) @((New-Dep 'R459' 'E1' '10' 't459'), (New-Dep 'R467' 'E1' '05' 't467')) @{ t459 = 'Success'; t467 = 'Success' }
+Test-Case 'a higher version assembled earlier is the candidate' $c.Release.Id 'R467'
+$c = Select-With @($late, $early) @((New-Dep 'R459' 'E1' '10' 't459'), (New-Dep 'R467' 'E1' '05' 't467'), (New-Dep 'R467' 'E2' '20' 't467u')) @{ t459 = 'Success'; t467 = 'Success'; t467u = 'Success' }
+Test-Case 'a lower version assembled later is not promoted over a higher one running' $c.Release.Id 'R467'
+Test-Case 'equal versions fall back to Assembled' @(Get-ReleasesNewestFirst @(@{ Id = 'A'; Version = '2.4.5'; Assembled = '2026-10-14T01:00:00Z' }, @{ Id = 'B'; Version = '2.4.5'; Assembled = '2026-10-14T02:00:00Z' }) | ForEach-Object Id) @('B', 'A')
+Test-Case 'an unparsable version sorts below a parsable one, even assembled later' @(Get-ReleasesNewestFirst @(@{ Id = 'A'; Version = '2.4.9'; Assembled = '2026-10-14T01:00:00Z' }, @{ Id = 'B'; Version = 'hotfix'; Assembled = '2026-10-14T02:00:00Z' }) | ForEach-Object Id) @('A', 'B')
+Test-Case 'two unparsable versions fall back to Assembled' @(Get-ReleasesNewestFirst @(@{ Id = 'A'; Version = 'hotfix-a'; Assembled = '2026-10-14T01:00:00Z' }, @{ Id = 'B'; Version = 'hotfix-b'; Assembled = '2026-10-14T02:00:00Z' }) | ForEach-Object Id) @('B', 'A')
+$v10 = @{ Id = '2.4.10'; Version = '2.4.10'; Assembled = '2026-10-14T00:00:00Z' }
+$v9 = @{ Id = '2.4.9'; Version = '2.4.9'; Assembled = '2026-10-14T02:00:00Z' }
+$hf = @{ Id = 'hotfix'; Version = 'hotfix'; Assembled = '2026-10-14T01:00:00Z' }
+foreach ($order in @(@($v10, $v9, $hf), @($hf, $v9, $v10), @($v9, $hf, $v10))) {
+    Test-Case "order is total: $(@($order | ForEach-Object Id) -join ', ') sorts 2.4.10, 2.4.9, hotfix" @(Get-ReleasesNewestFirst $order | ForEach-Object Id) @('2.4.10', '2.4.9', 'hotfix')
+}
+Test-Case '2.4.10 is newer than 2.4.9 (numeric, not text)' ((Compare-Release @{ Version = '2.4.10'; Assembled = '2026-10-14T01:00:00Z' } @{ Version = '2.4.9'; Assembled = '2026-10-14T02:00:00Z' }) -gt 0) $true
 $c = Select-With @($r3) @((New-Dep 'R3' 'E1' '10' 't3')) @{ t3 = 'Running' }
 Test-Case 'a deployment still running in tdd is not a success' $c.Release $null
 
@@ -212,6 +249,38 @@ Test-Case 'corrupt state file is empty' (Read-State $tmp).Count 0
 Test-Case 'good state file is read' (Read-State $tmp).ContainsKey('D-1') $true
 Remove-Item $tmp
 Test-Case 'evidence hash is stable' (Get-EvidenceHash 'a') (Get-EvidenceHash 'a')
+
+# Pipeline-only override (owner rule 2026-10-14): a known pipeline change is the only flag.
+function New-Pipe([double] $Minutes, [string] $Master, [hashtable] $More = @{}) {
+    $f = New-Facts (@{ Paths = @('.github/workflows/build.yml'); Now = $t0.AddMinutes([math]::Max($Minutes, 12))
+        PipelineOverride = @{ Minutes = $Minutes; MasterState = $Master; MasterEvidence = @() } })
+    foreach ($k in $More.Keys) { $f[$k] = $More[$k] }
+    $f
+}
+$d = Get-PromotionDecision -Facts (New-Pipe 59 'green')
+Test-Case 'pipeline only, 59 minutes: hold with the promised time' @($d.Decision, ($d.Note -like '*promoted automatically after 2026-10-14 05:00 UTC if master*')) @('hold', $true)
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'green')
+Test-Case 'pipeline only, 60 minutes, master green: promote by the override' @($d.Decision, $d.Reason, $d.Note) @('promote', 'pipeline-override')
+Test-Case 'override Sign-off note names the rule' ((Format-PromotionReason -Decision $d -Previous 'uat' -RunUrl 'r1') -like 'Auto-promoted after 60 minutes: pipeline change accepted (owner rule 2026-10-14), master green, no other flag;*run r1') $true
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'pending')
+Test-Case 'pipeline only, 60 minutes, master pending: hold with the promised time' @($d.Decision, ($d.Note -like '*after 2026-10-14 05:00 UTC if master*pending*')) @('hold', $true)
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'red')
+Test-Case 'pipeline only, 60 minutes, master red: hold and say so' @($d.Decision, ($d.Note -like '*master is red*')) @('hold', $true)
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'unknown')
+Test-Case 'pipeline only, 60 minutes, master unknown: hold and say so' @($d.Decision, ($d.Note -like '*could not be read*')) @('hold', $true)
+Test-Case 'pipeline only, no override facts: hold (unknown)' (Get-PromotionDecision -Facts (New-Facts @{ Paths = @('Dockerfile') })).Decision 'hold'
+Test-Case 'pipeline plus failed deployment, 600 minutes, master green: hold' (Get-PromotionDecision -Facts (New-Pipe 600 'green' @{ PreviousState = 'Failed' })).Decision 'hold'
+Test-Case 'pipeline plus red checks, 600 minutes, master green: hold' (Get-PromotionDecision -Facts (New-Pipe 600 'green' @{ Checks = @(@{ Name = 'CRAP'; State = 'failure'; Url = 'x' }) })).Decision 'hold'
+Test-Case 'pipeline plus Hold label, 600 minutes, master green: hold' (Get-PromotionDecision -Facts (New-Pipe 600 'green' @{ HoldItems = @(@{ Number = 7; Url = 'i7'; Labels = @('Hold') }) })).Decision 'hold'
+Test-Case 'incomplete comparison, 600 minutes, master green: hold (no override)' (Get-PromotionDecision -Facts (New-Pipe 600 'green' @{ PathsKnown = $false })).Decision 'hold'
+Test-Case 'pipeline only, 600 minutes, master green, a wait open: hold' (Get-PromotionDecision -Facts (New-Pipe 600 'green' @{ HoldUnknown = @('#4 not read') })).Decision 'hold'
+$d = Get-PromotionDecision -Facts (New-Facts)
+Test-Case 'no flag: promote as today' @($d.Decision, $d.Reason) @('promote', 'no-flag')
+Test-Case 'no flag Sign-off note unchanged' (Format-PromotionReason -Decision $d -Previous 'tdd' -RunUrl 'r1') 'Auto-promoted: no flag. checks green (2 passed), deployment and health ok in tdd, no pipeline change, no Hold label; run r1'
+Test-Case 'master: all passed is green' (Get-MasterState @(@{ Name = 'a'; State = 'success'; Url = '' }, @{ Name = 'b'; State = 'skipped'; Url = '' })).State 'green'
+Test-Case 'master: one pending is pending' (Get-MasterState @(@{ Name = 'a'; State = 'success'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' })).State 'pending'
+Test-Case 'master: one failed is red' (Get-MasterState @(@{ Name = 'a'; State = 'failure'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' })).State 'red'
+Test-Case 'master: no check is not green' (Get-MasterState @()).State 'pending'
 
 if ($failures -gt 0) { Write-Host "$failures case(s) failed."; exit 1 }
 Write-Host 'All cases passed.'

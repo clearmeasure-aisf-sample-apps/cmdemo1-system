@@ -10,8 +10,9 @@
 #      (pending: the run waits and flags nothing yet).
 #   2. Deployment or health failed: the deployment to the previous environment did not succeed, its task log has an
 #      Error or Warning line or a step SuccessWithWarning (the rule of the kit's test-deployment-logs.ps1), or
-#      /_healthcheck/detailed was not Healthy in a read taken since it finished (a single unreachable read flags: the
-#      safe side), or the task log is unreadable. Health rule, exactly: no read since the deployment finished is not
+#      /_healthcheck/detailed was not Healthy in a read taken since it finished (an answered non-Healthy status counts at
+#      once; an unreachable or timed-out read is retried up to 3 times, 20 to 30 s apart, in the same run, and flags as
+#      Unreachable only when all four attempts fail), or the task log is unreadable. Health rule, exactly: no read since the deployment finished is not
 #      Healthy, at least two reads are Healthy and at least 5 minutes apart, and the later one is at least 10 minutes
 #      after the deployment finished; otherwise the run waits (a ui address that is not known: wait, "health address
 #      unknown"). Each run adds one read (two, 5 minutes apart, when the first one comes late), kept in branch
@@ -29,6 +30,8 @@
 # A flagged release is not deployed: no Sign-off waits in the environment and holds it for the other deployables. One
 # issue "ui <version> held before <env>" (label release-held, no assignee) lists each flag with its evidence; it closes
 # when the release has a deployment there or a newer release replaces it. A person promotes it in Octopus as today.
+# Exception (owner, 2026-10-14): when flag 3 is the only flag, the release is promoted anyway 60 minutes after its deployment
+# to the previous environment finished, if master of the application repository is green (pending, red or unreadable: held).
 # Credentials: GitHub OIDC to Octopus as the system's service account (environment "octopus"; it must create
 # deployments of cmdemo1-ui and answer their Sign-off: it is a Space Manager of the space), and this workflow's token
 # for issues and the state branch. The application repository is public. No stored secret.
@@ -57,7 +60,7 @@ jobs:
   promote:
     runs-on: ubuntu-24.04
     environment: octopus
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v6.0.1
         with:
