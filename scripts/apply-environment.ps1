@@ -449,6 +449,9 @@ function Invoke-StackApply {
         [Parameter(Mandatory)] [string] $TemplateFile,
         [Parameter(Mandatory)] [string] $ParametersFile
     )
+    # Starting and stopping a Container Apps job's executions is open to whoever RBAC lets (the factory worker gateway's
+    # role on its runner jobs, infra/own/main.bicep); the deny assignment would refuse it to everyone but the deploy
+    # identity. A variance from the kit (cmdemo1, 2026-10-15) until the kit's template can say so itself.
     $transient = 'DeploymentStackTenantRegistrationFailed|PrincipalNotFound|InvalidAuthenticationToken|ConflictingDatabaseOperation'
     $errorFile = Join-Path ([IO.Path]::GetTempPath()) "stack-$([Guid]::NewGuid().ToString('N')).err"
     try {
@@ -462,6 +465,7 @@ function Invoke-StackApply {
                 --action-on-unmanage deleteResources `
                 --deny-settings-mode denyWriteAndDelete `
                 --deny-settings-excluded-principals $deployPrincipalId `
+                --deny-settings-excluded-actions Microsoft.App/jobs/start/action Microsoft.App/jobs/stop/action `
                 --yes `
                 --output json 2>$errorFile
             $applied = $LASTEXITCODE -eq 0
