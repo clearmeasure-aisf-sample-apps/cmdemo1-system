@@ -293,6 +293,7 @@ resource runnerTranscripts 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 }
 
 // One execution per work item, started by the gateway: no ingress, no retry, four hours at most.
+// A job has no termination grace setting: the API refuses terminationGracePeriodSeconds in a job template.
 resource runner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
   name: 'caj-${stack.slug}-${stack.environmentName}-fwrunner'
   location: stack.location
@@ -325,9 +326,6 @@ resource runner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
       ]
     }
     template: {
-      // The job API takes it although the Bicep types do not list it yet.
-      #disable-next-line BCP037
-      terminationGracePeriodSeconds: 60
       containers: [
         {
           name: 'fwrunner'
@@ -386,9 +384,6 @@ resource codexRunner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
       ]
     }
     template: {
-      // The job API takes it although the Bicep types do not list it yet.
-      #disable-next-line BCP037
-      terminationGracePeriodSeconds: 60
       containers: [
         {
           name: 'fwrunner'
