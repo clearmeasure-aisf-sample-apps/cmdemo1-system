@@ -11,7 +11,8 @@
     is nothing to flag them. don't let them stop in release queue". For deployable ui only; every other deployable
     keeps a person's sign-off. Run by workflow ui-auto-promote.
 
-    Candidate (Select-Candidate): releases newest Assembled first; the first whose latest deployment to the previous
+    Candidate (Select-Candidate): releases newest first by version (Major.Minor.Patch; an unparsable version below every
+    parsable one; Assembled only between equal or unparsable versions: releases can be assembled out of order); the first whose latest deployment to the previous
     environment (tdd before uat, uat before prod) succeeded. It is the candidate when it has no deployment at all to the
     next environment (any state: a canceled one is a person's no) and is newer than the release running there; prod is
     looked at before uat. A newer release that ended otherwise in the previous environment is skipped and the run log says so.
@@ -29,8 +30,9 @@
       2 deployment  Flag: the deployment to the previous environment is not Success; its task log is unreadable (under 20
                  lines or without its "Task ID:" header); the log has a line at Error, Warning or Fatal level or a step
                  SuccessWithWarning (the kit's test-deployment-logs.ps1 rule, plus Fatal, which a real failed ui task
-                 logs); or a /_healthcheck/detailed read since it finished was not Healthy (a single unreachable read
-                 flags: safe side). Health rule: no read since the deployment finished is not Healthy, at least two reads
+                 logs); or a /_healthcheck/detailed read since it finished was not Healthy (an answered status other
+                 than Healthy counts at once; an unreachable or timed-out read is tried up to 3 more times, 20 to 30 s
+                 apart, in the same run, and is recorded Unreachable, which flags, only when all four fail). Health rule: no read since the deployment finished is not Healthy, at least two reads
                  are Healthy and at least 5 minutes apart, and the later one is at least 10 minutes after the deployment
                  finished. Else wait. A ui address that is not known: wait ("health address unknown").
       3 pipeline  Compared with the commit running in the next environment (/_build "commit", else the commit in the notes of
@@ -47,6 +49,11 @@
     deployable. One issue "ui <version> held before <env>" (label release-held, no assignee) lists each flag with its
     evidence; it is edited only when the evidence changes. It closes when that release has a deployment in the environment
     that no longer waits for this workflow, or a newer release is the candidate or runs there already.
+    Pipeline-only override (owner, 2026-10-14): when flag 3 (a known change, not "comparison incomplete") is the only flag
+    and nothing waits, the release is promoted anyway once 60 minutes ($PipelineOverrideMinutes) have passed since its deployment to the
+    previous environment finished AND the head commit of the application repository's default branch (master) is green:
+    every check run and commit status completed success, skipped or neutral. Pending: hold until green; red, or a read that
+    failed: hold. Until then the held issue says when it will be promoted.
 
 .PARAMETER LoadOnly
     Defines the functions and stops (for the tests).
@@ -77,6 +84,10 @@ $BuildFiles = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.P
 # Never a flag (prefixes of the repository path).
 # .github/private-build/ holds the kit's own script, synced by the kit (owner's decision 2026-10-14).
 $UnflaggedFolders = @('src/Database/', '.github/private-build/')
+# Pipeline-only override (owner's decision, Jeffrey Palermo 2026-10-14): a release whose only flag is a pipeline or infra
+# change is promoted anyway this many minutes after its deployment to the previous environment finished, when master of
+# the application repository is green.
+$PipelineOverrideMinutes = 60
 $PromotionMarker = 'Promoted by workflow ui-auto-promote'
 
 function ConvertTo-GlobRegex([string] $Glob) {
@@ -109,6 +120,17 @@ function ConvertTo-CheckState {
 }
 function ConvertTo-StatusState([string] $State) { switch ($State) { 'success' { 'success' } 'pending' { 'pending' } default { 'failure' } } }
 
+function Get-MasterState {
+    # Checks of master's head commit (Name, State): green when every one passed, red when one failed, pending when one is not
+    # finished or none has reported. A read that failed is 'unknown' (decided by the caller), never green.
+    param([object[]] $Checks)
+    $c = Get-CheckFindings -Checks @($Checks)
+    if ($c.Failed.Count -gt 0) { return @{ State = 'red'; Evidence = @($c.Failed | ForEach-Object { "$($_.Name) $($_.Url)".Trim() }) } }
+    if (@($Checks).Count -eq 0) { return @{ State = 'pending'; Evidence = @('no check has reported yet') } }
+    if ($c.Pending.Count -gt 0) { return @{ State = 'pending'; Evidence = @($c.Pending | ForEach-Object Name) } }
+    @{ State = 'green'; Evidence = @() }
+}
+
 function Get-CheckFindings {
     param([object[]] $Checks)
     @{
@@ -128,6 +150,19 @@ function Get-HealthVerdict {
     if (($last - $first).TotalMinutes -ge $GapMinutes -and $last -ge $Finished.AddMinutes($WindowMinutes)) { 'ok' } else { 'wait' }
 }
 
+function Invoke-HealthRead {
+    # One health read. Reader: the answered overallStatus; it throws or answers nothing when the app is unreachable or the
+    # request timed out, and then it is tried again up to Retries more times, Pause between (20 to 30 s). An answered
+    # status, Healthy or not, counts at once. Returns @{ Status; Attempts }; Status Unreachable only when every attempt failed.
+    param([scriptblock] $Reader, [int] $Retries = 3, [scriptblock] $Pause = { Start-Sleep -Seconds (Get-Random -Minimum 20 -Maximum 31) })
+    for ($i = 1; $i -le $Retries + 1; $i++) {
+        $status = try { [string] (& $Reader) } catch { '' }
+        if ($status) { return @{ Status = $status; Attempts = $i } }
+        if ($i -le $Retries) { & $Pause }
+    }
+    @{ Status = 'Unreachable'; Attempts = $Retries + 1 }
+}
+
 function Get-LogFindings {
     # The task's raw log: findings, or "task log unreadable" when it is empty, short or lacks the task's own header.
     param([string] $Raw, [string] $TaskId, [string[]] $WarnedSteps = @())
@@ -139,10 +174,18 @@ function Get-LogFindings {
     $out
 }
 
+function Test-PipelineOnly {
+    # The pipeline-or-infra flag is the only flag, from a known comparison (an incomplete one also skipped the Hold lookup).
+    param([object[]] $Flags, [hashtable] $Facts)
+    @($Flags).Count -eq 1 -and $Flags[0].Flag -eq 'Pipeline or infra change' -and [bool] $Facts.PathsKnown
+}
+
 function Get-PromotionDecision {
     <# Facts: Checks, PathsKnown, PathsReason, Paths, HoldItems, HoldUnknown (reasons), PreviousState, LogFindings, Finished,
-       Now, HealthReads, HealthAddressKnown. Returns @{ Decision = promote|hold|wait; Flags; Waiting; Passed }. #>
-    param([hashtable] $Facts)
+       Now, HealthReads, HealthAddressKnown, and PipelineOverride = @{ Minutes (since the previous deployment finished);
+       MasterState = green|pending|red|unknown; MasterEvidence } (read only when the pipeline flag is the only one).
+       Returns @{ Decision = promote|hold|wait; Reason = no-flag|pipeline-override (promote); Note (hold); Flags; Waiting; Passed }. #>
+    param([hashtable] $Facts, [int] $OverrideMinutes = $PipelineOverrideMinutes)
     $flags = [Collections.Generic.List[object]]::new()
     $waiting = [Collections.Generic.List[string]]::new()
 
@@ -175,7 +218,23 @@ function Get-PromotionDecision {
     foreach ($u in @($Facts.HoldUnknown)) { if ($u) { $waiting.Add("hold lookup incomplete: $u") } }
 
     $decision = if ($flags.Count -gt 0) { 'hold' } elseif ($waiting.Count -gt 0) { 'wait' } else { 'promote' }
-    @{ Decision = $decision; Flags = @($flags); Waiting = @($waiting); Passed = @($c.Passed | ForEach-Object Name) }
+    $reason = if ($decision -eq 'promote') { 'no-flag' } else { $null }
+    $note = $null
+    if (Test-PipelineOnly -Flags @($flags) -Facts $Facts) {
+        $o = $Facts['PipelineOverride']
+        $minutes = if ($o -and $null -ne $o['Minutes']) { [double] $o['Minutes'] } else { -1 }
+        $master = if ($o -and $o['MasterState']) { [string] $o['MasterState'] } else { 'unknown' }
+        $masterWhy = if ($o -and $o['MasterEvidence']) { ": $(@($o['MasterEvidence']) -join ', ')" } else { '' }
+        $at = if ($Facts.Finished) { ([datetime] $Facts.Finished).AddMinutes($OverrideMinutes).ToString('yyyy-MM-dd HH:mm') + ' UTC' } else { "$OverrideMinutes minutes after the deployment to the previous environment finished" }
+        $when = "Pipeline change is the only flag: promoted automatically after $at if master of the application repository is green (owner rule 2026-10-14)."
+        if ($master -eq 'red') { $note = "$when Not now: master is red$masterWhy." }
+        elseif ($master -ne 'green' -and $master -ne 'pending') { $note = "$when Not now: the state of master could not be read$masterWhy (unknown counts as not green)." }
+        elseif ($minutes -lt $OverrideMinutes) { $note = $when }
+        elseif ($master -eq 'pending') { $note = "$when Not yet: master is not green yet (pending$masterWhy)." }
+        elseif ($waiting.Count -gt 0) { $note = "$when Not yet: waiting for $(@($waiting) -join '; ')." }
+        else { $decision = 'promote'; $reason = 'pipeline-override' }
+    }
+    @{ Decision = $decision; Reason = $reason; Note = $note; Flags = @($flags); Waiting = @($waiting); Passed = @($c.Passed | ForEach-Object Name) }
 }
 
 function Get-BusyReason {
@@ -187,12 +246,31 @@ function Get-BusyReason {
     }
 }
 
+function ConvertTo-ReleaseVersion([string] $Version) {
+    # Major.Minor.Patch of a release version (a suffix is ignored); $null when it does not parse.
+    if ($Version -match '^v?(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?!\d)') { [version]::new([int] $Matches[1], [int] $Matches[2], [int] $Matches[3]) }
+}
+function Compare-Release($A, $B) {
+    # Above 0 when release A is newer than B: by version; an unparsable version is older than every parsable one; by
+    # Assembled when the versions are equal or both do not parse (a total order, so the sort is consistent).
+    $va = ConvertTo-ReleaseVersion $A.Version; $vb = ConvertTo-ReleaseVersion $B.Version
+    if ($va -and -not $vb) { return 1 }
+    if ($vb -and -not $va) { return -1 }
+    if ($va -and $va -ne $vb) { return $va.CompareTo($vb) }
+    ([datetimeoffset] $A.Assembled).CompareTo([datetimeoffset] $B.Assembled)
+}
+function Get-ReleasesNewestFirst([object[]] $Releases) {
+    $l = [Collections.Generic.List[object]]::new(); foreach ($r in @($Releases)) { if ($r) { $l.Add($r) } }
+    $l.Sort([Comparison[object]] { param($x, $y) Compare-Release $y $x })
+    @($l)
+}
+
 function Select-Candidate {
     <# Environments ordered; Releases (Id, Version, Assembled); GetDeployments {param($releaseId)} -> deployments (Id, ReleaseId,
        EnvironmentId, TaskId, Created); GetTaskState {param($deployment)} -> Octopus task state. Returns
        @{ Release; Target; Previous; RunningReleaseId; Notes } or $null with Notes. Looks at the last environment first. #>
     param([object[]] $Environments, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState)
-    $sorted = @($Releases | Sort-Object { [datetimeoffset] $_.Assembled } -Descending)
+    $sorted = @(Get-ReleasesNewestFirst $Releases)
     $cache = @{}
     $deps = { param($r) if (-not $cache.ContainsKey($r.Id)) { $cache[$r.Id] = @(& $GetDeployments $r.Id) }; $cache[$r.Id] }
     $notes = [Collections.Generic.List[string]]::new()
@@ -215,7 +293,7 @@ function Select-Candidate {
             if ($runningId -eq $r.Id) { break }
             if ($runningId) {
                 $running = $sorted | Where-Object Id -eq $runningId
-                if ([datetimeoffset] $running.Assembled -ge [datetimeoffset] $r.Assembled) { break }
+                if ((Compare-Release $running $r) -ge 0) { break }
             }
             if ($skipped) { $notes.Add("newer release ${skipped}: the older release $($r.Version) is considered for $($target.Name)") }
             return @{ Release = $r; Target = $target; Previous = $previous; RunningReleaseId = $runningId; Notes = @($notes) }
@@ -304,11 +382,23 @@ function Read-State {
 
 function Get-EvidenceHash([string] $Text) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Text))).Substring(0, 16).ToLowerInvariant() }
 
+function Format-PromotionReason {
+    # The Sign-off note of a promotion.
+    param([hashtable] $Decision, [string] $Previous, [string] $RunUrl, [switch] $Recovered, [int] $OverrideMinutes = $PipelineOverrideMinutes)
+    $how = if ($Recovered) { 'Auto-promoted (recovered)' } else { 'Auto-promoted' }
+    $common = "checks green ($(@($Decision.Passed).Count) passed), deployment and health ok in $Previous"
+    if ($Decision.Reason -eq 'pipeline-override') {
+        return "$how after $OverrideMinutes minutes: pipeline change accepted (owner rule 2026-10-14), master green, no other flag; $common, no Hold label; run $RunUrl"
+    }
+    "${how}: no flag. $common, no pipeline change, no Hold label; run $RunUrl"
+}
+
 function Format-HeldEvidence {
-    param([string] $Version, [string] $Sha, [string] $Target, [object[]] $Flags, [string] $DeploymentNote = '')
+    param([string] $Version, [string] $Sha, [string] $Target, [object[]] $Flags, [string] $DeploymentNote = '', [string] $OverrideNote = '')
     $b = "ui $Version (commit $Sha) is not promoted to $Target automatically. Flags:`n"
     foreach ($f in $Flags) { $b += "`n**$($f.Flag)**`n" + (($f.Evidence | ForEach-Object { "- $_" }) -join "`n") + "`n" }
-    $b += "`nRules: health needs no read since the deployment finished that is not Healthy, two Healthy reads at least 5 minutes apart, the later one at least 10 minutes after the deployment finished; a single unreachable read flags."
+    if ($OverrideNote) { $b += "`n$OverrideNote`n" }
+    $b += "`nRules: health needs no read since the deployment finished that is not Healthy, two Healthy reads at least 5 minutes apart, the later one at least 10 minutes after the deployment finished; an unreachable or timed-out read is retried up to 3 times, 20 to 30 seconds apart, and flags only when all four attempts fail."
     if ($DeploymentNote) { $b += "`n$DeploymentNote" } else { $b += "`nNo deployment was created. A person promotes it in Octopus (the Sign-off waits for them)." }
     $b
 }
@@ -395,6 +485,33 @@ function Save-State {
     $keep | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath
 }
 
+function Get-CommitChecks([string] $Sha) {
+    # Check runs (paged) and commit statuses of a commit of the application repository; an incomplete list adds a pending entry.
+    $checks = [Collections.Generic.List[object]]::new(); $page = 1
+    do {
+        $r = Invoke-Gh @("repos/$appRepo/commits/$Sha/check-runs?per_page=100&page=$page")
+        foreach ($c in @($r.check_runs)) { $checks.Add(@{ Name = $c.name; State = ConvertTo-CheckState $c.status $c.conclusion; Url = $c.html_url }) }
+        $page++
+    } while (@($r.check_runs).Count -eq 100 -and $page -le 10)
+    if ($r.total_count -gt $checks.Count) { $checks.Add(@{ Name = "check list incomplete ($($checks.Count) of $($r.total_count))"; State = 'pending'; Url = '' }) }
+    $s = Invoke-Gh @("repos/$appRepo/commits/$Sha/status?per_page=100")
+    foreach ($c in @($s.statuses)) { $checks.Add(@{ Name = $c.context; State = ConvertTo-StatusState $c.state; Url = $c.target_url }) }
+    if ($s.total_count -gt @($s.statuses).Count) { $checks.Add(@{ Name = 'status list incomplete'; State = 'pending'; Url = '' }) }
+    $checks
+}
+
+function Read-MasterState {
+    # The head commit of the application repository's default branch, and its checks. Any failure: unknown.
+    try {
+        $branch = [string] (Invoke-Gh @("repos/$appRepo")).default_branch
+        if (-not $branch) { throw 'no default branch' }
+        $head = [string] (Invoke-Gh @("repos/$appRepo/branches/$branch")).commit.sha
+        if ($head -notmatch '^[0-9a-f]{40}$') { throw "no head commit of $branch" }
+        $m = Get-MasterState -Checks @(Get-CommitChecks $head)
+        @{ State = $m.State; Evidence = @($m.Evidence); Sha = $head; Branch = $branch }
+    } catch { @{ State = 'unknown'; Evidence = @("read failed: $($_.Exception.Message)"); Sha = $null; Branch = $null } }
+}
+
 function Get-Evaluation {
     param($Release, $Target, $Previous, $RunningRelease)
     $sha = Get-Commit $Release
@@ -402,16 +519,7 @@ function Get-Evaluation {
     $facts = @{ HoldUnknown = @() }
 
     # 1. Checks
-    $checks = [Collections.Generic.List[object]]::new(); $page = 1
-    do {
-        $r = Invoke-Gh @("repos/$appRepo/commits/$sha/check-runs?per_page=100&page=$page")
-        foreach ($c in @($r.check_runs)) { $checks.Add(@{ Name = $c.name; State = ConvertTo-CheckState $c.status $c.conclusion; Url = $c.html_url }) }
-        $page++
-    } while (@($r.check_runs).Count -eq 100 -and $page -le 10)
-    if ($r.total_count -gt $checks.Count) { $checks.Add(@{ Name = "check list incomplete ($($checks.Count) of $($r.total_count))"; State = 'pending'; Url = '' }) }
-    $s = Invoke-Gh @("repos/$appRepo/commits/$sha/status?per_page=100")
-    foreach ($c in @($s.statuses)) { $checks.Add(@{ Name = $c.context; State = ConvertTo-StatusState $c.state; Url = $c.target_url }) }
-    if ($s.total_count -gt @($s.statuses).Count) { $checks.Add(@{ Name = 'status list incomplete'; State = 'pending'; Url = '' }) }
+    $checks = @(Get-CommitChecks $sha)
 
     # 2. Previous deployment: state, log, health
     $prevDeployment = (@(Get-ReleaseDeployments $Release.Id | Where-Object { $_.EnvironmentId -eq $Previous.Id } | Sort-Object { Get-Utc $_.Created } -Descending) | Select-Object -First 1)
@@ -426,9 +534,10 @@ function Get-Evaluation {
     $prevAddress = if ($addresses) { [string] $addresses.($Previous.Name).$Deployable } else { '' }
     $addressKnown = [bool] $prevAddress
     function Read-Health {
-        $status = try { [string] (Invoke-RestMethod -Uri "$prevAddress/_healthcheck/detailed" -TimeoutSec 30 -SkipHttpErrorCheck).overallStatus } catch { 'Unreachable' }
-        if (-not $status) { $status = 'Unreachable' }
-        @{ At = [datetime]::UtcNow; Status = $status }
+        $address = $prevAddress
+        $r = Invoke-HealthRead -Reader { (Invoke-RestMethod -Uri "$address/_healthcheck/detailed" -TimeoutSec 30 -SkipHttpErrorCheck).overallStatus }.GetNewClosure()
+        if ($r.Attempts -gt 1) { Say "Health read: $($r.Status) after $($r.Attempts) attempts." }
+        @{ At = [datetime]::UtcNow; Status = $r.Status }
     }
     if ($addressKnown -and $prevTask.State -eq 'Success') {
         $reads += Read-Health
@@ -471,13 +580,22 @@ function Get-Evaluation {
     }
     $facts += @{ Checks = $checks; PathsKnown = $pathsKnown; PathsReason = $pathsReason; Paths = $paths; HoldItems = $holdItems; PreviousState = $prevTask.State
         LogFindings = $findings; Finished = $finished; Now = [datetime]::UtcNow; HealthReads = $reads; HealthAddressKnown = $addressKnown }
-    @{ Behind = $false; Sha = $sha; BaseSha = $baseSha; Decision = (Get-PromotionDecision -Facts $facts) }
+    $decision = Get-PromotionDecision -Facts $facts
+    if (Test-PipelineOnly -Flags @($decision.Flags) -Facts $facts) {
+        # The pipeline-only override: master of the application repository, read only when it can matter.
+        $m = Read-MasterState
+        Say "Master ($($m.Branch) $($m.Sha)): $($m.State)$(if (@($m.Evidence).Count) { ': ' + (@($m.Evidence) -join ', ') })"
+        $masterEvidence = if ($m.State -eq 'unknown') { @('read failed') } else { @($m.Evidence | Select-Object -First 5) }
+        $facts['PipelineOverride'] = @{ Minutes = ($facts.Now - $finished).TotalMinutes; MasterState = $m.State; MasterEvidence = $masterEvidence }
+        $decision = Get-PromotionDecision -Facts $facts
+    }
+    @{ Behind = $false; Sha = $sha; BaseSha = $baseSha; Decision = $decision }
 }
 
 function Set-HeldIssue {
     param($Release, $Target, $Evaluation, [string] $DeploymentNote = '')
     $title = "ui $($Release.Version) held before $($Target.Name)"
-    $evidence = Format-HeldEvidence -Version $Release.Version -Sha $Evaluation.Sha -Target $Target.Name -Flags $Evaluation.Decision.Flags -DeploymentNote $DeploymentNote
+    $evidence = Format-HeldEvidence -Version $Release.Version -Sha $Evaluation.Sha -Target $Target.Name -Flags $Evaluation.Decision.Flags -DeploymentNote $DeploymentNote -OverrideNote ([string] $Evaluation.Decision.Note)
     $hash = Get-EvidenceHash $evidence
     $body = "$evidence`n`nRun $RunUrl`n<!-- evidence:$hash -->"
     Say $evidence
@@ -503,7 +621,7 @@ function Close-HeldIssues {
         if ($rel -and $env) {
             $deps = @(Get-ReleaseDeployments $rel.Id | Where-Object { $_.EnvironmentId -eq $env.Id })
             if (@($deps | Where-Object { $_.TaskId -notin $ActiveTaskIds }).Count -gt 0) { $why = "ui $version has a deployment to $envName." }
-            elseif ($Candidate.Release -and $Candidate.Target.Id -eq $env.Id -and [datetimeoffset] $Candidate.Release.Assembled -gt [datetimeoffset] $rel.Assembled) { $why = "ui $($Candidate.Release.Version), a newer release, is the candidate for $envName." }
+            elseif ($Candidate.Release -and $Candidate.Target.Id -eq $env.Id -and (Compare-Release $Candidate.Release $rel) -gt 0) { $why = "ui $($Candidate.Release.Version), a newer release, is the candidate for $envName." }
         }
         if ($why) { Say "closing issue #$($i.number): $why"; if (-not $DryRun) { & gh issue close $i.number -R $ownRepo --comment "$why $RunUrl" | Out-Null } }
     }
@@ -535,7 +653,7 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
         continue
     }
     if ($DryRun) { Say 'Dry run: would answer the Sign-off.'; continue }
-    Submit-SignOff -TaskId $b.TaskId -Reason "Auto-promoted (recovered): no flag. checks green ($($ev.Decision.Passed.Count) passed), deployment and health ok in $($previous.Name), no pipeline change, no Hold label; run $RunUrl" -WaitSeconds 0
+    Submit-SignOff -TaskId $b.TaskId -Reason (Format-PromotionReason -Decision $ev.Decision -Previous $previous.Name -RunUrl $RunUrl -Recovered) -WaitSeconds 0
 }
 
 # 3. Candidate.
@@ -556,7 +674,7 @@ Say "Decision: $($decision.Decision)"
 if ($decision.Decision -eq 'wait') { $decision.Waiting | ForEach-Object { Say "  waiting: $_" }; return }
 if ($decision.Decision -eq 'hold') { Set-HeldIssue -Release $release -Target $target -Evaluation $ev; return }
 
-$reason = "Auto-promoted: no flag. checks green ($($decision.Passed.Count) passed), deployment and health ok in $($previous.Name), no pipeline change, no Hold label; run $RunUrl"
+$reason = Format-PromotionReason -Decision $decision -Previous $previous.Name -RunUrl $RunUrl
 Say $reason
 if ($DryRun) { return }
 $created = Invoke-Octopus "/api/$space/deployments" 'Post' @{ ReleaseId = $release.Id; EnvironmentId = $target.Id; Comments = "${PromotionMarker}: $RunUrl" }
