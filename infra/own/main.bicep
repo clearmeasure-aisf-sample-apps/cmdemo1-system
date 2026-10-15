@@ -92,8 +92,9 @@ resource access 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasSt
 }
 
 // Cloud worker runtime of the factory worker, phase 1 (cmdemo1-fworker docs/design/cloud-worker-runtimes.md, sections 2
-// and 3): one Container Apps job, each execution of which runs one work item with Claude Code on a Foundry deployment
-// of Claude, as an identity of its own (no key anywhere). Only in the environments below.
+// and 3): Container Apps jobs, each execution of which runs one work item, as an identity of its own (no key anywhere):
+// one with Claude Code on a Foundry deployment of Claude, one with Codex CLI on an OpenAI deployment. Only in the
+// environments below.
 var runnerEnvironments = ['tdd']
 var hasRunner = contains(runnerEnvironments, stack.environmentName)
 var runnerDeployment = 'claude-sonnet-5-5'
@@ -101,6 +102,8 @@ var runnerDeployment = 'claude-sonnet-5-5'
 // MarketplaceSubscriptionCannotBeCompleted (the subscription needs Microsoft's allowlisting), and a failing resource
 // would fail every deployment of the environment.
 var deploysClaude = false
+// The model of the Codex worker (Jeffrey, 2026-10-15).
+var codexDeployment = 'gpt-6.1-sol'
 // The workload profile of the Container Apps environment the job runs on: D4 once the environment has one (the kit's
 // template creates the environment); until then Consumption, which also allows 4 vCPU and 8 GiB.
 var runnerWorkloadProfile = 'Consumption'
@@ -173,6 +176,28 @@ resource claude 'Microsoft.CognitiveServices/accounts/deployments@2025-10-01-pre
       organizationName: 'Clear Measure'
       countryCode: 'US'
     }
+  }
+}
+
+// The model of the Codex worker: an OpenAI model is sold by Microsoft itself, no Marketplace purchase.
+resource sol 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = if (hasRunner) {
+  parent: foundry
+  name: codexDeployment
+  // One deployment operation at a time per account.
+  dependsOn: [
+    claude
+  ]
+  sku: {
+    name: 'GlobalStandard'
+    capacity: 600
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: codexDeployment
+      version: '2026-09-29'
+    }
+    versionUpgradeOption: 'NoAutoUpgrade'
   }
 }
 
@@ -328,12 +353,71 @@ resource runner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
   }
 }
 
-// The gateway starts, follows and stops executions of this job, and nothing else.
+// The same runner with Codex CLI on the OpenAI deployment instead of Claude Code: same identity, limits and size.
+resource codexRunner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
+  name: 'caj-${stack.slug}-${stack.environmentName}-fwrunner-codex'
+  location: stack.location
+  tags: runnerTags
+  dependsOn: [
+    runnerPull
+  ]
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${runnerIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: managedEnvironment.id
+    workloadProfileName: runnerWorkloadProfile
+    configuration: {
+      triggerType: 'Manual'
+      replicaTimeout: 14400
+      replicaRetryLimit: 0
+      manualTriggerConfig: {
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      registries: [
+        {
+          server: registry!.properties.loginServer
+          identity: runnerIdentity.id
+        }
+      ]
+    }
+    template: {
+      // The job API takes it although the Bicep types do not list it yet.
+      #disable-next-line BCP037
+      terminationGracePeriodSeconds: 60
+      containers: [
+        {
+          name: 'fwrunner'
+          // A placeholder until a Codex runner image is in the registry.
+          image: 'mcr.microsoft.com/azure-cli:latest'
+          command: ['/bin/sh', '-c']
+          args: ['echo placeholder: the Codex runner image is not in the registry yet']
+          resources: {
+            cpu: json('4')
+            memory: '8Gi'
+          }
+          env: [
+            { name: 'FWRUNNER_AGENT', value: 'codex' }
+            { name: 'AZURE_OPENAI_ENDPOINT', value: 'https://${foundry.name}.openai.azure.com/' }
+            { name: 'AZURE_OPENAI_DEPLOYMENT', value: codexDeployment }
+            { name: 'AZURE_CLIENT_ID', value: runnerIdentity!.properties.clientId }
+          ]
+        }
+      ]
+    }
+  }
+}
+
+// The gateway starts, follows and stops executions of the two jobs, and nothing else.
 resource runnerOperator 'Microsoft.Authorization/roleDefinitions@2022-04-01' = if (hasRunner && !empty(gateway.deployable)) {
   name: guid(resourceGroup().id, 'fwrunner-operator', stack.environmentName)
   properties: {
     roleName: '${stack.slug} ${stack.environmentName} fwrunner job operator'
-    description: 'Start, read and stop executions of the job caj-${stack.slug}-${stack.environmentName}-fwrunner.'
+    description: 'Start, read and stop executions of the jobs caj-${stack.slug}-${stack.environmentName}-fwrunner and -fwrunner-codex.'
     type: 'CustomRole'
     permissions: [
       {
@@ -348,6 +432,7 @@ resource runnerOperator 'Microsoft.Authorization/roleDefinitions@2022-04-01' = i
     ]
     assignableScopes: [
       runner.id
+      codexRunner.id
     ]
   }
 }
@@ -355,6 +440,16 @@ resource runnerOperator 'Microsoft.Authorization/roleDefinitions@2022-04-01' = i
 resource gatewayRunner 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasRunner && !empty(gateway.deployable)) {
   scope: runner
   name: guid(runner.id, 'fworker', 'fwrunner-operator')
+  properties: {
+    principalId: gateway.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', runnerOperator.name)
+  }
+}
+
+resource gatewayCodexRunner 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasRunner && !empty(gateway.deployable)) {
+  scope: codexRunner
+  name: guid(codexRunner.id, 'fworker', 'fwrunner-operator')
   properties: {
     principalId: gateway.principalId
     principalType: 'ServicePrincipal'
