@@ -236,7 +236,7 @@
         "prod"
       ],
       "database": false,
-      "cpu": "0.5",
+      "cpu": "1",
       "settings": {
         "FACTORY_OWNER_MODE": "1",
         "FACTORY_AUTHOR_APP": "1",
