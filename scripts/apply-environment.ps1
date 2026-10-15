@@ -92,7 +92,33 @@ function Get-StackOutput {
             $code = $LASTEXITCODE
             $PSNativeCommandUseErrorActionPreference = $true
             if ($code -eq 0) {
-                return ($json | ConvertFrom-Json -AsHashtable).outputs
+                $stack = $json | ConvertFrom-Json -AsHashtable
+                if ($stack.outputs -and $stack.outputs.ContainsKey('keyVaultName')) {
+                    return $stack.outputs
+                }
+                # The stack exists without outputs: its last apply failed (cmdemo1, 2026-10-15, kit #93). It is not a
+                # new environment: take the outputs of its last succeeded deployment, or stop.
+                $PSNativeCommandUseErrorActionPreference = $false
+                $history = az deployment group list --resource-group $resourceGroup --query "[?starts_with(name, '$stackName-') && properties.provisioningState=='Succeeded']" --output json 2>&1
+                $listed = $LASTEXITCODE -eq 0
+                $PSNativeCommandUseErrorActionPreference = $true
+                if (-not $listed) {
+                    Fail-Step "$stackName exists ($($stack.provisioningState)) but has no outputs, and its deployments could not be listed: $("$history" -replace '\s+', ' ')"
+                }
+                # Only this stack's own deployments (<stackName>-<13 characters>, not those of <stackName>-edge or of an
+                # environment whose name starts with this one's), naming this environment's vault (main.bicep, vaultName).
+                $vaultPrefix = "kv$slug$environmentName"
+                $vaultPrefix = $vaultPrefix.Substring(0, [Math]::Min(24, $vaultPrefix.Length))
+                $last = @($history | ConvertFrom-Json -AsHashtable) |
+                    Where-Object { $_.name -match "^$([regex]::Escape($stackName))-[0-9a-z]{13}$" } |
+                    Where-Object { $_.properties.outputs -and $_.properties.outputs.ContainsKey('keyVaultName') -and ([string] $_.properties.outputs.keyVaultName.value).StartsWith($vaultPrefix) } |
+                    Sort-Object { [datetime] $_.properties.timestamp } |
+                    Select-Object -Last 1
+                if (-not $last) {
+                    Fail-Step "$stackName exists ($($stack.provisioningState)) but has no outputs, and no succeeded deployment of it has any: not applying, which would take the environment for new and replace its secrets. A stack whose first apply failed has to be deleted before the next apply."
+                }
+                Write-Warning "$stackName is $($stack.provisioningState) and has no outputs: using those of its last succeeded deployment $($last.name) ($($last.properties.timestamp))."
+                return $last.properties.outputs
             }
             $stderr = ((Get-Content -LiteralPath $errorFile -Raw -ErrorAction SilentlyContinue) ?? '').Trim()
             if ($stderr -match 'DeploymentStackNotFound|ResourceNotFound|could not be found|was not found') {
