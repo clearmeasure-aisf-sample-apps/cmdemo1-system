@@ -286,6 +286,7 @@
       },
       "alwaysOn": true,
       "alwaysOnEnvironments": [
+        "tdd",
         "prod"
       ]
     }
