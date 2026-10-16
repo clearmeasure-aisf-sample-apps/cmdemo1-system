@@ -91,11 +91,12 @@ resource access 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasSt
   }
 }
 
-// Cloud worker runtime of the factory worker, phase 1 (cmdemo1-fworker docs/design/cloud-worker-runtimes.md, sections 2
-// and 3): Container Apps jobs, each execution of which runs one work item, as an identity of its own (no key anywhere):
-// one with Claude Code on a Foundry deployment of Claude, one with Codex CLI on an OpenAI deployment. Only in the
-// environments below.
-var runnerEnvironments = ['tdd']
+// Cloud worker runtime of the factory worker (cmdemo1-fworker docs/design/cloud-worker-runtimes.md, sections 2, 3 and 6):
+// Container Apps jobs, each execution of which runs one work item, as an identity of its own (no key anywhere): one with
+// Claude Code on a Foundry deployment of Claude, one with Codex CLI on an OpenAI deployment. In the environments below:
+// tdd since 2026-10-15 (rollout step 2), uat and prod since 2026-10-16 (steps 5 and 6, Jeffrey: "Implement all phases").
+// prod follows once its Container Apps environment has the D4 profile (one release earlier).
+var runnerEnvironments = ['tdd', 'uat']
 var hasRunner = contains(runnerEnvironments, stack.environmentName)
 var runnerDeployment = 'claude-sonnet-5-5'
 // Off until Azure Marketplace lets the subscription buy the Anthropic offer: the first deployment failed with
@@ -105,11 +106,24 @@ var deploysClaude = false
 // The model of the Codex worker (Jeffrey, 2026-10-15).
 var codexDeployment = 'gpt-6.1-sol'
 // The dedicated workload profile of the Container Apps environment the jobs run on (../modules/containerapps.bicep,
-// cmdemo1's own copy, gives tdd a D4 profile of zero to two nodes).
+// cmdemo1's own copy, gives tdd, which uat shares, and prod a D4 profile of zero to two nodes).
 var runnerWorkloadProfile = 'D4'
 // The runner image of cmdemo1-fworker (release.yml of pull request #150): Claude Code and Codex CLI in one image; the
 // job's FWRUNNER_AGENT chooses. Its own entry point runs the work item the gateway hands over.
-var runnerImage = '${loadJsonContent('../../system.json').azure.registry.loginServer}/cmdemo1/fwrunner:2.1.300-263'
+var system = loadJsonContent('../../system.json')
+var runnerImage = '${system.azure.registry.loginServer}/cmdemo1/fwrunner:2.1.300-263'
+// The Container Apps environment the apps of this environment run in, named as ../main.bicep names it
+// (managedEnvironmentName; cmdemo1 has no azure.appEnvironment): uat runs in tdd's, prod in its own with a region suffix.
+var runnerEnvironment = first(filter(system.environments, e => e.name == stack.environmentName))!
+var runnerSharedWith = string(union({ sharesAppEnvironmentWith: '' }, runnerEnvironment).sharesAppEnvironmentWith)
+var runnerHost = empty(runnerSharedWith) ? runnerEnvironment : first(filter(system.environments, e => e.name == runnerSharedWith))!
+var runnerLocation = string(union({ appLocation: stack.location }, runnerHost).appLocation)
+var runnerPlacement = contains(runnerHost, 'appLocation') ? '-${take(uniqueString(runnerLocation), 4)}' : ''
+// The registry is in the nonprod group (the seed's). There the runner pulls as itself (AcrPull below); in prod, whose
+// deploy identity has no right in the nonprod group, the job pulls as the environment's shared identity, which the seed
+// gave AcrPull, and which the containers cannot use (identitySettings, lifecycle None), as the kit does for the apps.
+var registryInThisGroup = resourceGroup().name == system.azure.resourceGroups.nonprod
+var sharedIdentityId = first(filter(system.azure.identities.apps, a => a.environment == stack.environmentName))!.resourceId
 var gateway = first(filter(stack.identities, i => i.deployable == 'fworker')) ?? {
   deployable: ''
   principalId: ''
@@ -122,14 +136,12 @@ var acrPull = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 
 // Foundry User (formerly Azure AI User): call the account's model deployments.
 var foundryUser = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '53ca6127-db72-4b80-b1b0-d745d6d5456d')
 
-resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = if (hasRunner) {
-  name: loadJsonContent('../../system.json').azure.registry.name
+resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = if (hasRunner && registryInThisGroup) {
+  name: system.azure.registry.name
 }
 
-// The environment's default name in this group: right while the environment has no appLocation of its own and the
-// system no azure.appEnvironment (../main.bicep, managedEnvironmentName).
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' existing = if (hasRunner) {
-  name: 'cae-${stack.slug}-${stack.environmentName}'
+  name: 'cae-${stack.slug}-${runnerHost.name}${runnerPlacement}'
 }
 
 resource runnerIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (hasRunner) {
@@ -265,7 +277,7 @@ resource transcriptLifetime 'Microsoft.Storage/storageAccounts/managementPolicie
   }
 }
 
-resource runnerPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasRunner) {
+resource runnerPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasRunner && registryInThisGroup) {
   scope: registry
   name: guid(registry.id, 'fwrunner', stack.environmentName, acrPull)
   properties: {
@@ -299,16 +311,14 @@ resource runnerTranscripts 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 // A job has no termination grace setting: the API refuses terminationGracePeriodSeconds in a job template.
 resource runner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
   name: 'caj-${stack.slug}-${stack.environmentName}-fwrunner'
-  location: stack.location
+  location: runnerLocation
   tags: runnerTags
   dependsOn: [
     runnerPull
   ]
   identity: {
     type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${runnerIdentity.id}': {}
-    }
+    userAssignedIdentities: union({ '${runnerIdentity.id}': {} }, registryInThisGroup ? {} : { '${sharedIdentityId}': {} })
   }
   properties: {
     environmentId: managedEnvironment.id
@@ -321,10 +331,20 @@ resource runner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
         parallelism: 1
         replicaCompletionCount: 1
       }
+      ...(registryInThisGroup
+        ? {}
+        : {
+            identitySettings: [
+              {
+                identity: sharedIdentityId
+                lifecycle: 'None'
+              }
+            ]
+          })
       registries: [
         {
-          server: registry!.properties.loginServer
-          identity: runnerIdentity.id
+          server: system.azure.registry.loginServer
+          identity: registryInThisGroup ? runnerIdentity.id : sharedIdentityId
         }
       ]
     }
@@ -355,16 +375,14 @@ resource runner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
 // The same runner with Codex CLI on the OpenAI deployment instead of Claude Code: same identity, limits and size.
 resource codexRunner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
   name: 'caj-${stack.slug}-${stack.environmentName}-fwrunner-codex'
-  location: stack.location
+  location: runnerLocation
   tags: runnerTags
   dependsOn: [
     runnerPull
   ]
   identity: {
     type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${runnerIdentity.id}': {}
-    }
+    userAssignedIdentities: union({ '${runnerIdentity.id}': {} }, registryInThisGroup ? {} : { '${sharedIdentityId}': {} })
   }
   properties: {
     environmentId: managedEnvironment.id
@@ -377,10 +395,20 @@ resource codexRunner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
         parallelism: 1
         replicaCompletionCount: 1
       }
+      ...(registryInThisGroup
+        ? {}
+        : {
+            identitySettings: [
+              {
+                identity: sharedIdentityId
+                lifecycle: 'None'
+              }
+            ]
+          })
       registries: [
         {
-          server: registry!.properties.loginServer
-          identity: runnerIdentity.id
+          server: system.azure.registry.loginServer
+          identity: registryInThisGroup ? runnerIdentity.id : sharedIdentityId
         }
       ]
     }
