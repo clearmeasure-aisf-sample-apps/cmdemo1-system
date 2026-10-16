@@ -1,8 +1,10 @@
-# Automatic promotion of the work-order app's releases (deployable ui), by the owner's decision of 2026-10-14 (Jeffrey
+# Automatic promotion of releases of deployables ui (the work-order app) and fworker, by the owner's decision of 2026-10-14 (Jeffrey
 # Palermo): "release candidates automatically deployed to production if there is nothing to flag them. don't let them
-# stop in release queue". Only ui: every other deployable keeps a person's sign-off. scripts/auto-promote/ui-auto-promote.ps1
-# finds the newest ui release that succeeded in the previous environment (tdd before uat, uat before prod) and has no
-# deployment yet to the next, one environment step per run, never while a deployment of ui to uat or prod is queued,
+# stop in release queue". ui, and fworker under the same rules (owner's decision of 2026-10-15); every other deployable
+# keeps a person's sign-off. Each run promotes ui first, then fworker, one after the other in this one job (never two
+# promotions to one environment at once). The per-deployable settings (application paths, health path) are a table at the top of the script.
+# scripts/auto-promote/ui-auto-promote.ps1 -Deployable <name> finds the newest release that succeeded in the previous environment (tdd before uat, uat before prod) and has no
+# deployment yet to the next, one environment step per run, never while a deployment of it to uat or prod is queued,
 # running or waiting. It promotes it, and answers its Sign-off as the system's service account with a reason that names
 # this run, unless something flags it. The flags (every rule is a function, tested by scripts/auto-promote/test-ui-auto-promote.ps1,
 # which this workflow runs first; the owner's lists of documentation paths and build files are at the top of the script):
@@ -10,30 +12,32 @@
 #      (pending: the run waits and flags nothing yet).
 #   2. Deployment or health failed: the deployment to the previous environment did not succeed, its task log has an
 #      Error or Warning line or a step SuccessWithWarning (the rule of the kit's test-deployment-logs.ps1), or
-#      /_healthcheck/detailed was not Healthy in a read taken since it finished (an answered non-Healthy status counts at
+#      its health (ui /_healthcheck/detailed overallStatus; fworker /ready: 200; a 503 "not ready" only when every attempt answered it) was not Healthy in a read taken since it finished (an answered non-Healthy status counts at
 #      once; an unreachable or timed-out read is retried up to 3 times, 20 to 30 s apart, in the same run, and flags as
 #      Unreachable only when all four attempts fail), or the task log is unreadable. Health rule, exactly: no read since the deployment finished is not
 #      Healthy, at least two reads are Healthy and at least 5 minutes apart, and the later one is at least 10 minutes
-#      after the deployment finished; otherwise the run waits (a ui address that is not known: wait, "health address
+#      after the deployment finished; otherwise the run waits (an address that is not known: wait, "health address
 #      unknown"). Each run adds one read (two, 5 minutes apart, when the first one comes late), kept in branch
 #      auto-promote (one commit, force-pushed, no history; ui-auto-promote.json: reads per deployment, two days).
 #   3. Pipeline or infra change: compared with the commit running in the next environment (/_build "commit"), a
-#      changed path outside src/ or a build/project file in src/ (Directory.Build.*, global.json, nuget.config, *.csproj,
-#      *.sln, *.props, *.targets, Dockerfile*). Never a flag: src/Database/ (migrations; owner, 2026-10-14), .github/private-build/ (the kit's script; owner, 2026-10-14) and
+#      changed path outside the deployable's application paths (ui: src/; fworker: gateway/, plugin/, tests/,
+#      config/instance.json) or a build/project file inside them (Directory.Build.*, global.json, nuget.config, *.csproj,
+#      *.sln, *.props, *.targets, Dockerfile*). Never a flag: for ui src/Database/ (migrations; owner, 2026-10-14) and .github/private-build/ (the kit's script; owner, 2026-10-14); for both
 #      documentation (docs/**, arch/**, *.md anywhere: proposed, one list in the script for the owner to edit). A
 #      comparison that is incomplete (no base commit, over 250 commits, 300 files or more) flags.
 #   4. Hold label: a pull request in those commits, or an issue they close or reference (also owner/repo#N), labelled
 #      Hold. A read of that chain that fails or is cut makes the run wait.
+# Health reads of both deployables share one state file (keys "<deployable>/<deployment id>").
 # A deployment this workflow created that waits at its Sign-off (its Comments say so) is evaluated again by a later run: no
 # flag, it is answered; a flag, it stays waiting and the issue says so. Any unfinished deployment or runbook run to the
 # target environment, of any project, stops the run; so does a task listing that fails or is incomplete.
 # A flagged release is not deployed: no Sign-off waits in the environment and holds it for the other deployables. One
-# issue "ui <version> held before <env>" (label release-held, no assignee) lists each flag with its evidence; it closes
+# issue "<deployable> <version> held before <env>" (label release-held, no assignee) lists each flag with its evidence; it closes
 # when the release has a deployment there or a newer release replaces it. A person promotes it in Octopus as today.
 # Exception (owner, 2026-10-14): when flag 3 is the only flag, the release is promoted anyway 60 minutes after its deployment
 # to the previous environment finished, if master of the application repository is green (pending, red or unreadable: held).
 # Credentials: GitHub OIDC to Octopus as the system's service account (environment "octopus"; it must create
-# deployments of cmdemo1-ui and answer their Sign-off: it is a Space Manager of the space), and this workflow's token
+# deployments of cmdemo1-ui and cmdemo1-fworker and answer their Sign-off (system.json pipelineSignOff of each): it is a Space Manager of the space), and this workflow's token
 # for issues and the state branch. The application repository is public. No stored secret.
 name: ui-auto-promote
 
@@ -67,16 +71,19 @@ jobs:
           persist-credentials: false
 
       - name: Test the decision rules
+        id: rules
         shell: pwsh
         run: ./scripts/auto-promote/test-ui-auto-promote.ps1
 
       - name: Sign in to Octopus
+        id: login
         uses: OctopusDeploy/login@v2
         with:
           server: ${{ vars.OCTOPUS_URL }}
           service_account_id: ${{ vars.OCTOPUS_SERVICE_ACCOUNT_ID }}
 
       - name: Fetch the health reads
+        id: fetch
         run: |
           set -euo pipefail
           echo '{}' > "$RUNNER_TEMP/ui-auto-promote.json"
@@ -85,7 +92,7 @@ jobs:
             git show FETCH_HEAD:ui-auto-promote.json > "$RUNNER_TEMP/ui-auto-promote.json" || echo '{}' > "$RUNNER_TEMP/ui-auto-promote.json"
           fi
 
-      - name: Promote or hold
+      - name: Promote or hold ui
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -93,7 +100,20 @@ jobs:
         run: |
           $run = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           $extra = if ($env:DRY_RUN -eq 'true') { @('-DryRun') } else { @() }
-          ./scripts/auto-promote/ui-auto-promote.ps1 -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run @extra
+          ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable ui -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run @extra
+
+      # After ui, in the same job: never two promotions to one environment at once. Runs also when the ui step failed,
+      # never when the rules, the sign-in or the reads failed.
+      - name: Promote or hold fworker
+        if: ${{ !cancelled() && steps.rules.outcome == 'success' && steps.login.outcome == 'success' && steps.fetch.outcome == 'success' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          $run = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $extra = if ($env:DRY_RUN -eq 'true') { @('-DryRun') } else { @() }
+          ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable fworker -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run @extra
 
       - name: Keep the health reads for the next job
         if: ${{ always() }}

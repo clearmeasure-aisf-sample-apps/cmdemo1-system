@@ -3,13 +3,14 @@
 
 <#
 .SYNOPSIS
-    Promotes the newest release of deployable ui to the next environment when nothing flags it, and holds it (one
-    GitHub issue) when something does. One environment step per run.
+    Promotes the newest release of a deployable ($Deployable: ui, or another one in $DeployableSettings) to the next
+    environment when nothing flags it, and holds it (one GitHub issue) when something does. One environment step per run.
 
 .DESCRIPTION
     Owner's decision (Jeffrey Palermo, 2026-10-14): "release candidates automatically deployed to production if there
-    is nothing to flag them. don't let them stop in release queue". For deployable ui only; every other deployable
-    keeps a person's sign-off. Run by workflow ui-auto-promote.
+    is nothing to flag them. don't let them stop in release queue". For deployable ui; fworker under the same rules by the
+    owner's decision of 2026-10-15. A deployable that is not in $DeployableSettings keeps a person's sign-off (the script
+    stops). Run by workflow ui-auto-promote, once per deployable, one after the other. Below, "ui" stands for the deployable.
 
     Candidate (Select-Candidate): releases newest first by version (Major.Minor.Patch; an unparsable version below every
     parsable one; Assembled only between equal or unparsable versions: releases can be assembled out of order); the first whose latest deployment to the previous
@@ -30,15 +31,15 @@
       2 deployment  Flag: the deployment to the previous environment is not Success; its task log is unreadable (under 20
                  lines or without its "Task ID:" header); the log has a line at Error, Warning or Fatal level or a step
                  SuccessWithWarning (the kit's test-deployment-logs.ps1 rule, plus Fatal, which a real failed ui task
-                 logs); or a /_healthcheck/detailed read since it finished was not Healthy (an answered status other
+                 logs); or a health read (HealthPath of the deployable: ui /_healthcheck/detailed, fworker /ready) since it finished was not Healthy (an answered status other
                  than Healthy counts at once; an unreachable or timed-out read is tried up to 3 more times, 20 to 30 s
                  apart, in the same run, and is recorded Unreachable, which flags, only when all four fail). Health rule: no read since the deployment finished is not Healthy, at least two reads
                  are Healthy and at least 5 minutes apart, and the later one is at least 10 minutes after the deployment
                  finished. Else wait. A ui address that is not known: wait ("health address unknown").
       3 pipeline  Compared with the commit running in the next environment (/_build "commit", else the commit in the notes of
-                 the release running there), a changed path (a renamed file counts both names) outside src/, or a build
-                 or project file anywhere in src/ (BuildFiles list), unless it is documentation (DocumentationPaths list:
-                 docs/**, arch/**, *.md anywhere, including .github/x.md). src/Database/ and .github/private-build/ (the kit's script) never flag (owner, 2026-10-14).
+                 the release running there), a changed path (a renamed file counts both names) outside the deployable's
+                 ApplicationPaths (ui: src/), or a build or project file anywhere (BuildFiles list), unless it is documentation (DocumentationPaths list:
+                 docs/**, arch/**, *.md anywhere, including .github/x.md). UnflaggedFolders never flag (ui: src/Database/ and .github/private-build/, owner 2026-10-14).
                  A comparison that is unknown or incomplete (no base commit, more than 250 commits, 300 files or more, a
                  read failed) flags as "comparison incomplete".
       4 hold      Flag: a pull request in the commits between those two, or an issue they close or reference (#N and
@@ -46,7 +47,7 @@
                  ignored). Wait: any read of that chain failed or was cut (more than 300 items).
 
     Flagged: the deployment is NOT created, so no Sign-off waits in the environment and holds it for every other
-    deployable. One issue "ui <version> held before <env>" (label release-held, no assignee) lists each flag with its
+    deployable. One issue "<deployable> <version> held before <env>" (label release-held, no assignee) lists each flag with its
     evidence; it is edited only when the evidence changes. It closes when that release has a deployment in the environment
     that no longer waits for this workflow, or a newer release is the candidate or runs there already.
     Pipeline-only override (owner, 2026-10-14): when flag 3 (a known change, not "comparison incomplete") is the only flag
@@ -78,17 +79,46 @@ $ProgressPreference = 'SilentlyContinue'
 # Documentation-only paths: a change to them alone does not flag (proposed, not decided by the owner: remove a line to
 # make that kind of change a flag). ** any depth, * inside one folder. *.md matches a Markdown file anywhere.
 $DocumentationPaths = @('docs/**', 'arch/**', '*.md', '**/*.md')
-# Build and project files that flag wherever they are in src/ (file names, or *.ext).
+# Build and project files that flag wherever they are, also inside the application paths (file names, or *.ext).
 $BuildFiles = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props', 'global.json', 'nuget.config',
     '*.csproj', '*.sln', '*.slnx', '*.props', '*.targets', 'Dockerfile*')
-# Never a flag (prefixes of the repository path).
-# .github/private-build/ holds the kit's own script, synced by the kit (owner's decision 2026-10-14).
-$UnflaggedFolders = @('src/Database/', '.github/private-build/')
+# The deployables this workflow promotes, keyed by deployable name (system.json deployables[].name). A deployable that is
+# not here is not promoted automatically (the script stops). Per deployable:
+#   ApplicationPaths  globs of the application repository: a change inside them is not a pipeline change, except a build
+#                     or project file (BuildFiles). Every path outside them flags, unless documentation or UnflaggedFolders.
+#   UnflaggedFolders  never a flag (prefixes of the repository path).
+#   HealthPath        read in the previous environment since the deployment finished.
+#   HealthRead        overallStatus: the JSON overallStatus of the answer is the status (Healthy or not, answered at once).
+#                     ready: 200 is Healthy; 503 with a JSON "ready" answer is NotReady, retried like an unreachable read
+#                     (the gateway answers it while it starts) and recorded only when every attempt answered it; anything
+#                     else (another status code, no answer, a timeout) is retried like an unreachable read.
+$DeployableSettings = @{
+    # The work-order app (cmdemo1-workorders). Owner's decision 2026-10-14.
+    ui      = @{
+        ApplicationPaths = @('src/**')
+        # src/Database/: migrations; .github/private-build/: the kit's own script, synced by the kit (owner, 2026-10-14).
+        UnflaggedFolders = @('src/Database/', '.github/private-build/')
+        HealthPath       = '/_healthcheck/detailed'
+        HealthRead       = 'overallStatus'
+    }
+    # The factory worker gateway (cmdemo1-fworker). Owner's decision 2026-10-15: same rules as ui. Application: the
+    # gateway, the plugin it serves to workers, the tests, and the instance configuration the gateway reads. Pipeline: the
+    # rest (.github/, Dockerfile, .dockerignore, run-*.sh, tools/, config/deploy.overrides.json, config/apply-overrides.ps1).
+    fworker = @{
+        ApplicationPaths = @('gateway/**', 'plugin/**', 'tests/**', 'config/instance.json')
+        UnflaggedFolders = @()
+        HealthPath       = '/ready'
+        HealthRead       = 'ready'
+    }
+}
 # Pipeline-only override (owner's decision, Jeffrey Palermo 2026-10-14): a release whose only flag is a pipeline or infra
 # change is promoted anyway this many minutes after its deployment to the previous environment finished, when master of
 # the application repository is green.
 $PipelineOverrideMinutes = 60
 $PromotionMarker = 'Promoted by workflow ui-auto-promote'
+
+$Settings = $DeployableSettings[$Deployable]
+if (-not $Settings) { throw "deployable $Deployable is not promoted automatically: no entry in `$DeployableSettings ($(@($DeployableSettings.Keys | Sort-Object) -join ', '))" }
 
 function ConvertTo-GlobRegex([string] $Glob) {
     $r = [regex]::Escape($Glob) -replace '\\\*\\\*/', '(?:.*/)?' -replace '\\\*\\\*', '.*' -replace '\\\*', '[^/]*'
@@ -100,11 +130,13 @@ function Test-GlobMatch([string] $Path, [string[]] $Globs) {
 }
 
 function Get-PipelineEvidence {
-    param([string[]] $Paths, [string[]] $Documentation = $DocumentationPaths, [string[]] $Build = $BuildFiles, [string[]] $Unflagged = $UnflaggedFolders)
+    param([string[]] $Paths, [string[]] $Documentation = $DocumentationPaths, [string[]] $Build = $BuildFiles,
+        [string[]] $Unflagged = $Settings.UnflaggedFolders, [string[]] $Application = $Settings.ApplicationPaths)
+    $outside = "outside $(@($Application | ForEach-Object { $_ -replace '\*\*$', '' }) -join ', ')"
     foreach ($p in @($Paths | Where-Object { $_ })) {
         if (Test-GlobMatch $p $Documentation) { continue }
-        if ($Unflagged | Where-Object { $p.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) { continue }
-        if (-not $p.StartsWith('src/', [StringComparison]::OrdinalIgnoreCase)) { "$p (outside src/)"; continue }
+        if (@($Unflagged | Where-Object { $_ -and $p.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { continue }
+        if (-not (Test-GlobMatch $p $Application)) { "$p ($outside)"; continue }
         if (Test-GlobMatch ($p.Split('/')[-1]) $Build) { "$p (build or project file)" }
     }
 }
@@ -153,14 +185,30 @@ function Get-HealthVerdict {
 function Invoke-HealthRead {
     # One health read. Reader: the answered overallStatus; it throws or answers nothing when the app is unreachable or the
     # request timed out, and then it is tried again up to Retries more times, Pause between (20 to 30 s). An answered
-    # status, Healthy or not, counts at once. Returns @{ Status; Attempts }; Status Unreachable only when every attempt failed.
+    # status, Healthy or not, counts at once, except NotReady (an app still starting), which is tried again too and
+    # counts only when every attempt answered it. Returns @{ Status; Attempts }; Status Unreachable when every attempt
+    # failed.
     param([scriptblock] $Reader, [int] $Retries = 3, [scriptblock] $Pause = { Start-Sleep -Seconds (Get-Random -Minimum 20 -Maximum 31) })
+    $notReady = 0
     for ($i = 1; $i -le $Retries + 1; $i++) {
         $status = try { [string] (& $Reader) } catch { '' }
-        if ($status) { return @{ Status = $status; Attempts = $i } }
+        if ($status -eq 'NotReady') { $notReady++ }
+        elseif ($status) { return @{ Status = $status; Attempts = $i } }
         if ($i -le $Retries) { & $Pause }
     }
-    @{ Status = 'Unreachable'; Attempts = $Retries + 1 }
+    @{ Status = ($notReady -eq $Retries + 1 ? 'NotReady' : 'Unreachable'); Attempts = $Retries + 1 }
+}
+
+function ConvertTo-ReadyStatus {
+    # A /ready answer (HealthRead ready): 200 is Healthy; 503 whose JSON has "ready" is NotReady (Invoke-HealthRead retries it);
+    # anything else is '' (not answered: Invoke-HealthRead tries again, as for an unreachable app).
+    param([int] $StatusCode, [string] $Body)
+    if ($StatusCode -eq 200) { return 'Healthy' }
+    if ($StatusCode -eq 503) {
+        $j = try { $Body | ConvertFrom-Json -AsHashtable } catch { $null }
+        if ($j -is [Collections.IDictionary] -and $j.ContainsKey('ready')) { return 'NotReady' }
+    }
+    ''
 }
 
 function Get-LogFindings {
@@ -185,7 +233,7 @@ function Get-PromotionDecision {
        Now, HealthReads, HealthAddressKnown, and PipelineOverride = @{ Minutes (since the previous deployment finished);
        MasterState = green|pending|red|unknown; MasterEvidence } (read only when the pipeline flag is the only one).
        Returns @{ Decision = promote|hold|wait; Reason = no-flag|pipeline-override (promote); Note (hold); Flags; Waiting; Passed }. #>
-    param([hashtable] $Facts, [int] $OverrideMinutes = $PipelineOverrideMinutes)
+    param([hashtable] $Facts, [int] $OverrideMinutes = $PipelineOverrideMinutes, [string] $Name = $Deployable, [string] $HealthPath = $Settings.HealthPath)
     $flags = [Collections.Generic.List[object]]::new()
     $waiting = [Collections.Generic.List[string]]::new()
 
@@ -198,10 +246,10 @@ function Get-PromotionDecision {
     if ($Facts.PreviousState -ne 'Success') { $d.Add("the deployment to the previous environment ended $($Facts.PreviousState)") }
     foreach ($l in @($Facts.LogFindings)) { if ($l) { $d.Add("log: $l") } }
     if ($d.Count -eq 0) {
-        if (-not $Facts.HealthAddressKnown) { $waiting.Add('health address unknown: the address of ui in the previous environment could not be read') }
+        if (-not $Facts.HealthAddressKnown) { $waiting.Add("health address unknown: the address of $Name in the previous environment could not be read") }
         else {
             $h = Get-HealthVerdict -Finished $Facts.Finished -Now $Facts.Now -Reads @($Facts.HealthReads)
-            if ($h -eq 'fail') { $d.Add("health: /_healthcheck/detailed was not Healthy: $(@($Facts.HealthReads | Where-Object { $_.Status -ne 'Healthy' } | ForEach-Object { "$($_.Status) at $($_.At.ToString('u'))" }) -join '; ')") }
+            if ($h -eq 'fail') { $d.Add("health: $HealthPath was not Healthy: $(@($Facts.HealthReads | Where-Object { $_.Status -ne 'Healthy' } | ForEach-Object { "$($_.Status) at $($_.At.ToString('u'))" }) -join '; ')") }
             elseif ($h -eq 'wait') { $waiting.Add('health window: not yet 10 minutes since the deployment finished with two Healthy reads 5 minutes apart') }
         }
     }
@@ -239,10 +287,10 @@ function Get-PromotionDecision {
 
 function Get-BusyReason {
     # Items: @{ Kind = deployment|runbook; ProjectId; EnvironmentId } of every task that is not finished.
-    param([object[]] $Items, [string] $TargetEnvironmentId, [string] $FirstEnvironmentId, [string] $ProjectId)
+    param([object[]] $Items, [string] $TargetEnvironmentId, [string] $FirstEnvironmentId, [string] $ProjectId, [string] $Name = $Deployable)
     foreach ($i in @($Items)) {
         if ($i.EnvironmentId -eq $TargetEnvironmentId) { return "a $($i.Kind) of project $($i.ProjectId) to the target environment is not finished" }
-        if ($i.Kind -eq 'deployment' -and $i.ProjectId -eq $ProjectId -and $i.EnvironmentId -ne $FirstEnvironmentId) { return 'a ui deployment is not finished in another environment' }
+        if ($i.Kind -eq 'deployment' -and $i.ProjectId -eq $ProjectId -and $i.EnvironmentId -ne $FirstEnvironmentId) { return "a $Name deployment is not finished in another environment" }
     }
 }
 
@@ -394,13 +442,31 @@ function Format-PromotionReason {
 }
 
 function Format-HeldEvidence {
-    param([string] $Version, [string] $Sha, [string] $Target, [object[]] $Flags, [string] $DeploymentNote = '', [string] $OverrideNote = '')
-    $b = "ui $Version (commit $Sha) is not promoted to $Target automatically. Flags:`n"
+    param([string] $Version, [string] $Sha, [string] $Target, [object[]] $Flags, [string] $DeploymentNote = '', [string] $OverrideNote = '', [string] $Name = $Deployable)
+    $b = "$Name $Version (commit $Sha) is not promoted to $Target automatically. Flags:`n"
     foreach ($f in $Flags) { $b += "`n**$($f.Flag)**`n" + (($f.Evidence | ForEach-Object { "- $_" }) -join "`n") + "`n" }
     if ($OverrideNote) { $b += "`n$OverrideNote`n" }
     $b += "`nRules: health needs no read since the deployment finished that is not Healthy, two Healthy reads at least 5 minutes apart, the later one at least 10 minutes after the deployment finished; an unreachable or timed-out read is retried up to 3 times, 20 to 30 seconds apart, and flags only when all four attempts fail."
     if ($DeploymentNote) { $b += "`n$DeploymentNote" } else { $b += "`nNo deployment was created. A person promotes it in Octopus (the Sign-off waits for them)." }
     $b
+}
+
+function Get-HeldTitle([string] $Version, [string] $Environment, [string] $Name = $Deployable) { "$Name $Version held before $Environment" }
+function Get-HeldTitleParts {
+    # Version and Environment of a held issue of this deployable; $null for any other title (another deployable's too).
+    param([string] $Title, [string] $Name = $Deployable)
+    if ($Title -cmatch ('^' + [regex]::Escape($Name) + ' (\S+) held before (\S+)$')) { @{ Version = $Matches[1]; Environment = $Matches[2] } }
+}
+function Get-StateKey([string] $DeploymentId, [string] $Name = $Deployable) {
+    # Health reads are kept per deployable and deployment ("fworker/Deployments-12"); Read-StateReads also finds ui's
+    # reads stored before the key named the deployable (bare "Deployments-12").
+    "$Name/$DeploymentId"
+}
+function Read-StateReads([hashtable] $State, [string] $DeploymentId, [string] $Name = $Deployable) {
+    $k = Get-StateKey $DeploymentId $Name
+    if ($State.ContainsKey($k)) { return @($State[$k]) }
+    if ($Name -eq 'ui' -and $State.ContainsKey($DeploymentId)) { return @($State[$DeploymentId]) }
+    @()
 }
 
 if ($LoadOnly) { return }
@@ -528,14 +594,20 @@ function Get-Evaluation {
     $warned = @((Invoke-Octopus "/api/tasks/$($prevTask.Id)/details?verbose=false").ActivityLogs[0].Children | Where-Object { $_.Status -eq 'SuccessWithWarning' } | ForEach-Object Name)
     $raw = try { [string] (Invoke-Octopus "/api/tasks/$($prevTask.Id)/raw") } catch { '' }
     $findings = @(Get-LogFindings -Raw $raw -TaskId $prevTask.Id -WarnedSteps $warned)
-    $key = [string] $prevDeployment.Id
-    $stored = if ($state.ContainsKey($key)) { @($state[$key]) } else { @() }
+    $key = Get-StateKey ([string] $prevDeployment.Id)
+    $stored = @(Read-StateReads $state ([string] $prevDeployment.Id))
     $reads = @($stored | ForEach-Object { @{ At = Get-Utc $_.at; Status = [string] $_.status } })
     $prevAddress = if ($addresses) { [string] $addresses.($Previous.Name).$Deployable } else { '' }
     $addressKnown = [bool] $prevAddress
     function Read-Health {
-        $address = $prevAddress
-        $r = Invoke-HealthRead -Reader { (Invoke-RestMethod -Uri "$address/_healthcheck/detailed" -TimeoutSec 30 -SkipHttpErrorCheck).overallStatus }.GetNewClosure()
+        $uri = "$prevAddress$($Settings.HealthPath)"
+        $reader = switch ($Settings.HealthRead) {
+            'overallStatus' { { (Invoke-RestMethod -Uri $uri -TimeoutSec 30 -SkipHttpErrorCheck).overallStatus }.GetNewClosure() }
+            # The function travels as a value: a closure does not see the script's own functions.
+            'ready' { $toReady = ${function:ConvertTo-ReadyStatus}; { $w = Invoke-WebRequest -Uri $uri -TimeoutSec 30 -SkipHttpErrorCheck; & $toReady -StatusCode ([int] $w.StatusCode) -Body ([string] $w.Content) }.GetNewClosure() }
+            default { throw "HealthRead $($Settings.HealthRead) of $Deployable is not known (overallStatus or ready)" }
+        }
+        $r = Invoke-HealthRead -Reader $reader
         if ($r.Attempts -gt 1) { Say "Health read: $($r.Status) after $($r.Attempts) attempts." }
         @{ At = [datetime]::UtcNow; Status = $r.Status }
     }
@@ -594,7 +666,7 @@ function Get-Evaluation {
 
 function Set-HeldIssue {
     param($Release, $Target, $Evaluation, [string] $DeploymentNote = '')
-    $title = "ui $($Release.Version) held before $($Target.Name)"
+    $title = Get-HeldTitle $Release.Version $Target.Name
     $evidence = Format-HeldEvidence -Version $Release.Version -Sha $Evaluation.Sha -Target $Target.Name -Flags $Evaluation.Decision.Flags -DeploymentNote $DeploymentNote -OverrideNote ([string] $Evaluation.Decision.Note)
     $hash = Get-EvidenceHash $evidence
     $body = "$evidence`n`nRun $RunUrl`n<!-- evidence:$hash -->"
@@ -612,16 +684,17 @@ function Close-HeldIssues {
     # candidate or runs in that environment.
     param($Candidate, [object[]] $ActiveTaskIds)
     foreach ($i in $heldIssues) {
-        if ($i.title -notmatch '^ui (\S+) held before (\S+)$') { continue }
-        $version = $Matches[1]; $envName = $Matches[2]
+        $parts = Get-HeldTitleParts $i.title
+        if (-not $parts) { continue }
+        $version = $parts.Version; $envName = $parts.Environment
         if ($Candidate.Release -and $Candidate.Release.Version -eq $version -and $Candidate.Target.Name -eq $envName) { continue }
         $rel = (@($releases | Where-Object Version -eq $version) | Select-Object -First 1)
         $env = (@($envs | Where-Object Name -eq $envName) | Select-Object -First 1)
         $why = $null
         if ($rel -and $env) {
             $deps = @(Get-ReleaseDeployments $rel.Id | Where-Object { $_.EnvironmentId -eq $env.Id })
-            if (@($deps | Where-Object { $_.TaskId -notin $ActiveTaskIds }).Count -gt 0) { $why = "ui $version has a deployment to $envName." }
-            elseif ($Candidate.Release -and $Candidate.Target.Id -eq $env.Id -and (Compare-Release $Candidate.Release $rel) -gt 0) { $why = "ui $($Candidate.Release.Version), a newer release, is the candidate for $envName." }
+            if (@($deps | Where-Object { $_.TaskId -notin $ActiveTaskIds }).Count -gt 0) { $why = "$Deployable $version has a deployment to $envName." }
+            elseif ($Candidate.Release -and $Candidate.Target.Id -eq $env.Id -and (Compare-Release $Candidate.Release $rel) -gt 0) { $why = "$Deployable $($Candidate.Release.Version), a newer release, is the candidate for $envName." }
         }
         if ($why) { Say "closing issue #$($i.number): $why"; if (-not $DryRun) { & gh issue close $i.number -R $ownRepo --comment "$why $RunUrl" | Out-Null } }
     }
@@ -645,7 +718,7 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
     $rel = (@($releases | Where-Object Id -eq $b.Deployment.ReleaseId) | Select-Object -First 1)
     $tIndex = [array]::IndexOf(@($envs | ForEach-Object Id), $b.EnvironmentId)
     $target = $envs[$tIndex]; $previous = $envs[$tIndex - 1]
-    Say "Recovery: ui $($rel.Version) waits at its Sign-off in $($target.Name) ($($b.TaskId))."
+    Say "Recovery: $Deployable $($rel.Version) waits at its Sign-off in $($target.Name) ($($b.TaskId))."
     $ev = Get-Evaluation -Release $rel -Target $target -Previous $previous -RunningRelease $null
     if ($ev.Behind -or $ev.Decision.Decision -ne 'promote') {
         if (-not $ev.Behind -and $ev.Decision.Decision -eq 'hold') { Set-HeldIssue -Release $rel -Target $target -Evaluation $ev -DeploymentNote "The deployment $($b.Deployment.Id) was created earlier and waits at its Sign-off: a person decides." }
@@ -659,12 +732,12 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
 # 3. Candidate.
 $candidate = Select-Candidate -Environments $envs -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d }
 $candidate.Notes | ForEach-Object { Say $_ }
-if (-not $candidate.Release) { Say 'No ui release waits for a next environment.'; Close-HeldIssues $candidate $activeTaskIds; return }
+if (-not $candidate.Release) { Say "No $Deployable release waits for a next environment."; Close-HeldIssues $candidate $activeTaskIds; return }
 $release = $candidate.Release; $target = $candidate.Target; $previous = $candidate.Previous
 Close-HeldIssues $candidate $activeTaskIds
 $busy = Get-BusyReason -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id
 if ($busy) { Say "Nothing to do: $busy."; return }
-Say "Candidate: ui $($release.Version) to $($target.Name) (commit $(Get-Commit $release))"
+Say "Candidate: $Deployable $($release.Version) to $($target.Name) (commit $(Get-Commit $release))"
 
 $running = (@($releases | Where-Object Id -eq $candidate.RunningReleaseId) | Select-Object -First 1)
 $ev = Get-Evaluation -Release $release -Target $target -Previous $previous -RunningRelease $running
