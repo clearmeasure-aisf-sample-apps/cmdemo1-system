@@ -69,17 +69,52 @@ var telemetryEnv = empty(applicationInsightsConnectionString)
       }
     ]
 
+// cmdemo1's own copy of this module (fleet.ownedTemplates; owner's decision of 2026-10-15 on kit #92): in the
+// environments below, the Container Apps environment sends console and system logs to the environment's Log Analytics
+// workspace (capability "telemetry", modules/telemetry.bicep) and has a dedicated D4 workload profile, zero to two
+// nodes, for the factory worker's runner jobs (infra/own/main.bicep). The apps of uat run in tdd's environment, so
+// their logs land in tdd's workspace too. Only with the telemetry capability, which creates the workspace.
+var ownSettingsEnvironments = ['tdd']
+var hasOwnSettings = ownsManagedEnvironment && contains(ownSettingsEnvironments, environmentName) && !empty(applicationInsightsConnectionString)
+
+resource logWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = if (hasOwnSettings) {
+  name: 'log-${slug}-${environmentName}'
+}
+
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = if (ownsManagedEnvironment) {
   name: managedEnvironmentName
   location: location
   tags: tags
   properties: {
-    workloadProfiles: [
-      {
-        name: 'Consumption'
-        workloadProfileType: 'Consumption'
-      }
-    ]
+    ...(hasOwnSettings
+      ? {
+          appLogsConfiguration: {
+            destination: 'log-analytics'
+            logAnalyticsConfiguration: {
+              customerId: logWorkspace!.properties.customerId
+              sharedKey: logWorkspace!.listKeys().primarySharedKey
+            }
+          }
+        }
+      : {})
+    workloadProfiles: concat(
+      [
+        {
+          name: 'Consumption'
+          workloadProfileType: 'Consumption'
+        }
+      ],
+      hasOwnSettings
+        ? [
+            {
+              name: 'D4'
+              workloadProfileType: 'D4'
+              minimumCount: 0
+              maximumCount: 2
+            }
+          ]
+        : []
+    )
   }
 }
 
