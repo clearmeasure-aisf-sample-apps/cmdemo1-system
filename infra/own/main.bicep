@@ -95,8 +95,7 @@ resource access 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasSt
 // Container Apps jobs, each execution of which runs one work item, as an identity of its own (no key anywhere): one with
 // Claude Code on a Foundry deployment of Claude, one with Codex CLI on an OpenAI deployment. In the environments below:
 // tdd since 2026-10-15 (rollout step 2), uat and prod since 2026-10-16 (steps 5 and 6, Jeffrey: "Implement all phases").
-// prod follows once its Container Apps environment has the D4 profile (one release earlier).
-var runnerEnvironments = ['tdd', 'uat']
+var runnerEnvironments = ['tdd', 'uat', 'prod']
 var hasRunner = contains(runnerEnvironments, stack.environmentName)
 var runnerDeployment = 'claude-sonnet-5-5'
 // Off until Azure Marketplace lets the subscription buy the Anthropic offer: the first deployment failed with
