@@ -91,17 +91,17 @@ resource access 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasSt
   }
 }
 
-// Cloud worker runtime of the factory worker (cmdemo1-fworker docs/design/cloud-worker-runtimes.md, sections 2, 3 and 6):
-// Container Apps jobs, each execution of which runs one work item, as an identity of its own (no key anywhere): one with
-// Claude Code on a Foundry deployment of Claude, one with Codex CLI on an OpenAI deployment. In the environments below:
-// tdd since 2026-10-15 (rollout step 2), uat and prod since 2026-10-16 (steps 5 and 6, Jeffrey: "Implement all phases").
+// Cloud worker runtime of the factory worker (cmdemo1-fworker docs/design/cloud-worker-runtimes.md, sections 2, 3
+// and 6): Container Apps jobs, each execution of which runs one work item, as an identity of its own (no key anywhere):
+// one for Claude Code (no model behind it, see runnerDeployment) and one with Codex CLI on an OpenAI deployment. In the
+// environments below: tdd since 2026-10-15 (rollout step 2), uat and prod since 2026-10-16 (steps 5 and 6, Jeffrey:
+// "Implement all phases").
 var runnerEnvironments = ['tdd', 'uat', 'prod']
 var hasRunner = contains(runnerEnvironments, stack.environmentName)
+// No Foundry deployment of Claude: Azure Marketplace would not sell the subscription the Anthropic offer, and Jeffrey
+// took Claude in Foundry out of scope (2026-10-16). The Claude job stays, as the image carries both agents, but no
+// model backs it; the gateway runs Codex (FACTORY_RUNTIME_AGENT).
 var runnerDeployment = 'claude-sonnet-5-5'
-// Off until Azure Marketplace lets the subscription buy the Anthropic offer: the first deployment failed with
-// MarketplaceSubscriptionCannotBeCompleted (the subscription needs Microsoft's allowlisting), and a failing resource
-// would fail every deployment of the environment.
-var deploysClaude = false
 // The model of the Codex worker (Jeffrey, 2026-10-15).
 var codexDeployment = 'gpt-6.1-sol'
 // The dedicated workload profile of the Container Apps environment the jobs run on (../modules/containerapps.bicep,
@@ -168,39 +168,10 @@ resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' = if (hasRunn
   }
 }
 
-// Billed through Azure Marketplace; capacity is in thousands of tokens per minute. An Anthropic model needs the
-// organization's details (modelProviderData), which the 2025-10-01-preview API accepts.
-resource claude 'Microsoft.CognitiveServices/accounts/deployments@2025-10-01-preview' = if (hasRunner && deploysClaude) {
-  parent: foundry
-  name: runnerDeployment
-  sku: {
-    name: 'GlobalStandard'
-    capacity: 600
-  }
-  properties: {
-    model: {
-      format: 'Anthropic'
-      name: runnerDeployment
-      version: '2'
-    }
-    versionUpgradeOption: 'NoAutoUpgrade'
-    #disable-next-line BCP037
-    modelProviderData: {
-      industry: 'Technology'
-      organizationName: 'Clear Measure'
-      countryCode: 'US'
-    }
-  }
-}
-
 // The model of the Codex worker: an OpenAI model is sold by Microsoft itself, no Marketplace purchase.
 resource sol 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = if (hasRunner) {
   parent: foundry
   name: codexDeployment
-  // One deployment operation at a time per account.
-  dependsOn: [
-    claude
-  ]
   sku: {
     name: 'GlobalStandard'
     capacity: 600
