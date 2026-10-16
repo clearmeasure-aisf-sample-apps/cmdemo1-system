@@ -255,7 +255,7 @@
         },
         "uat": {
           "FACTORY_ENVIRONMENT": "uat",
-          "FACTORY_RUNTIME_ENABLED": "1",
+          "FACTORY_RUNTIME_ENABLED": "true",
           "FACTORY_RUNTIME_AGENT": "codex",
           "FACTORY_RUNTIME_JOB_CLAUDE": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner",
           "FACTORY_RUNTIME_JOB_CODEX": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner-codex",
@@ -266,7 +266,7 @@
         },
         "prod": {
           "FACTORY_ENVIRONMENT": "prod",
-          "FACTORY_RUNTIME_ENABLED": "0",
+          "FACTORY_RUNTIME_ENABLED": "false",
           "FACTORY_RUNTIME_AGENT": "codex",
           "FACTORY_RUNTIME_JOB_CLAUDE": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/jobs/caj-cmdemo1-prod-fwrunner",
           "FACTORY_RUNTIME_JOB_CODEX": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/jobs/caj-cmdemo1-prod-fwrunner-codex",
