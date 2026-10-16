@@ -164,6 +164,16 @@ $swaCliNodeVersion = 18
 $plantUmlVersion = '1.2026.8'
 $plantUmlSha256 = '5E1ECFA8ECD32C90B03BBF3B1EB6F020943F98AB0FCF4032BE31A0002EE2C462'
 
+function Get-DatabaseName {
+    # The environment's database as infra/main.bicep names it: sqldb-<slug>-<env>, with -<n> once system.sqlGeneration
+    # is raised above 1 (a new database in place of the old one).
+    param([Parameter(Mandatory)] [hashtable] $System, [Parameter(Mandatory)] [string] $Environment)
+    $generation = if ($System.system.ContainsKey('sqlGeneration')) { [int] $System.system.sqlGeneration } else { 1 }
+    $name = "sqldb-$([string] $System.system.slug)-$Environment"
+    if ($generation -gt 1) { return "$name-$generation" }
+    return $name
+}
+
 function Get-PortalAddress {
     # The address of a resource's page (a "blade" of its menu, such as overview or performance) in the Azure portal.
     # With the tenant the portal opens the right directory for a viewer who has several.
@@ -282,7 +292,7 @@ function ConvertTo-Topology {
                 $environmentLinks.applicationMap = Get-PortalAddress -ResourceId $insights -Blade 'applicationMap' -TenantId $tenantId
             }
             if ($group -and $server) {
-                $environmentLinks.database = Get-PortalAddress -ResourceId "$group/providers/Microsoft.Sql/servers/$server/databases/sqldb-$slug-$environmentName" -TenantId $tenantId
+                $environmentLinks.database = Get-PortalAddress -ResourceId "$group/providers/Microsoft.Sql/servers/$server/databases/$(Get-DatabaseName -System $System -Environment $environmentName)" -TenantId $tenantId
             }
             if ($group) { $environmentLinks.resourceGroup = Get-PortalAddress -ResourceId $group -TenantId $tenantId }
             $recorded = if ($NodeRecord[$environmentName] -is [Collections.IDictionary]) { $NodeRecord[$environmentName] } else { @{} }
@@ -1047,7 +1057,7 @@ function ConvertTo-RuntimeDiagram {
             $lines.Add('      }')
         }
         if ($region.roles.Contains('data')) {
-            $database = "sqldb-$slug-$Environment"
+            $database = Get-DatabaseName -System $System -Environment $Environment
             $lines.Add("      ContainerDb(sqldb, $(Get-Quoted $database), `"Azure SQL database`", $(Get-Quoted $smallTileSlot))")
             Add-Node ([ordered] @{ alias = 'sqldb'; qualifiedName = "sub.rg_tier.$($region.alias).sqldb"; kind = 'sql'; name = $database; region = $region.name; regionAlias = $region.alias; url = $null })
         }
@@ -2342,3 +2352,7 @@ while ($true) {
     Start-Sleep -Seconds 10
 }
 Write-Highlight "$name $version deployed to $staticSite in ${environmentName}: $url ($summary)"
+
+# Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
+# whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).
+exit 0

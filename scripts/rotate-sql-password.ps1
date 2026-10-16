@@ -131,3 +131,7 @@ if ($failed -gt 0) {
     Fail-Step "$failed app(s) of $environmentName are unhealthy after the password rotation."
 }
 Write-Highlight (Get-RotationSummary -Environment $environmentName -Restarted $restarted)
+
+# Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
+# whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).
+exit 0

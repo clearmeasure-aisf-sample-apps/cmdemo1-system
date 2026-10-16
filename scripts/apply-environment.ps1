@@ -81,9 +81,37 @@ function Get-DesiredVersion {
     return $text | ConvertFrom-Json -AsHashtable
 }
 
+function Find-EnvironmentVault {
+    # The name of this environment's vault when it exists, or $null: from the stack's own resources, else the vault in
+    # the resource group that carries this system's and this environment's tags (a resource group holds several
+    # environments). A failed apply leaves the stack with no outputs, and a deleted stack leaves its vault behind:
+    # neither is a new environment, and its secrets stay.
+    param([object[]] $StackResources)
+    $fromStack = @($StackResources | Where-Object { $_ -and [string] $_['id'] -match '/providers/Microsoft\.KeyVault/vaults/([^/]+)$' } |
+            ForEach-Object { [string] ([regex]::Match([string] $_['id'], '/vaults/([^/]+)$').Groups[1].Value) })
+    if ($fromStack.Count -gt 0) { return $fromStack[0] }
+    $query = "[?tags.system=='$slug' && tags.environment=='$environmentName'].name"
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $read = az keyvault list --resource-group $resourceGroup --query $query --output json 2>&1
+        $code = $LASTEXITCODE
+        $PSNativeCommandUseErrorActionPreference = $true
+        if ($code -eq 0) {
+            $names = @(("$read" | ConvertFrom-Json) | Where-Object { $_ })
+            if ($names.Count -gt 1) { Fail-Step "More than one vault in $resourceGroup carries the tags of ${environmentName}: $($names -join ', ')." }
+            return $names.Count -eq 1 ? [string] $names[0] : $null
+        }
+        if ($attempt -eq 3) { Fail-Step "Cannot list the vaults of ${resourceGroup}: $("$read" -replace '\s+', ' ')" }
+        Write-Host "Listing the vaults of $resourceGroup failed (attempt $attempt of 3); retrying in 30 seconds."
+        Start-Sleep -Seconds 30
+    }
+}
+
 function Get-StackOutput {
-    # Only a stack that does not exist means "first apply". Any other failure to read it is retried, then stops the
-    # step: an apply that wrongly takes the stack for new generates new SQL passwords (it happened in cmdemo1's prod).
+    # Only an environment without a vault means "first apply". A stack that does not exist or has no outputs (a failed
+    # apply) is looked up by its vault, and any other failure to read it is retried, then stops the step: an apply that
+    # wrongly takes the environment for new generates new SQL passwords and secrets (it happened in cmdemo1's prod, and
+    # in cmdemo1's tdd after a failed apply, issue #93).
     $errorFile = Join-Path ([IO.Path]::GetTempPath()) "stack-show-$([Guid]::NewGuid().ToString('N')).err"
     try {
         for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -93,36 +121,26 @@ function Get-StackOutput {
             $PSNativeCommandUseErrorActionPreference = $true
             if ($code -eq 0) {
                 $stack = $json | ConvertFrom-Json -AsHashtable
-                if ($stack.outputs -and $stack.outputs.ContainsKey('keyVaultName')) {
-                    return $stack.outputs
+                $stackOutputs = $stack['outputs']
+                if ($stackOutputs -and $stackOutputs.ContainsKey('keyVaultName')) {
+                    return $stackOutputs
                 }
-                # The stack exists without outputs: its last apply failed (cmdemo1, 2026-10-15, kit #93). It is not a
-                # new environment: take the outputs of its last succeeded deployment, or stop.
-                $PSNativeCommandUseErrorActionPreference = $false
-                $history = az deployment group list --resource-group $resourceGroup --query "[?starts_with(name, '$stackName-') && properties.provisioningState=='Succeeded']" --output json 2>&1
-                $listed = $LASTEXITCODE -eq 0
-                $PSNativeCommandUseErrorActionPreference = $true
-                if (-not $listed) {
-                    Fail-Step "$stackName exists ($($stack.provisioningState)) but has no outputs, and its deployments could not be listed: $("$history" -replace '\s+', ' ')"
+                $vault = Find-EnvironmentVault -StackResources @($stack['resources'])
+                if (-not $vault) {
+                    Write-Host "Stack $stackName is $($stack['provisioningState']) with no outputs, and $environmentName has no vault yet: a first apply."
+                    return $null
                 }
-                # Only this stack's own deployments (<stackName>-<13 characters>, not those of <stackName>-edge or of an
-                # environment whose name starts with this one's), naming this environment's vault (main.bicep, vaultName).
-                $vaultPrefix = "kv$slug$environmentName"
-                $vaultPrefix = $vaultPrefix.Substring(0, [Math]::Min(24, $vaultPrefix.Length))
-                $last = @($history | ConvertFrom-Json -AsHashtable) |
-                    Where-Object { $_.name -match "^$([regex]::Escape($stackName))-[0-9a-z]{13}$" } |
-                    Where-Object { $_.properties.outputs -and $_.properties.outputs.ContainsKey('keyVaultName') -and ([string] $_.properties.outputs.keyVaultName.value).StartsWith($vaultPrefix) } |
-                    Sort-Object { [datetime] $_.properties.timestamp } |
-                    Select-Object -Last 1
-                if (-not $last) {
-                    Fail-Step "$stackName exists ($($stack.provisioningState)) but has no outputs, and no succeeded deployment of it has any: not applying, which would take the environment for new and replace its secrets. A stack whose first apply failed has to be deleted before the next apply."
-                }
-                Write-Warning "$stackName is $($stack.provisioningState) and has no outputs: using those of its last succeeded deployment $($last.name) ($($last.properties.timestamp))."
-                return $last.properties.outputs
+                Write-Highlight "Stack $stackName is $($stack['provisioningState']) with no outputs: the secrets are read from its vault $vault."
+                $kept = if ($stackOutputs) { $stackOutputs } else { @{} }
+                $kept['keyVaultName'] = @{ value = $vault }
+                return $kept
             }
             $stderr = ((Get-Content -LiteralPath $errorFile -Raw -ErrorAction SilentlyContinue) ?? '').Trim()
             if ($stderr -match 'DeploymentStackNotFound|ResourceNotFound|could not be found|was not found') {
-                return $null
+                $vault = Find-EnvironmentVault -StackResources @()
+                if (-not $vault) { return $null }
+                Write-Highlight "Stack $stackName does not exist, but $environmentName's vault $vault does: the secrets are read from it."
+                return @{ keyVaultName = @{ value = $vault } }
             }
             if ($attempt -eq 3) {
                 Fail-Step "Cannot read ${stackName}: $stderr"
@@ -449,11 +467,14 @@ function Invoke-StackApply {
         [Parameter(Mandatory)] [string] $TemplateFile,
         [Parameter(Mandatory)] [string] $ParametersFile
     )
-    # Starting and stopping a Container Apps job's executions is open to whoever RBAC lets (the factory worker gateway's
-    # role on its runner jobs, infra/own/main.bicep); the deny assignment would refuse it to everyone but the deploy
-    # identity. A variance from the kit (cmdemo1, 2026-10-15) until the kit's template can say so itself. az takes the
-    # actions as one value and splits it on spaces.
     $transient = 'DeploymentStackTenantRegistrationFailed|PrincipalNotFound|InvalidAuthenticationToken|ConflictingDatabaseOperation'
+    # system.denyExcludedActions: the control-plane actions a system lets anyone with a role on the resource call
+    # through the deny assignment (cmdemo1: starting and stopping its runner jobs, issue #94). The Azure CLI takes
+    # them as one space-separated value.
+    $excluded = @()
+    if ($system.system.ContainsKey('denyExcludedActions') -and @($system.system.denyExcludedActions).Count -gt 0) {
+        $excluded = @('--deny-settings-excluded-actions', (@($system.system.denyExcludedActions) -join ' '))
+    }
     $errorFile = Join-Path ([IO.Path]::GetTempPath()) "stack-$([Guid]::NewGuid().ToString('N')).err"
     try {
         for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -466,7 +487,7 @@ function Invoke-StackApply {
                 --action-on-unmanage deleteResources `
                 --deny-settings-mode denyWriteAndDelete `
                 --deny-settings-excluded-principals $deployPrincipalId `
-                --deny-settings-excluded-actions 'Microsoft.App/jobs/start/action Microsoft.App/jobs/stop/action' `
+                @excluded `
                 --yes `
                 --output json 2>$errorFile
             $applied = $LASTEXITCODE -eq 0
@@ -625,3 +646,7 @@ foreach ($endpoint in $endpoints) {
     Set-OctopusVariable -name "FrontDoorUrl.$($endpoint.name)" -value $endpoint.url
 }
 Write-Highlight "Capabilities of ${environmentName}: $($stack.outputs.capabilities.value -join ', ')"
+# Said as an exit code: Octopus ends the step with the exit code of the last program the script ran, which may be one
+# whose refusal was expected and handled (a dormant system's edge stack is looked for in a group that is gone:
+# cmdemo2, release 1.0.61 in tdd, 2026-10-15, failed after everything had been applied).
+exit 0

@@ -76,7 +76,11 @@ var vaultName = take('kv${slug}${environmentName}${suffix}', 24)
 // region of its own therefore gets a name of its own (unchanged when sqlLocation is location).
 var sqlSuffix = sqlLocation == location ? suffix : take(uniqueString(subscription().id, resourceGroup().id, environmentName, sqlLocation), 5)
 var sqlServerName = 'sql-${slug}-${environmentName}-${sqlSuffix}'
-var databaseName = 'sqldb-${slug}-${environmentName}'
+// system.sqlGeneration (1 when left out): raising it names a new database, so the stack deletes the old one with its
+// data and creates the new one empty; the migrations then build its schema. Azure moves a database between serverless
+// and Basic in place, but never from Basic (paid) back to the free offer: that takes a new database.
+var sqlGeneration = int(union({ sqlGeneration: 1 }, system.system).sqlGeneration)
+var databaseName = sqlGeneration > 1 ? 'sqldb-${slug}-${environmentName}-${sqlGeneration}' : 'sqldb-${slug}-${environmentName}'
 var sqlAdminLogin = 'sqladmin'
 var sqlServerFqdn = '${sqlServerName}${az.environment().suffixes.sqlServerHostname}'
 
