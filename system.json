@@ -254,10 +254,26 @@
           "FACTORY_ENVIRONMENT": "tdd"
         },
         "uat": {
-          "FACTORY_ENVIRONMENT": "uat"
+          "FACTORY_ENVIRONMENT": "uat",
+          "FACTORY_RUNTIME_ENABLED": "1",
+          "FACTORY_RUNTIME_AGENT": "codex",
+          "FACTORY_RUNTIME_JOB_CLAUDE": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner",
+          "FACTORY_RUNTIME_JOB_CODEX": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner-codex",
+          "FACTORY_RUNTIME_IDENTITY_CLIENT_ID": "ecd2fa26-3395-4b60-ac3f-d002a97374c3",
+          "FACTORY_RUNTIME_GATEWAY_URL": "http://ca-cmdemo1-uat-fworker-fccv",
+          "FACTORY_RUNTIME_MAX_CONCURRENT": "2",
+          "FACTORY_RUNTIME_MAX_PER_DAY": "30"
         },
         "prod": {
-          "FACTORY_ENVIRONMENT": "prod"
+          "FACTORY_ENVIRONMENT": "prod",
+          "FACTORY_RUNTIME_ENABLED": "0",
+          "FACTORY_RUNTIME_AGENT": "codex",
+          "FACTORY_RUNTIME_JOB_CLAUDE": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/jobs/caj-cmdemo1-prod-fwrunner",
+          "FACTORY_RUNTIME_JOB_CODEX": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/jobs/caj-cmdemo1-prod-fwrunner-codex",
+          "FACTORY_RUNTIME_IDENTITY_CLIENT_ID": "b21c26a7-326d-4bb2-a0d9-cb710459bec1",
+          "FACTORY_RUNTIME_GATEWAY_URL": "http://ca-cmdemo1-prod-fworker-bhj5",
+          "FACTORY_RUNTIME_MAX_CONCURRENT": "2",
+          "FACTORY_RUNTIME_MAX_PER_DAY": "10"
         }
       },
       "urlSetting": "FACTORY_PUBLIC_URL",
