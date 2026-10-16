@@ -27,3 +27,7 @@ $server = [string] $OctopusParameters['Octopus.Action[Open test database].Output
 $ruleName = [string] $OctopusParameters['Octopus.Action[Open test database].Output.FirewallRule']
 az sql server firewall-rule delete --resource-group $resourceGroup --server $server --name $ruleName --output none
 Write-Host "Removed firewall rule $ruleName from $server"
+
+# Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
+# whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).
+exit 0

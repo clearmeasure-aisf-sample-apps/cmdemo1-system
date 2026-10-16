@@ -158,3 +158,7 @@ if ($unproven.Count -gt 0) {
 else {
     Write-Highlight "$($waiting.Count) app(s) of $environmentName restarted; each one answers its health path, and none of their secrets changed in the vault in the last $refreshMinutes minutes."
 }
+
+# Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
+# whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).
+exit 0

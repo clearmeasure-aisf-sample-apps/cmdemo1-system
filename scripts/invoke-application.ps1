@@ -285,3 +285,7 @@ if ($afterRevert) {
     return
 }
 Write-Highlight "$deployable $version runs in $environmentName (its own verify.ps1 says so)."
+
+# Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
+# whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).
+exit 0

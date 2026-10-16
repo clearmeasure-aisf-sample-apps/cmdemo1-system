@@ -403,6 +403,22 @@ if ($system.system.ContainsKey('planSku')) {
     Test-Rule 'system.planSku' $valid 'an object of tier (nonprod, prod) to F1 or B1'
 }
 
+# Optional: the generation of the environments' databases (infra/main.bicep); raising it replaces each database with a
+# new, empty one, the only way from a Basic database back to the free offer.
+if ($system.system.ContainsKey('sqlGeneration')) {
+    $generation = $system.system.sqlGeneration
+    Test-Rule 'system.sqlGeneration' (($generation -is [int] -or $generation -is [long]) -and [long] $generation -ge 1) 'a whole number, 1 or more (raised by one to replace every database with a new, empty one)'
+}
+
+# Optional: control-plane actions the stacks' deny assignment lets through (apply-environment.ps1), such as
+# "Microsoft.App/jobs/start/action". Azure takes at most 200, and no wildcard that would open writes or deletes.
+if ($system.system.ContainsKey('denyExcludedActions')) {
+    $actions = @($system.system.denyExcludedActions)
+    $valid = $system.system.denyExcludedActions -is [array] -and $actions.Count -ge 1 -and $actions.Count -le 200 -and
+        @($actions | Where-Object { $_ -isnot [string] -or $_ -notmatch '^Microsoft\.[A-Za-z]+(/[A-Za-z]+)+/action$' }).Count -eq 0
+    Test-Rule 'system.denyExcludedActions' $valid 'a list of 1 to 200 actions of the form Microsoft.<Provider>/<type>/.../action, without wildcards'
+}
+
 if ($system.azure.ContainsKey('frontDoor') -and $system.azure.frontDoor.ContainsKey('dormant')) {
     Test-Rule 'azure.frontDoor.dormant' ($system.azure.frontDoor.dormant -is [bool]) 'true or false (set-demo-frontdoor.ps1 writes it)'
 }

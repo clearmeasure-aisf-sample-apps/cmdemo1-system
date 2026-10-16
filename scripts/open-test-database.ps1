@@ -49,3 +49,7 @@ Set-OctopusVariable -name 'SqlServer' -value $server
 Set-OctopusVariable -name 'FirewallRule' -value $ruleName
 Set-OctopusVariable -name 'Opened' -value 'True'
 Write-Highlight "Acceptance tests of $environmentName target https://$fqdn"
+
+# Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
+# whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).
+exit 0

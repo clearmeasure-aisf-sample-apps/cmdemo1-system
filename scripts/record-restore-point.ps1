@@ -51,3 +51,7 @@ $point = [datetimeoffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
 Set-OctopusVariable -name 'RestorePoint' -value $point
 Write-Highlight "Restore point before ${release}: $point (backups available since $($db.earliestRestoreDate))."
 Write-Host "To return the data to it: az sql db restore --resource-group $resourceGroup --server $server --name $database --dest-name $database-before-$($OctopusParameters['Octopus.Release.Number']) --time $point"
+
+# Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
+# whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).
+exit 0

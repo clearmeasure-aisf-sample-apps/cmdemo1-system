@@ -480,3 +480,7 @@ if ($found.Count -gt 0) {
     Fail-Step "$($text.Substring(0, 1).ToUpperInvariant())$($text.Substring(1)).$(if ($unhealthy -eq 0 -and $asked -gt 0) { " The $asked node(s) that were asked are healthy." })"
 }
 Write-Highlight "All $($nodes.Count - $unreleased) node(s) of $environmentName are healthy$(if ($unreleased -gt 0) { "; $unreleased storage website(s) without a release yet" })."
+
+# Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
+# whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).
+exit 0
