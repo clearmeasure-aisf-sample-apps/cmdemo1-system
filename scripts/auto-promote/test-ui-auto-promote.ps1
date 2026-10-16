@@ -162,6 +162,13 @@ $c = Select-With @($r1, $r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R2'
 Test-Case 'newest in tdd goes to uat' @($c.Release.Id, $c.Target.Name) @('R3', 'uat')
 $c = Select-With @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '06' 't2u')) @{ t3 = 'Success'; t3u = 'Success'; t2 = 'Success'; t2u = 'Success' }
 Test-Case 'a release through uat goes to prod' @($c.Release.Id, $c.Target.Name) @('R3', 'prod')
+# The release running in an environment: a waiting deployment of a newer one is not it (fworker 1.0.260, 2026-10-16).
+$rdeps = @((New-Dep 'R3' 'E2' '20' 'w3'), (New-Dep 'R2' 'E2' '10' 's2'), (New-Dep 'R1' 'E2' '05' 's1'))
+$rstates = @{ w3 = 'Queued'; s2 = 'Success'; s1 = 'Success' }
+$run = Get-RunningRelease -Target $envs3[1] -Releases @($r1, $r2, $r3) -GetDeployments { param($id) @($rdeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState { param($d) $rstates[$d.TaskId] }.GetNewClosure()
+Test-Case 'running release: a queued newer deployment is not running' $run.Id 'R2'
+$run = Get-RunningRelease -Target $envs3[2] -Releases @($r1, $r2, $r3) -GetDeployments { param($id) @($rdeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState { param($d) $rstates[$d.TaskId] }.GetNewClosure()
+Test-Case 'running release: none deployed there is none' ($null -eq $run) $true
 $c = Select-With @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R3' 'E3' '30' 't3p')) @{ t3 = 'Success'; t3u = 'Success'; t3p = 'Success' }
 Test-Case 'everything promoted: no candidate' $c.Release $null
 $c = Select-With @($r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u')) @{ t3 = 'Success'; t3u = 'Canceled' }

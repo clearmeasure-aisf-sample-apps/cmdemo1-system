@@ -313,6 +313,17 @@ function Get-ReleasesNewestFirst([object[]] $Releases) {
     @($l)
 }
 
+function Get-RunningRelease {
+    <# The release that runs in Target: the newest (by version) with a deployment there whose task succeeded. A queued or
+       waiting deployment is not running. Releases; GetDeployments {param($releaseId)}; GetTaskState {param($deployment)}. #>
+    param($Target, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState)
+    foreach ($o in @(Get-ReleasesNewestFirst $Releases)) {
+        $ran = @(& $GetDeployments $o.Id | Where-Object { $_.EnvironmentId -eq $Target.Id } | Where-Object { (& $GetTaskState $_) -eq 'Success' }) | Select-Object -First 1
+        if ($ran) { return $o }
+    }
+    $null
+}
+
 function Select-Candidate {
     <# Environments ordered; Releases (Id, Version, Assembled); GetDeployments {param($releaseId)} -> deployments (Id, ReleaseId,
        EnvironmentId, TaskId, Created); GetTaskState {param($deployment)} -> Octopus task state. Returns
@@ -719,7 +730,9 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
     $tIndex = [array]::IndexOf(@($envs | ForEach-Object Id), $b.EnvironmentId)
     $target = $envs[$tIndex]; $previous = $envs[$tIndex - 1]
     Say "Recovery: $Deployable $($rel.Version) waits at its Sign-off in $($target.Name) ($($b.TaskId))."
-    $ev = Get-Evaluation -Release $rel -Target $target -Previous $previous -RunningRelease $null
+    # The base of the comparison is the release that ran there before this deployment, not the waiting one.
+    $runningBefore = Get-RunningRelease -Target $target -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d }
+    $ev = Get-Evaluation -Release $rel -Target $target -Previous $previous -RunningRelease $runningBefore
     if ($ev.Behind -or $ev.Decision.Decision -ne 'promote') {
         if (-not $ev.Behind -and $ev.Decision.Decision -eq 'hold') { Set-HeldIssue -Release $rel -Target $target -Evaluation $ev -DeploymentNote "The deployment $($b.Deployment.Id) was created earlier and waits at its Sign-off: a person decides." }
         else { Say "Left waiting: $(@($ev.Decision.Waiting) -join '; ')" }
