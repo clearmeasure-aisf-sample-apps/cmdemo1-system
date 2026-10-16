@@ -9,7 +9,8 @@
     "sqlSku": "Basic",
     "denyExcludedActions": [
       "Microsoft.App/jobs/start/action",
-      "Microsoft.App/jobs/stop/action"
+      "Microsoft.App/jobs/stop/action",
+      "Microsoft.App/jobs/stop/execution/action"
     ]
   },
   "azure": {
