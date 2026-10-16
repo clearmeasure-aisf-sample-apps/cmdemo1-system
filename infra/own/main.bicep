@@ -447,6 +447,9 @@ resource runnerOperator 'Microsoft.Authorization/roleDefinitions@2022-04-01' = i
           'Microsoft.App/jobs/start/action'
           'Microsoft.App/jobs/executions/read'
           'Microsoft.App/jobs/stop/action'
+          // Stopping one execution (POST .../executions/<name>/stop) is an action of its own.
+          'Microsoft.App/jobs/stop/execution/action'
+          'Microsoft.App/jobs/execution/read'
         ]
         notActions: []
       }
