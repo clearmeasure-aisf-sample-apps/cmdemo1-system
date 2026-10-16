@@ -104,9 +104,12 @@ var runnerDeployment = 'claude-sonnet-5-5'
 var deploysClaude = false
 // The model of the Codex worker (Jeffrey, 2026-10-15).
 var codexDeployment = 'gpt-6.1-sol'
-// The workload profile of the Container Apps environment the job runs on: D4 once the environment has one (the kit's
-// template creates the environment); until then Consumption, which also allows 4 vCPU and 8 GiB.
-var runnerWorkloadProfile = 'Consumption'
+// The dedicated workload profile of the Container Apps environment the jobs run on (../modules/containerapps.bicep,
+// cmdemo1's own copy, gives tdd a D4 profile of zero to two nodes).
+var runnerWorkloadProfile = 'D4'
+// The runner image of cmdemo1-fworker (release.yml of pull request #150): Claude Code and Codex CLI in one image; the
+// job's FWRUNNER_AGENT chooses. Its own entry point runs the work item the gateway hands over.
+var runnerImage = '${loadJsonContent('../../system.json').azure.registry.loginServer}/cmdemo1/fwrunner:2.1.300-263'
 var gateway = first(filter(stack.identities, i => i.deployable == 'fworker')) ?? {
   deployable: ''
   principalId: ''
@@ -329,12 +332,10 @@ resource runner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
       containers: [
         {
           name: 'fwrunner'
-          // A placeholder until the fwrunner image is in the registry (cmdemo1-fworker pull request #150).
-          image: 'mcr.microsoft.com/azure-cli:latest'
-          command: ['/bin/sh', '-c']
-          args: ['echo placeholder: the fwrunner image is not in the registry yet']
+          image: runnerImage
           resources: {
-            cpu: json('4')
+            // A D4 node keeps part of its 4 vCPU for the platform: a 4-vCPU replica may never be scheduled.
+            cpu: json('3.5')
             memory: '8Gi'
           }
           env: [
@@ -387,12 +388,10 @@ resource codexRunner 'Microsoft.App/jobs@2025-01-01' = if (hasRunner) {
       containers: [
         {
           name: 'fwrunner'
-          // A placeholder until a Codex runner image is in the registry.
-          image: 'mcr.microsoft.com/azure-cli:latest'
-          command: ['/bin/sh', '-c']
-          args: ['echo placeholder: the Codex runner image is not in the registry yet']
+          image: runnerImage
           resources: {
-            cpu: json('4')
+            // A D4 node keeps part of its 4 vCPU for the platform: a 4-vCPU replica may never be scheduled.
+            cpu: json('3.5')
             memory: '8Gi'
           }
           env: [
