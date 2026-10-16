@@ -104,6 +104,10 @@ var hasRunner = contains(runnerEnvironments, stack.environmentName)
 var runnerDeployment = 'claude-sonnet-5-5'
 // The model of the Codex worker (Jeffrey, 2026-10-15).
 var codexDeployment = 'gpt-6.1-sol'
+// The connection to Foundry, off since 2026-10-16 (Jeffrey: "Abort any further testing or calls through AI foundry. Deactivate
+// and disable the connection to AI foundry."): no public network access, no model deployment, no Foundry User role
+// for the runner. The account itself stays, empty.
+var foundryConnected = false
 // The dedicated workload profile of the Container Apps environment the jobs run on (../modules/containerapps.bicep,
 // cmdemo1's own copy, gives tdd, which uat shares, and prod a D4 profile of zero to two nodes).
 var runnerWorkloadProfile = 'D4'
@@ -164,12 +168,12 @@ resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' = if (hasRunn
     customSubDomainName: 'aif-${stack.slug}-${stack.environmentName}'
     allowProjectManagement: true
     disableLocalAuth: true
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: foundryConnected ? 'Enabled' : 'Disabled'
   }
 }
 
 // The model of the Codex worker: an OpenAI model is sold by Microsoft itself, no Marketplace purchase.
-resource sol 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = if (hasRunner) {
+resource sol 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = if (hasRunner && foundryConnected) {
   parent: foundry
   name: codexDeployment
   sku: {
@@ -257,7 +261,7 @@ resource runnerPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (h
   }
 }
 
-resource runnerModel 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasRunner) {
+resource runnerModel 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasRunner && foundryConnected) {
   scope: foundry
   name: guid(foundry.id, 'fwrunner', foundryUser)
   properties: {

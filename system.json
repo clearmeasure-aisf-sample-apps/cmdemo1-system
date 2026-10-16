@@ -252,11 +252,12 @@
       },
       "environmentSettings": {
         "tdd": {
-          "FACTORY_ENVIRONMENT": "tdd"
+          "FACTORY_ENVIRONMENT": "tdd",
+          "FACTORY_RUNTIME_ENABLED": "false"
         },
         "uat": {
           "FACTORY_ENVIRONMENT": "uat",
-          "FACTORY_RUNTIME_ENABLED": "true",
+          "FACTORY_RUNTIME_ENABLED": "false",
           "FACTORY_RUNTIME_AGENT": "codex",
           "FACTORY_RUNTIME_JOB_CLAUDE": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner",
           "FACTORY_RUNTIME_JOB_CODEX": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner-codex",
