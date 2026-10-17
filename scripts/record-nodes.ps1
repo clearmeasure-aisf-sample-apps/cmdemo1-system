@@ -63,7 +63,7 @@
     not answering after the retries of a known transient failure (no answer, 408, 429, 5xx: four attempts), for a
     file that changed at each of four attempts to write it, for a request GitHub refuses, for an error of this
     script, and for GitHub not giving the App its token after the same four attempts (no answer, 408, 429, 5xx). Octopus then shows the deployment as succeeded with warnings, which the kit's test-deployment-logs.ps1
-    and the fleet's log finding report; the dashboard keeps the nodes of the last record meanwhile.
+    and the platform's log finding report; the dashboard keeps the nodes of the last record meanwhile.
     What stays a failure is a system that does not work, not a record that could not be written: the credential did
     not reach the step (GitHub.Token, or the App's key: the scope of the variable leaves the step out); the App is
     configured in part; or GitHub refuses the App a token for a reason that does not pass by itself (401: the key is
