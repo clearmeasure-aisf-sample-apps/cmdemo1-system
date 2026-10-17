@@ -300,6 +300,10 @@
         {
           "name": "github-token",
           "env": "FACTORY_APP_AUTHOR_KEY"
+        },
+        {
+          "name": "cursor-api-key",
+          "env": "CURSOR_API_KEY"
         }
       ],
       "buildPath": "/_build",
