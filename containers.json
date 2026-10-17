@@ -1,0 +1,1595 @@
+{
+  "generated": "2026-10-17T21:42:08Z",
+  "environments": {
+    "tdd": {
+      "ui": "https://ca-cmdemo1-tdd-ui.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+      "aisf": "https://ca-cmdemo1-tdd-aisf.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+      "scorecard": "https://ca-cmdemo1-tdd-scorecard.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+      "fworker": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io"
+    },
+    "uat": {
+      "ui": "https://ca-cmdemo1-uat-ui-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+      "aisf": "https://ca-cmdemo1-uat-aisf-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+      "scorecard": "https://ca-cmdemo1-uat-scorecard-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+      "fworker": "https://ca-cmdemo1-uat-fworker-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io"
+    },
+    "prod": {
+      "ui": "https://ca-cmdemo1-prod-ui-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
+      "aisf": "https://ca-cmdemo1-prod-aisf-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
+      "scorecard": "https://ca-cmdemo1-prod-scorecard-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
+      "fworker": "https://ca-cmdemo1-prod-fworker-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io"
+    }
+  },
+  "resources": {
+    "nonprod": [
+      {
+        "type": "microsoft.alertsmanagement/smartDetectorAlertRules",
+        "name": "Failure Anomalies - appi-cmdemo1-tdd",
+        "environment": "",
+        "environments": [],
+        "location": "global",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/microsoft.alertsmanagement/smartDetectorAlertRules/Failure Anomalies - appi-cmdemo1-tdd",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "microsoft.alertsmanagement/smartDetectorAlertRules",
+        "name": "Failure Anomalies - appi-cmdemo1-uat",
+        "environment": "",
+        "environments": [],
+        "location": "global",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/microsoft.alertsmanagement/smartDetectorAlertRules/Failure Anomalies - appi-cmdemo1-uat",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-tdd-aisf",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/ca-cmdemo1-tdd-aisf",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "https://ca-cmdemo1-tdd-aisf.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-tdd",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-tdd-fworker",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/ca-cmdemo1-tdd-fworker",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-tdd",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-tdd-scorecard",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/ca-cmdemo1-tdd-scorecard",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "https://ca-cmdemo1-tdd-scorecard.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-tdd",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-tdd-ui",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/ca-cmdemo1-tdd-ui",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "https://ca-cmdemo1-tdd-ui.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-tdd",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-uat-aisf-fccv",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/ca-cmdemo1-uat-aisf-fccv",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "https://ca-cmdemo1-uat-aisf-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-tdd",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-uat-fworker-fccv",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/ca-cmdemo1-uat-fworker-fccv",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "https://ca-cmdemo1-uat-fworker-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-tdd",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-uat-scorecard-fccv",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/ca-cmdemo1-uat-scorecard-fccv",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "https://ca-cmdemo1-uat-scorecard-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-tdd",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-uat-ui-fccv",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/containerApps/ca-cmdemo1-uat-ui-fccv",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "https://ca-cmdemo1-uat-ui-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-tdd",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/jobs",
+        "name": "caj-cmdemo1-tdd-fwrunner",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-tdd-fwrunner",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/jobs",
+        "name": "caj-cmdemo1-tdd-fwrunner-codex",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-tdd-fwrunner-codex",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/jobs",
+        "name": "caj-cmdemo1-uat-fwrunner",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/jobs",
+        "name": "caj-cmdemo1-uat-fwrunner-codex",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner-codex",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/managedEnvironments",
+        "name": "cae-cmdemo1-tdd",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-tdd",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.CognitiveServices/accounts",
+        "name": "aif-cmdemo1-tdd",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.CognitiveServices/accounts/aif-cmdemo1-tdd",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this Cognitive Services resource."
+        }
+      },
+      {
+        "type": "Microsoft.CognitiveServices/accounts",
+        "name": "aif-cmdemo1-uat",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.CognitiveServices/accounts/aif-cmdemo1-uat",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this Cognitive Services resource."
+        }
+      },
+      {
+        "type": "Microsoft.ContainerRegistry/registries",
+        "name": "acrcmdemo1chu4gq",
+        "environment": "tdd,uat,prod",
+        "environments": [
+          "tdd",
+          "uat",
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ContainerRegistry/registries/acrcmdemo1chu4gq",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Insights/components",
+        "name": "appi-cmdemo1-tdd",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Insights/components/appi-cmdemo1-tdd",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Insights/components",
+        "name": "appi-cmdemo1-uat",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Insights/components/appi-cmdemo1-uat",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.KeyVault/vaults",
+        "name": "kvcmdemo1tddvq464",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.KeyVault/vaults/kvcmdemo1tddvq464",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this key vault."
+        }
+      },
+      {
+        "type": "Microsoft.KeyVault/vaults",
+        "name": "kvcmdemo1uatypwme",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.KeyVault/vaults/kvcmdemo1uatypwme",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this key vault."
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-acr-push",
+        "environment": "tdd,uat,prod",
+        "environments": [
+          "tdd",
+          "uat",
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-acr-push",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-deploy-nonprod",
+        "environment": "tdd,uat",
+        "environments": [
+          "tdd",
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-deploy-nonprod",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-octopus-config",
+        "environment": "tdd,uat,prod",
+        "environments": [
+          "tdd",
+          "uat",
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-octopus-config",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-plan",
+        "environment": "tdd,uat,prod",
+        "environments": [
+          "tdd",
+          "uat",
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-plan",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-tdd-aisf",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-tdd-aisf",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-tdd-app",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-tdd-app",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-tdd-app2-ui",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-tdd-app2-ui",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-tdd-fworker",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-tdd-fworker",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-tdd-fwrunner",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-tdd-fwrunner",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-tdd-scorecard",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-tdd-scorecard",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-tdd-ui",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-tdd-ui",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-uat-aisf",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-uat-aisf",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-uat-app",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-uat-app",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-uat-app2-ui",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-uat-app2-ui",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-uat-fworker",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-uat-fworker",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-uat-fwrunner",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-uat-fwrunner",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-uat-scorecard",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-uat-scorecard",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-uat-ui",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-uat-ui",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.OperationalInsights/workspaces",
+        "name": "log-cmdemo1-tdd",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.OperationalInsights/workspaces/log-cmdemo1-tdd",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "No workspace issues detected."
+        }
+      },
+      {
+        "type": "Microsoft.OperationalInsights/workspaces",
+        "name": "log-cmdemo1-uat",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.OperationalInsights/workspaces/log-cmdemo1-uat",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "No workspace issues detected."
+        }
+      },
+      {
+        "type": "Microsoft.Sql/servers",
+        "name": "sql-cmdemo1-tdd-5tu77",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Sql/servers/sql-cmdemo1-tdd-5tu77",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Sql/servers",
+        "name": "sql-cmdemo1-uat-72l7x",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Sql/servers/sql-cmdemo1-uat-72l7x",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Sql/servers/databases",
+        "name": "sql-cmdemo1-tdd-5tu77/master",
+        "environment": "",
+        "environments": [],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Sql/servers/sql-cmdemo1-tdd-5tu77/databases/master",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Sql/servers/databases",
+        "name": "sql-cmdemo1-tdd-5tu77/sqldb-cmdemo1-tdd",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Sql/servers/sql-cmdemo1-tdd-5tu77/databases/sqldb-cmdemo1-tdd",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this SQL database or SQL data warehouse."
+        }
+      },
+      {
+        "type": "Microsoft.Sql/servers/databases",
+        "name": "sql-cmdemo1-uat-72l7x/master",
+        "environment": "",
+        "environments": [],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Sql/servers/sql-cmdemo1-uat-72l7x/databases/master",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Sql/servers/databases",
+        "name": "sql-cmdemo1-uat-72l7x/sqldb-cmdemo1-uat",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Sql/servers/sql-cmdemo1-uat-72l7x/databases/sqldb-cmdemo1-uat",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this SQL database or SQL data warehouse."
+        }
+      },
+      {
+        "type": "Microsoft.Storage/storageAccounts",
+        "name": "stcmdemo1tdd2bttonysob7i",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Storage/storageAccounts/stcmdemo1tdd2bttonysob7i",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this storage account."
+        }
+      },
+      {
+        "type": "Microsoft.Storage/storageAccounts",
+        "name": "stcmdemo1tddfwr2bttonyso",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Storage/storageAccounts/stcmdemo1tddfwr2bttonyso",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this storage account."
+        }
+      },
+      {
+        "type": "Microsoft.Storage/storageAccounts",
+        "name": "stcmdemo1tfchu4gq",
+        "environment": "tdd,uat,prod",
+        "environments": [
+          "tdd",
+          "uat",
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Storage/storageAccounts/stcmdemo1tfchu4gq",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this storage account."
+        }
+      },
+      {
+        "type": "Microsoft.Storage/storageAccounts",
+        "name": "stcmdemo1uat2bttonysob7i",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Storage/storageAccounts/stcmdemo1uat2bttonysob7i",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this storage account."
+        }
+      },
+      {
+        "type": "Microsoft.Storage/storageAccounts",
+        "name": "stcmdemo1uatfwr2bttonyso",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Storage/storageAccounts/stcmdemo1uatfwr2bttonyso",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:01Z",
+          "summary": "There aren't any known Azure platform problems affecting this storage account."
+        }
+      },
+      {
+        "type": "Microsoft.Web/serverFarms",
+        "name": "asp-cmdemo1-tdd",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Web/serverFarms/asp-cmdemo1-tdd",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Web/sites",
+        "name": "app-cmdemo1-tdd-app2-ui",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Web/sites/app-cmdemo1-tdd-app2-ui",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Web/sites",
+        "name": "app-cmdemo1-uat-app2-ui",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Web/sites/app-cmdemo1-uat-app2-ui",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Web/staticSites",
+        "name": "swa-cmdemo1-tdd-dashboard",
+        "environment": "tdd",
+        "environments": [
+          "tdd"
+        ],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Web/staticSites/swa-cmdemo1-tdd-dashboard",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      },
+      {
+        "type": "Microsoft.Web/staticSites",
+        "name": "swa-cmdemo1-uat-dashboard",
+        "environment": "uat",
+        "environments": [
+          "uat"
+        ],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.Web/staticSites/swa-cmdemo1-uat-dashboard",
+        "group": "rg-cmdemo1-nonprod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:01Z"
+        }
+      }
+    ],
+    "prod": [
+      {
+        "type": "microsoft.alertsmanagement/smartDetectorAlertRules",
+        "name": "Failure Anomalies - appi-cmdemo1-prod",
+        "environment": "",
+        "environments": [],
+        "location": "global",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/microsoft.alertsmanagement/smartDetectorAlertRules/Failure Anomalies - appi-cmdemo1-prod",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-prod-aisf-bhj5",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/containerApps/ca-cmdemo1-prod-aisf-bhj5",
+        "group": "rg-cmdemo1-prod",
+        "address": "https://ca-cmdemo1-prod-aisf-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-prod-ekdi",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-prod-fworker-bhj5",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/containerApps/ca-cmdemo1-prod-fworker-bhj5",
+        "group": "rg-cmdemo1-prod",
+        "address": "https://ca-cmdemo1-prod-fworker-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-prod-ekdi",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-prod-scorecard-bhj5",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/containerApps/ca-cmdemo1-prod-scorecard-bhj5",
+        "group": "rg-cmdemo1-prod",
+        "address": "https://ca-cmdemo1-prod-scorecard-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-prod-ekdi",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/containerApps",
+        "name": "ca-cmdemo1-prod-ui-bhj5",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/containerApps/ca-cmdemo1-prod-ui-bhj5",
+        "group": "rg-cmdemo1-prod",
+        "address": "https://ca-cmdemo1-prod-ui-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
+        "managedEnvironment": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-prod-ekdi",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/jobs",
+        "name": "caj-cmdemo1-prod-fwrunner",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/jobs/caj-cmdemo1-prod-fwrunner",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/jobs",
+        "name": "caj-cmdemo1-prod-fwrunner-codex",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/jobs/caj-cmdemo1-prod-fwrunner-codex",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.App/managedEnvironments",
+        "name": "cae-cmdemo1-prod-ekdi",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/managedEnvironments/cae-cmdemo1-prod-ekdi",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.CognitiveServices/accounts",
+        "name": "aif-cmdemo1-prod",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.CognitiveServices/accounts/aif-cmdemo1-prod",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:07Z",
+          "summary": "There aren't any known Azure platform problems affecting this Cognitive Services resource."
+        }
+      },
+      {
+        "type": "Microsoft.Insights/components",
+        "name": "appi-cmdemo1-prod",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.Insights/components/appi-cmdemo1-prod",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.KeyVault/vaults",
+        "name": "kvcmdemo1prod7ep6z",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.KeyVault/vaults/kvcmdemo1prod7ep6z",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:07Z",
+          "summary": "There aren't any known Azure platform problems affecting this key vault."
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-deploy-prod",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-deploy-prod",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-prod-aisf",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-prod-aisf",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-prod-app",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-prod-app",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-prod-app2-ui-ekdi",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-prod-app2-ui-ekdi",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-prod-fworker",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-prod-fworker",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-prod-fwrunner",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-prod-fwrunner",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-prod-scorecard",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-prod-scorecard",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "name": "id-cmdemo1-prod-ui",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-cmdemo1-prod-ui",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.OperationalInsights/workspaces",
+        "name": "log-cmdemo1-prod",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.OperationalInsights/workspaces/log-cmdemo1-prod",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:07Z",
+          "summary": "No workspace issues detected."
+        }
+      },
+      {
+        "type": "Microsoft.Sql/servers",
+        "name": "sql-cmdemo1-prod-swxdz",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.Sql/servers/sql-cmdemo1-prod-swxdz",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.Sql/servers/databases",
+        "name": "sql-cmdemo1-prod-swxdz/master",
+        "environment": "",
+        "environments": [],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.Sql/servers/sql-cmdemo1-prod-swxdz/databases/master",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.Sql/servers/databases",
+        "name": "sql-cmdemo1-prod-swxdz/sqldb-cmdemo1-prod",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.Sql/servers/sql-cmdemo1-prod-swxdz/databases/sqldb-cmdemo1-prod",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:07Z",
+          "summary": "There aren't any known Azure platform problems affecting this SQL database or SQL data warehouse."
+        }
+      },
+      {
+        "type": "Microsoft.Storage/storageAccounts",
+        "name": "stcmdemo1prodfwrj7265dy3",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.Storage/storageAccounts/stcmdemo1prodfwrj7265dy3",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:07Z",
+          "summary": "There aren't any known Azure platform problems affecting this storage account."
+        }
+      },
+      {
+        "type": "Microsoft.Storage/storageAccounts",
+        "name": "stcmdemo1prodj7265dy3lra",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.Storage/storageAccounts/stcmdemo1prodj7265dy3lra",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "available",
+          "source": "resourceHealth",
+          "checkedAt": "2026-10-17T21:42:07Z",
+          "summary": "There aren't any known Azure platform problems affecting this storage account."
+        }
+      },
+      {
+        "type": "Microsoft.Web/serverFarms",
+        "name": "asp-cmdemo1-prod",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.Web/serverFarms/asp-cmdemo1-prod",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.Web/sites",
+        "name": "app-cmdemo1-prod-app2-ui",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "southcentralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.Web/sites/app-cmdemo1-prod-app2-ui",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      },
+      {
+        "type": "Microsoft.Web/staticSites",
+        "name": "swa-cmdemo1-prod-dashboard",
+        "environment": "prod",
+        "environments": [
+          "prod"
+        ],
+        "location": "centralus",
+        "id": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.Web/staticSites/swa-cmdemo1-prod-dashboard",
+        "group": "rg-cmdemo1-prod",
+        "address": "",
+        "managedEnvironment": "",
+        "health": {
+          "status": "succeeded",
+          "source": "provisioningState",
+          "checkedAt": "2026-10-17T21:42:07Z"
+        }
+      }
+    ]
+  }
+}

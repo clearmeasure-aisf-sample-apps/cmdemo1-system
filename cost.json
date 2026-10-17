@@ -1,0 +1,92 @@
+{
+  "generated": "2026-10-17T12:48:23Z",
+  "currency": "USD",
+  "asOf": "2026-10-16",
+  "system": {
+    "yesterday": 36.78,
+    "last7Days": 106.31,
+    "monthToDate": 121.33
+  },
+  "environments": [
+    {
+      "name": "tdd",
+      "yesterday": 28.88,
+      "last7Days": 62.32,
+      "monthToDate": 67.93,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 41.16
+        },
+        {
+          "name": "Foundry Models",
+          "monthToDate": 19.54
+        },
+        {
+          "name": "Log Analytics",
+          "monthToDate": 5.54
+        }
+      ]
+    },
+    {
+      "name": "uat",
+      "yesterday": 2.85,
+      "last7Days": 14.85,
+      "monthToDate": 17.52,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 10.82
+        },
+        {
+          "name": "Log Analytics",
+          "monthToDate": 5.06
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 1.6
+        }
+      ]
+    },
+    {
+      "name": "prod",
+      "yesterday": 4.8,
+      "last7Days": 27.86,
+      "monthToDate": 33.31,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 23.79
+        },
+        {
+          "name": "Log Analytics",
+          "monthToDate": 7.88
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 1.59
+        }
+      ]
+    },
+    {
+      "name": "shared",
+      "yesterday": 0.25,
+      "last7Days": 1.28,
+      "monthToDate": 2.57,
+      "topServices": [
+        {
+          "name": "Container Registry",
+          "monthToDate": 2.35
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 0.15
+        },
+        {
+          "name": "MS Bing Services",
+          "monthToDate": 0.06
+        }
+      ]
+    }
+  ]
+}
