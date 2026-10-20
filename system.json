@@ -304,6 +304,10 @@
         {
           "name": "cursor-api-key",
           "env": "CURSOR_API_KEY"
+        },
+        {
+          "name": "copilot-tasks-token",
+          "env": "COPILOT_TASKS_TOKEN"
         }
       ],
       "buildPath": "/_build",
