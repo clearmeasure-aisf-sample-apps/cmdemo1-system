@@ -671,7 +671,7 @@ resource "octopusdeploy_process_step" "revert_own" {
   }
 }
 
-# A rollback is verified like an update (the kit's decision 0018, which the fleet reads from the process: a step after
+# A rollback is verified like an update (the kit's decision 0018, which the platform reads from the process: a step after
 # "Revert deployable" whose slug starts with "verify-", that waits for it and runs when the deployment has failed).
 # Right after "Revert deployable", on failure only: the application's verify.ps1 with the version the environment ran
 # before. It asks whether the environment runs the version versions.json will name once "Revert pin" has run, also
