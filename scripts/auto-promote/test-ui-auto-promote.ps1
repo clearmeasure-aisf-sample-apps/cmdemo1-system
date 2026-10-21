@@ -45,6 +45,7 @@ Test-Case 'neutral maps to skipped' (ConvertTo-CheckState 'completed' 'neutral')
 
 Test-Case 'Copilot agent run by name is ignored' (Test-AgentCheckRun 'Running Copilot cloud agent' '') $true
 Test-Case 'Copilot agent run by app is ignored' (Test-AgentCheckRun 'agent' 'copilot-swe-agent') $true
+Test-Case 'Copilot agent job named copilot is ignored' (Test-AgentCheckRun 'copilot' 'github-actions') $true
 Test-Case 'real CI check is not ignored' (Test-AgentCheckRun 'Build result' 'github-actions') $false
 # a failed Copilot agent run on the release commit does not hold it: filtered out before the decision, real checks pass
 $realChecks = @(@(@{ n = 'Running Copilot cloud agent'; a = 'copilot-swe-agent'; s = 'failure' }, @{ n = 'Build result'; a = 'github-actions'; s = 'success' }) | Where-Object { -not (Test-AgentCheckRun $_.n $_.a) } | ForEach-Object { @{ Name = $_.n; State = $_.s; Url = '' } })

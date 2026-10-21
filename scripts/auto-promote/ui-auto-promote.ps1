@@ -153,7 +153,7 @@ function ConvertTo-CheckState {
 function ConvertTo-StatusState([string] $State) { switch ($State) { 'success' { 'success' } 'pending' { 'pending' } default { 'failure' } } }
 function Test-AgentCheckRun([string] $Name, [string] $AppSlug) {
     # A GitHub Copilot cloud agent session ("Running Copilot cloud agent", event dynamic) is not a build or test of the commit.
-    ($AppSlug -match '^copilot-swe-agent') -or ($Name -match '^Running Copilot cloud agent')
+    ($AppSlug -match '^copilot-swe-agent') -or ($Name -match '^(Running Copilot cloud agent|copilot)$')
 }
 
 
