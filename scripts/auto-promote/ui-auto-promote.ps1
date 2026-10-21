@@ -151,6 +151,11 @@ function ConvertTo-CheckState {
     'pending'
 }
 function ConvertTo-StatusState([string] $State) { switch ($State) { 'success' { 'success' } 'pending' { 'pending' } default { 'failure' } } }
+function Test-AgentCheckRun([string] $Name, [string] $AppSlug) {
+    # A GitHub Copilot cloud agent session ("Running Copilot cloud agent", event dynamic) is not a build or test of the commit.
+    ($AppSlug -match '^copilot-swe-agent') -or ($Name -match '^Running Copilot cloud agent')
+}
+
 
 function Get-MasterState {
     # Checks of master's head commit (Name, State): green when every one passed, red when one failed, pending when one is not
@@ -564,13 +569,13 @@ function Save-State {
 
 function Get-CommitChecks([string] $Sha) {
     # Check runs (paged) and commit statuses of a commit of the application repository; an incomplete list adds a pending entry.
-    $checks = [Collections.Generic.List[object]]::new(); $page = 1
+    $checks = [Collections.Generic.List[object]]::new(); $page = 1; $ignored = 0
     do {
         $r = Invoke-Gh @("repos/$appRepo/commits/$Sha/check-runs?per_page=100&page=$page")
-        foreach ($c in @($r.check_runs)) { $checks.Add(@{ Name = $c.name; State = ConvertTo-CheckState $c.status $c.conclusion; Url = $c.html_url }) }
+        foreach ($c in @($r.check_runs)) { if (Test-AgentCheckRun ([string] $c.name) ([string] $c.app.slug)) { $ignored++; continue }; $checks.Add(@{ Name = $c.name; State = ConvertTo-CheckState $c.status $c.conclusion; Url = $c.html_url }) }
         $page++
     } while (@($r.check_runs).Count -eq 100 -and $page -le 10)
-    if ($r.total_count -gt $checks.Count) { $checks.Add(@{ Name = "check list incomplete ($($checks.Count) of $($r.total_count))"; State = 'pending'; Url = '' }) }
+    if ($r.total_count -gt ($checks.Count + $ignored)) { $checks.Add(@{ Name = "check list incomplete ($($checks.Count) of $($r.total_count))"; State = 'pending'; Url = '' }) }
     $s = Invoke-Gh @("repos/$appRepo/commits/$Sha/status?per_page=100")
     foreach ($c in @($s.statuses)) { $checks.Add(@{ Name = $c.context; State = ConvertTo-StatusState $c.state; Url = $c.target_url }) }
     if ($s.total_count -gt @($s.statuses).Count) { $checks.Add(@{ Name = 'status list incomplete'; State = 'pending'; Url = '' }) }

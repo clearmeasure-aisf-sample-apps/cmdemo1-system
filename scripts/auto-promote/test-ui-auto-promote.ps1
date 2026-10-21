@@ -43,6 +43,13 @@ Test-Case 'cancelled run maps to failure' (ConvertTo-CheckState 'completed' 'can
 Test-Case 'in progress maps to pending' (ConvertTo-CheckState 'in_progress' '') 'pending'
 Test-Case 'neutral maps to skipped' (ConvertTo-CheckState 'completed' 'neutral') 'skipped'
 
+Test-Case 'Copilot agent run by name is ignored' (Test-AgentCheckRun 'Running Copilot cloud agent' '') $true
+Test-Case 'Copilot agent run by app is ignored' (Test-AgentCheckRun 'agent' 'copilot-swe-agent') $true
+Test-Case 'real CI check is not ignored' (Test-AgentCheckRun 'Build result' 'github-actions') $false
+# a failed Copilot agent run on the release commit does not hold it: filtered out before the decision, real checks pass
+$realChecks = @(@(@{ n = 'Running Copilot cloud agent'; a = 'copilot-swe-agent'; s = 'failure' }, @{ n = 'Build result'; a = 'github-actions'; s = 'success' }) | Where-Object { -not (Test-AgentCheckRun $_.n $_.a) } | ForEach-Object { @{ Name = $_.n; State = $_.s; Url = '' } })
+Test-Case 'failed Copilot agent run does not hold the release' (Get-PromotionDecision -Facts (New-Facts @{ Checks = $realChecks })).Decision 'promote'
+
 # Flag 2
 Test-Case 'previous deployment failed flags' (Flags (New-Facts @{ PreviousState = 'Failed' })) @('Deployment or health failed')
 Test-Case 'log warning flags' (Flags (New-Facts @{ LogFindings = @('04:01 Warning | x') })) @('Deployment or health failed')
