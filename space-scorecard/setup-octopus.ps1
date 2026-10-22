@@ -30,8 +30,9 @@
                        -RotateOctopusKey. Octopus lets no AI agent's identity make an API key: run by the operator
                        (ai-ops is one), the script says so and a person makes the key in the portal
                        (Configuration > Users > cmdemo1-scorecard-runner > API keys, purpose "Scorecard.OctopusApiKey
-                       of cmdemo1-scorecard-space", at most a year) and gives it with -ReadRunnerKey; the older keys are then deleted in the portal. Run with a person's own key, the
-                       script makes it (and deletes the older ones of its purpose).
+                       of cmdemo1-scorecard-space", at most a year) and gives it with -ReadRunnerKey; the older keys
+                       are then deleted in the portal. Run with a person's own key, the script makes it (and deletes
+                       the older ones of its purpose).
                        Until then, by Jeffrey's decision of 2026-10-22, -UseOperatorKey puts the operator's own key
                        there; the runner account and its team stay, unused.
       Project          cmdemo1-scorecard-space, in the project group and lifecycle of cmdemo1-system.
