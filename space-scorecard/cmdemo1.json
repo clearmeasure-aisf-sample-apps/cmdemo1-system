@@ -9,10 +9,14 @@
   "cmisRepo": "ClearMeasure/Clear-Measure-Intelligence-Scorecard",
   "title": "cmdemo1 demo",
   "scorecardVersion": "1.0.40",
+  "scorecardCommit": "b6f970025e683bffc3ed0f33424f5c2d7a01d420",
   "scorecardRepo": "clearmeasure-aisf-sample-apps/cmdemo1-scorecard",
   "scorecardProject": "cmdemo1-scorecard",
   "sourceRepository": "clearmeasure-aisf-sample-apps/cmdemo1-system",
-  "site": { "account": "stcmdemo1prodsscj7265dy3", "container": "scorecard", "resourceGroup": "rg-cmdemo1-prod", "identity": "id-cmdemo1-prod-scorecard-site" },
+  "site": {
+    "account": "stcmdemo1prodsscj7265dy3", "container": "scorecard", "resourceGroup": "rg-cmdemo1-prod", "identity": "id-cmdemo1-prod-scorecard-site",
+    "pages": { "repo": "clearmeasure-aisf-sample-apps/cmdemo1-scorecard-site", "branch": "gh-pages", "url": "https://legendary-doodle-8lk2k24.pages.github.io/" }
+  },
   "automation": {
     "authors": ["github-actions[bot]", "github-actions", "dependabot[bot]"],
     "branches": ["^kit-templates.*$", "^template-sync-.*$", "^dependabot/.*$"],

@@ -3,23 +3,28 @@
 The delivery scorecard of a whole Octopus Deploy space, as static pages. Every project of the space is paired with
 its GitHub repository, each pair is harvested with cmis (Clear Measure Intelligence Scorecard) as a `GitHubDelivery`
 connection, and the pages of the live scorecard (cmdemo1-scorecard's Scorecard.Web) are exported from that store as
-static files, published at <https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard/index.html> (cmdemo1)
-and <https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard-cmdemo2/index.html> (cmdemo2).
+static files, published at <https://legendary-doodle-8lk2k24.pages.github.io/> (cmdemo1: private GitHub Pages of
+clearmeasure-aisf-sample-apps/cmdemo1-scorecard-site, with its data for AI tools at
+<https://legendary-doodle-8lk2k24.pages.github.io/llms.txt>; also, for now, at
+<https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard/index.html>) and
+<https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard-cmdemo2/index.html> (cmdemo2).
 
 Step 1 of the design "Space-level scorecard on cmis": discovery, cmis harvest and a static page, run by hand. Step 2:
 the same run every night as an Octopus runbook of the space, its store kept as a package in the space's built-in feed
 (see [Every night in Octopus](#every-night-in-octopus)). Step 2b: the pages rendered by Scorecard.Web's static export
 (`scorecardVersion`), the script's own page `scorecard.html` the fallback. Step 3: the pages published in a public blob
 container of prod (`infra/own/main.bicep`, [Published pages](#published-pages)). Step 4: the same code for a second
-space, cmdemo2's, driven only by its own configuration file ([More than one space](#more-than-one-space)).
+space, cmdemo2's, driven only by its own configuration file ([More than one space](#more-than-one-space)). Step 5:
+cmdemo1's pages on private GitHub Pages with a data layer an AI tool reads from `llms.txt`
+([GitHub Pages and the data for AI tools](#github-pages-and-the-data-for-ai-tools)).
 
 | File | What |
 |---|---|
 | `Invoke-SpaceScorecard.ps1` | The run: get cmis, discover, connections, harvest, compute, render |
 | `cmdemo1.json` | The configuration of the cmdemo1 space (Spaces-355) |
 | `cmdemo2.json` | The configuration of the cmdemo2 space (Spaces-356) |
-| `test-space-scorecard.ps1` | Tests without network: discovery order, the release-notes address, connection ids, rendering, the store package, the export and the published site |
-| `setup-octopus.ps1` | Sets up the nightly runbook in the space (runner identity, project, variables, Azure account, runbook, trigger); idempotent |
+| `test-space-scorecard.ps1` | Tests without network: discovery order, the release-notes address, connection ids, rendering, the store package, the export, the published site, and the GitHub Pages with their data layer (git faked) |
+| `setup-octopus.ps1` | Sets up the nightly runbook in the space (runner identity, project, variables, Azure account for a blob container, runbook, trigger); idempotent |
 
 ## Run it
 
@@ -38,9 +43,10 @@ pwsh -NoProfile -File space-scorecard/Invoke-SpaceScorecard.ps1 -Config space-sc
 | `-Config` | The space's configuration file |
 | `-WorkDir` | Where everything goes; keep it between runs, a rerun syncs instead of harvesting again |
 | `-Since`, `-Until` | The window, `yyyy-MM-dd`. Default: `Until` = today in `timeZone`, the window `historyDays` days long |
-| `-SkipHarvest` | Compute and render from what the store holds, for the projects of the last full run (`discovery.json`): harvests nothing and changes no connection. Only the export asks Octopus (the release's notes) and GitHub (its source) when `web/` does not hold that release's build yet; without a key it falls back to `scorecard.html` |
+| `-SkipHarvest` | Compute and render from what the store holds, for the projects of the last full run (`discovery.json`): harvests nothing and changes no connection. Only the export asks Octopus (the release's notes, unless `scorecardCommit` pins the commit) and GitHub (its source) when `web/` does not hold that release's build yet; without a key it falls back to `scorecard.html` |
 | `-StoreFeed` | Keep the store in the space's built-in feed: restore the newest `<prefix>-scorecard-store` package before the harvest, push a new version after a run that succeeded (see below). Not with `-SkipHarvest` |
-| `-PublishSite` | Publish the exported pages to `site` (see [Published pages](#published-pages)): needs `site` and `scorecardVersion`, and `az` signed in as an identity that may write the container |
+| `-PublishSite` | Publish the exported pages to `site`'s blob container (see [Published pages](#published-pages)): needs `site.account`, `site.container` and `scorecardVersion`, and `az` signed in as an identity that may write the container |
+| `-PublishPages` | Publish the exported pages and their data layer to `site.pages` (see [GitHub Pages and the data for AI tools](#github-pages-and-the-data-for-ai-tools)): needs `site.pages` and `scorecardVersion`, `git` on the `PATH`, and a GitHub token that may push to `site.pages.repo` |
 
 The export (with `scorecardVersion`) also needs the .NET SDK of Scorecard.Web's framework (10) as `dotnet` on the
 `PATH`, and the Octopus key (it reads the release's notes).
@@ -59,7 +65,8 @@ What lands in the work directory:
 | `scorecard.html` | The script's own page, the fallback when there is no export: one file, no script, no external request; dark and light; readable on a phone |
 | `summary.md` | The space's weekly table, one line per project for the last full week, what is measured and what not |
 | `scorecard-data.json` | Every number and item list the page is rendered from (no item titles) |
-| `document.json` | `cmis connections document` over all connections: metrics per local day of `timeZone`, item timelines |
+| `document.json` | `cmis connections document` over all connections: metrics per local day of `timeZone`, item timelines (with titles under `-PublishPages`, `--include-titles`) |
+| `pages/` | With `-PublishPages`: what goes to GitHub Pages, `site/` with `llms.txt`, `data/` and `.nojekyll` |
 | `discovery.json` | Each project of the space: its repository and where the pairing came from, or why it is not measured |
 | `bin/`, `workspace/`, `store/` | cmis itself, its workspace and its data store |
 | `harvest-state.json` | The first day each connection was harvested from |
@@ -137,6 +144,7 @@ Tests: `pwsh -NoProfile -File space-scorecard/test-space-scorecard.ps1` (PASS or
    offline, with `cmis connections renormalize` (same numbers, a few seconds).
 8. **Publish** (`-PublishSite`): see [Published pages](#published-pages). Before the push; a failure fails the run at
    its end, after the push. The storage token is taken at the start of the run, while Octopus's sign-in is fresh.
+   With `-PublishPages`, the same for GitHub Pages: see [GitHub Pages and the data for AI tools](#github-pages-and-the-data-for-ai-tools).
 9. **Inside Octopus** (the script runs in an Octopus step: `$OctopusParameters` or `New-OctopusArtifact` is there):
    `summary.md`, `document.json` and the pages become artifacts of the task: `scorecard-site.zip` and `index.html`
    alone (its style sheet is in the zip), or `scorecard.html` without an export. One line is highlighted: the space's
@@ -189,9 +197,11 @@ deliveries.
 | `scorecardVersion` | The release of the scorecard deployable whose Scorecard.Web renders the pages (`1.0.40`); without it, the script's own page only |
 | `scorecardRepo` | Its repository, `owner/repo` (`clearmeasure-aisf-sample-apps/cmdemo1-scorecard`) |
 | `scorecardProject` | The Octopus project of its releases (`cmdemo1-scorecard`), whose notes name the commit |
+| `scorecardCommit` | The commit of `scorecardRepo` to build, pinned (40 hex digits): then the release's notes are not read, and `scorecardProject` is not needed. `cmdemo1.json` pins the commit of release 1.0.40 (`b6f9700…`) |
 | `scorecardSpace` | The Octopus space of `scorecardProject` when it is not `space` (`Spaces-355` in `cmdemo2.json`: the scorecard deployable is cmdemo1's). The Octopus key must read it too |
 | `title` | What the pages say they cover. Default: the Octopus space's name |
-| `site.account`, `site.container` | Where `-PublishSite` publishes: storage account and public blob container |
+| `site.account`, `site.container` | Where `-PublishSite` publishes: storage account and public blob container (not needed with `site.pages` alone) |
+| `site.pages.repo`, `site.pages.branch`, `site.pages.url` | Where `-PublishPages` publishes: the GitHub repository, its branch (default `gh-pages`) that GitHub Pages serves, and the address it serves it at |
 | `site.resourceGroup`, `site.identity` | The identity `setup-octopus.ps1` makes the Azure account of (it reads its client id) |
 | `site.octopusAccount` | The name of that Azure account in the space. Default `azure-<prefix>-scorecard-site` |
 
@@ -232,6 +242,48 @@ the export no longer has, checks the container holds exactly the export, and tha
 request as `text/html`. The address goes into `summary.md` and the highlight. When there is no export, nothing is
 published: the container keeps the last pages.
 
+## GitHub Pages and the data for AI tools
+
+`-PublishPages` publishes the exported pages together with a data layer, to the GitHub repository `site.pages.repo`
+(cmdemo1: clearmeasure-aisf-sample-apps/cmdemo1-scorecard-site, private), whose GitHub Pages serve branch
+`site.pages.branch` (`gh-pages`, root) at `site.pages.url` (<https://legendary-doodle-8lk2k24.pages.github.io/>). The
+Pages are private (the organization is on GitHub Enterprise): a member of the organization who may read the repository
+signs in to GitHub to see them; anyone else is sent to GitHub's sign-in. The settings of the repository (Pages from
+`gh-pages`, root, private) were made once by hand.
+
+What goes there, in `<WorkDir>/pages`:
+
+| Path | What |
+|---|---|
+| the export | `site/` as it is, `index.html` with a link to `llms.txt` (in its head for tools, small in its footer) |
+| `.nojekyll` | GitHub Pages serves the files as they are |
+| `llms.txt` | For AI tools ([llmstxt.org](https://llmstxt.org)): what the scorecard is, the meaning of each number (the page's own words, from Scorecard.Web, and cmis's definition, unit and how periods add up, from its score), the stages, the projects, the window, when it was generated and with which cmis and Scorecard.Web, a link to every data file, and the rules that recompute a number for another window from the items' stage histories |
+| `data/summary.json` | Every number per scope (all projects together, each project) and week, MTTD also in hours and as the page writes it, the definitions, the projects, and the path of the list behind each number |
+| `data/drill/<scope>/<week>/<metric>.json` | The items behind each number of Work in process, Items started and Items delivered (`<scope>`: `_space` or the project's connection id): repository, number, kind, title, GitHub address, the stage move and when |
+| `data/items/<repo>.json` | Every item of the repository with activity in the window: number, kind, title, address, created, first delivered, current stage, its stages with the time each was entered |
+| `data/days.json` | The numbers per local day of `timeZone` (cmis's document) |
+| `data/cmis.json` | cmis's status: `connections list`, `connections inventory`, `connections last-run` (one run per connection), `config workstream list` (read-only commands) |
+| `data/full/` | `scorecard-data.json` and `document.json` of the run, whole (downloads) |
+
+A data file larger than about 90 KB of JSON goes on in parts (`<name>.2.json`, ...): an AI tool fetches a page whole,
+and many stop near 100 KB. Each part names all parts (`partFiles`); every path is from the site's root. The run checks
+that the recompute rules give every started, delivered, work in process and MTTD number of the run from the item files
+(`summary.json` says whether they do; a cell that differs is a warning). Every link is relative, so the site works
+under any path and as a clone of the branch.
+
+Not published: the raw harvest (`store/raw`), which holds more than the scorecard shows (whole commit messages, the
+names of commit authors and committers, every branch, Octopus deployment records with who deployed, form values, error
+messages and release notes; the title of a direct commit item is the first line of its message and of a branch item its
+name, and those titles are published), and `normalized.db`, cmis's LiteDB file of the same items and stage moves (a binary a web fetch
+cannot read; the item files hold what it adds). Both stay in the store package of the built-in feed.
+
+The push: the folder becomes the only commit of the branch (`git init` in a folder of its own, `add`, `commit`), force-
+pushed, so the branch keeps no history (the site of one run is some 70 MB). git signs in with the GitHub token through
+`GIT_ASKPASS`, a script that prints it from the process's environment: the token is in no command line, remote address,
+file or log, and no credential helper of the machine is used. Then the branch is checked to be that commit, and
+GitHub's Pages build of it is awaited (10 minutes at most: built is success, errored a failure, still building a
+warning). The address goes into `summary.md` and the highlight.
+
 ## Every night in Octopus
 
 `setup-octopus.ps1 -Config space-scorecard/<prefix>.json`, run by the operator (`OCTOPUS_ADMIN_API_KEY`, else the kit's `Get-OctopusApiKey`: Space manager
@@ -247,14 +299,16 @@ the script did not make stops it:
 | Project | `cmdemo1-scorecard-space` | Project group and lifecycle of `systemProject` (`cmdemo1-system`); no deployment process |
 | Variables | `Scorecard.OctopusApiKey`, `Scorecard.GitHubToken` (sensitive), `Scorecard.SourceRef` (prompted, default `main`) | The GitHub token is the operator's `gh auth token`, set when missing or with `-UpdateGitHubToken` |
 | Azure account | `azure-cmdemo1-scorecard-site` (`site.octopusAccount`) | Azure OpenID Connect (no secret), of `site.identity` (its client id read with the operator's `az`), prod only, subject keys space, project, environment |
-| Runbook | `Refresh space scorecard` | prod only; one "Run an Azure Script" step as that account (a "Run a Script" step without `site`) on `Hosted Ubuntu`, on the worker itself (Ubuntu 24.04 with PowerShell 7.6.2, .NET SDK 10 and Azure CLI 2.86 on 2026-10-22; `-ContainerImage` runs it in an execution container instead), the worker's own tools (no bundled tooling); its snapshot is published when anything changed |
+| Runbook | `Refresh space scorecard` | prod only; one "Run an Azure Script" step as that account (a "Run a Script" step without a blob container in `site`) on `Hosted Ubuntu`, on the worker itself (Ubuntu 24.04 with PowerShell 7.6.2, .NET SDK 10 and Azure CLI 2.86 on 2026-10-22; `-ContainerImage` runs it in an execution container instead), the worker's own tools (no bundled tooling); its snapshot is published when anything changed |
 | Trigger | `Nightly space scorecard` | Every day 00:15 in `timeZone` (America/Chicago; `-Schedule`), the published runbook in prod |
 
 The step downloads the `space-scorecard` folder of this repository at `Scorecard.SourceRef` through the GitHub API
 (tarball), sets `GITHUB_TOKEN` and `OCTOPUS_API_KEY` from the sensitive variables in its own process, and runs
-`Invoke-SpaceScorecard.ps1 -Config space-scorecard/<prefix>.json -WorkDir <the step's folder> -StoreFeed -PublishSite`
-(the window: `historyDays` days up to today in `timeZone`; `-PublishSite` with `site` only), `az` signed in by Octopus
-as the site's account. A manual run may name another branch in `Scorecard.SourceRef`, to try a change before it merges;
+`Invoke-SpaceScorecard.ps1 -Config space-scorecard/<prefix>.json -WorkDir <the step's folder> -StoreFeed -PublishSite -PublishPages`
+(the window: `historyDays` days up to today in `timeZone`; `-PublishSite` with a blob container in `site` only, `az`
+signed in by Octopus as the site's account; `-PublishPages` with `site.pages` only, pushed with `Scorecard.GitHubToken`).
+A configuration without a blob container gets a plain "Run a Script" step, and the Azure account this script made for
+it is deleted. A manual run may name another branch in `Scorecard.SourceRef`, to try a change before it merges;
 the nightly run takes `main`. The pages, the summary and the document are artifacts of each run's task.
 
 Accepted for this demo space, and to reconsider before another:
@@ -268,8 +322,10 @@ Accepted for this demo space, and to reconsider before another:
   the built-in feed (never replace one).
 - The store package holds data harvested from the space's repositories; everyone with `BuiltInFeedDownload` in the
   space can download it.
-- The published pages are public: anyone with the address reads the numbers and item lists of the space's
-  repositories (as anyone can on the live scorecard), and a manual run of another ref publishes what that ref renders.
+- The pages published to a blob container are public: anyone with the address reads the numbers and item lists of
+  the space's repositories (as anyone can on the live scorecard), and a manual run of another ref publishes what that
+  ref renders. The GitHub Pages are private to the organization's members who may read the repository.
+- The GitHub token that harvests also pushes the Pages: whoever can run the runbook can push to that repository.
 
 A rerun of `setup-octopus.ps1` changes only what differs from the above and says what it did; it prints ids, never a
 key or a token.
