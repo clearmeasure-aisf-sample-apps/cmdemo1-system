@@ -11,6 +11,7 @@
   "scorecardVersion": "1.0.40",
   "scorecardRepo": "clearmeasure-aisf-sample-apps/cmdemo1-scorecard",
   "scorecardProject": "cmdemo1-scorecard",
+  "sourceRepository": "clearmeasure-aisf-sample-apps/cmdemo1-system",
   "site": { "account": "stcmdemo1prodsscj7265dy3", "container": "scorecard", "resourceGroup": "rg-cmdemo1-prod", "identity": "id-cmdemo1-prod-scorecard-site" },
   "automation": {
     "authors": ["github-actions[bot]", "github-actions", "dependabot[bot]"],

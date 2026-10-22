@@ -38,12 +38,13 @@
       Render        scorecard.html (one file, no external request, no script) and summary.md, from
                     scorecard-data.json, the numbers and lists the compute step gathered (no item titles). One function
                     (Write-ScorecardFiles), apart from harvest and compute, so another renderer can take its place.
-      Export        With scorecardVersion in the configuration: the pages of Scorecard.Web (cmdemo1-scorecard) as
+      Export        With scorecardVersion in the configuration: the pages of Scorecard.Web (of scorecardRepo) as
                     static files in <WorkDir>/site (index.html, split.html, people.html, split-people.html, drill/,
                     css/, fonts/), the same pages as the live scorecard, from this run's store, and the site as
                     scorecard-site.zip. Scorecard.Web is built here from the commit release scorecardVersion of the
-                    Octopus project scorecardProject names (its notes), with the .NET SDK of the machine. When the
-                    build or the export fails, a warning, and scorecard.html is the page.
+                    Octopus project scorecardProject (in scorecardSpace, default the space) names (its notes), with
+                    the .NET SDK of the machine. When the build or the export fails, a warning, and scorecard.html is
+                    the page.
       Publish       With -PublishSite: the exported site into the public blob container site.container of storage
                     account site.account as the signed-in az identity (in Octopus, the step's Azure account); files
                     the export no longer has are deleted. The address is in the summary and the highlight. A
@@ -66,7 +67,7 @@
     Nothing is written to disk or printed. The Octopus key also reads and pushes the store package (-StoreFeed).
 
 .PARAMETER Config
-    The space's configuration file (see README.md), for example space-scorecard/cmdemo1.json.
+    The space's configuration file (see README.md), for example space-scorecard/cmdemo1.json or cmdemo2.json.
 .PARAMETER WorkDir
     Where the binary, the cmis workspace and store, and the outputs go. Kept between runs: a rerun syncs.
 .PARAMETER Since
@@ -146,6 +147,8 @@ function Read-SpaceConfig([string] $Path) {
         if (-not ($c['scorecardRepo'] -is [string] -and $c['scorecardRepo'] -cmatch '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+\z')) { throw "$Path`: 'scorecardRepo' (owner/repo) is required with 'scorecardVersion'." }
         if (-not ($c['scorecardProject'] -is [string] -and $c['scorecardProject'].Trim())) { throw "$Path`: 'scorecardProject' (the Octopus project of the release) is required with 'scorecardVersion'." }
     }
+    # The space of scorecardProject when the deployable belongs to another system's space (it goes into a request path).
+    if ($null -ne $c['scorecardSpace'] -and -not ($c['scorecardSpace'] -is [string] -and $c['scorecardSpace'] -cmatch '^Spaces-\d+\z')) { throw "$Path`: 'scorecardSpace' must be an Octopus space id such as Spaces-355." }
     if ($c['site']) {
         $s = $c['site']
         if ($s -isnot [Collections.IDictionary] -or -not ("$($s['account'])" -cmatch '^[a-z0-9]{3,24}\z') -or -not ("$($s['container'])" -cmatch '^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]\z')) {
@@ -1054,7 +1057,13 @@ function Invoke-WithoutSecrets([scriptblock] $Script) {
     finally { foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) } }
 }
 
-# Scorecard.Web of release scorecardVersion of the Octopus project scorecardProject, framework-dependent, in
+# The Octopus space of scorecardProject: scorecardSpace, else the space of the configuration (the scorecard deployable
+# may belong to another system, whose space then needs to be readable with the same key).
+function Get-ScorecardSpace([hashtable] $Config) {
+    if ($Config['scorecardSpace']) { [string] $Config['scorecardSpace'] } else { [string] $Config.space }
+}
+
+# Scorecard.Web of release scorecardVersion of the Octopus project scorecardProject (in scorecardSpace), framework-dependent, in
 # <Directory>: the release's notes name the commit; its source comes through the GitHub REST API (tarball of
 # scorecardRepo) and "dotnet publish" builds Scorecard.Web/Scorecard.Web.csproj (a .NET SDK of the project's
 # framework on the PATH: Hosted Ubuntu has one). Built as the image of that release is (Release, no app host, the
@@ -1074,9 +1083,10 @@ function Get-ScorecardWeb([hashtable] $Config, [string] $Directory) {
     }
     $started = [Diagnostics.Stopwatch]::StartNew()
     $name = $Config.scorecardProject
-    $projects = @(@((Invoke-OctopusRequest $Config "/api/$($Config.space)/projects?partialName=$([uri]::EscapeDataString($name))&take=100")['Items']) | Where-Object { $_ -and $_['Name'] -ceq $name })
-    if ($projects.Count -ne 1) { throw "Space $($Config.space) has $($projects.Count) projects named $name." }
-    $release = Invoke-OctopusRequest $Config "/api/$($Config.space)/projects/$($projects[0]['Id'])/releases/$([uri]::EscapeDataString($version))"
+    $space = Get-ScorecardSpace $Config
+    $projects = @(@((Invoke-OctopusRequest $Config "/api/$space/projects?partialName=$([uri]::EscapeDataString($name))&take=100")['Items']) | Where-Object { $_ -and $_['Name'] -ceq $name })
+    if ($projects.Count -ne 1) { throw "Space $space has $($projects.Count) projects named $name." }
+    $release = Invoke-OctopusRequest $Config "/api/$space/projects/$($projects[0]['Id'])/releases/$([uri]::EscapeDataString($version))"
     $commit = Get-ReleaseCommit ([string] $release['ReleaseNotes'])
     if (-not $commit) { throw "The notes of release $version of $name name no commit." }
 

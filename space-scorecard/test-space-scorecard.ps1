@@ -427,5 +427,65 @@ Test-Case 'octopus: not inside an Octopus step here' (Test-InsideOctopus) $false
 Test-Case 'highlight: last full week of the space, measured, store version' (Get-HighlightLine $fixture '2026.10.22.51500') 'Space Spaces-1, 2026-09-28 to 2026-10-14: week of 2026-10-05 started 0, delivered 1, WIP 0, MTTD 5.8 h; 1 of 2 projects measured; store 2026.10.22.51500'
 Test-Case 'highlight: and where the pages are' (Get-HighlightLine $fixture '2026.10.22.51500' 'pages at https://stacme01.blob.core.windows.net/scorecard/index.html') 'Space Spaces-1, 2026-09-28 to 2026-10-14: week of 2026-10-05 started 0, delivered 1, WIP 0, MTTD 5.8 h; 1 of 2 projects measured; store 2026.10.22.51500; pages at https://stacme01.blob.core.windows.net/scorecard/index.html'
 
+# --- More than one space: everything of a space comes from its configuration -------------------------------------
+$configFile = Join-Path ([IO.Path]::GetTempPath()) "space-scorecard-test-$([guid]::NewGuid().ToString('N')).json"
+Test-Case 'config: scorecard space kept' (Read-Fixture ($scorecard + @{ scorecardSpace = 'Spaces-355' })).scorecardSpace 'Spaces-355'
+Test-Case 'config: a scorecard space that is no space id is refused' (Read-Fixture ($scorecard + @{ scorecardSpace = '../Spaces-355' })) "refused: 'scorecardSpace' must be an Octopus space id such as Spaces-355."
+Test-Case 'config: a scorecard space that is no text is refused' (Read-Fixture ($scorecard + @{ scorecardSpace = 355 })) "refused: 'scorecardSpace' must be an Octopus space id such as Spaces-355."
+Remove-Item -LiteralPath $configFile -Force
+Test-Case 'scorecard space: the space of the configuration by default' (Get-ScorecardSpace @{ space = 'Spaces-1' }) 'Spaces-1'
+Test-Case 'scorecard space: scorecardSpace when given' (Get-ScorecardSpace @{ space = 'Spaces-2'; scorecardSpace = 'Spaces-1' }) 'Spaces-1'
+
+# The release of the scorecard deployable is read in scorecardSpace, the projects of the space in space.
+$webCalls = [Collections.Generic.List[string]]::new()
+function Invoke-OctopusRequest([hashtable] $Config, [string] $Path) {
+    $webCalls.Add($Path)
+    if ($Path -like '*/projects?partialName=*') { return @{ Items = @(@{ Id = 'Projects-7'; Name = 'acme-scorecard' }, @{ Id = 'Projects-8'; Name = 'acme-scorecard-space' }) } }
+    if ($Path -like '*/projects/Projects-7/releases/1.0.40') { return @{ ReleaseNotes = 'no commit named here' } }
+    throw "unexpected Get $Path"
+}
+$webDir = Join-Path ([IO.Path]::GetTempPath()) "space-scorecard-web-$([guid]::NewGuid().ToString('N'))"
+function Get-WebFailure([hashtable] $Config) { try { Get-ScorecardWeb $Config $webDir; 'built' } catch { $_.Exception.Message } }
+$webConfig = $scorecard + @{ space = 'Spaces-2' }
+Test-Case 'export: release looked up in the space by default' @(@(Get-WebFailure $webConfig) + @($webCalls)) @('The notes of release 1.0.40 of acme-scorecard name no commit.', '/api/Spaces-2/projects?partialName=acme-scorecard&take=100', '/api/Spaces-2/projects/Projects-7/releases/1.0.40')
+$webCalls.Clear()
+Test-Case 'export: release looked up in scorecardSpace' @(@(Get-WebFailure ($webConfig + @{ scorecardSpace = 'Spaces-1' })) + @($webCalls)) @('The notes of release 1.0.40 of acme-scorecard name no commit.', '/api/Spaces-1/projects?partialName=acme-scorecard&take=100', '/api/Spaces-1/projects/Projects-7/releases/1.0.40')
+
+# The configurations in this folder: each reads, and each names its own space, store and runbook project.
+$cmdemo1 = Read-SpaceConfig (Join-Path $PSScriptRoot 'cmdemo1.json')
+$cmdemo2 = Read-SpaceConfig (Join-Path $PSScriptRoot 'cmdemo2.json')
+Test-Case 'cmdemo1.json: space, store, scorecard release in its own space' @($cmdemo1.space, (Get-StorePackageId $cmdemo1), (Get-ScorecardSpace $cmdemo1), $cmdemo1.site.container) @('Spaces-355', 'cmdemo1-scorecard-store', 'Spaces-355', 'scorecard')
+Test-Case 'cmdemo2.json: space, store, scorecard release in the space of cmdemo1' @($cmdemo2.space, (Get-StorePackageId $cmdemo2), (Get-ScorecardSpace $cmdemo2), ($cmdemo2.exclude -join ",")) @('Spaces-356', 'cmdemo2-scorecard-store', 'Spaces-355', 'cmdemo2-scorecard-space')
+$coordinates = Get-ConnectionCoordinates $cmdemo2 @{ owner = 'clearmeasure-aisf-sample-apps'; repo = 'cmdemo2-workorders'; slug = 'cmdemo2-ui'; environments = 'auto' } 0
+Test-Case 'cmdemo2.json: coordinates name its own space' @($coordinates.octopusServer, $coordinates.octopusSpace, $coordinates.octopusProject) @('https://clearmeasure.octopus.app', 'Spaces-356', 'cmdemo2-ui')
+# cmdemo1's coordinates as cmis stored them before the configuration was generalized: a change here harvests again.
+$coordinates = Get-ConnectionCoordinates $cmdemo1 @{ owner = 'clearmeasure-aisf-sample-apps'; repo = 'cmdemo1-workorders'; slug = 'cmdemo1-ui'; environments = 'auto' } 0
+Test-Case 'cmdemo1.json: coordinates unchanged' (ConvertTo-Json -InputObject $coordinates -Compress) '{"owner":"clearmeasure-aisf-sample-apps","repo":"cmdemo1-workorders","octopusServer":"https://clearmeasure.octopus.app","octopusSpace":"Spaces-355","octopusProject":"cmdemo1-ui","environments":"auto","itemNumberBase":"0","automationAuthors":"github-actions[bot],github-actions,dependabot[bot]","automationBranches":"^kit-templates.*$\n^template-sync-.*$\n^dependabot/.*$","automationCommitMessages":"^Pin \\S+ \\S+ in \\S+ \\(Deployments-\\d+\\)$\n^Revert pin of \\S+ \\S+ in \\S+ \\(Deployments-\\d+ failed\\)$\n^Template sync: .*$\n^Kit (templates|workflows)\\b.*$"}'
+
+# setup-octopus.ps1: what it builds on and the names it makes, from the configuration alone.
+$setupScript = Join-Path $PSScriptRoot 'setup-octopus.ps1'
+function Get-Setup([string] $Path, [hashtable] $Override = @{}, [string] $Source) {
+    & {
+        . $setupScript -LoadOnly
+        $c = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($k in $Override.Keys) { if ($null -eq $Override[$k]) { $c.Remove($k) } else { $c[$k] = $Override[$k] } }
+        try { Get-SetupSettings $c $Path $Source } catch { "refused: $($_.Exception.Message -replace '^.*?: ', '')" }
+    }
+}
+$one = Get-Setup (Join-Path $PSScriptRoot 'cmdemo1.json')
+Test-Case 'setup cmdemo1: as before the generalization' @($one.Space, $one.SourceRepository, $one.SystemProject, $one.StorePackage, $one.ConfigName) @('Spaces-355', 'clearmeasure-aisf-sample-apps/cmdemo1-system', 'cmdemo1-system', 'cmdemo1-scorecard-store', 'cmdemo1.json')
+Test-Case 'setup cmdemo1: names as before' @($one.Names.Role, $one.Names.Account, $one.Names.Team, $one.Names.Project, $one.Names.KeyPurpose, $one.Names.AzureAccount) @('cmdemo1 scorecard store feed', 'cmdemo1-scorecard-runner', 'cmdemo1 scorecard runner', 'cmdemo1-scorecard-space', 'Scorecard.OctopusApiKey of cmdemo1-scorecard-space', 'azure-cmdemo1-scorecard-site')
+$two = Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json')
+Test-Case 'setup cmdemo2: its own space, the code of cmdemo1-system' @($two.Space, $two.SourceRepository, $two.SystemProject, $two.StorePackage, $two.ConfigName) @('Spaces-356', 'clearmeasure-aisf-sample-apps/cmdemo1-system', 'cmdemo2-system', 'cmdemo2-scorecard-store', 'cmdemo2.json')
+Test-Case 'setup cmdemo2: its own names, no Azure account without a site' @($two.Names.Role, $two.Names.Account, $two.Names.Team, $two.Names.Project, $two.Names.AzureAccount) @('cmdemo2 scorecard store feed', 'cmdemo2-scorecard-runner', 'cmdemo2 scorecard runner', 'cmdemo2-scorecard-space', $null)
+Test-Case 'setup: -SourceRepository wins' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{} 'acme/fork').SourceRepository 'acme/fork'
+Test-Case 'setup: no source repository is refused' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ sourceRepository = $null }) "refused: 'sourceRepository' (owner/repo whose space-scorecard folder the runbook runs) is required, or -SourceRepository."
+Test-Case 'setup: systemProject when given' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ systemProject = 'platform' }).SystemProject 'platform'
+Test-Case 'setup: an empty systemProject is refused' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ systemProject = ' ' }) "refused: 'systemProject' must be the name of an Octopus project."
+Test-Case 'setup: site.octopusAccount when given' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo1.json') @{ site = @{ account = 'stacme01'; container = 'scorecard'; octopusAccount = 'azure-shared-site' } }).Names.AzureAccount 'azure-shared-site'
+Test-Case 'setup: a space that is no space id is refused' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ space = 'Spaces-356/../x' }) "refused: 'space' must be an Octopus space id such as Spaces-355."
+Test-Case 'setup: a site that is no object is refused' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ site = 'stacme01' }) "refused: 'site' must be an object (account, container, resourceGroup, identity)."
+Test-Case 'setup: no prefix is refused' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ prefix = $null }) "refused: 'prefix' is required."
+
 if ($failures) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'All passed'
