@@ -1,0 +1,24 @@
+{
+  "space": "Spaces-355",
+  "octopusServer": "https://clearmeasure.octopus.app",
+  "githubOwner": "clearmeasure-aisf-sample-apps",
+  "timeZone": "America/Chicago",
+  "historyDays": 90,
+  "cmisVersion": "1.0.3713-delivery.3",
+  "cmisRepo": "ClearMeasure/Clear-Measure-Intelligence-Scorecard",
+  "automation": {
+    "authors": ["github-actions[bot]", "github-actions", "dependabot[bot]"],
+    "branches": ["^kit-templates.*$", "^template-sync-.*$", "^dependabot/.*$"],
+    "commitMessages": [
+      "^Pin \\S+ \\S+ in \\S+ \\(Deployments-\\d+\\)$",
+      "^Revert pin of \\S+ \\S+ in \\S+ \\(Deployments-\\d+ failed\\)$",
+      "^Template sync: .*$",
+      "^Kit (templates|workflows)\\b.*$"
+    ]
+  },
+  "projects": {
+    "cmdemo1-ui": { "repo": "cmdemo1-workorders" },
+    "cmdemo1-scorecard": { "environments": "tdd:TDD,uat:UAT,prod:Delivered" }
+  },
+  "exclude": []
+}
