@@ -6,8 +6,9 @@
     Tests Invoke-SpaceScorecard.ps1 without network: discovery's resolution order (fake Octopus answers), the
     release-notes address rule, the connection ids and coordinates, the page and summary rendered from a small
     fixture, the store package (version, which one is restored, what it holds, restore against a fake feed), and the
-    export and published site (release commit, content types, upload order, stale files, secrets kept out, the zip).
-    PASS or FAIL per case; exit 1 on a FAIL.
+    export and published site (release commit, content types, upload order, stale files, secrets kept out, the zip),
+    and the Pages with their data layer (item kinds and addresses, parts, the recompute rules, summary, lists, item
+    files, llms.txt and its links, git faked for the push). PASS or FAIL per case; exit 1 on a FAIL.
 .EXAMPLE
     pwsh -NoProfile -File space-scorecard/test-space-scorecard.ps1
 #>
@@ -287,7 +288,15 @@ $scorecard = @{ scorecardVersion = '1.0.40'; scorecardRepo = 'acme/scorecard'; s
 Test-Case 'config: scorecard release kept' (Read-Fixture $scorecard).scorecardVersion '1.0.40'
 Test-Case 'config: a scorecard version that is no release number is refused' (Read-Fixture @{ scorecardVersion = 'latest'; scorecardRepo = 'acme/scorecard'; scorecardProject = 'p' }) "refused: 'scorecardVersion' must be a release number such as 1.0.40."
 Test-Case 'config: a scorecard version without its repository is refused' (Read-Fixture @{ scorecardVersion = '1.0.40'; scorecardProject = 'p' }) "refused: 'scorecardRepo' (owner/repo) is required with 'scorecardVersion'."
-Test-Case 'config: a scorecard version without its project is refused' (Read-Fixture @{ scorecardVersion = '1.0.40'; scorecardRepo = 'acme/scorecard' }) "refused: 'scorecardProject' (the Octopus project of the release) is required with 'scorecardVersion'."
+Test-Case 'config: a scorecard version without its project is refused' (Read-Fixture @{ scorecardVersion = '1.0.40'; scorecardRepo = 'acme/scorecard' }) "refused: 'scorecardProject' (the Octopus project of the release) is required with 'scorecardVersion' when 'scorecardCommit' does not pin the commit."
+Test-Case 'config: a pinned commit needs no project' (Read-Fixture @{ scorecardVersion = '1.0.40'; scorecardRepo = 'acme/scorecard'; scorecardCommit = 'b6f970025e683bffc3ed0f33424f5c2d7a01d420' }).scorecardCommit 'b6f970025e683bffc3ed0f33424f5c2d7a01d420'
+Test-Case 'config: a pinned commit that is no full commit id is refused' (Read-Fixture ($scorecard + @{ scorecardCommit = 'b6f9700' })) "refused: 'scorecardCommit' must be a full commit id (40 lower-case hex digits)."
+$pagesSite = @{ repo = 'acme/shop-site'; url = 'https://acme.pages.github.io' }
+Test-Case 'config: GitHub Pages alone, the branch gh-pages by default, the address ending in /' @((Read-Fixture ($scorecard + @{ site = @{ pages = $pagesSite } })).site.pages | ForEach-Object { $_.repo, $_.branch, $_.url }) @('acme/shop-site', 'gh-pages', 'https://acme.pages.github.io/')
+Test-Case 'config: GitHub Pages beside a blob container' @((Read-Fixture ($scorecard + @{ site = @{ account = 'stacme01'; container = 'scorecard'; pages = $pagesSite } })).site | ForEach-Object { $_.container, $_.pages.repo }) @('scorecard', 'acme/shop-site')
+Test-Case 'config: GitHub Pages without a repository is refused' (Read-Fixture ($scorecard + @{ site = @{ pages = @{ url = 'https://acme.pages.github.io/' } } })) "refused: 'site.pages' needs 'repo' (owner/repo) and 'url' (the https:// address GitHub Pages serves it at)."
+Test-Case 'config: GitHub Pages at an http address is refused' (Read-Fixture ($scorecard + @{ site = @{ pages = @{ repo = 'acme/s'; url = 'http://acme.pages.github.io/' } } })) "refused: 'site.pages' needs 'repo' (owner/repo) and 'url' (the https:// address GitHub Pages serves it at)."
+Test-Case 'config: a Pages branch that is no branch name is refused' (Read-Fixture ($scorecard + @{ site = @{ pages = $pagesSite + @{ branch = 'gh..pages' } } })) "refused: 'site.pages.branch' must be a branch name."
 Test-Case 'config: site kept' (Read-Fixture ($scorecard + @{ site = @{ account = 'stacme01'; container = 'scorecard' } })).site.container 'scorecard'
 Test-Case 'config: a site without a scorecard version is refused' (Read-Fixture @{ site = @{ account = 'stacme01'; container = 'scorecard' } }) "refused: 'site' needs 'scorecardVersion': the published pages are the export's."
 Test-Case 'config: a site account with capitals is refused' (Read-Fixture @{ site = @{ account = 'StAcme'; container = 'scorecard' } }) "refused: 'site' needs 'account' (a storage account name) and 'container' (a blob container name)."
@@ -422,6 +431,118 @@ Test-Case 'site zip: the files by their paths in the site' @($zip.Entries | ForE
 $zip.Dispose()
 Remove-Item -LiteralPath $siteDir -Recurse -Force
 
+# --- The Pages site and its data layer ---------------------------------------------------------------------------
+function Kind([long] $Number, [string] $Kind) { $a = Get-ItemAddress 'acme' 'shop' $Number $Kind; "$($a.Kind) $($a.Url)" }
+Test-Case 'item: an issue' (Kind 13 'issue') 'issue https://github.com/acme/shop/issues/13'
+Test-Case 'item: a pull request' (Kind 12 'pull request') 'pull request https://github.com/acme/shop/pull/12'
+Test-Case 'item: no list names it, a GitHub number' (Kind 40 '') 'issue or pull request https://github.com/acme/shop/issues/40'
+Test-Case 'item: no list names it, a branch number' (Kind 683150 '') 'branch '
+Test-Case 'item: no list names it, a commit number' (Kind 961170 '') 'direct commit '
+Test-Case 'item: a direct commit has no address' (Kind 961170 'direct commit') 'direct commit '
+$parts = Split-ByJsonSize @(1..10 | ForEach-Object { [ordered]@{ n = $_; text = 'x' * 40 } }) 200
+Test-Case 'parts: each within the budget, in order' @(@($parts | ForEach-Object { (ConvertTo-Json -InputObject @($_) -Compress).Length -le 200 }) + @($parts | ForEach-Object { $_ } | ForEach-Object { $_.n })) @(@($parts | ForEach-Object { $true }) + @(1..10))
+Test-Case 'parts: more than one when large' ($parts.Count -gt 1) $true
+Test-Case 'parts: nothing is one empty part' @((Split-ByJsonSize @() 200).Count, @((Split-ByJsonSize @() 200)[0]).Count) @(1, 0)
+
+# A small document for the fixture: shop-api's three items as cmis connections document --include-titles writes them.
+$fixtureDocument = @{
+    timeZone = 'America/Chicago'; from = '2026-09-28'; to = '2026-10-14'
+    connections = @(@{ id = 'shop-api'; tracker = 'GitHubDelivery'; stages = @('Created', 'Development', 'In Review', 'Merged', 'TDD', 'Delivered'); deliveredStages = @('Delivered') })
+    days = @(@{ day = '2026-09-28'; metrics = @{ ItemsDelivered = 0 } })
+    items = @(
+        @{ connection = 'shop-api'; number = 1000012; type = 'Feature'; createdUtc = '2026-09-29T10:00:00+00:00'; currentStage = 'Delivered'; title = 'Checkout [beta] *fast*'
+            stages = @(@{ stage = 'Created'; enteredUtc = '2026-09-29T10:00:00+00:00' }, @{ stage = 'In Review'; enteredUtc = '2026-10-04T20:53:26+00:00' }, @{ stage = 'Delivered'; enteredUtc = '2026-10-06T10:00:00+00:00' }) }
+        @{ connection = 'shop-api'; number = 1000013; type = 'Feature'; createdUtc = '2026-09-30T10:00:00+00:00'; currentStage = 'Delivered'; title = 'Basket'
+            stages = @(@{ stage = 'Created'; enteredUtc = '2026-09-30T10:00:00+00:00' }, @{ stage = 'Delivered'; enteredUtc = '2026-10-01T10:00:00+00:00' }) }
+        @{ connection = 'shop-api'; number = 1961170; type = 'Feature'; createdUtc = '2026-09-30T11:00:00+00:00'; currentStage = 'Delivered'; title = 'Pin api 1.2.3'
+            stages = @(@{ stage = 'Created'; enteredUtc = '2026-09-30T11:00:00+00:00' }, @{ stage = 'Delivered'; enteredUtc = '2026-10-01T11:00:00+00:00' }) }
+        @{ connection = 'shop-api'; number = 1000014; type = 'Feature'; createdUtc = '2026-09-27T12:00:00+00:00'; currentStage = 'Closed'; title = 'Dropped'
+            stages = @(@{ stage = 'Created'; enteredUtc = '2026-09-27T12:00:00+00:00' }, @{ stage = 'Closed'; enteredUtc = '2026-10-02T12:00:00+00:00' }) }
+        @{ connection = 'other'; number = 9000001; type = 'Feature'; createdUtc = '2026-09-30T12:00:00+00:00'; currentStage = 'Created'; title = 'Not measured'; stages = @() }
+    )
+}
+$items = Get-PagesItems $fixtureDocument $fixture
+Test-Case 'items: by measured connection only' @($items.Keys) @('shop-api')
+Test-Case 'items: own number, kind from the lists, title, address' @($items['shop-api'] | ForEach-Object { "$($_.number) $($_.kind) $($_.url)" }) @('12 pull request https://github.com/acme/shop-api/pull/12', '13 issue https://github.com/acme/shop-api/issues/13', '961170 direct commit ', '14 issue or pull request https://github.com/acme/shop-api/issues/14')
+Test-Case 'items: first delivered, null when not' @($items['shop-api'] | ForEach-Object { "$($_.deliveredUtc)" }) @('2026-10-06T10:00:00+00:00', '2026-10-01T10:00:00+00:00', '2026-10-01T11:00:00+00:00', '')
+# The fixture's MTTD is not what these items give (it is a page fixture): exactly those cells differ.
+Test-Case 'recompute: the cells whose numbers the items do not give' @(Test-RecomputedNumbers $fixture $items $fixtureDocument | ForEach-Object { $_ -replace ':.*$' }) @('_space 2026-09-28 meanTimeToDelivery', '_space 2026-10-05 meanTimeToDelivery', 'shop-api 2026-09-28 meanTimeToDelivery')
+$consistent = @{} + $fixture
+$consistent.scopes = @(foreach ($s in $fixture.scopes) {
+        $periods = @{}
+        foreach ($k in $s.periods.Keys) { $periods[$k] = @{} + $s.periods[$k]; if ($k -eq '2026-09-28') { $periods[$k].meanTimeToDelivery = 1 / 7 } elseif ($k -eq '2026-10-05') { $periods[$k].meanTimeToDelivery = 1.0 } }
+        @{ id = $s.id; title = $s.title; periods = $periods; drills = $s.drills }
+    })
+Test-Case 'recompute: started, delivered, work in process (a closed item is out) and MTTD from the items' @(Test-RecomputedNumbers $consistent $items $fixtureDocument) @()
+
+$pagesRoot = Join-Path ([IO.Path]::GetTempPath()) "space-scorecard-pages-$([guid]::NewGuid().ToString('N'))"
+$script:DataFileBudget = 400
+$layer = Write-PagesDataLayer $consistent $fixtureDocument ([ordered]@{ connections = @(@{ id = 'shop-api' }) }) @{ version = '1.0.40'; repository = 'acme/scorecard'; commit = 'b6f970025e683bffc3ed0f33424f5c2d7a01d420' } @{ prefix = 'shop' } $pagesRoot 'Shop [demo] *one*'
+$script:DataFileBudget = 90000
+$summary = Get-Content -LiteralPath "$pagesRoot/data/summary.json" -Raw | ConvertFrom-Json -AsHashtable
+function SummaryWeek([string] $Scope, [string] $Week) { @(@($summary.scopes | Where-Object { $_.id -eq $Scope })[0].weeks | Where-Object { $_.week -eq $Week })[0] }
+Test-Case 'summary: the numbers of the run' @((SummaryWeek '_space' '2026-09-28') | ForEach-Object { $_.workInProcess, $_.itemsStarted, $_.itemsDelivered, $_.throughput, $_.rework, $_.netThroughput, $_.meanTimeToDeliveryHours, $_.meanTimeToDeliveryText }) @(1, 3, 2, 11, 1, 10, 24.0, '24.0 h')
+Test-Case 'summary: a project week without data is null' @((SummaryWeek 'shop-api' '2026-10-05') | ForEach-Object { $_.itemsDelivered, $_.meanTimeToDeliveryText }) @($null, '–')
+Test-Case 'summary: the recompute check holds' $summary.recomputed 'The rules of llms.txt give every started, delivered, work in process and MTTD number of these weeks from the item files.'
+Test-Case 'summary: the list behind a number' (SummaryWeek '_space' '2026-09-28').lists.itemsStarted 'data/drill/_space/2026-09-28/itemsStarted.json'
+Test-Case 'summary: definitions of the page, in its order' @($summary.metrics | ForEach-Object { $_.key }) @('workInProcess', 'itemsStarted', 'itemsDelivered', 'meanTimeToDelivery', 'throughput', 'rework', 'netThroughput')
+Test-Case 'summary: a project names its items' @($summary.projects | ForEach-Object { "$($_.project) $($_.items)" }) @('shop-api data/items/shop-api.json', 'Retired ')
+$drill = Get-Content -LiteralPath "$pagesRoot/data/drill/_space/2026-09-28/itemsStarted.json" -Raw | ConvertFrom-Json -AsHashtable
+$drillItems = @($(if ($drill['partFiles']) { $drill.partFiles } else { 'data/drill/_space/2026-09-28/itemsStarted.json' }) | ForEach-Object { (Get-Content -LiteralPath (Join-Path $pagesRoot $_) -Raw | ConvertFrom-Json -AsHashtable).items })
+Test-Case 'drill file: count, and the items with their titles' @(@($drill.count, $drill.listed) + @($drillItems | ForEach-Object { "$($_.number) $($_.title)" })) @(3, 3, '12 Checkout [beta] *fast*', '13 Basket', '961170 Pin api 1.2.3')
+Test-Case 'drill file: where the items'' histories are' $drill.itemFiles['acme/shop-api'] 'data/items/shop-api.json'
+$itemFile = Get-Content -LiteralPath "$pagesRoot/data/items/shop-api.json" -Raw | ConvertFrom-Json -AsHashtable
+Test-Case 'items file: in parts when large, each naming them all' @($itemFile.part, $itemFile.parts, ($itemFile.partFiles | ForEach-Object { Test-Path -LiteralPath (Join-Path $pagesRoot $_) })) @(1, $itemFile.parts, @($itemFile.partFiles | ForEach-Object { $true }))
+Test-Case 'items file: every item across the parts' @($itemFile.partFiles | ForEach-Object { (Get-Content -LiteralPath (Join-Path $pagesRoot $_) -Raw | ConvertFrom-Json -AsHashtable).items } | ForEach-Object { $_.number }) @(12, 13, 961170, 14)
+Test-Case 'cmis status: kept' (Get-Content -LiteralPath "$pagesRoot/data/cmis.json" -Raw | ConvertFrom-Json -AsHashtable).connections[0].id 'shop-api'
+$llms = Get-LlmsText $layer @{ prefix = 'shop' }
+Set-Content -LiteralPath "$pagesRoot/llms.txt" -Value $llms
+New-Item -ItemType Directory -Path "$pagesRoot/data/full" -Force | Out-Null
+foreach ($f in 'index.html', 'split.html', 'people.html', 'split-people.html', 'data/full/scorecard-data.json', 'data/full/document.json') { Set-Content -LiteralPath (Join-Path $pagesRoot $f) -Value 'x' }
+$links = @([regex]::Matches($llms, '\]\(([^)]+)\)') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -notmatch '^https?://' } | Select-Object -Unique)
+Test-Case 'llms.txt: every link it gives is a file of the site' @($links | Where-Object { -not (Test-Path -LiteralPath (Join-Path $pagesRoot $_) -PathType Leaf) }) @()
+Test-Case 'llms.txt: links every data file' @(Get-ChildItem -LiteralPath "$pagesRoot/data" -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath($pagesRoot, $_.FullName).Replace('\', '/') } | Where-Object { $_ -notin $links }) @()
+Test-Case 'llms.txt: relative links only, besides GitHub' @([regex]::Matches($llms, '\]\(([^)]+)\)') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -match '^/|^https?://(?!github\.com/)' }) @()
+Test-Case 'llms.txt: a title in Markdown is escaped' ($llms.Contains('# Delivery scorecard of Shop \[demo\] \*one\*')) $true
+Remove-Item -LiteralPath $pagesRoot -Recurse -Force
+$page = Add-LlmsLink "<html><head><title>t</title></head><body><footer class=`"page-footer`"><span>Read-only</span></footer></body></html>"
+Test-Case 'index.html: llms.txt linked in the head and the footer' @(($page -match '<link rel="alternate" type="text/markdown" href="llms.txt"[^>]*/>\s*</head>'), ($page -match '<a href="llms.txt"[^>]*>Data \(llms.txt\)</a></span>\s*</footer>')) @($true, $true)
+Test-Case 'index.html: without a footer, before the end of the body' ((Add-LlmsLink '<html><head></head><body>x</body></html>') -match 'llms.txt\)</a></span>\s*</body>') $true
+
+# Publish to Pages with git faked: one commit force-pushed, the token never in an argument, the environment as before.
+$gitCalls = [Collections.Generic.List[object]]::new()
+$script:fakeRemote = $null
+function Invoke-Git([string[]] $Arguments) {
+    $i = 0; while ($Arguments[$i] -cin '-c', '--git-dir', '--work-tree') { $i += 2 }
+    $askPass = $env:GIT_ASKPASS
+    $gitCalls.Add(@{ Command = $Arguments[$i]; Arguments = $Arguments; Token = $env:SCORECARD_PAGES_TOKEN; Prompt = $env:GIT_TERMINAL_PROMPT; AskPass = $(if ($askPass -and (Test-Path -LiteralPath $askPass)) { Get-Content -LiteralPath $askPass -Raw } else { $null }) })
+    switch ($Arguments[$i]) {
+        'rev-parse' { return 'c0ffee' }
+        'ls-files' { return @('index.html', 'llms.txt') }
+        'ls-remote' { return "$($script:fakeRemote)`trefs/heads/gh-pages" }
+    }
+}
+function Wait-PagesBuild([hashtable] $Pages, [string] $Commit, [int] $Minutes = 10) { $script:awaited = $Commit; 'built' }
+$savedToken = $script:GitHubToken
+$script:GitHubToken = 'ghs_TEST_TOKEN_never_printed'
+$savedAskPass = $env:GIT_ASKPASS
+$env:GIT_ASKPASS = $null
+$script:fakeRemote = 'c0ffee'
+$pagesConfig = @{ repo = 'acme/shop-site'; branch = 'gh-pages'; url = 'https://acme.pages.github.io/' }
+$address = Publish-ScorecardPages $pagesConfig $PSScriptRoot 'Space scorecard of Shop demo'
+Test-Case 'pages: init, add, commit, push, check, in that order' @($gitCalls | ForEach-Object { $_.Command }) @('init', 'add', 'commit', 'rev-parse', 'ls-files', 'push', 'ls-remote')
+$push = @($gitCalls | Where-Object { $_.Command -eq 'push' })[0].Arguments
+Test-Case 'pages: force-pushed to the branch, the remote without credentials' @(($push -ccontains '--force'), ($push -ccontains 'HEAD:refs/heads/gh-pages'), ($push -ccontains 'https://github.com/acme/shop-site.git')) @($true, $true, $true)
+Test-Case 'pages: the initial branch is the Pages branch, no credential helper of the machine' @(((@($gitCalls)[0].Arguments) -ccontains '--initial-branch=gh-pages'), ((@($gitCalls)[0].Arguments) -ccontains 'credential.helper=')) @($true, $true)
+Test-Case 'pages: the token in no argument and not in the askpass script' @($gitCalls | Where-Object { ($_.Arguments -join ' ').Contains('ghs_TEST_TOKEN') -or "$($_.AskPass)".Contains('ghs_TEST_TOKEN') }) @()
+Test-Case 'pages: git reads the token from the environment, never prompts' @($gitCalls | Where-Object { $_.Token -cne 'ghs_TEST_TOKEN_never_printed' -or $_.Prompt -cne '0' -or -not "$($_.AskPass)".Contains('$SCORECARD_PAGES_TOKEN') }) @()
+Test-Case 'pages: the environment as before, the build of the commit awaited, the address returned' @([bool] $env:SCORECARD_PAGES_TOKEN, [bool] $env:GIT_ASKPASS, $script:awaited, $address) @($false, $false, 'c0ffee', 'https://acme.pages.github.io/')
+$script:fakeRemote = 'deadbeef'
+Test-Case 'pages: a branch that is not the commit after the push fails' $(try { Publish-ScorecardPages $pagesConfig $PSScriptRoot 'm' | Out-Null; 'published' } catch { $_.Exception.Message }) 'Branch gh-pages of acme/shop-site is deadbeef after the push, not c0ffee.'
+Test-Case 'pages: and leaves the environment as before' @([bool] $env:SCORECARD_PAGES_TOKEN, [bool] $env:GIT_ASKPASS) @($false, $false)
+$script:GitHubToken = $savedToken
+$env:GIT_ASKPASS = $savedAskPass
+
 # --- Inside Octopus --------------------------------------------------------------------------------------------
 Test-Case 'octopus: not inside an Octopus step here' (Test-InsideOctopus) $false
 Test-Case 'highlight: last full week of the space, measured, store version' (Get-HighlightLine $fixture '2026.10.22.51500') 'Space Spaces-1, 2026-09-28 to 2026-10-14: week of 2026-10-05 started 0, delivered 1, WIP 0, MTTD 5.8 h; 1 of 2 projects measured; store 2026.10.22.51500'
@@ -450,6 +571,8 @@ $webConfig = $scorecard + @{ space = 'Spaces-2' }
 Test-Case 'export: release looked up in the space by default' @(@(Get-WebFailure $webConfig) + @($webCalls)) @('The notes of release 1.0.40 of acme-scorecard name no commit.', '/api/Spaces-2/projects?partialName=acme-scorecard&take=100', '/api/Spaces-2/projects/Projects-7/releases/1.0.40')
 $webCalls.Clear()
 Test-Case 'export: release looked up in scorecardSpace' @(@(Get-WebFailure ($webConfig + @{ scorecardSpace = 'Spaces-1' })) + @($webCalls)) @('The notes of release 1.0.40 of acme-scorecard name no commit.', '/api/Spaces-1/projects?partialName=acme-scorecard&take=100', '/api/Spaces-1/projects/Projects-7/releases/1.0.40')
+
+Test-Case 'export: a pinned commit asks Octopus nothing' @(@(Get-ScorecardCommit ($webConfig + @{ scorecardCommit = 'b6f970025e683bffc3ed0f33424f5c2d7a01d420' })) + @($webCalls.Count)) @('b6f970025e683bffc3ed0f33424f5c2d7a01d420', 2)
 
 # The configurations in this folder: each reads, and each names its own space, store and runbook project.
 $cmdemo1 = Read-SpaceConfig (Join-Path $PSScriptRoot 'cmdemo1.json')
@@ -487,6 +610,8 @@ $two = Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json')
 Test-Case 'setup cmdemo2: its own space, the code of cmdemo1-system' @($two.Space, $two.SourceRepository, $two.SystemProject, $two.StorePackage, $two.ConfigName) @('Spaces-356', 'clearmeasure-aisf-sample-apps/cmdemo1-system', 'cmdemo2-system', 'cmdemo2-scorecard-store', 'cmdemo2.json')
 Test-Case 'setup cmdemo2: its own names and Azure account' @($two.Names.Role, $two.Names.Account, $two.Names.Team, $two.Names.Project, $two.Names.AzureAccount) @('cmdemo2 scorecard store feed', 'cmdemo2-scorecard-runner', 'cmdemo2 scorecard runner', 'cmdemo2-scorecard-space', 'azure-cmdemo2-scorecard-site')
 Test-Case 'setup: no Azure account without a site' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ site = $null }).Names.AzureAccount $null
+Test-Case 'setup: no Azure account for GitHub Pages alone, which the step publishes' @((Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ site = @{ pages = @{ repo = 'acme/s'; url = 'https://acme.pages.github.io/' } } }) | ForEach-Object { $_.Names.AzureAccount, $_.PublishPages, $_.FormerAzureAccount }) @($null, $true, 'azure-cmdemo2-scorecard-site')
+Test-Case 'setup: a blob container alone publishes no Pages' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json')).PublishPages $false
 Test-Case 'setup: -SourceRepository wins' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{} 'acme/fork').SourceRepository 'acme/fork'
 Test-Case 'setup: no source repository is refused' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ sourceRepository = $null }) "refused: 'sourceRepository' (owner/repo whose space-scorecard folder the runbook runs) is required, or -SourceRepository."
 Test-Case 'setup: systemProject when given' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ systemProject = 'platform' }).SystemProject 'platform'

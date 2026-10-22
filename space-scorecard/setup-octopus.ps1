@@ -52,13 +52,17 @@
                        name it), with -Publish, or when none is published.
       Trigger          "Nightly space scorecard": every day 00:15 in the configuration's timeZone (-Schedule), the
                        published runbook in prod. Disabled while Scorecard.OctopusApiKey has no key.
-      Azure account    With "site" in the configuration: site.octopusAccount (default azure-<prefix>-scorecard-site:
+      Azure account    With a blob container in the configuration's "site" (site.account): site.octopusAccount (default azure-<prefix>-scorecard-site:
                        azure-cmdemo1-scorecard-site), an Azure OpenID Connect account
                        (no secret) of the identity site.identity in site.resourceGroup (infra/own/main.bicep makes it, in
                        prod; its federated credential trusts runs of this project in that environment), for the runbook's
                        environment only. The runbook's step is then "Run an Azure Script" as that account and passes
                        -PublishSite: the exported pages go into the public container site.container. Reads the
-                       identity's client id with the operator's az login.
+                       identity's client id with the operator's az login. Without a blob container the step is a
+                       plain "Run a Script" step, and an account of that name this script made is deleted.
+      GitHub Pages     With site.pages in the configuration the step also passes -PublishPages: the pages and their
+                       data layer go to branch site.pages.branch of site.pages.repo, pushed with Scorecard.GitHubToken
+                       (no other credential); nothing to set up here.
 
     Whoever may run the runbook, or push a branch to the source repository, can run that branch's code with both
     secrets: a manual run may name any ref. Accepted for this demo space (both are the operator and the factory's
@@ -141,15 +145,22 @@ function Get-SetupSettings([hashtable] $Cfg, [string] $ConfigPath, [string] $Sou
     if ($systemProject -isnot [string] -or -not $systemProject.Trim()) { throw "$ConfigPath`: 'systemProject' must be the name of an Octopus project." }
     $prefix = $Cfg.prefix
     $azureAccount = $null
+    $pages = $false
     if ($Cfg['site']) {
         if ($Cfg.site -isnot [Collections.IDictionary]) { throw "$ConfigPath`: 'site' must be an object (account, container, resourceGroup, identity)." }
+        $pages = [bool] $Cfg.site['pages']
+    }
+    # An Azure account only for a blob container: GitHub Pages need none.
+    if ($Cfg['site'] -and $Cfg.site['account']) {
         $azureAccount = if ($null -ne $Cfg.site['octopusAccount']) { $Cfg.site['octopusAccount'] } else { "azure-$prefix-scorecard-site" }
         if ($azureAccount -isnot [string] -or -not $azureAccount.Trim()) { throw "$ConfigPath`: 'site.octopusAccount' must be the name of an Octopus account." }
     }
     [ordered]@{
         Space = [string] $Cfg.space; Server = ([string] $Cfg.octopusServer).TrimEnd('/'); Prefix = $prefix
         SourceRepository = $source; SystemProject = $systemProject; StorePackage = "$prefix-scorecard-store"
-        ConfigName = Split-Path -Leaf $ConfigPath
+        ConfigName = Split-Path -Leaf $ConfigPath; PublishPages = $pages
+        # What a blob site's account would be named: one of that name this script made goes when the site does.
+        FormerAzureAccount = if ($Cfg['site'] -and $Cfg.site['octopusAccount']) { [string] $Cfg.site['octopusAccount'] } else { "azure-$prefix-scorecard-site" }
         Names = [ordered]@{
             Role = "$prefix scorecard store feed"; Account = "$prefix-scorecard-runner"; Team = "$prefix scorecard runner"
             Project = "$prefix-scorecard-space"; Runbook = 'Refresh space scorecard'; Trigger = 'Nightly space scorecard'
@@ -291,7 +302,7 @@ foreach ($id in $wantedRoles) {
 }
 
 # --- Project ---------------------------------------------------------------------------------------------------
-$projectDescription = "The nightly delivery scorecard of space $space (space-scorecard/ of $SourceRepository): runbook '$($names.Runbook)' harvests every project of the space with cmis, keeps the store as package $($settings.StorePackage) in the built-in feed, renders the pages with Scorecard.Web's export$(if ($cfg['site']) { ", publishes them to https://$($cfg.site.account).blob.core.windows.net/$($cfg.site.container)/index.html" }) and attaches them to its task. No deployments; made by space-scorecard/setup-octopus.ps1."
+$projectDescription = "The nightly delivery scorecard of space $space (space-scorecard/ of $SourceRepository): runbook '$($names.Runbook)' harvests every project of the space with cmis, keeps the store as package $($settings.StorePackage) in the built-in feed, renders the pages with Scorecard.Web's export$(if ($cfg['site'] -and $cfg.site['account']) { ", publishes them to https://$($cfg.site.account).blob.core.windows.net/$($cfg.site.container)/index.html" })$(if ($settings.PublishPages) { ", publishes them with a data layer for AI tools to GitHub Pages ($($cfg.site.pages.url), branch $(if ($cfg.site.pages['branch']) { $cfg.site.pages.branch } else { 'gh-pages' }) of $($cfg.site.pages.repo))" }) and attaches them to its task. No deployments; made by space-scorecard/setup-octopus.ps1."
 $project = Find-One @(Invoke-Octopus "/api/$space/projects/all") $names.Project
 if ($project) { Assert-Ours $project 'Project' $project.Description }
 if (-not $project) {
@@ -404,7 +415,7 @@ $runnerKey = $null
 # An OpenID Connect account: Octopus signs in as the identity with a token of its own for each run, no secret is stored.
 # The identity trusts runs of this project in this environment only (its federated credential, infra/own/main.bicep).
 $azureAccount = $null
-if ($cfg['site']) {
+if ($cfg['site'] -and $cfg.site['account']) {
     foreach ($k in 'account', 'container', 'resourceGroup', 'identity') { if (-not $cfg.site[$k]) { throw "$Config`: 'site.$k' is required." } }
     $PSNativeCommandUseErrorActionPreference = $false
     $identityJson = az identity show --resource-group $cfg.site.resourceGroup --name $cfg.site.identity --output json 2>$null | Out-String
@@ -436,7 +447,7 @@ if ($cfg['site']) {
 # --- Runbook ---------------------------------------------------------------------------------------------------
 $runbooks = @((Invoke-Octopus "/api/$space/projects/$($project.Id)/runbooks?take=100").Items)
 $runbook = Find-One $runbooks $names.Runbook
-$runbookDescription = "Harvests every project of space $space with cmis (Invoke-SpaceScorecard.ps1 -StoreFeed of $SourceRepository at Scorecard.SourceRef), restores and pushes the store package $($settings.StorePackage) of the built-in feed, renders the pages with Scorecard.Web's export$(if ($azureAccount) { ", publishes them to $(("https://{0}.blob.core.windows.net/{1}/index.html" -f $cfg.site.account, $cfg.site.container))" }), attaches summary.md, document.json and the pages (scorecard-site.zip, index.html)."
+$runbookDescription = "Harvests every project of space $space with cmis (Invoke-SpaceScorecard.ps1 -StoreFeed of $SourceRepository at Scorecard.SourceRef), restores and pushes the store package $($settings.StorePackage) of the built-in feed, renders the pages with Scorecard.Web's export$(if ($azureAccount) { ", publishes them to $(("https://{0}.blob.core.windows.net/{1}/index.html" -f $cfg.site.account, $cfg.site.container))" })$(if ($settings.PublishPages) { ", publishes them with a data layer for AI tools to GitHub Pages ($($cfg.site.pages.url))" }), attaches summary.md, document.json and the pages (scorecard-site.zip, index.html)."
 $runbookFields = [ordered]@{ Description = $runbookDescription; EnvironmentScope = 'Specified'; Environments = @($environmentId); MultiTenancyMode = 'Untenanted'; DefaultGuidedFailureMode = 'Off' }
 if (-not $runbook) {
     $body = [ordered]@{ Name = $names.Runbook; ProjectId = $project.Id; RunRetentionPolicy = @{ QuantityToKeep = 30; ShouldKeepForever = $false } } + $runbookFields
@@ -475,10 +486,10 @@ if ($LASTEXITCODE -ne 0) { throw "Unpacking space-scorecard of $repository at $r
 Remove-Item -LiteralPath $tarball -Force
 
 Write-Host "Source $repository at $ref"
-& (Join-Path $source 'space-scorecard/Invoke-SpaceScorecard.ps1') -Config (Join-Path $source 'space-scorecard/#{ConfigName}') -WorkDir (Join-Path $work 'run') -StoreFeed#{PublishSite}
+& (Join-Path $source 'space-scorecard/Invoke-SpaceScorecard.ps1') -Config (Join-Path $source 'space-scorecard/#{ConfigName}') -WorkDir (Join-Path $work 'run') -StoreFeed#{PublishSite}#{PublishPages}
 '@
 # Line breaks as \n whatever the checkout has, so a CRLF checkout does not change the step on every run.
-$stepScript = $stepScript.Replace('#{SourceRepository}', $SourceRepository).Replace('#{ConfigName}', $configName).Replace('#{DefaultRef}', $SourceRef).Replace('#{PublishSite}', $(if ($azureAccount) { ' -PublishSite' } else { '' })) -replace "`r`n", "`n"
+$stepScript = $stepScript.Replace('#{SourceRepository}', $SourceRepository).Replace('#{ConfigName}', $configName).Replace('#{DefaultRef}', $SourceRef).Replace('#{PublishSite}', $(if ($azureAccount) { ' -PublishSite' } else { '' })).Replace('#{PublishPages}', $(if ($settings.PublishPages) { ' -PublishPages' } else { '' })) -replace "`r`n", "`n"
 
 $process = Invoke-Octopus "/api/$space/runbookProcesses/$($runbook.RunbookProcessId)"
 $existingStep = @($process.Steps) | Select-Object -First 1
@@ -518,6 +529,7 @@ if (-not (Test-Same $current $wanted)) {
 }
 else { Write-Host 'runbook process: as it should be' }
 
+
 $runbook = Invoke-Octopus "/api/$space/runbooks/$($runbook.Id)"
 # A snapshot freezes the variables: its notes name the version of the project's variables it froze, and one that froze
 # another version (a key or token changed here or in the portal, also by a run of this script that stopped before it
@@ -537,6 +549,16 @@ if ($changed -or $Publish -or $stale) {
     $created.snapshot = $snapshot.Id
 }
 else { Write-Host "snapshot: $($runbook.PublishedRunbookSnapshotId) published, nothing changed"; $created.snapshot = $runbook.PublishedRunbookSnapshotId }
+
+# Without a blob site the step signs in to Azure no more: the account this script made for it goes, after the snapshot
+# without it is published (Octopus refuses while anything still uses it; that is a warning, and a rerun tries again).
+if (-not $azureAccount) {
+    $former = Find-One @(Invoke-Octopus "/api/$space/accounts/all") $settings.FormerAzureAccount
+    if ($former -and $former.AccountType -ceq 'AzureOidc' -and "$($former.Description)" -match 'setup-octopus\.ps1') {
+        try { Invoke-Octopus "/api/$space/accounts/$($former.Id)" Delete | Out-Null; Write-Host "Azure account: deleted $($former.Id) ($($former.Name)), the configuration publishes to no blob container" }
+        catch { Write-Warning "Azure account $($former.Id) ($($former.Name)) not deleted: $($_.Exception.Message)" }
+    }
+}
 
 # The older keys of the runner go only after a snapshot with the new one is published: a run that stops before that
 # leaves the published snapshot a key that still works.

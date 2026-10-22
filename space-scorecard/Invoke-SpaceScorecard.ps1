@@ -44,13 +44,18 @@
                     static files in <WorkDir>/site (index.html, split.html, people.html, split-people.html, drill/,
                     css/, fonts/), the same pages as the live scorecard, from this run's store, and the site as
                     scorecard-site.zip. Scorecard.Web is built here from the commit release scorecardVersion of the
-                    Octopus project scorecardProject (in scorecardSpace, default the space) names (its notes), with
-                    the .NET SDK of the machine. When the build or the export fails, a warning, and scorecard.html is
-                    the page.
+                    Octopus project scorecardProject (in scorecardSpace, default the space) names (its notes), or
+                    the commit scorecardCommit pins, with the .NET SDK of the machine. When the build or the export
+                    fails, a warning, and scorecard.html is the page.
       Publish       With -PublishSite: the exported site into the public blob container site.container of storage
                     account site.account as the signed-in az identity (in Octopus, the step's Azure account); files
                     the export no longer has are deleted. The address is in the summary and the highlight. A
                     failure fails the run at its end, after the push.
+      Pages         With -PublishPages: the exported site with a data layer for AI tools (llms.txt at the root,
+                    data/: every number, the items behind each, every item's title and stage history, cmis's
+                    status) as one commit without history, force-pushed to branch site.pages.branch of the GitHub
+                    repository site.pages.repo, which GitHub Pages serves at site.pages.url. A failure fails the
+                    run at its end, after the push, as -PublishSite's does.
       Octopus       Inside an Octopus step (OctopusParameters or New-OctopusArtifact is there): summary.md,
                     document.json and the pages (scorecard-site.zip and index.html; scorecard.html without an export)
                     become artifacts of the task, and a line of the space's last full week is highlighted.
@@ -84,8 +89,11 @@
     before the harvest, pushed as a new version after a run that succeeded. Needs "prefix" in the configuration and an
     Octopus key that may view and download from the built-in feed and push to it. Not with -SkipHarvest.
 .PARAMETER PublishSite
-    Publishes the exported site to the configuration's "site" (needs "site" and "scorecardVersion", and az signed in
-    as an identity that may write that container).
+    Publishes the exported site to the configuration's blob container (needs site.account, site.container and
+    scorecardVersion, and az signed in as an identity that may write that container).
+.PARAMETER PublishPages
+    Publishes the exported site and its data layer to the configuration's GitHub Pages branch (needs site.pages and
+    scorecardVersion, git on the PATH, and a GitHub token that may push to site.pages.repo).
 .PARAMETER LoadOnly
     Defines the functions and stops (for the tests).
 .EXAMPLE
@@ -100,6 +108,7 @@ param(
     [switch] $SkipHarvest,
     [switch] $StoreFeed,
     [switch] $PublishSite,
+    [switch] $PublishPages,
     [switch] $LoadOnly
 )
 Set-StrictMode -Version Latest
@@ -155,14 +164,31 @@ function Read-SpaceConfig([string] $Path) {
     if ($c['scorecardVersion']) {
         if (-not ($c['scorecardVersion'] -is [string] -and $c['scorecardVersion'] -cmatch '^\d+\.\d+\.\d+\z')) { throw "$Path`: 'scorecardVersion' must be a release number such as 1.0.40." }
         if (-not ($c['scorecardRepo'] -is [string] -and $c['scorecardRepo'] -cmatch '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+\z')) { throw "$Path`: 'scorecardRepo' (owner/repo) is required with 'scorecardVersion'." }
-        if (-not ($c['scorecardProject'] -is [string] -and $c['scorecardProject'].Trim())) { throw "$Path`: 'scorecardProject' (the Octopus project of the release) is required with 'scorecardVersion'." }
+        # The commit pinned: the release's notes are not read, so the Octopus project need not exist any more.
+        if ($null -ne $c['scorecardCommit']) {
+            if (-not ($c['scorecardCommit'] -is [string] -and $c['scorecardCommit'] -cmatch '^[0-9a-f]{40}\z')) { throw "$Path`: 'scorecardCommit' must be a full commit id (40 lower-case hex digits)." }
+        }
+        elseif (-not ($c['scorecardProject'] -is [string] -and $c['scorecardProject'].Trim())) { throw "$Path`: 'scorecardProject' (the Octopus project of the release) is required with 'scorecardVersion' when 'scorecardCommit' does not pin the commit." }
     }
     # The space of scorecardProject when the deployable belongs to another system's space (it goes into a request path).
     if ($null -ne $c['scorecardSpace'] -and -not ($c['scorecardSpace'] -is [string] -and $c['scorecardSpace'] -cmatch '^Spaces-\d+\z')) { throw "$Path`: 'scorecardSpace' must be an Octopus space id such as Spaces-355." }
     if ($c['site']) {
         $s = $c['site']
-        if ($s -isnot [Collections.IDictionary] -or -not ("$($s['account'])" -cmatch '^[a-z0-9]{3,24}\z') -or -not ("$($s['container'])" -cmatch '^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]\z')) {
-            throw "$Path`: 'site' needs 'account' (a storage account name) and 'container' (a blob container name)."
+        if ($s -isnot [Collections.IDictionary]) { throw "$Path`: 'site' needs 'account' (a storage account name) and 'container' (a blob container name), or 'pages'." }
+        # A blob container (account and container), GitHub Pages (pages), or both while one replaces the other.
+        if ($s.Contains('account') -or $s.Contains('container') -or -not $s.Contains('pages')) {
+            if (-not ("$($s['account'])" -cmatch '^[a-z0-9]{3,24}\z') -or -not ("$($s['container'])" -cmatch '^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]\z')) {
+                throw "$Path`: 'site' needs 'account' (a storage account name) and 'container' (a blob container name)."
+            }
+        }
+        if ($s.Contains('pages')) {
+            $g = $s['pages']
+            if ($g -isnot [Collections.IDictionary] -or -not ("$($g['repo'])" -cmatch '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+\z') -or -not ("$($g['url'])" -cmatch '^https://[^/\s]+(/\S*)?\z')) {
+                throw "$Path`: 'site.pages' needs 'repo' (owner/repo) and 'url' (the https:// address GitHub Pages serves it at)."
+            }
+            if (-not $g['branch']) { $g['branch'] = 'gh-pages' }
+            if (-not ("$($g['branch'])" -cmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*\z') -or "$($g['branch'])" -match '\.\.|\.lock\z|/\z') { throw "$Path`: 'site.pages.branch' must be a branch name." }
+            if (-not $g['url'].EndsWith('/')) { $g['url'] += '/' }
         }
         if (-not $c['scorecardVersion']) { throw "$Path`: 'site' needs 'scorecardVersion': the published pages are the export's." }
     }
@@ -757,12 +783,14 @@ function Find-ItemConnection([long] $ItemNumber, $Entries) {
     @{ Entry = $hit[0]; Number = $ItemNumber - $hit[0].itemNumberBase }
 }
 
-# One item of a drill list as the page shows it: repository, number, kind, the stage move and when. No title.
+# One item of a drill list as the page shows it: repository, number, kind, the stage move and when. No title. The
+# connection it belongs to joins it to the item's stage history (the data layer of -PublishPages).
 function ConvertTo-DrillItem($Item, $Entries) {
     $located = Find-ItemConnection ([long] $Item['itemNumber']) $Entries
     $source = [string] $Item['sourceWorkItemType']
     $kind = switch ($source) { '' { 'issue' } 'Pull Request' { 'pull request' } 'Commit' { 'direct commit' } 'Branch' { 'branch' } default { $source.ToLowerInvariant() } }
     [ordered]@{
+        connection = if ($located) { $located.Entry['connectionId'] } else { $null }
         owner = if ($located) { $located.Entry.owner } else { $null }; repo = if ($located) { $located.Entry.repo } else { $null }
         number = if ($located) { $located.Number } else { [long] $Item['itemNumber'] }; kind = $kind
         from = [string] $Item['oldStatus']; to = [string] $Item['newStatus']; at = [string] $Item['revisionDate']
@@ -806,7 +834,18 @@ function Get-PeriodNumber($Scope, [string] $WeekStart, [string] $Metric) {
     [long] $numbers[$Metric]
 }
 
-function Get-ScorecardData([string] $Cmis, [hashtable] $Config, $Projects, [hashtable] $Window, [hashtable] $Paths, $HarvestRun) {
+# What cmis's score says its numbers are: per metric its definition, unit and how periods add up, and the interval
+# and calendar of the periods. Empty when the score has none.
+function Get-ScoreSemantics($Score) {
+    $semantics = if ($Score -is [Collections.IDictionary]) { $Score['semantics'] } else { $null }
+    if ($semantics -isnot [Collections.IDictionary]) { return [ordered]@{ metrics = @(); interval = $null; calendar = $null } }
+    [ordered]@{
+        metrics = @(foreach ($m in @($semantics['metrics'])) { if ($m -is [Collections.IDictionary]) { [ordered]@{ name = $m['name']; unit = $m['unit']; aggregation = $m['aggregation']; definition = $m['definition'] } } })
+        interval = $semantics['interval']; calendar = $semantics['calendar']
+    }
+}
+
+function Get-ScorecardData([string] $Cmis, [hashtable] $Config, $Projects, [hashtable] $Window, [hashtable] $Paths, $HarvestRun, [switch] $IncludeTitles) {
     $measured = @($Projects | Where-Object { $_.measured })
     if (-not $measured.Count) { throw 'No project of the space is measured; nothing to compute.' }
     $warnings = [Collections.Generic.List[string]]::new()
@@ -814,7 +853,8 @@ function Get-ScorecardData([string] $Cmis, [hashtable] $Config, $Projects, [hash
     if (-not $version) { $version = @{ Version = 'unknown'; Commit = $null } }
 
     $connections = @(foreach ($e in $measured) { '--connection'; $e.connectionId })
-    Invoke-Cmis $Cmis (@('connections', 'document') + $connections + @('--from', $Window.Since, '--to', $Window.Until, '--time-zone', $Config.timeZone, '--out', $Paths.Document)) $Paths.Workspace $Paths.Store | Out-Null
+    # With the items' titles for the data layer of -PublishPages (the exported pages show them too).
+    Invoke-Cmis $Cmis (@('connections', 'document') + $connections + @('--from', $Window.Since, '--to', $Window.Until, '--time-zone', $Config.timeZone) + $(if ($IncludeTitles) { @('--include-titles') } else { @() }) + @('--out', $Paths.Document)) $Paths.Workspace $Paths.Store | Out-Null
 
     # The weeks come from the space's own score; the per-project scores have the same periods (same window).
     $spaceScore = Invoke-Cmis $Cmis (@('connections', 'score') + $connections + @('--since', $Window.Since, '--until', $Window.Until, '--period', 'week')) $Paths.Workspace $Paths.Store
@@ -839,6 +879,8 @@ function Get-ScorecardData([string] $Cmis, [hashtable] $Config, $Projects, [hash
         since = $Window.Since; until = $Window.Until; generatedUtc = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
         cmis = [ordered]@{ version = $version.Version; commit = $version.Commit; repo = $Config.cmisRepo }
         projects = @($Projects); weeks = @($weeks); scopes = @($scopes); warnings = @($warnings); harvest = $HarvestRun
+        # What cmis says each number is (its score's "semantics"): the definitions the data layer quotes.
+        semantics = Get-ScoreSemantics $spaceScore
     }
 }
 
@@ -1119,7 +1161,8 @@ function Get-ScorecardSpace([hashtable] $Config) {
 }
 
 # Scorecard.Web of release scorecardVersion of the Octopus project scorecardProject (in scorecardSpace), framework-dependent, in
-# <Directory>: the release's notes name the commit; its source comes through the GitHub REST API (tarball of
+# <Directory>: the release's notes name the commit (scorecardCommit, when the configuration pins it, instead: Octopus
+# is not asked); its source comes through the GitHub REST API (tarball of
 # scorecardRepo) and "dotnet publish" builds Scorecard.Web/Scorecard.Web.csproj (a .NET SDK of the project's
 # framework on the PATH: Hosted Ubuntu has one). Built as the image of that release is (Release, no app host, the
 # release number as the version), without NuGet's vulnerability audit: an advisory published after the release would
@@ -1131,19 +1174,13 @@ function Get-ScorecardWeb([hashtable] $Config, [string] $Directory) {
     $marker = Join-Path $Directory 'space-scorecard-build.json'
     if ((Test-Path -LiteralPath $dll) -and (Test-Path -LiteralPath $marker)) {
         $built = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json -AsHashtable
-        if ($built['version'] -ceq $version -and $built['repository'] -ceq $Config.scorecardRepo) {
+        if ($built['version'] -ceq $version -and $built['repository'] -ceq $Config.scorecardRepo -and (-not $Config['scorecardCommit'] -or $built['commit'] -ceq $Config['scorecardCommit'])) {
             Write-Host "Scorecard.Web $version`: reused from $Directory (commit $($built['commit']))"
             return $dll
         }
     }
     $started = [Diagnostics.Stopwatch]::StartNew()
-    $name = $Config.scorecardProject
-    $space = Get-ScorecardSpace $Config
-    $projects = @(@((Invoke-OctopusRequest $Config "/api/$space/projects?partialName=$([uri]::EscapeDataString($name))&take=100")['Items']) | Where-Object { $_ -and $_['Name'] -ceq $name })
-    if ($projects.Count -ne 1) { throw "Space $space has $($projects.Count) projects named $name." }
-    $release = Invoke-OctopusRequest $Config "/api/$space/projects/$($projects[0]['Id'])/releases/$([uri]::EscapeDataString($version))"
-    $commit = Get-ReleaseCommit ([string] $release['ReleaseNotes'])
-    if (-not $commit) { throw "The notes of release $version of $name name no commit." }
+    $commit = Get-ScorecardCommit $Config
 
     $work = Join-Path ([IO.Path]::GetTempPath()) "scorecard-web-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $work | Out-Null
@@ -1173,6 +1210,21 @@ function Get-ScorecardWeb([hashtable] $Config, [string] $Directory) {
     finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
     Write-Host ("Scorecard.Web {0}: built from {1} at {2} in {3:n0} s" -f $version, $Config.scorecardRepo, $commit, $started.Elapsed.TotalSeconds)
     $dll
+}
+
+# The commit of Scorecard.Web to build: scorecardCommit when the configuration pins it, else the one the notes of release
+# scorecardVersion of the Octopus project scorecardProject (in scorecardSpace) name.
+function Get-ScorecardCommit([hashtable] $Config) {
+    if ($Config['scorecardCommit']) { return [string] $Config['scorecardCommit'] }
+    $version = $Config.scorecardVersion
+    $name = $Config.scorecardProject
+    $space = Get-ScorecardSpace $Config
+    $projects = @(@((Invoke-OctopusRequest $Config "/api/$space/projects?partialName=$([uri]::EscapeDataString($name))&take=100")['Items']) | Where-Object { $_ -and $_['Name'] -ceq $name })
+    if ($projects.Count -ne 1) { throw "Space $space has $($projects.Count) projects named $name." }
+    $release = Invoke-OctopusRequest $Config "/api/$space/projects/$($projects[0]['Id'])/releases/$([uri]::EscapeDataString($version))"
+    $commit = Get-ReleaseCommit ([string] $release['ReleaseNotes'])
+    if (-not $commit) { throw "The notes of release $version of $name name no commit." }
+    $commit
 }
 
 # The export: the pages Scorecard.Web serves, as static files in <OutDir> (index.html, split.html, people.html,
@@ -1314,6 +1366,502 @@ function Publish-ScorecardSite([hashtable] $Site, [string] $SiteDir) {
     if ([int] $answer.StatusCode -ne 200 -or -not $type.StartsWith('text/html', [StringComparison]::OrdinalIgnoreCase)) { throw "$url answers HTTP $([int] $answer.StatusCode) with Content-Type '$type' to an anonymous request." }
     Write-Host "site: $($names.Count) file(s) at $url"
     $url
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# The published Pages site and its data layer (-PublishPages)
+# ---------------------------------------------------------------------------------------------------------------
+
+# The most bytes of JSON one data file holds before its list goes on in a next part: an AI tool fetches a page whole,
+# and many stop reading near 100 KB.
+$script:DataFileBudget = 90000
+# Every path in the data files is from the site's root, the folder of llms.txt.
+$script:PathsNote = 'Paths are relative to the site root (the folder of llms.txt).'
+# The numbers of the page, in its order: the key in the data, the row of the page, what the page says the row is (the
+# hints of Scorecard.Web's ScorecardColumns and WeeklyTable), cmis's name, and whether its weekly cells list their items.
+$script:PageMetrics = @(
+    [ordered]@{ key = 'workInProcess'; row = 'Work in process'; page = 'every item not yet delivered at the end of the week, including the backlog'; cmis = 'WorkInProcess'; lists = $true }
+    [ordered]@{ key = 'itemsStarted'; row = 'Items started'; page = 'items created in the week'; cmis = 'ItemsStarted'; lists = $true }
+    [ordered]@{ key = 'itemsDelivered'; row = 'Items delivered'; page = 'items that reached the delivered stage in the week'; cmis = 'ItemsDelivered'; lists = $true }
+    [ordered]@{ key = 'meanTimeToDelivery'; row = 'Mean time to delivery (MTTD)'; page = 'mean time from creation to delivery of the items delivered in the week'; cmis = 'MeanTimeToDelivery'; lists = $false }
+    [ordered]@{ key = 'throughput'; row = 'Throughput (stage moves)'; page = 'forward stage moves in the week. This counts moves, not items: an item that moved forward through three stages in the week counts three times'; cmis = 'Throughput'; lists = $false }
+    [ordered]@{ key = 'rework'; row = 'Rework'; page = 'backward stage moves in the week (moves, not items)'; cmis = 'Rework'; lists = $false }
+    [ordered]@{ key = 'netThroughput'; row = 'Net throughput'; page = 'forward minus backward stage moves in the week (moves, not items)'; cmis = 'NetThroughput'; lists = $false }
+)
+
+# What an item is and its GitHub address. The drill lists know the kind (cmis's source type); for an item no list names,
+# its number says it (cmis's DeliveryProcessDefinition): a branch from 500,000, a direct commit from 900,000 (numbers
+# cmis derives from the name or commit id, without an address), below that an issue or a pull request (GitHub's own
+# numbers). GitHub answers the issue address of a pull request with the pull request.
+function Get-ItemAddress([string] $Owner, [string] $Repo, [long] $Number, [string] $Kind) {
+    if (-not $Kind) { $Kind = if ($Number -ge 900000) { 'direct commit' } elseif ($Number -ge 500000) { 'branch' } else { 'issue or pull request' } }
+    $url = $null
+    if ($Owner -and $Repo -and $Kind -cin 'issue', 'pull request', 'issue or pull request') {
+        $url = "https://github.com/$Owner/$Repo/$(if ($Kind -ceq 'pull request') { 'pull' } else { 'issues' })/$Number"
+    }
+    @{ Kind = $Kind; Url = $url }
+}
+
+# The connection a drill item belongs to: its own (ConvertTo-DrillItem), else the measured project of its repository.
+function Get-DrillConnection($Item, $Data) {
+    if ($Item['connection']) { return [string] $Item['connection'] }
+    $hit = @($Data.projects | Where-Object { $_.measured -and $_.owner -ceq $Item['owner'] -and $_.repo -ceq $Item['repo'] })
+    if ($hit.Count) { [string] $hit[0].connectionId } else { $null }
+}
+
+# The time of a stage entry as cmis writes it (ISO 8601 with an offset).
+function ConvertTo-Instant([string] $Text) { [DateTimeOffset]::Parse($Text, $script:Invariant) }
+
+# Every item of the document (cmis connections document --include-titles) by connection, as the data layer lists it:
+# its own number in its repository, kind, title, GitHub address, when it was created and first delivered, where it
+# stands, and its stages in the order it entered them. The kinds come from the drill lists of $Data.
+function Get-PagesItems($Document, $Data) {
+    $entries = @{}
+    foreach ($p in @($Data.projects | Where-Object { $_.measured })) { $entries[$p.connectionId] = $p }
+    $kinds = @{}
+    foreach ($scope in $Data.scopes) { foreach ($list in $scope.drills.Values) { foreach ($i in @($list)) { $c = Get-DrillConnection $i $Data; if ($c) { $kinds["$c|$($i['number'])"] = $i['kind'] } } } }
+    $delivered = @{}
+    foreach ($c in @($Document['connections'])) { $delivered[[string] $c['id']] = @($c['deliveredStages']) }
+    $byConnection = [ordered]@{}
+    foreach ($e in $entries.Values | Sort-Object { $_.connectionId }) { $byConnection[$e.connectionId] = [Collections.Generic.List[object]]::new() }
+    foreach ($item in @($Document['items'])) {
+        $id = [string] $item['connection']
+        $e = $entries[$id]
+        if (-not $e) { continue }
+        $number = [long] $item['number'] - [long] $e.itemNumberBase
+        $address = Get-ItemAddress $e.owner $e.repo $number $kinds["$id|$number"]
+        $first = $null; $firstText = $null
+        foreach ($s in @($item['stages'])) {
+            if ([string] $s['stage'] -cin @($delivered[$id])) {
+                $at = ConvertTo-Instant $s['enteredUtc']
+                if ($null -eq $first -or $at -lt $first) { $first = $at; $firstText = [string] $s['enteredUtc'] }
+            }
+        }
+        $byConnection[$id].Add([ordered]@{
+                number = $number; kind = $address.Kind; title = $item['title']; url = $address.Url
+                createdUtc = [string] $item['createdUtc']; deliveredUtc = $firstText; currentStage = $item['currentStage']
+                stages = @(foreach ($s in @($item['stages'])) { [ordered]@{ stage = $s['stage']; enteredUtc = [string] $s['enteredUtc'] } })
+                cmisNumber = [long] $item['number']
+            })
+    }
+    $byConnection
+}
+
+# Items in parts of at most $Budget bytes of JSON each, in their order; one part (perhaps empty) when they fit.
+function Split-ByJsonSize($Items, [int] $Budget) {
+    $parts = [Collections.Generic.List[object]]::new()
+    $current = [Collections.Generic.List[object]]::new()
+    $size = 0
+    foreach ($i in @($Items)) {
+        $n = [Text.Encoding]::UTF8.GetByteCount((ConvertTo-Json -InputObject $i -Depth 20 -Compress)) + 1
+        if ($current.Count -and $size + $n -gt $Budget) { $parts.Add($current.ToArray()); $current = [Collections.Generic.List[object]]::new(); $size = 0 }
+        $current.Add($i); $size += $n
+    }
+    $parts.Add($current.ToArray())
+    Write-Output -NoEnumerate $parts.ToArray()
+}
+
+# One data file, its list in parts when it is large: <Path>.json holds the first part, <Path>.2.json and on the rest;
+# each says which part it is and names them all. $Head: what every part says before its list. Returns the files'
+# paths from the root.
+function Write-DataFile([string] $Root, [string] $Path, $Head, $Items, [string] $ItemsKey = 'items') {
+    $parts = Split-ByJsonSize $Items $script:DataFileBudget
+    $names = @(for ($k = 1; $k -le $parts.Count; $k++) { if ($k -eq 1) { "$Path.json" } else { "$Path.$k.json" } })
+    for ($k = 0; $k -lt $parts.Count; $k++) {
+        $doc = [ordered]@{}
+        foreach ($key in $Head.Keys) { $doc[$key] = $Head[$key] }
+        if ($names.Count -gt 1) { $doc['part'] = $k + 1; $doc['parts'] = $names.Count; $doc['partFiles'] = $names }
+        $doc[$ItemsKey] = @($parts[$k])
+        $file = Join-Path $Root $names[$k]
+        New-Item -ItemType Directory -Path (Split-Path -Parent $file) -Force | Out-Null
+        ConvertTo-Json -InputObject $doc -Depth 20 -Compress | Set-Content -LiteralPath $file -NoNewline
+    }
+    $names
+}
+
+# One object as a data file of the root, compact JSON.
+function Write-DataObject([string] $Root, [string] $Path, $Object) {
+    $file = Join-Path $Root $Path
+    New-Item -ItemType Directory -Path (Split-Path -Parent $file) -Force | Out-Null
+    ConvertTo-Json -InputObject $Object -Depth 30 -Compress | Set-Content -LiteralPath $file -NoNewline
+}
+
+# The file name of a repository's items: the repository's name, with the connection's id when two connections share it.
+function Get-ItemFileNames($Projects) {
+    $measured = @($Projects | Where-Object { $_.measured })
+    $names = @{}
+    foreach ($p in $measured) {
+        $shared = @($measured | Where-Object { $_.repo -ceq $p.repo }).Count -gt 1
+        $names[$p.connectionId] = "data/items/$(if ($shared) { "$($p.repo)--$($p.connectionId)" } else { $p.repo })"
+    }
+    $names
+}
+
+# The definition of each number of the page: the page's own words and cmis's (unit, how periods add up).
+function Get-MetricDefinitions($Data) {
+    $cmis = @{}
+    foreach ($m in @($Data['semantics'] ? $Data.semantics.metrics : @())) { $cmis[[string] $m['name']] = $m }
+    @(foreach ($m in $script:PageMetrics) {
+            $c = $cmis[$m.cmis]
+            [ordered]@{
+                key = $m.key; row = $m.row; page = $m.page; cmisName = $m.cmis
+                cmis = if ($c) { $c['definition'] } else { $null }; unit = if ($c) { $c['unit'] } else { $null }; aggregation = if ($c) { $c['aggregation'] } else { $null }
+                lists = $m.lists
+            }
+        })
+}
+
+# The numbers of the weeks recomputed from the items' stage histories, by the rules llms.txt gives, compared with the
+# numbers of the run: the cells that differ ("<scope> <week> <metric>: <run> vs <recomputed>"); none when the rules hold.
+function Test-RecomputedNumbers($Data, $Items, $Document) {
+    $delivered = @{}
+    foreach ($c in @($Document['connections'])) { $delivered[[string] $c['id']] = @($c['deliveredStages']) }
+    $differences = [Collections.Generic.List[string]]::new()
+    foreach ($scope in $Data.scopes) {
+        $ids = if ($scope.id -ceq $script:SpaceScopeId) { @($Items.Keys) } else { @($scope.id) }
+        $list = @(foreach ($id in $ids) { if ($Items.Contains($id)) { $Items[$id] } })
+        foreach ($w in $Data.weeks) {
+            $n = $scope.periods[$w.start]
+            if ($null -eq $n) { continue }
+            $from = [DateTimeOffset]::new([datetime]::ParseExact($w.start, 'yyyy-MM-dd', $script:Invariant), [TimeSpan]::Zero)
+            $to = $from.AddDays(7)
+            $started = 0; $deliveredCount = 0; $wip = 0; $sum = 0.0
+            foreach ($i in $list) {
+                $created = ConvertTo-Instant $i.createdUtc
+                $done = if ($i.deliveredUtc) { ConvertTo-Instant $i.deliveredUtc } else { $null }
+                if ($created -ge $from -and $created -lt $to) { $started++ }
+                if ($done -and $done -ge $from -and $done -lt $to) { $deliveredCount++; $sum += ($done - $created).TotalDays / 7 }
+                $last = $null
+                foreach ($s in $i.stages) { if ((ConvertTo-Instant $s.enteredUtc) -lt $to) { $last = $s.stage } }
+                if ($created -lt $to -and -not ($done -and $done -lt $to) -and $last -cne 'Closed') { $wip++ }
+            }
+            $mean = if ($deliveredCount) { $sum / $deliveredCount } else { $null }
+            foreach ($pair in @(@('itemsStarted', $started), @('itemsDelivered', $deliveredCount), @('workInProcess', $wip))) {
+                if ([long] ($n[$pair[0]] ?? 0) -ne $pair[1]) { $differences.Add("$($scope.id) $($w.start) $($pair[0]): $($n[$pair[0]]) vs $($pair[1])") }
+            }
+            $run = $n['meanTimeToDelivery']
+            if (($null -eq $run) -ne ($null -eq $mean) -or ($null -ne $run -and [math]::Abs([double] $run - $mean) -gt 1e-6)) { $differences.Add("$($scope.id) $($w.start) meanTimeToDelivery: $run vs $mean") }
+        }
+    }
+    $differences
+}
+
+# What cmis says of its connections and its store: the connections, what the store holds, the last harvest runs (one
+# per connection: each is harvested on its own) and the work streams. Read-only commands; one that fails is named.
+function Get-CmisStatus([string] $Cmis, [hashtable] $Paths, [int] $Runs) {
+    $status = [ordered]@{}
+    $commands = [ordered]@{
+        connections = @('connections', 'list'); inventory = @('connections', 'inventory')
+        lastRuns = @('connections', 'last-run', '--take', [string] [math]::Max(1, $Runs)); workStreams = @('config', 'workstream', 'list')
+    }
+    foreach ($key in $commands.Keys) {
+        try {
+            $d = Invoke-Cmis $Cmis $commands[$key] $Paths.Workspace $Paths.Store
+            $field = @{ connections = 'connections'; inventory = 'connections'; lastRuns = 'runs'; workStreams = 'workStreams' }[$key]
+            $status[$key] = @($d[$field] | Where-Object { $null -ne $_ })
+        }
+        catch { $status[$key] = [ordered]@{ error = "cmis $($commands[$key] -join ' ') failed: $($_.Exception.Message)" } }
+    }
+    $status
+}
+
+# The data layer in <Root>/data: summary.json (every number per scope and week, with the lists behind them), drill/
+# (the items behind each number), items/ (every item's title, address and stage history), days.json (per local day),
+# cmis.json (cmis's status), full/ (the run's own two files). Returns what llms.txt names.
+function Write-PagesDataLayer($Data, $Document, $CmisStatus, $Web, [hashtable] $Config, [string] $Root, [string] $Title) {
+    $items = Get-PagesItems $Document $Data
+    $itemFiles = Get-ItemFileNames $Data.projects
+    $repoOf = @{}; foreach ($p in @($Data.projects | Where-Object { $_.measured })) { $repoOf[$p.connectionId] = "$($p.owner)/$($p.repo)" }
+    # An item of a list by its connection and number.
+    $byKey = @{}
+    foreach ($id in $items.Keys) { foreach ($i in $items[$id]) { $byKey["$id|$($i.number)"] = $i } }
+    $definitions = Get-MetricDefinitions $Data
+
+    # The items of each repository.
+    $written = [ordered]@{}
+    foreach ($id in $items.Keys) {
+        $p = @($Data.projects | Where-Object { $_.connectionId -ceq $id })[0]
+        $connection = @($Document['connections'] | Where-Object { $_['id'] -ceq $id }) | Select-Object -First 1
+        $head = [ordered]@{
+            paths = $script:PathsNote; project = $p.project; connectionId = $id; repository = $repoOf[$id]; itemNumberBase = $p.itemNumberBase
+            stages = @(if ($connection) { $connection['stages'] }); deliveredStages = @(if ($connection) { $connection['deliveredStages'] }); window = [ordered]@{ since = $Data.since; until = $Data.until }
+            count = $items[$id].Count
+            note = 'Every item with activity in the window. number: an issue or pull request number of the repository; a branch (from 500000) or a direct commit (from 900000) has a number cmis derives from its name or commit id and no GitHub address. cmisNumber: the number plus the connection''s itemNumberBase, as cmis knows the item across repositories. stages: in the order entered, times in UTC. deliveredUtc: its first entry into a delivered stage. Closed: closed without delivery.'
+        }
+        $written[$id] = @(Write-DataFile $Root $itemFiles[$id] $head $items[$id])
+    }
+
+    # The items behind each number, and the summary of every number.
+    $lists = [ordered]@{}
+    $scopes = foreach ($scope in $Data.scopes) {
+        $isSpace = $scope.id -ceq $script:SpaceScopeId
+        $lists[$scope.id] = [ordered]@{}
+        $weeks = foreach ($w in $Data.weeks) {
+            $n = $scope.periods[$w.start]
+            $cell = [ordered]@{ week = $w.start; label = $w.label; partial = $w.partial }
+            foreach ($m in $script:PageMetrics) { if ($m.key -cne 'meanTimeToDelivery') { $cell[$m.key] = if ($null -eq $n) { $null } else { $n[$m.key] } } }
+            $mttd = if ($null -eq $n) { $null } else { $n['meanTimeToDelivery'] }
+            $cell['meanTimeToDelivery'] = $mttd
+            $cell['meanTimeToDeliveryHours'] = if ($null -eq $mttd) { $null } else { [math]::Round([double] $mttd * 168, 2) }
+            $cell['meanTimeToDeliveryText'] = Format-Duration $mttd
+            $cellLists = [ordered]@{}
+            foreach ($m in $script:PageMetrics | Where-Object { $_.lists }) {
+                $drill = $scope.drills["$($m.key)|$($w.start)"]
+                if ($null -eq $drill) { continue }
+                $listed = @(foreach ($d in @($drill)) {
+                        $known = $byKey["$(Get-DrillConnection $d $Data)|$($d['number'])"]
+                        [ordered]@{
+                            repository = if ($d['owner']) { "$($d['owner'])/$($d['repo'])" } else { $null }; number = $d['number']; kind = $d['kind']
+                            title = if ($known) { $known.title } else { $null }; url = if ($known) { $known.url } else { (Get-ItemAddress $d['owner'] $d['repo'] $d['number'] $d['kind']).Url }
+                            from = $d['from']; to = $d['to']; at = $d['at']
+                        }
+                    })
+                $repositories = [ordered]@{}
+                foreach ($d in @($drill)) { $c = Get-DrillConnection $d $Data; if ($c -and $itemFiles[$c]) { $repositories["$($d['owner'])/$($d['repo'])"] = "$($itemFiles[$c]).json" } }
+                $head = [ordered]@{
+                    paths = $script:PathsNote; scope = $scope.id; scopeTitle = $(if ($isSpace) { "All projects of $Title" } else { $scope.title }); repository = $(if ($isSpace) { $null } else { $repoOf[$scope.id] })
+                    week = $w.start; weekLabel = $w.label; partial = $w.partial; metric = $m.key; row = $m.row; definition = $m.page
+                    count = $(if ($null -eq $n) { 0 } else { $n[$m.key] }); listed = $listed.Count
+                    move = 'from, to, at: the stage move that put the item in this list and when (UTC)'
+                    itemFiles = $repositories
+                }
+                $names = @(Write-DataFile $Root "data/drill/$($scope.id)/$($w.start)/$($m.key)" $head $listed)
+                $cellLists[$m.key] = $names[0]
+                $lists[$scope.id]["$($w.start)|$($m.key)"] = $names
+            }
+            $cell['lists'] = $cellLists
+            $cell
+        }
+        [ordered]@{
+            id = $scope.id; title = $(if ($isSpace) { "All projects of $Title" } else { $scope.title })
+            repository = $(if ($isSpace) { $null } else { $repoOf[$scope.id] }); items = $(if ($isSpace) { $null } else { "$($itemFiles[$scope.id]).json" })
+            weeks = @($weeks)
+        }
+    }
+    $differences = @(Test-RecomputedNumbers $Data $items $Document)
+    $summary = [ordered]@{
+        paths = $script:PathsNote; title = $Title; space = $Data.space; octopusServer = $Data.octopusServer; generatedUtc = $Data.generatedUtc
+        window = [ordered]@{ since = $Data.since; until = $Data.until; timeZone = $Data.timeZone }
+        weeksAre = 'ISO weeks, Monday 00:00 UTC to the next Monday. partial: the window does not cover the whole week (the page marks it *). null: the scope has no data that week (the page shows a dash).'
+        meanTimeToDeliveryIs = 'meanTimeToDelivery in weeks as cmis gives it; meanTimeToDeliveryHours the same in hours; meanTimeToDeliveryText as the page writes it (minutes under 90 minutes, hours with one decimal under 48 hours, else days).'
+        cmis = $Data.cmis; scorecardWeb = $Web
+        metrics = @($definitions)
+        projects = @(foreach ($p in $Data.projects) {
+                [ordered]@{
+                    project = $p.project; connectionId = $p.connectionId; repository = $(if ($p.measured) { "$($p.owner)/$($p.repo)" } else { $null }); measured = $p.measured; reason = $p.reason
+                    pairedBy = $p.source; environments = $p.environments; items = $(if ($p.measured) { "$($itemFiles[$p.connectionId]).json" } else { $null })
+                }
+            })
+        scopes = @($scopes)
+        recomputed = $(if ($differences.Count) { "The rules of llms.txt give other numbers in $($differences.Count) cell(s): $(@($differences | Select-Object -First 5) -join '; ')" } else { 'The rules of llms.txt give every started, delivered, work in process and MTTD number of these weeks from the item files.' })
+        warnings = @($Data.warnings)
+        files = [ordered]@{ llms = 'llms.txt'; days = 'data/days.json'; cmis = 'data/cmis.json'; fullScorecardData = 'data/full/scorecard-data.json'; fullDocument = 'data/full/document.json' }
+    }
+    Write-DataObject $Root 'data/summary.json' $summary
+
+    $daysHead = [ordered]@{
+        paths = $script:PathsNote; timeZone = $Document['timeZone']; from = $Document['from']; to = $Document['to']
+        note = "Per local day of the time zone, all projects together, as cmis's connections document computes them (its own rules for a day). The weekly numbers of the page are in data/summary.json."
+    }
+    $days = @(Write-DataFile $Root 'data/days' $daysHead @($Document['days']) 'days')
+    Write-DataObject $Root 'data/cmis.json' ([ordered]@{ paths = $script:PathsNote; version = $Data.cmis['version']; commit = $Data.cmis['commit']; repo = $Data.cmis['repo']; generatedUtc = $Data.generatedUtc } + $CmisStatus)
+    [ordered]@{ Summary = $summary; Lists = $lists; ItemFiles = $written; Days = $days; Differences = $differences; Stages = @($Document['connections']) }
+}
+
+# Markdown as one line of text: nothing in it that Markdown would read as a link or emphasis.
+function ConvertTo-LlmsText([string] $Text) { ($Text -replace '\s+', ' ' -replace '([\[\]\*_`|])', '\$1').Trim() }
+
+# llms.txt (https://llmstxt.org): what the scorecard is, what each number means, the projects, and a link to every
+# data file, with the rules that recompute a number for another window from the items' stage histories.
+function Get-LlmsText($Layer, [hashtable] $Config) {
+    $s = $Layer.Summary
+    $b = [Text.StringBuilder]::new()
+    function Line([string] $Text = '') { [void] $b.Append($Text).Append("`n") }
+    $measured = @($s.projects | Where-Object { $_.measured })
+    Line "# Delivery scorecard of $(ConvertTo-LlmsText $s.title)"
+    Line
+    Line "> The weekly delivery scorecard of Octopus Deploy space $($s.space) ($(ConvertTo-LlmsText $s.title)): $($measured.Count) project(s), each paired with its GitHub repository and measured from its issues, pull requests, commits and Octopus deployments with cmis (Clear Measure Intelligence Scorecard) $($s.cmis.version), from $($s.window.since) to $($s.window.until) ($($s.window.timeZone)). Generated $($s.generatedUtc). The pages ([index.html](index.html)) are Scorecard.Web's$(if ($s.scorecardWeb) { " $($s.scorecardWeb.version) (commit $($s.scorecardWeb.commit) of $($s.scorecardWeb.repository))" }); this file and data/ hold the same numbers, and the items behind them, as JSON."
+    Line
+    Line "All paths are relative to this file. The window is $($s.window.since) to $($s.window.until), both days included (today in $($s.window.timeZone) the last); the data is what GitHub and Octopus held when the run harvested, shortly before $($s.generatedUtc). Weeks are ISO weeks, Monday 00:00 UTC to the next Monday, named by their Monday (yyyy-MM-dd); a week the window does not cover whole is partial (the page marks it *). The weeks before the first week in which anything happened are left out (the window may begin before the first repository did); summary.json lists the weeks shown. Every time is UTC unless a file says otherwise. Updated every night: this branch holds one commit, the last run."
+    Line
+    Line '## Numbers'
+    Line
+    foreach ($m in $s.metrics) {
+        Line "- **$($m.row)** (``$($m.key)``): $(ConvertTo-LlmsText $m.page).$(if ($m.cmis) { " cmis: $(ConvertTo-LlmsText $m.cmis) Unit: $($m.unit); several periods: $($m.aggregation)." })$(if ($m.lists) { ' Each weekly number lists its items.' })"
+    }
+    Line
+    Line 'The page shows Work in process, Items started, Items delivered and MTTD; Throughput, Rework and Net throughput are in its folded "Flow detail" panel. MTTD: summary.json has it in weeks (meanTimeToDelivery, as cmis gives a weekly period), in hours rounded to two decimals, and as the page writes it. Every kind of item counts in every number: issues, pull requests that belong to no issue, branches and direct commits.'
+    Line
+    Line '## Stages'
+    Line
+    $sequences = @($Layer.Stages | ForEach-Object { "$(@($_['stages']) -join ' > ') (delivered: $(@($_['deliveredStages']) -join ', '))" } | Select-Object -Unique)
+    foreach ($q in $sequences) { Line "- $(ConvertTo-LlmsText $q)" }
+    Line '- Closed: closed without being delivered (an issue closed with no merged pull request, or a pull request that belongs to no issue closed without merging). cmis keeps it off the board: neither in process nor delivered, a move into or out of it neither throughput nor rework. The item files list it among an item''s stages, with when it was entered, and as its currentStage.'
+    Line
+    Line "A work item is a GitHub issue of the repository, or a pull request that belongs to no issue; also a branch with no pull request that names no issue, and a commit pushed straight to the default branch. Each stage is entered by a signal from GitHub (Created: the issue created; Development: the first commit of its pull request; In Review: the pull request opened; Merged: the pull request merged) or from Octopus Deploy (each later stage: the first successful deployment to that environment, the last one Delivered). So says cmis's delivery process (GitHubDelivery)."
+    Line
+    Line '## Projects'
+    Line
+    Line 'An Octopus project and its repository may have different names: the item files are named by repository, data/drill by project (its connection id); the list below pairs them.'
+    Line
+    foreach ($p in $s.projects) {
+        if ($p.measured) { Line "- $(ConvertTo-LlmsText $p.project): repository [$($p.repository)](https://github.com/$($p.repository)), items [$($p.items)]($($p.items))$(if (@($Layer.ItemFiles[$p.connectionId]).Count -gt 1) { " (continued in $(@($Layer.ItemFiles[$p.connectionId] | Select-Object -Skip 1 | ForEach-Object { "[$_]($_)" }) -join ', '))" })" }
+        else { Line "- $(ConvertTo-LlmsText $p.project): not measured, $(ConvertTo-LlmsText $p.reason)" }
+    }
+    Line
+    Line '## Data'
+    Line
+    Line '- [data/summary.json](data/summary.json): every number per scope (all projects together, and each project) and week, the definitions, the projects, and the path of the list behind each number'
+    Line "- [data/days.json](data/days.json): the numbers per local day of $($s.window.timeZone) (not UTC days), all projects together, as cmis computes a day (MTTD in days)$(if (@($Layer.Days).Count -gt 1) { "; continued in $(@($Layer.Days | Select-Object -Skip 1 | ForEach-Object { "[$_]($_)" }) -join ', ')" })"
+    Line '- [data/cmis.json](data/cmis.json): cmis status: its connections, what its store holds, the last harvest of each connection, the work streams'
+    Line '- [data/full/scorecard-data.json](data/full/scorecard-data.json): the run''s whole model in one file (about 1 MB, a download)'
+    Line '- [data/full/document.json](data/full/document.json): cmis connections document of the run (every item with its title and stage history, every day) in one file (a download)'
+    Line
+    Line '## Item lists behind the numbers'
+    Line
+    Line 'Each list holds the items behind one number: repository, number, kind, title, GitHub address, and the stage move that put it there (from, to, at). A list longer than about 90 KB of JSON goes on in parts named in its partFiles. A number that is 0 has no list, and a week a scope has no data for has none either: data/summary.json tells the two apart (0 or null).'
+    foreach ($scope in $s.scopes) {
+        Line
+        Line "### $(ConvertTo-LlmsText $scope.title)$(if ($scope.repository) { " ($($scope.repository))" })"
+        Line
+        foreach ($w in $scope.weeks) {
+            $links = @(foreach ($key in $w.lists.Keys) {
+                    $names = @($Layer.Lists[$scope.id]["$($w.week)|$key"])
+                    "[$key]($($names[0])) $($w[$key])$(if ($names.Count -gt 1) { " (parts $(@(for ($k = 1; $k -lt $names.Count; $k++) { "[$($k + 1)]($($names[$k]))" }) -join ', '))" })"
+                })
+            if ($links.Count) { Line "- Week of $($w.week)$(if ($w.partial) { ' (partial)' }): $($links -join ', ')" }
+        }
+    }
+    Line
+    Line '## Recomputing a number for another window'
+    Line
+    Line 'Each item file lists every item of one repository with activity in the window: createdUtc, deliveredUtc (its first entry into a delivered stage, null when not delivered), currentStage, and its stages with the time each was entered, in the order entered. For a window from F (inclusive) to T (exclusive), UTC, over the items of one project or of all (the space):'
+    Line
+    Line '- Items started: the items with F <= createdUtc < T.'
+    Line '- Items delivered: the items with F <= deliveredUtc < T.'
+    Line '- Mean time to delivery: the mean of (deliveredUtc - createdUtc) over the items delivered in the window.'
+    Line '- Work in process at an instant T: the items with createdUtc < T, not delivered before T, whose last stage entered before T is not Closed (an item reopened later counts again). A week''s number is the work in process at its end, the next Monday 00:00 UTC.'
+    Line '- Throughput, Rework, Net throughput: stage moves, which the item files do not hold completely; take them per week from data/summary.json.'
+    Line
+    Line "$($s.recomputed) Over several weeks cmis's own score adds the weekly started and delivered numbers, takes the work in process of the last week, and averages the weekly MTTDs without weights; the MTTD rule above weighs every item the same. An item's local day in $($s.window.timeZone): convert its UTC times."
+    Line
+    Line '## Pages'
+    Line
+    Line '- [index.html](index.html): the scorecard, all repositories together; [split.html](split.html): by repository; [people.html](people.html) and [split-people.html](split-people.html): the "People and factory" setting (automation items left out). Their drill/ pages list the items behind every cell, also of rows data/ does not hold (time per stage, deployments, waste, closed without delivery).'
+    Line
+    Line '## Not published'
+    Line
+    Line "- The raw harvest (cmis's store/raw): the GitHub and Octopus answers as harvested, which hold more than the scorecard shows: whole commit messages, the names of commit authors and committers, every branch, and Octopus deployment records (who deployed, form values, error messages, release notes). (The title of a direct commit item here is the first line of its message, and of a branch item its name.)"
+    Line "- normalized.db: cmis's LiteDB file of the same items and stage moves, a binary a web fetch cannot read; data/items holds what it adds to the numbers (titles, stages)."
+    Line "- Both stay in the store package $($Config.prefix)-scorecard-store of the space's built-in Octopus feed."
+    $b.ToString()
+}
+
+# index.html with a link to llms.txt: one in its head for tools, one in its footer, small, for people.
+function Add-LlmsLink([string] $Html) {
+    $Html = [regex]::new('</head>').Replace($Html, "    <link rel=`"alternate`" type=`"text/markdown`" href=`"llms.txt`" title=`"Data for AI tools`" />`n</head>", 1)
+    $link = '<span><a href="llms.txt" title="What the scorecard is, every number and the items behind it as JSON: for AI tools">Data (llms.txt)</a></span>'
+    if ($Html.Contains('</footer>')) { [regex]::new('</footer>').Replace($Html, "    $link`n        </footer>", 1) }
+    else { [regex]::new('</body>').Replace($Html, "$link`n</body>", 1) }
+}
+
+# The Pages site in <OutDir>: the exported site, its index.html with a link to llms.txt, .nojekyll (GitHub Pages serves
+# the files as they are), the data layer and llms.txt. Returns the data layer's model.
+function New-PagesSite($Data, [hashtable] $Paths, [string] $Cmis, [hashtable] $Config, [string] $SiteDir, [string] $OutDir, [string] $Title) {
+    if (Test-Path -LiteralPath $OutDir) { Remove-Item -LiteralPath $OutDir -Recurse -Force }
+    Copy-Item -LiteralPath $SiteDir -Destination $OutDir -Recurse
+    $index = Join-Path $OutDir 'index.html'
+    Set-Content -LiteralPath $index -Value (Add-LlmsLink (Get-Content -LiteralPath $index -Raw)) -NoNewline
+    New-Item -ItemType File -Path (Join-Path $OutDir '.nojekyll') -Force | Out-Null
+    $document = Get-Content -LiteralPath $Paths.Document -Raw | ConvertFrom-Json -AsHashtable -DateKind String -Depth 100
+    $runs = @($Data.projects | Where-Object { $_.measured }).Count
+    $status = Get-CmisStatus $Cmis $Paths $runs
+    $marker = Join-Path $Paths.Web 'space-scorecard-build.json'
+    $web = if (Test-Path -LiteralPath $marker) { Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json -AsHashtable } else { $null }
+    $layer = Write-PagesDataLayer $Data $document $status $web $Config $OutDir $Title
+    New-Item -ItemType Directory -Path (Join-Path $OutDir 'data/full') -Force | Out-Null
+    Copy-Item -LiteralPath $Paths.Document -Destination (Join-Path $OutDir 'data/full/document.json')
+    Copy-Item -LiteralPath $Paths.Data -Destination (Join-Path $OutDir 'data/full/scorecard-data.json')
+    Set-Content -LiteralPath (Join-Path $OutDir 'llms.txt') -Value (Get-LlmsText $layer $Config) -NoNewline
+    foreach ($d in $layer.Differences) { Write-Warning "pages: recomputed from the items, $d" }
+    $large = @(Get-ChildItem -LiteralPath (Join-Path $OutDir 'data') -Recurse -File | Where-Object { $_.Length -gt 100000 -and [IO.Path]::GetRelativePath($OutDir, $_.FullName).Replace('\', '/') -notlike 'data/full/*' })
+    foreach ($f in $large) { Write-Warning "pages: $([IO.Path]::GetRelativePath($OutDir, $f.FullName)) is $($f.Length) bytes, more than an AI tool may read" }
+    $layer
+}
+
+# One git command (git on the PATH): its lines on standard output; a failure throws with git's own words.
+function Invoke-Git([string[]] $Arguments) {
+    $PSNativeCommandUseErrorActionPreference = $false
+    $errors = [IO.Path]::GetTempFileName()
+    try {
+        $out = @(git @Arguments 2> $errors | ForEach-Object { "$_" })
+        if ($LASTEXITCODE -ne 0) {
+            # The command's name: the first argument after git's own options (each of which takes a value).
+            $i = 0; while ($i -lt $Arguments.Count -and $Arguments[$i] -cin '-c', '--git-dir', '--work-tree') { $i += 2 }
+            throw "git $(if ($i -lt $Arguments.Count) { $Arguments[$i] }) failed (exit $LASTEXITCODE): $((("$(Get-Content -LiteralPath $errors -Raw)") -replace '\s+', ' ').Trim())"
+        }
+        $out
+    }
+    finally { Remove-Item -LiteralPath $errors -Force -ErrorAction SilentlyContinue }
+}
+
+# GitHub builds the pages of a pushed branch on its own. Waits until its latest Pages build is of this commit and done:
+# "built" is success, "errored" a failure; still not done after $Minutes, a warning (the push is what this run owns).
+function Wait-PagesBuild([hashtable] $Pages, [string] $Commit, [int] $Minutes = 10) {
+    $deadline = [datetime]::UtcNow.AddMinutes($Minutes)
+    while ($true) {
+        $build = $null
+        try { $build = Invoke-GitHubGet "/repos/$($Pages.repo)/pages/builds/latest" | ConvertFrom-Json -AsHashtable } catch { $build = $null }
+        if ($build -and $build['commit'] -ceq $Commit) {
+            if ($build['status'] -ceq 'built') { Write-Host "pages: GitHub built $Commit"; return 'built' }
+            if ($build['status'] -ceq 'errored') { throw "GitHub's Pages build of $Commit failed: $(if ($build['error']) { $build['error']['message'] })" }
+        }
+        if ([datetime]::UtcNow -gt $deadline) { Write-Warning "pages: GitHub had not built $Commit after $Minutes minutes; it may still"; return 'pending' }
+        Start-Sleep -Seconds 15
+    }
+}
+
+# Publish to GitHub Pages: <Directory> as the only commit of branch site.pages.branch of site.pages.repo, force-pushed
+# (the branch keeps no history: the site of one run, some 70 MB, would pile up every night). git signs in with the
+# GitHub token through GIT_ASKPASS, a script that prints it from this process's environment: the token is in no command
+# line, remote address, file or log. Then the branch is checked to be that commit and GitHub's build of it awaited.
+# Returns the address of the pages.
+function Publish-ScorecardPages([hashtable] $Pages, [string] $Directory, [string] $Message) {
+    $work = Join-Path ([IO.Path]::GetTempPath()) "scorecard-pages-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $work | Out-Null
+    $askPass = Join-Path $work 'askpass.sh'
+    Set-Content -LiteralPath $askPass -Value "#!/bin/sh`ncase `"`$1`" in Username*) echo x-access-token ;; *) printf '%s\n' `"`$SCORECARD_PAGES_TOKEN`" ;; esac`n" -NoNewline
+    if (-not $IsWindows) { chmod 700 $askPass }
+    $remote = "https://github.com/$($Pages.repo).git"
+    $names = 'SCORECARD_PAGES_TOKEN', 'GIT_ASKPASS', 'GIT_TERMINAL_PROMPT'
+    $saved = @{}; foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+    try {
+        $env:SCORECARD_PAGES_TOKEN = Get-GitHubToken; $env:GIT_ASKPASS = $askPass; $env:GIT_TERMINAL_PROMPT = '0'
+        # No credential helper of the machine's, no line-ending conversion: the files go as the export wrote them.
+        $git = @('-c', 'credential.helper=', '-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', '--git-dir', (Join-Path $work 'git'), '--work-tree', $Directory)
+        Invoke-Git ($git + @('init', '--quiet', "--initial-branch=$($Pages.branch)")) | Out-Null
+        Invoke-Git ($git + @('add', '--all')) | Out-Null
+        Invoke-Git ($git + @('-c', 'user.name=space-scorecard', '-c', 'user.email=space-scorecard@users.noreply.github.com', 'commit', '--quiet', '--no-verify', '--message', $Message)) | Out-Null
+        $commit = @(Invoke-Git ($git + @('rev-parse', 'HEAD')))[0]
+        $files = @(Invoke-Git ($git + @('ls-files'))).Count
+        for ($attempt = 1; ; $attempt++) {
+            try { Invoke-Git ($git + @('push', '--force', '--quiet', $remote, "HEAD:refs/heads/$($Pages.branch)")) | Out-Null; break }
+            catch {
+                if ($attempt -ge 3) { throw }
+                Write-Host "pages: push failed (try $attempt of 3), again in 30 s: $($_.Exception.Message)"
+                Start-Sleep -Seconds 30
+            }
+        }
+        $held = "$(@(Invoke-Git ($git + @('ls-remote', $remote, "refs/heads/$($Pages.branch)")))[0])" -split '\s+' | Select-Object -First 1
+        if ($held -cne $commit) { throw "Branch $($Pages.branch) of $($Pages.repo) is $held after the push, not $commit." }
+        Write-Host "pages: $files file(s) as commit $commit, force-pushed to $($Pages.branch) of $($Pages.repo)"
+    }
+    finally {
+        foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    [void] (Wait-PagesBuild $Pages $commit)
+    $Pages.url
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1511,7 +2059,8 @@ if ($StoreFeed -and $SkipHarvest) { throw '-StoreFeed and -SkipHarvest exclude e
 
 $started = [Diagnostics.Stopwatch]::StartNew()
 $cfg = Read-SpaceConfig $Config
-if ($PublishSite -and -not ($cfg['site'] -and $cfg['scorecardVersion'])) { throw "-PublishSite needs 'site' and 'scorecardVersion' in $Config." }
+if ($PublishSite -and -not ($cfg['site'] -and $cfg.site['account'] -and $cfg['scorecardVersion'])) { throw "-PublishSite needs 'site' (account, container) and 'scorecardVersion' in $Config." }
+if ($PublishPages -and -not ($cfg['site'] -and $cfg.site['pages'] -and $cfg['scorecardVersion'])) { throw "-PublishPages needs 'site.pages' and 'scorecardVersion' in $Config." }
 # cmis writes its store under the culture of its process, and Scorecard.Web reads it culture-invariant: a store written
 # under another culture it rebuilds from the raw files on every export. So cmis runs culture-invariant too (the
 # processes this script starts inherit the variable).
@@ -1524,6 +2073,9 @@ if ($PublishSite) {
     try { Invoke-Az @('account', 'get-access-token', '--resource', 'https://storage.azure.com/', '--output', 'none') | Out-Null; Write-Host 'site: az holds a storage token' }
     catch { $publishFailure = "no storage token: $($_.Exception.Message)"; Write-Warning "The pages will not be published, $publishFailure" }
 }
+# git pushes the Pages: without it nothing is published, and the run fails at its end (the store is still pushed).
+$pagesFailure = $null
+if ($PublishPages -and -not (Get-Command git -ErrorAction SilentlyContinue)) { $pagesFailure = 'git is not on the PATH'; Write-Warning "The Pages will not be published: $pagesFailure" }
 if ($StoreFeed) { [void] (Get-StorePackageId $cfg) }
 $window = Resolve-Window $cfg $Since $Until
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
@@ -1531,7 +2083,7 @@ $WorkDir = (Resolve-Path -LiteralPath $WorkDir).Path
 $paths = @{
     Bin = Join-Path $WorkDir 'bin'; Workspace = Join-Path $WorkDir 'workspace'; Store = Join-Path $WorkDir 'store'
     HarvestState = Join-Path $WorkDir 'harvest-state.json'; Document = Join-Path $WorkDir 'document.json'
-    Web = Join-Path $WorkDir 'web'; Site = Join-Path $WorkDir 'site'
+    Web = Join-Path $WorkDir 'web'; Site = Join-Path $WorkDir 'site'; Pages = Join-Path $WorkDir 'pages'; Data = Join-Path $WorkDir 'scorecard-data.json'
 }
 foreach ($dir in $paths.Workspace, $paths.Store) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 Write-Host "Space $($cfg.space), window $($window.Since) to $($window.Until) ($($cfg.timeZone))"
@@ -1571,7 +2123,7 @@ else {
     ConvertTo-Json -InputObject @($projects) -Depth 5 | Set-Content -LiteralPath $discovery
 }
 
-$data = Get-ScorecardData $cmis $cfg $projects $window $paths $harvest
+$data = Get-ScorecardData $cmis $cfg $projects $window $paths $harvest -IncludeTitles:$PublishPages
 if ($StoreFeed) { $data.store = [ordered]@{ package = Get-StorePackageId $cfg; restored = $restored } }
 Write-ScorecardFiles $data $WorkDir
 foreach ($w in $data.warnings) { Write-Warning $w }
@@ -1579,10 +2131,11 @@ foreach ($w in $data.warnings) { Write-Warning $w }
 # The pages through Scorecard.Web's export; when that fails, the script's own scorecard.html (written above) stands in.
 $siteDir = $null
 $siteNote = $null
+$siteTitle = Get-SiteTitle $cfg
 if ($cfg['scorecardVersion']) {
     try {
         $web = Get-ScorecardWeb $cfg $paths.Web
-        Export-ScorecardSite $web $paths (Get-SiteTitle $cfg) $paths.Site
+        Export-ScorecardSite $web $paths $siteTitle $paths.Site
         New-SiteArchive $paths.Site (Join-Path $WorkDir 'scorecard-site.zip')
         $siteDir = $paths.Site
         Write-Host "site: exported with Scorecard.Web $($cfg.scorecardVersion) to $siteDir"
@@ -1610,14 +2163,37 @@ if ($PublishSite) {
     Add-Content -LiteralPath (Join-Path $WorkDir 'summary.md') -Value "`n## Published pages`n`n$(if ($publishFailure -or -not $siteDir) { $siteNote } else { "The pages of this run: <$url>" })"
 }
 
+# The Pages and their data layer, also before the store is pushed; a failure fails the run at its end, as above.
+$pagesNote = $null
+if ($PublishPages) {
+    $pagesUrl = $cfg.site.pages.url
+    if ($pagesFailure) { $pagesNote = "Pages NOT published to $pagesUrl" }
+    elseif ($siteDir) {
+        try {
+            [void] (New-PagesSite $data $paths $cmis $cfg $siteDir $paths.Pages $siteTitle)
+            $message = "Space scorecard of $siteTitle ($($cfg.space)), $($data.since) to $($data.until), generated $($data.generatedUtc) with cmis $($data.cmis.version) and Scorecard.Web $($cfg.scorecardVersion)"
+            $pagesNote = "Pages at $(Publish-ScorecardPages $cfg.site.pages $paths.Pages $message)"
+        }
+        catch {
+            $pagesFailure = $_.Exception.Message
+            $pagesNote = "Pages NOT published to $pagesUrl"
+            Write-Warning "The Pages were not published to $pagesUrl`: $pagesFailure"
+        }
+    }
+    else { $pagesNote = "no Scorecard.Web export, so nothing published; $pagesUrl keeps the last pages" }
+    Add-Content -LiteralPath (Join-Path $WorkDir 'summary.md') -Value "`n## GitHub Pages`n`n$(if ($pagesFailure -or -not $siteDir) { $pagesNote } else { "The pages of this run, with their data for AI tools ($($pagesUrl)llms.txt): <$pagesUrl> (private: members of the organization who may read $($cfg.site.pages.repo))" })"
+}
+
 $inOctopus = Test-InsideOctopus
 if ($inOctopus) { Publish-OctopusArtifacts $WorkDir $siteDir }
 # Last: only a run that got this far pushes its store.
 $pushed = if ($StoreFeed) { Publish-StoreToFeed $cfg $WorkDir } else { $null }
 # The store is pushed by now: a highlight that fails is a warning, not a failed run.
 if ($inOctopus) {
-    try { Write-Highlight (Get-HighlightLine $data $pushed $siteNote) }
+    try { Write-Highlight (Get-HighlightLine $data $pushed (@($siteNote, $pagesNote | Where-Object { $_ }) -join '; ')) }
     catch { Write-Warning "No highlight: $($_.Exception.Message)" }
 }
-if ($publishFailure) { throw "The pages were not published to $(Get-SiteUrl $cfg.site): $publishFailure" }
+if ($publishFailure -or $pagesFailure) {
+    throw (@($(if ($publishFailure) { "The pages were not published to $(Get-SiteUrl $cfg.site): $publishFailure" }), $(if ($pagesFailure) { "The Pages were not published to $($cfg.site.pages.url): $pagesFailure" }) | Where-Object { $_ }) -join ' ')
+}
 Write-Host ("Done in {0:n1} s: {1}" -f $started.Elapsed.TotalSeconds, $(if ($siteDir) { Join-Path $siteDir 'index.html' } else { Join-Path $WorkDir 'scorecard.html' }))
