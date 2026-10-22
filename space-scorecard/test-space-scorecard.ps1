@@ -487,5 +487,59 @@ Test-Case 'setup: a space that is no space id is refused' (Get-Setup (Join-Path 
 Test-Case 'setup: a site that is no object is refused' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ site = 'stacme01' }) "refused: 'site' must be an object (account, container, resourceGroup, identity)."
 Test-Case 'setup: no prefix is refused' (Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json') @{ prefix = $null }) "refused: 'prefix' is required."
 
+# --- Harvest: a connection is tried again; the cause of a failure is shown ----------------------------------------
+$harvestEnvelope = @{ ok = $false; error = @{ code = 'general'; cause = 'Every configured connection failed (shop-api).' }; data = @{ connections = @(@{ connectionId = 'shop-api'; succeeded = $false; error = 'GitHub GraphQL query failed: Something went wrong' }) } }
+Test-Case 'cmis failure: the connection error after the cause' (Get-CmisFailure $harvestEnvelope 1 '') 'general: Every configured connection failed (shop-api). [shop-api: GitHub GraphQL query failed: Something went wrong]'
+Test-Case 'cmis failure: a sync without data gives the cause only' (Get-CmisFailure @{ ok = $false; data = $null; error = @{ code = 'general'; cause = 'Every configured connection failed (shop-api).' } } 1 '') 'general: Every configured connection failed (shop-api).'
+Test-Case 'cmis failure: no envelope gives exit code and standard error' (Get-CmisFailure $null 134 'Unhandled exception') 'exit 134; Unhandled exception'
+$harvestDir = Join-Path ([IO.Path]::GetTempPath()) "space-scorecard-harvest-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path "$harvestDir/store" -Force | Out-Null
+$runsLog = "$harvestDir/store/harvest-runs.jsonl"
+Set-Content -LiteralPath $runsLog -Value '{"StartedUtc":"2026-10-22T14:10:07.88+00:00","Connections":[{"ConnectionId":"shop-api","Error":"InvalidOperationException: GitHub GraphQL query failed"},{"ConnectionId":"shop-ui","Error":null}]}'
+Test-Case 'last harvest error: of that connection' (Get-LastHarvestError "$harvestDir/store" 'shop-api' ([DateTimeOffset]::Parse('2026-10-22T14:10:00Z'))) 'InvalidOperationException: GitHub GraphQL query failed'
+Test-Case 'last harvest error: none for a connection without one' (Get-LastHarvestError "$harvestDir/store" 'shop-ui' ([DateTimeOffset]::Parse('2026-10-22T14:10:00Z'))) $null
+Test-Case 'last harvest error: an older run does not count' (Get-LastHarvestError "$harvestDir/store" 'shop-api' ([DateTimeOffset]::Parse('2026-10-22T14:11:00Z'))) $null
+Test-Case 'last harvest error: no log' (Get-LastHarvestError "$harvestDir/none" 'shop-api' ([DateTimeOffset]::Parse('2026-10-22T14:10:00Z'))) $null
+Remove-Item -LiteralPath $runsLog -Force
+$savedAttempts = $script:HarvestAttempts; $savedPause = $script:HarvestRetrySeconds
+$script:HarvestRetrySeconds = 0
+$cmisCalls = [Collections.Generic.List[string]]::new()
+# Per connection, the failures still to come, in order: 'band' answers ok with the connection failed in its data,
+# 'log' writes cmis's run log and fails the command without data (as a sync does), 'auth' fails for good.
+$script:cmisFailures = @{}
+function Invoke-Cmis([string] $Cmis, [string[]] $Arguments, [string] $Workspace, [string] $Store) {
+    if ($Arguments[1] -eq 'inventory') { return @{ connections = @() } }
+    $id = $Arguments[3]
+    $cmisCalls.Add("$($Arguments[1]) $id")
+    $queue = $script:cmisFailures[$id]
+    if ($queue -and $queue.Count) {
+        $kind = $queue[0]; $script:cmisFailures[$id] = @($queue | Select-Object -Skip 1)
+        switch ($kind) {
+            'band' { return @{ connections = @(@{ connectionId = $id; succeeded = $false; error = 'GitHub GraphQL query failed: Something went wrong while executing your query (in band)' }) } }
+            'log' {
+                Set-Content -LiteralPath (Join-Path $Store 'harvest-runs.jsonl') -Value (ConvertTo-Json -Compress -InputObject @{ StartedUtc = [DateTimeOffset]::UtcNow.ToString('o'); Connections = @(@{ ConnectionId = $id; Error = 'InvalidOperationException: Something went wrong while executing your query (logged)' }) })
+                throw "cmis connections harvest failed: general: Every configured connection failed ($id)."
+            }
+            default { throw "cmis connections harvest failed: general: Every configured connection failed ($id). [${id}: Bad credentials]" }
+        }
+    }
+    @{ connections = @(@{ connectionId = $id; succeeded = $true }); workItemsPulled = 1; revisionsPulled = 2; apiRequestCount = 3 }
+}
+$harvestPaths = @{ Workspace = "$harvestDir/workspace"; Store = "$harvestDir/store"; HarvestState = "$harvestDir/harvest-state.json" }
+$harvestWindow = @{ Since = '2026-07-25'; Until = '2026-10-22'; HarvestUntil = '2026-10-23' }
+$entries = @([ordered]@{ connectionId = 'shop-api'; measured = $true; reason = $null }, [ordered]@{ connectionId = 'shop-ui'; measured = $true; reason = $null }, [ordered]@{ connectionId = 'shop-db'; measured = $true; reason = $null })
+$script:HarvestAttempts = 3
+$script:cmisFailures = @{ 'shop-api' = @('band', 'log'); 'shop-ui' = @('band', 'band', 'band'); 'shop-db' = @('auth') }
+$said = @(& { Invoke-Harvest 'cmis' $entries $harvestWindow $harvestPaths } 6>&1 3>&1 | ForEach-Object { "$_" })
+function Count-Calls([string] $Call) { @($cmisCalls | Where-Object { $_ -eq $Call }).Count }
+Test-Case 'harvest: tried three times, the third succeeds' @((Count-Calls 'harvest shop-api'), $entries[0].measured) @(3, $true)
+Test-Case 'harvest: a failure in the data is tried again, with its cause' (@($said | Where-Object { $_ -like 'shop-api: harvest failed (try 1 of 3)*(in band)' }).Count) 1
+Test-Case 'harvest: a failure without data shows the error of the run log' (@($said | Where-Object { $_ -like 'shop-api: harvest failed (try 2 of 3)*`[shop-api: InvalidOperationException: Something went wrong while executing your query (logged)`]' }).Count) 1
+Test-Case 'harvest: as many failures as tries and the connection is not measured' @((Count-Calls 'harvest shop-ui'), $entries[1].measured, $entries[1].reason) @(3, $false, "harvest failed (the run's output says why)")
+Test-Case 'harvest: a failure that is not passing is not tried again' @((Count-Calls 'harvest shop-db'), $entries[2].measured, (@($said | Where-Object { $_ -like 'shop-db: harvest failed: *Bad credentials*' }).Count)) @(1, $false, 1)
+Test-Case 'harvest: the state names only the connection that succeeded' @((Get-Content -LiteralPath $harvestPaths.HarvestState -Raw | ConvertFrom-Json -AsHashtable).Keys) @('shop-api')
+$script:HarvestAttempts = $savedAttempts; $script:HarvestRetrySeconds = $savedPause
+Remove-Item -LiteralPath $harvestDir -Recurse -Force
+
 if ($failures) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'All passed'

@@ -99,7 +99,12 @@ Tests: `pwsh -NoProfile -File space-scorecard/test-space-scorecard.ps1` (PASS or
 4. **Harvest.** Per connection: `connections harvest` over the window when the store holds nothing of it, else
    `connections sync` from its watermark (from `Since` when `Since` lies before the first day harvested, which
    `harvest-state.json` keeps). The harvest reaches one UTC day past `Until`, so the last local day of a zone west of
-   UTC is covered. A connection that fails is listed as not measured (the console says why); the others go on.
+   UTC is covered. A connection that fails for a passing cause is tried again 30 s later, four tries in all: GitHub's
+   GraphQL API now and then answers "Something went wrong while executing your query" (a query that times out on its
+   side, mostly on a repository no one has read for a while; cmdemo2-system's first harvest needed three tries), and
+   the same query works moments later; also a timeout, HTTP 500, 502, 503 or 504, and a secondary rate limit. Any other
+   failure (a bad token, a missing repository) is not tried again. A connection that still fails is listed as not
+   measured (the console says why, with the connection's own error from cmis); the others go on.
 5. **Compute.** `connections score --period week` for the space (all connections) and for each project;
    `connections document`; `connections score-drill` for every weekly cell of Work in process, Items started and Items
    delivered that is not zero. A drill list whose length differs from its number, a drill that fails, and a space
