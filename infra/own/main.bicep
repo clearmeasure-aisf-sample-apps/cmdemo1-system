@@ -456,6 +456,84 @@ resource gatewayCodexRunner 'Microsoft.Authorization/roleAssignments@2022-04-01'
   }
 }
 
+// The space scorecard's published site (space-scorecard/ of this repository, step 3 of the design "Space-level
+// scorecard on cmis"): the static pages the nightly runbook "Refresh space scorecard" (Octopus project
+// <slug>-scorecard-space, environment prod) exports, readable by anyone at
+// https://<account>.blob.core.windows.net/scorecard/index.html. In prod only, where the runbook runs.
+// A public blob container, not a static website: ARM has no static website setting, and under the stack's deny
+// settings only the deploy identity could switch it on, which no step of the system's deployment does for a resource
+// of infra/own. Anonymous reads of single blobs only: the container cannot be listed.
+// The runbook signs in as an identity of its own (the Octopus Azure OpenID Connect account <slug>-scorecard-site that
+// space-scorecard/setup-octopus.ps1 makes), not as the deploy identity: the runbook runs the code of whatever branch a
+// manual run names, so its identity may write this one container and nothing else.
+var hasScorecardSite = stack.environmentName == 'prod'
+var scorecardSiteName = take(toLower('st${stack.slug}${stack.environmentName}ssc${uniqueString(resourceGroup().id)}'), 24)
+var scorecardSiteContainer = 'scorecard'
+var scorecardSiteTags = union(stack.tags, { purpose: 'space-scorecard' })
+
+resource scorecardSite 'Microsoft.Storage/storageAccounts@2024-01-01' = if (hasScorecardSite) {
+  name: scorecardSiteName
+  location: stack.location
+  tags: scorecardSiteTags
+  kind: 'StorageV2'
+  sku: {
+    name: 'Standard_LRS'
+  }
+  properties: {
+    accessTier: 'Hot'
+    // Needed for the container's anonymous reads below; no other container of this account allows them.
+    allowBlobPublicAccess: true
+    allowSharedKeyAccess: false
+    defaultToOAuthAuthentication: true
+    minimumTlsVersion: 'TLS1_2'
+    supportsHttpsTrafficOnly: true
+  }
+}
+
+resource scorecardSiteBlobs 'Microsoft.Storage/storageAccounts/blobServices@2024-01-01' = if (hasScorecardSite) {
+  parent: scorecardSite
+  name: 'default'
+}
+
+resource scorecardSitePages 'Microsoft.Storage/storageAccounts/blobServices/containers@2024-01-01' = if (hasScorecardSite) {
+  parent: scorecardSiteBlobs
+  name: scorecardSiteContainer
+  properties: {
+    publicAccess: 'Blob'
+  }
+}
+
+resource scorecardSiteIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (hasScorecardSite) {
+  name: 'id-${stack.slug}-${stack.environmentName}-scorecard-site'
+  location: stack.location
+  tags: scorecardSiteTags
+}
+
+// Octopus signs in as this identity for a run of a runbook of project <slug>-scorecard-space in this environment, and
+// for nothing else (the account's subject keys: space, project, environment).
+resource scorecardSiteOctopus 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = if (hasScorecardSite) {
+  parent: scorecardSiteIdentity
+  name: 'octopus-scorecard-space'
+  properties: {
+    issuer: system.octopus.url
+    subject: 'space:${system.octopus.spaceSlug}:project:${stack.slug}-scorecard-space:environment:${stack.environmentName}'
+    audiences: [
+      'api://AzureADTokenExchange'
+    ]
+  }
+}
+
+// On the container: the runbook writes and deletes the site's files, and nothing else.
+resource scorecardSiteWriter 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasScorecardSite) {
+  scope: scorecardSitePages
+  name: guid(scorecardSitePages.id, 'scorecard-site', blobDataContributor)
+  properties: {
+    principalId: scorecardSiteIdentity!.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: blobDataContributor
+  }
+}
+
 @description('Settings for container deployables, by deployable and then by name: { "<deployable>": { "<NAME>": "<value>" } }. Each becomes an environment variable of that deployable\'s container app. Never a secret: a value here is readable in the deployment.')
 output settings object = hasStore
   ? {

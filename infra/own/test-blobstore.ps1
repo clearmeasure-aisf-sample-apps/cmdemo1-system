@@ -49,8 +49,9 @@ function Test-That {
     if ($Holds) { Write-Host "PASS $What" } else { Write-Host "FAIL $What$(if ($Otherwise) { ": $Otherwise" })"; $script:failed++ }
 }
 
-# The factory worker runner's transcript store (main.bicep, purpose fwrunner) is another account with the same prefix.
-$accounts = @(az storage account list --resource-group $group --query "[?starts_with(name, 'st$slug$Environment') && tags.purpose != 'fwrunner']" --output json | ConvertFrom-Json)
+# The factory worker runner's transcript store (main.bicep, purpose fwrunner) and the space scorecard's site (purpose
+# space-scorecard, prod only) are other accounts with the same prefix.
+$accounts = @(az storage account list --resource-group $group --query "[?starts_with(name, 'st$slug$Environment') && tags.purpose != 'fwrunner' && tags.purpose != 'space-scorecard']" --output json | ConvertFrom-Json)
 Test-That "one storage account st$slug$Environment* in $group" ($accounts.Count -eq 1) "$($accounts.Count) found"
 if ($accounts.Count -ne 1) { exit 1 }
 $account = $accounts[0]
