@@ -155,7 +155,7 @@ stops it:
 | What | Name | Notes |
 |---|---|---|
 | User role | `cmdemo1 scorecard store feed` | `FeedView`, `BuiltInFeedDownload`, `BuiltInFeedPush` only (a push never replaces a version). No built-in role lets an account download from the built-in feed without much more (Build server also creates releases, deployments and runbook runs, and deletes packages; Package publisher also pushes and deletes build information) |
-| Service account | `cmdemo1-scorecard-runner` | No login; its API key goes only into `Scorecard.OctopusApiKey`, expires after a year. Octopus lets no AI agent's identity (the operator's ai-ops is one) make an API key: a person makes it in the portal and gives it with `-ReadRunnerKey` (older keys are then deleted in the portal); with a person's own key `-RotateOctopusKey` makes a new one and deletes the older. Until the variable has a key the script ends with exit code 3 and the trigger stays disabled |
+| Service account | `cmdemo1-scorecard-runner` | No login; its API key goes only into `Scorecard.OctopusApiKey`, expires after a year. Octopus lets no AI agent's identity (the operator's ai-ops is one) make an API key: a person makes it in the portal and gives it with `-ReadRunnerKey` (older keys are then deleted in the portal); with a person's own key `-RotateOctopusKey` makes a new one and deletes the older. Until the variable has a key the script ends with exit code 3 and the trigger stays disabled. **In use instead (Jeffrey's decision of 2026-10-22):** `-UseOperatorKey` puts the operator's own key (ai-ops, the key the script runs with) into `Scorecard.OctopusApiKey`, and its description says so; the account and its team are kept, unused, for a runner key later (`-ReadRunnerKey` replaces the operator's). Rerun `-UseOperatorKey` when the operator's key changes: nothing detects an old one, and the nightly runs then fail |
 | Team | `cmdemo1 scorecard runner` | Of the space; the account only; roles Project viewer and the store feed role, unscoped within the space |
 | Project | `cmdemo1-scorecard-space` | Project group and lifecycle of `cmdemo1-system`; no deployment process |
 | Variables | `Scorecard.OctopusApiKey`, `Scorecard.GitHubToken` (sensitive), `Scorecard.SourceRef` (prompted, default `main`) | The GitHub token is the operator's `gh auth token`, set when missing or with `-UpdateGitHubToken` |
@@ -174,6 +174,8 @@ Accepted for this demo space, and to reconsider before another:
 - Whoever may run the runbook, or push a branch to this repository, can run that branch's code with both secrets. A
   manual run of another ref also pushes the store that the next nightly run restores.
 - The GitHub token is the operator's own login (broad scopes), not a read-only credential of its own.
+- The Octopus key is the operator's own (Space manager of the space and more), by Jeffrey's decision of 2026-10-22,
+  not the runner's least-privilege key: anything that runs in the step can act with it.
 - `BuiltInFeedPush` cannot be limited to one package id: the runner's key may push a new version of any package of
   the built-in feed (never replace one).
 - The store package holds data harvested from the space's repositories; everyone with `BuiltInFeedDownload` in the

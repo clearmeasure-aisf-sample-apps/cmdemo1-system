@@ -26,12 +26,14 @@
                        both unscoped within the space (feed permissions cannot be scoped to a project).
       API key          of the service account, put only into the sensitive project variable Scorecard.OctopusApiKey;
                        never printed. Needed when that variable is missing, the account has no key that is valid for
-                       two more weeks, or with -RotateOctopusKey. Octopus lets no AI agent's identity make an API key:
-                       run by the operator (ai-ops is one), the script says so and a person makes the key in the
-                       portal (Configuration > Users > cmdemo1-scorecard-runner > API keys, purpose
-                       "Scorecard.OctopusApiKey of cmdemo1-scorecard-space", at most a year) and gives it with
-                       -ReadRunnerKey; the older keys are then deleted in the portal. Run with a person's own key, the
+                       two more weeks (not while the variable holds the operator's own key), or with
+                       -RotateOctopusKey. Octopus lets no AI agent's identity make an API key: run by the operator
+                       (ai-ops is one), the script says so and a person makes the key in the portal
+                       (Configuration > Users > cmdemo1-scorecard-runner > API keys, purpose "Scorecard.OctopusApiKey
+                       of cmdemo1-scorecard-space", at most a year) and gives it with -ReadRunnerKey; the older keys are then deleted in the portal. Run with a person's own key, the
                        script makes it (and deletes the older ones of its purpose).
+                       Until then, by Jeffrey's decision of 2026-10-22, -UseOperatorKey puts the operator's own key
+                       there; the runner account and its team stay, unused.
       Project          cmdemo1-scorecard-space, in the project group and lifecycle of cmdemo1-system.
       Variables        Scorecard.GitHubToken (sensitive): the operator's "gh auth token", read in this process only;
                        set when missing or with -UpdateGitHubToken. Scorecard.SourceRef: the branch, tag or commit of
@@ -78,6 +80,12 @@
 .PARAMETER ReadRunnerKey
     Reads the runner's API key, made by a person in the Octopus portal, from a masked prompt (or one line of standard
     input), checks that it is the runner's own, and puts it in Scorecard.OctopusApiKey.
+.PARAMETER UseOperatorKey
+    Puts the operator's own key (the one this script runs with: OCTOPUS_ADMIN_API_KEY, else Get-OctopusApiKey) into
+    Scorecard.OctopusApiKey in place of a runner key, by Jeffrey's decision of 2026-10-22 (Octopus lets the operator, an
+    AI agent's identity, make no key for the runner). Read in this process only and never printed. The runner account
+    and its team stay, unused, for a runner key later (-ReadRunnerKey replaces this one). Run it again after the
+    operator's key changes.
 .PARAMETER Publish
     Publishes a new runbook snapshot even when nothing changed (after a variable was changed in the portal).
 .PARAMETER UpdateGitHubToken
@@ -99,6 +107,7 @@ param(
     [string] $Schedule = '0 15 0 * * *',
     [switch] $RotateOctopusKey,
     [switch] $ReadRunnerKey,
+    [switch] $UseOperatorKey,
     [switch] $Publish,
     [switch] $UpdateGitHubToken,
     [string] $KitCommon = (Join-Path $HOME 'demo-platform-kit/.claude/skills/demo-environment/scripts/demo-common.ps1')
@@ -109,6 +118,7 @@ $ErrorActionPreference = 'Stop'
 $cfg = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json -AsHashtable
 foreach ($key in 'space', 'octopusServer', 'prefix', 'timeZone') { if (-not $cfg[$key]) { throw "$Config`: '$key' is required." } }
 $space = $cfg.space
+if ($UseOperatorKey -and ($ReadRunnerKey -or $RotateOctopusKey)) { throw '-UseOperatorKey excludes -ReadRunnerKey and -RotateOctopusKey.' }
 if ($SourceRef -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*\z' -or $SourceRef -match '\.\.') { throw "-SourceRef '$SourceRef' is not a branch, tag or commit name." }
 $prefix = $cfg.prefix
 $server = $cfg.octopusServer.TrimEnd('/')
@@ -265,11 +275,20 @@ $variablesChanged = $false
 # API keys, the purpose below, at most a year) and gives it to this script with -ReadRunnerKey (a masked prompt, or
 # one line on standard input). It is checked to be the runner's own key before it is stored. With a person's own key
 # in OCTOPUS_ADMIN_API_KEY the script makes the key itself.
+# -UseOperatorKey puts the operator's own key there instead (Jeffrey's decision of 2026-10-22); a variable that holds it
+# needs no runner key until -ReadRunnerKey or -RotateOctopusKey replaces it.
 $keys = @((Invoke-Octopus "/api/users/$($account.Id)/apikeys?take=100").Items)
 $liveKeys = @($keys | Where-Object { -not $_.Expires -or [datetimeoffset] $_.Expires -gt [datetimeoffset]::UtcNow.AddDays(14) })
-$keyNeeded = $RotateOctopusKey -or -not (Find-ProjectVariable 'Scorecard.OctopusApiKey') -or -not $liveKeys.Count
-$runnerKey = $null; $runnerKeyNote = $null; $madeKeyId = $null; $keyPending = $false
-if ($ReadRunnerKey) {
+$keyVariable = Find-ProjectVariable 'Scorecard.OctopusApiKey'
+$holdsOperatorKey = $keyVariable -and "$($keyVariable.Description)" -like "*operator's own key*"
+$keyNeeded = $RotateOctopusKey -or -not $keyVariable -or (-not $holdsOperatorKey -and -not $liveKeys.Count)
+$runnerKey = $null; $runnerKeyNote = $null; $madeKeyId = $null; $keyPending = $false; $keyDescription = $null
+if ($UseOperatorKey) {
+    $runnerKey = $key
+    $keyDescription = "The operator's own key ($($caller.Username), $($caller.Id)), by Jeffrey's decision of 2026-10-22, in place of a key of service account $($names.Account), which Octopus lets no AI agent make; set by setup-octopus.ps1 -UseOperatorKey on $([datetime]::UtcNow.ToString('yyyy-MM-dd'))."
+    Write-Host "API key: the operator's own ($($caller.Username)), by Jeffrey's decision of 2026-10-22"
+}
+elseif ($ReadRunnerKey) {
     $runnerKey = if ([Console]::IsInputRedirected) { "$([Console]::In.ReadLine())".Trim() } else { "$(Read-Host -Prompt "API key of $($names.Account) (purpose '$($names.KeyPurpose)')" -MaskInput)".Trim() }
     if ($runnerKey -cnotmatch '^API-[A-Z0-9]{20,}$') { throw 'That is not an Octopus API key (API-...); nothing stored.' }
     try { $owner = (Invoke-WebRequest -Uri "$server/api/users/me" -Headers @{ 'X-Octopus-ApiKey' = $runnerKey }).Content | ConvertFrom-Json -AsHashtable }
@@ -300,7 +319,7 @@ if ($runnerKey) {
     $v = Find-ProjectVariable 'Scorecard.OctopusApiKey'
     if (-not $v) { $v = [ordered]@{ Name = 'Scorecard.OctopusApiKey'; Type = 'Sensitive'; IsSensitive = $true; Scope = @{} }; $variables.Add($v) }
     $v.Value = $runnerKey; $v.Type = 'Sensitive'; $v.IsSensitive = $true
-    $v.Description = "API key of service account $($names.Account) (team '$($names.Team)'), $runnerKeyNote."
+    $v.Description = if ($keyDescription) { $keyDescription } else { "API key of service account $($names.Account) (team '$($names.Team)'), $runnerKeyNote." }
     $variablesChanged = $true
     Remove-Variable v
 }
@@ -336,7 +355,7 @@ if ($variablesChanged) {
     $changed = $true
 }
 else { Write-Host 'variables: as they should be' }
-$variableSet = $null; $variables = $null
+$variableSet = $null; $variables = $null; $keyVariable = $null
 $runnerKey = $null
 
 # --- Runbook ---------------------------------------------------------------------------------------------------
@@ -475,5 +494,7 @@ if (-not $hasKey -or $keyPending) {
     Write-Host "  Configuration > Users > $($names.Account) > API keys > New API key; purpose '$($names.KeyPurpose)', expiry at most a year"
     Write-Host "and gives it to this script, which checks it is $($names.Account)'s, stores it, publishes the runbook again and enables the trigger:"
     Write-Host "  pwsh -NoProfile -File $PSCommandPath -ReadRunnerKey"
+    Write-Host "or, by Jeffrey's decision of 2026-10-22, puts the operator's own key there (and reruns that after the operator's key changes):"
+    Write-Host "  pwsh -NoProfile -File $PSCommandPath -UseOperatorKey"
     exit 3
 }
