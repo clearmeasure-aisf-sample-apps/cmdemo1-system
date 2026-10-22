@@ -29,7 +29,9 @@
                     started again and everything is harvested anew (said in a warning).
       Harvest       Per connection: "connections harvest" over the window when the store holds nothing of it, else
                     "connections sync" (differential, from the watermark; from Since when Since lies before the
-                    first harvested day). A connection that fails is not measured; the others go on.
+                    first harvested day). A connection that fails for a passing cause is tried again (HarvestAttempts
+                    tries, 30 s apart: GitHub's GraphQL API times out now and then); one that still fails is not
+                    measured; the others go on.
       Compute       "connections score --period week" per connection and over all of them, "connections document"
                     over all of them (document.json), and "connections score-drill" for every weekly cell of
                     Items started, Items delivered and Work in process that is not zero (the item lists). A space
@@ -38,12 +40,13 @@
       Render        scorecard.html (one file, no external request, no script) and summary.md, from
                     scorecard-data.json, the numbers and lists the compute step gathered (no item titles). One function
                     (Write-ScorecardFiles), apart from harvest and compute, so another renderer can take its place.
-      Export        With scorecardVersion in the configuration: the pages of Scorecard.Web (cmdemo1-scorecard) as
+      Export        With scorecardVersion in the configuration: the pages of Scorecard.Web (of scorecardRepo) as
                     static files in <WorkDir>/site (index.html, split.html, people.html, split-people.html, drill/,
                     css/, fonts/), the same pages as the live scorecard, from this run's store, and the site as
                     scorecard-site.zip. Scorecard.Web is built here from the commit release scorecardVersion of the
-                    Octopus project scorecardProject names (its notes), with the .NET SDK of the machine. When the
-                    build or the export fails, a warning, and scorecard.html is the page.
+                    Octopus project scorecardProject (in scorecardSpace, default the space) names (its notes), with
+                    the .NET SDK of the machine. When the build or the export fails, a warning, and scorecard.html is
+                    the page.
       Publish       With -PublishSite: the exported site into the public blob container site.container of storage
                     account site.account as the signed-in az identity (in Octopus, the step's Azure account); files
                     the export no longer has are deleted. The address is in the summary and the highlight. A
@@ -66,7 +69,7 @@
     Nothing is written to disk or printed. The Octopus key also reads and pushes the store package (-StoreFeed).
 
 .PARAMETER Config
-    The space's configuration file (see README.md), for example space-scorecard/cmdemo1.json.
+    The space's configuration file (see README.md), for example space-scorecard/cmdemo1.json or cmdemo2.json.
 .PARAMETER WorkDir
     Where the binary, the cmis workspace and store, and the outputs go. Kept between runs: a rerun syncs.
 .PARAMETER Since
@@ -113,6 +116,14 @@ $script:SpaceScopeId = '_space'
 $script:DrillMetrics = [ordered]@{ workInProcess = 'wip'; itemsStarted = 'itemsstarted'; itemsDelivered = 'itemsdelivered' }
 # The GitHub token once read (Get-GitHubToken); in memory only.
 $script:GitHubToken = $null
+# How often one connection's harvest or sync is tried, and the pause between two tries: GitHub's GraphQL API answers
+# "Something went wrong while executing your query" now and then (a query that times out on its side), and the same
+# query works moments later.
+$script:HarvestAttempts = 4
+$script:HarvestRetrySeconds = 30
+# The failures worth another try: GitHub's own timeouts and server errors, and secondary rate limits. A bad token, a
+# repository that is not there or a configuration error fails the same way again at once.
+$script:TransientHarvestError = 'Something went wrong while executing your query|timed? ?out|timeout|\b50[0234]\b|secondary rate limit'
 
 # ---------------------------------------------------------------------------------------------------------------
 # Configuration
@@ -146,6 +157,8 @@ function Read-SpaceConfig([string] $Path) {
         if (-not ($c['scorecardRepo'] -is [string] -and $c['scorecardRepo'] -cmatch '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+\z')) { throw "$Path`: 'scorecardRepo' (owner/repo) is required with 'scorecardVersion'." }
         if (-not ($c['scorecardProject'] -is [string] -and $c['scorecardProject'].Trim())) { throw "$Path`: 'scorecardProject' (the Octopus project of the release) is required with 'scorecardVersion'." }
     }
+    # The space of scorecardProject when the deployable belongs to another system's space (it goes into a request path).
+    if ($null -ne $c['scorecardSpace'] -and -not ($c['scorecardSpace'] -is [string] -and $c['scorecardSpace'] -cmatch '^Spaces-\d+\z')) { throw "$Path`: 'scorecardSpace' must be an Octopus space id such as Spaces-355." }
     if ($c['site']) {
         $s = $c['site']
         if ($s -isnot [Collections.IDictionary] -or -not ("$($s['account'])" -cmatch '^[a-z0-9]{3,24}\z') -or -not ("$($s['container'])" -cmatch '^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]\z')) {
@@ -373,13 +386,27 @@ function Invoke-Cmis([string] $Cmis, [string[]] $Arguments, [string] $Workspace,
         $envelope = $null
         try { $envelope = $text | ConvertFrom-Json -AsHashtable -DateKind String -Depth 100 } catch { $envelope = $null }
         if ($envelope -isnot [Collections.IDictionary] -or $envelope['ok'] -ne $true) {
-            $problem = if ($envelope -is [Collections.IDictionary]) { $envelope['error'] } else { $null }
-            $cause = if ($problem -is [Collections.IDictionary]) { "$($problem['code']): $($problem['cause'])" } else { "exit $exit; $((Get-Content -LiteralPath $errors -Raw) ?? '')".Trim() }
-            throw "cmis $($Arguments[0..1] -join ' ') failed: $cause"
+            throw "cmis $($Arguments[0..1] -join ' ') failed: $(Get-CmisFailure $envelope $exit "$((Get-Content -LiteralPath $errors -Raw) ?? '')")"
         }
         $envelope['data']
     }
     finally { Remove-Item -LiteralPath $errors -Force -ErrorAction SilentlyContinue }
+}
+
+# Why a cmis command failed, from its envelope: cmis's code and cause, and the first failed connection's own error
+# (harvest: data.connections, sync: data.harvest.connections), which the cause only points at. Without an envelope,
+# the exit code and standard error.
+function Get-CmisFailure($Envelope, [int] $Exit, [string] $StandardError) {
+    $problem = if ($Envelope -is [Collections.IDictionary]) { $Envelope['error'] } else { $null }
+    if ($problem -isnot [Collections.IDictionary]) { return "exit $Exit; $StandardError".Trim() }
+    $cause = "$($problem['code']): $($problem['cause'])"
+    $data = $Envelope['data']
+    if ($data -is [Collections.IDictionary]) {
+        $runs = @($data, $data['harvest']) | Where-Object { $_ -is [Collections.IDictionary] }
+        $failed = @(foreach ($run in $runs) { @($run['connections']) | Where-Object { $_ -is [Collections.IDictionary] -and $_['error'] } }) | Select-Object -First 1
+        if ($failed) { $cause += " [$($failed['connectionId']): $($failed['error'])]" }
+    }
+    $cause
 }
 
 # A normalized store that cmis wrote under a culture (en-US, before this script ran cmis culture-invariant) cannot be
@@ -622,7 +649,24 @@ function Get-HarvestArguments([string] $Id, [bool] $Stored, [string] $From, [has
     @('connections', 'sync', '--connection', $Id, '--until', $Window.HarvestUntil, '--on-failure', 'strict')
 }
 
-# Harvest or sync per connection. A connection that fails is not measured; the others go on. Its cause goes to the
+# The error of one connection in the last run cmis logged in <store>/harvest-runs.jsonl, when that run started at or
+# after <After> ($null when it has none, is older, or the log cannot be read): a failed sync answers data: null, so this
+# is where its cause is.
+function Get-LastHarvestError([string] $Store, [string] $ConnectionId, [DateTimeOffset] $After) {
+    $log = Join-Path $Store 'harvest-runs.jsonl'
+    if (-not (Test-Path -LiteralPath $log)) { return $null }
+    try {
+        $line = @(Get-Content -LiteralPath $log -Tail 1)[0]
+        $record = $line | ConvertFrom-Json -AsHashtable -DateKind String
+        if ([DateTimeOffset]::Parse([string] $record['StartedUtc'], $script:Invariant) -lt $After) { return $null }
+        $hit = @(@($record['Connections']) | Where-Object { $_ -is [Collections.IDictionary] -and $_['ConnectionId'] -ceq $ConnectionId -and $_['Error'] })
+        if ($hit.Count) { [string] $hit[0]['Error'] } else { $null }
+    }
+    catch { $null }
+}
+
+# Harvest or sync per connection, each tried up to HarvestAttempts times. A connection that fails is not measured; the
+# others go on. Its cause goes to the
 # console only: the page and the data file are meant to be shared. <WorkDir>/harvest-state.json keeps the first day
 # each connection was harvested from, written after each one.
 function Invoke-Harvest([string] $Cmis, $Entries, [hashtable] $Window, [hashtable] $Paths) {
@@ -638,10 +682,24 @@ function Invoke-Harvest([string] $Cmis, $Entries, [hashtable] $Window, [hashtabl
         $mode = $arguments[1]
         $clock = [Diagnostics.Stopwatch]::StartNew()
         try {
-            $r = Invoke-Cmis $Cmis $arguments $Paths.Workspace $Paths.Store
-            $run = if ($mode -eq 'sync') { $r['harvest'] } else { $r }
-            $failed = @($run['connections'] | Where-Object { -not $_['succeeded'] })
-            if ($failed.Count) { throw "cmis connections $mode failed: $($failed[0]['error'])" }
+            for ($attempt = 1; ; $attempt++) {
+                $tried = [DateTimeOffset]::UtcNow
+                try {
+                    $r = Invoke-Cmis $Cmis $arguments $Paths.Workspace $Paths.Store
+                    $run = if ($mode -eq 'sync') { $r['harvest'] } else { $r }
+                    $failed = @($run['connections'] | Where-Object { -not $_['succeeded'] })
+                    if ($failed.Count) { throw "cmis connections $mode failed: $($failed[0]['error'])" }
+                    break
+                }
+                catch {
+                    $message = $_.Exception.Message
+                    $last = Get-LastHarvestError $Paths.Store $id $tried.AddSeconds(-1)
+                    if ($last -and -not $message.Contains($last)) { $message += " [$id`: $last]" }
+                    if ($attempt -ge $script:HarvestAttempts -or $message -notmatch $script:TransientHarvestError) { throw $message }
+                    Write-Host "$id`: $mode failed (try $attempt of $($script:HarvestAttempts)), again in $($script:HarvestRetrySeconds) s: $message"
+                    Start-Sleep -Seconds $script:HarvestRetrySeconds
+                }
+            }
             if ($arguments -contains '--since') { $state[$id] = $Window.Since }
             $state | ConvertTo-Json | Set-Content -LiteralPath $Paths.HarvestState
             $timings[$id] = [ordered]@{ mode = $mode; seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1); itemsPulled = $run['workItemsPulled']; revisionsPulled = $run['revisionsPulled']; requests = $run['apiRequestCount'] }
@@ -1054,7 +1112,13 @@ function Invoke-WithoutSecrets([scriptblock] $Script) {
     finally { foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) } }
 }
 
-# Scorecard.Web of release scorecardVersion of the Octopus project scorecardProject, framework-dependent, in
+# The Octopus space of scorecardProject: scorecardSpace, else the space of the configuration (the scorecard deployable
+# may belong to another system, whose space then needs to be readable with the same key).
+function Get-ScorecardSpace([hashtable] $Config) {
+    if ($Config['scorecardSpace']) { [string] $Config['scorecardSpace'] } else { [string] $Config.space }
+}
+
+# Scorecard.Web of release scorecardVersion of the Octopus project scorecardProject (in scorecardSpace), framework-dependent, in
 # <Directory>: the release's notes name the commit; its source comes through the GitHub REST API (tarball of
 # scorecardRepo) and "dotnet publish" builds Scorecard.Web/Scorecard.Web.csproj (a .NET SDK of the project's
 # framework on the PATH: Hosted Ubuntu has one). Built as the image of that release is (Release, no app host, the
@@ -1074,9 +1138,10 @@ function Get-ScorecardWeb([hashtable] $Config, [string] $Directory) {
     }
     $started = [Diagnostics.Stopwatch]::StartNew()
     $name = $Config.scorecardProject
-    $projects = @(@((Invoke-OctopusRequest $Config "/api/$($Config.space)/projects?partialName=$([uri]::EscapeDataString($name))&take=100")['Items']) | Where-Object { $_ -and $_['Name'] -ceq $name })
-    if ($projects.Count -ne 1) { throw "Space $($Config.space) has $($projects.Count) projects named $name." }
-    $release = Invoke-OctopusRequest $Config "/api/$($Config.space)/projects/$($projects[0]['Id'])/releases/$([uri]::EscapeDataString($version))"
+    $space = Get-ScorecardSpace $Config
+    $projects = @(@((Invoke-OctopusRequest $Config "/api/$space/projects?partialName=$([uri]::EscapeDataString($name))&take=100")['Items']) | Where-Object { $_ -and $_['Name'] -ceq $name })
+    if ($projects.Count -ne 1) { throw "Space $space has $($projects.Count) projects named $name." }
+    $release = Invoke-OctopusRequest $Config "/api/$space/projects/$($projects[0]['Id'])/releases/$([uri]::EscapeDataString($version))"
     $commit = Get-ReleaseCommit ([string] $release['ReleaseNotes'])
     if (-not $commit) { throw "The notes of release $version of $name name no commit." }
 

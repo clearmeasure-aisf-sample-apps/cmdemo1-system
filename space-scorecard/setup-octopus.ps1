@@ -35,7 +35,8 @@
                        the older ones of its purpose).
                        Until then, by Jeffrey's decision of 2026-10-22, -UseOperatorKey puts the operator's own key
                        there; the runner account and its team stay, unused.
-      Project          cmdemo1-scorecard-space, in the project group and lifecycle of cmdemo1-system.
+      Project          cmdemo1-scorecard-space, in the project group and lifecycle of the configuration's
+                       systemProject (default <prefix>-system: cmdemo1-system).
       Variables        Scorecard.GitHubToken (sensitive): the operator's "gh auth token", read in this process only;
                        set when missing or with -UpdateGitHubToken. Scorecard.SourceRef: the branch, tag or commit of
                        the source repository the runbook runs, prompted with default -SourceRef (main): a manual run
@@ -51,7 +52,8 @@
                        name it), with -Publish, or when none is published.
       Trigger          "Nightly space scorecard": every day 00:15 in the configuration's timeZone (-Schedule), the
                        published runbook in prod. Disabled while Scorecard.OctopusApiKey has no key.
-      Azure account    With "site" in the configuration: azure-cmdemo1-scorecard-site, an Azure OpenID Connect account
+      Azure account    With "site" in the configuration: site.octopusAccount (default azure-<prefix>-scorecard-site:
+                       azure-cmdemo1-scorecard-site), an Azure OpenID Connect account
                        (no secret) of the identity site.identity in site.resourceGroup (infra/own/main.bicep makes it, in
                        prod; its federated credential trusts runs of this project in that environment), for the runbook's
                        environment only. The runbook's step is then "Run an Azure Script" as that account and passes
@@ -65,9 +67,11 @@
     Nothing secret is printed or written to disk.
 
 .PARAMETER Config
-    The space's configuration (space, octopusServer, prefix, timeZone). Default: cmdemo1.json next to this script.
+    The space's configuration (space, octopusServer, prefix, timeZone, sourceRepository; systemProject and site
+    optional), for example space-scorecard/cmdemo1.json. Required.
 .PARAMETER SourceRepository
-    owner/repo of the repository whose space-scorecard folder the runbook runs.
+    owner/repo of the repository whose space-scorecard folder the runbook runs. Default: the configuration's
+    sourceRepository.
 .PARAMETER SourceRef
     The default of Scorecard.SourceRef.
 .PARAMETER Environment
@@ -99,13 +103,15 @@
     Puts the operator's current "gh auth token" into Scorecard.GitHubToken.
 .PARAMETER KitCommon
     The kit's demo-common.ps1, for Get-OctopusApiKey when OCTOPUS_ADMIN_API_KEY is not set.
+.PARAMETER LoadOnly
+    Defines the functions and stops (for the tests).
 .EXAMPLE
-    pwsh -NoProfile -File space-scorecard/setup-octopus.ps1
+    pwsh -NoProfile -File space-scorecard/setup-octopus.ps1 -Config space-scorecard/cmdemo1.json
 #>
 [CmdletBinding()]
 param(
-    [string] $Config = (Join-Path $PSScriptRoot 'cmdemo1.json'),
-    [string] $SourceRepository = 'clearmeasure-aisf-sample-apps/cmdemo1-system',
+    [string] $Config,
+    [string] $SourceRepository,
     [string] $SourceRef = 'main',
     [string] $Environment = 'prod',
     [string] $WorkerPool = 'Hosted Ubuntu',
@@ -117,24 +123,53 @@ param(
     [switch] $UseOperatorKey,
     [switch] $Publish,
     [switch] $UpdateGitHubToken,
-    [string] $KitCommon = (Join-Path $HOME 'demo-platform-kit/.claude/skills/demo-environment/scripts/demo-common.ps1')
+    [string] $KitCommon = (Join-Path $HOME 'demo-platform-kit/.claude/skills/demo-environment/scripts/demo-common.ps1'),
+    [switch] $LoadOnly
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Everything the setup takes from the space's configuration: what it builds on and the names of what it makes. Nothing
+# of one space is written in this script; -SourceRepository, when given, wins over the configuration's.
+function Get-SetupSettings([hashtable] $Cfg, [string] $ConfigPath, [string] $SourceRepository) {
+    foreach ($key in 'space', 'octopusServer', 'prefix', 'timeZone') { if (-not $Cfg[$key]) { throw "$ConfigPath`: '$key' is required." } }
+    if ($Cfg.space -isnot [string] -or $Cfg.space -cnotmatch '^Spaces-\d+\z') { throw "$ConfigPath`: 'space' must be an Octopus space id such as Spaces-355." }
+    if ($Cfg.prefix -isnot [string] -or $Cfg.prefix -cnotmatch '^[a-z0-9][a-z0-9-]*\z') { throw "$ConfigPath`: 'prefix' must be lower case letters, digits and '-'." }
+    $source = if ($SourceRepository) { $SourceRepository } else { [string] $Cfg['sourceRepository'] }
+    if ($source -cnotmatch '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+\z') { throw "$ConfigPath`: 'sourceRepository' (owner/repo whose space-scorecard folder the runbook runs) is required, or -SourceRepository." }
+    $systemProject = if ($null -ne $Cfg['systemProject']) { $Cfg['systemProject'] } else { "$($Cfg.prefix)-system" }
+    if ($systemProject -isnot [string] -or -not $systemProject.Trim()) { throw "$ConfigPath`: 'systemProject' must be the name of an Octopus project." }
+    $prefix = $Cfg.prefix
+    $azureAccount = $null
+    if ($Cfg['site']) {
+        if ($Cfg.site -isnot [Collections.IDictionary]) { throw "$ConfigPath`: 'site' must be an object (account, container, resourceGroup, identity)." }
+        $azureAccount = if ($null -ne $Cfg.site['octopusAccount']) { $Cfg.site['octopusAccount'] } else { "azure-$prefix-scorecard-site" }
+        if ($azureAccount -isnot [string] -or -not $azureAccount.Trim()) { throw "$ConfigPath`: 'site.octopusAccount' must be the name of an Octopus account." }
+    }
+    [ordered]@{
+        Space = [string] $Cfg.space; Server = ([string] $Cfg.octopusServer).TrimEnd('/'); Prefix = $prefix
+        SourceRepository = $source; SystemProject = $systemProject; StorePackage = "$prefix-scorecard-store"
+        ConfigName = Split-Path -Leaf $ConfigPath
+        Names = [ordered]@{
+            Role = "$prefix scorecard store feed"; Account = "$prefix-scorecard-runner"; Team = "$prefix scorecard runner"
+            Project = "$prefix-scorecard-space"; Runbook = 'Refresh space scorecard'; Trigger = 'Nightly space scorecard'
+            KeyPurpose = "Scorecard.OctopusApiKey of $prefix-scorecard-space"; AzureAccount = $azureAccount
+        }
+    }
+}
+
+if ($LoadOnly) { return }
+if (-not $Config) { throw '-Config is required: the configuration of the space, for example space-scorecard/cmdemo1.json.' }
 $cfg = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json -AsHashtable
-foreach ($key in 'space', 'octopusServer', 'prefix', 'timeZone') { if (-not $cfg[$key]) { throw "$Config`: '$key' is required." } }
-$space = $cfg.space
+$settings = Get-SetupSettings $cfg $Config $SourceRepository
+$space = $settings.Space
 if ($UseOperatorKey -and ($ReadRunnerKey -or $RotateOctopusKey)) { throw '-UseOperatorKey excludes -ReadRunnerKey and -RotateOctopusKey.' }
 if ($SourceRef -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*\z' -or $SourceRef -match '\.\.') { throw "-SourceRef '$SourceRef' is not a branch, tag or commit name." }
-$prefix = $cfg.prefix
-$server = $cfg.octopusServer.TrimEnd('/')
-$configName = Split-Path -Leaf $Config
-$names = @{
-    Role = "$prefix scorecard store feed"; Account = "$prefix-scorecard-runner"; Team = "$prefix scorecard runner"
-    Project = "$prefix-scorecard-space"; Runbook = 'Refresh space scorecard'; Trigger = 'Nightly space scorecard'
-    KeyPurpose = "Scorecard.OctopusApiKey of $prefix-scorecard-space"
-}
+$prefix = $settings.Prefix
+$server = $settings.Server
+$configName = $settings.ConfigName
+$SourceRepository = $settings.SourceRepository
+$names = $settings.Names
 
 # The key: in this process only.
 $key = $env:OCTOPUS_ADMIN_API_KEY
@@ -184,7 +219,7 @@ $created = [ordered]@{}
 $caller = Invoke-Octopus '/api/users/me'
 
 # --- What the setup builds on ----------------------------------------------------------------------------------
-$system = Get-ByName "/api/$space/projects/all" "$prefix-system" 'project'
+$system = Get-ByName "/api/$space/projects/all" $settings.SystemProject 'project'
 $environmentId = (Get-ByName "/api/$space/environments/all" $Environment 'environment').Id
 $workerPoolId = (Get-ByName "/api/$space/workerpools/all" $WorkerPool 'worker pool').Id
 $containerFeedId = if ($ContainerImage) { (Get-ByName "/api/$space/feeds/all" $ContainerFeed 'feed').Id } else { $null }
@@ -256,7 +291,7 @@ foreach ($id in $wantedRoles) {
 }
 
 # --- Project ---------------------------------------------------------------------------------------------------
-$projectDescription = "The nightly delivery scorecard of space $space (space-scorecard/ of $SourceRepository): runbook '$($names.Runbook)' harvests every project of the space with cmis, keeps the store as package $prefix-scorecard-store in the built-in feed, renders the pages with Scorecard.Web's export$(if ($cfg['site']) { ", publishes them to https://$($cfg.site.account).blob.core.windows.net/$($cfg.site.container)/index.html" }) and attaches them to its task. No deployments; made by space-scorecard/setup-octopus.ps1."
+$projectDescription = "The nightly delivery scorecard of space $space (space-scorecard/ of $SourceRepository): runbook '$($names.Runbook)' harvests every project of the space with cmis, keeps the store as package $($settings.StorePackage) in the built-in feed, renders the pages with Scorecard.Web's export$(if ($cfg['site']) { ", publishes them to https://$($cfg.site.account).blob.core.windows.net/$($cfg.site.container)/index.html" }) and attaches them to its task. No deployments; made by space-scorecard/setup-octopus.ps1."
 $project = Find-One @(Invoke-Octopus "/api/$space/projects/all") $names.Project
 if ($project) { Assert-Ours $project 'Project' $project.Description }
 if (-not $project) {
@@ -376,7 +411,7 @@ if ($cfg['site']) {
     if ($LASTEXITCODE -ne 0 -or -not $identityJson.Trim()) { throw "Identity $($cfg.site.identity) in $($cfg.site.resourceGroup) not found (az signed in? the system's prod stack applied with infra/own/main.bicep?)." }
     $identity = $identityJson | ConvertFrom-Json -AsHashtable
     $subscription = if ([string] $identity.id -match '^/subscriptions/([0-9a-f-]{36})/') { $Matches[1] } else { throw "Unexpected identity id $($identity.id)." }
-    $accountName = "azure-$prefix-scorecard-site"
+    $accountName = $names.AzureAccount
     $accountFields = [ordered]@{
         Description = "$($cfg.site.identity): writes the published space scorecard (container $($cfg.site.container) of storage account $($cfg.site.account)) for runbook '$($names.Runbook)' of $($names.Project). Made by space-scorecard/setup-octopus.ps1."
         EnvironmentIds = @($environmentId); TenantedDeploymentParticipation = 'Untenanted'; TenantIds = @(); TenantTags = @()
@@ -401,7 +436,7 @@ if ($cfg['site']) {
 # --- Runbook ---------------------------------------------------------------------------------------------------
 $runbooks = @((Invoke-Octopus "/api/$space/projects/$($project.Id)/runbooks?take=100").Items)
 $runbook = Find-One $runbooks $names.Runbook
-$runbookDescription = "Harvests every project of space $space with cmis (Invoke-SpaceScorecard.ps1 -StoreFeed of $SourceRepository at Scorecard.SourceRef), restores and pushes the store package $prefix-scorecard-store of the built-in feed, renders the pages with Scorecard.Web's export$(if ($azureAccount) { ", publishes them to $(("https://{0}.blob.core.windows.net/{1}/index.html" -f $cfg.site.account, $cfg.site.container))" }), attaches summary.md, document.json and the pages (scorecard-site.zip, index.html)."
+$runbookDescription = "Harvests every project of space $space with cmis (Invoke-SpaceScorecard.ps1 -StoreFeed of $SourceRepository at Scorecard.SourceRef), restores and pushes the store package $($settings.StorePackage) of the built-in feed, renders the pages with Scorecard.Web's export$(if ($azureAccount) { ", publishes them to $(("https://{0}.blob.core.windows.net/{1}/index.html" -f $cfg.site.account, $cfg.site.container))" }), attaches summary.md, document.json and the pages (scorecard-site.zip, index.html)."
 $runbookFields = [ordered]@{ Description = $runbookDescription; EnvironmentScope = 'Specified'; Environments = @($environmentId); MultiTenancyMode = 'Untenanted'; DefaultGuidedFailureMode = 'Off' }
 if (-not $runbook) {
     $body = [ordered]@{ Name = $names.Runbook; ProjectId = $project.Id; RunRetentionPolicy = @{ QuantityToKeep = 30; ShouldKeepForever = $false } } + $runbookFields

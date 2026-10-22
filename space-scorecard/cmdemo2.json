@@ -1,0 +1,28 @@
+{
+  "space": "Spaces-356",
+  "prefix": "cmdemo2",
+  "octopusServer": "https://clearmeasure.octopus.app",
+  "githubOwner": "clearmeasure-aisf-sample-apps",
+  "timeZone": "America/Chicago",
+  "historyDays": 90,
+  "cmisVersion": "1.0.3713-delivery.3",
+  "cmisRepo": "ClearMeasure/Clear-Measure-Intelligence-Scorecard",
+  "title": "cmdemo2 demo",
+  "scorecardVersion": "1.0.40",
+  "scorecardRepo": "clearmeasure-aisf-sample-apps/cmdemo1-scorecard",
+  "scorecardProject": "cmdemo1-scorecard",
+  "scorecardSpace": "Spaces-355",
+  "sourceRepository": "clearmeasure-aisf-sample-apps/cmdemo1-system",
+  "automation": {
+    "authors": ["github-actions[bot]", "github-actions", "dependabot[bot]"],
+    "branches": ["^kit-templates.*$", "^template-sync-.*$", "^dependabot/.*$"],
+    "commitMessages": [
+      "^Pin \\S+ \\S+ in \\S+ \\(Deployments-\\d+\\)$",
+      "^Revert pin of \\S+ \\S+ in \\S+ \\(Deployments-\\d+ failed\\)$",
+      "^Template sync: .*$",
+      "^Kit (templates|workflows)\\b.*$"
+    ]
+  },
+  "projects": {},
+  "exclude": ["cmdemo2-scorecard-space"]
+}

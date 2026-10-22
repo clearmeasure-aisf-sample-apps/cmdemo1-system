@@ -9,12 +9,14 @@ Step 1 of the design "Space-level scorecard on cmis": discovery, cmis harvest an
 the same run every night as an Octopus runbook of the space, its store kept as a package in the space's built-in feed
 (see [Every night in Octopus](#every-night-in-octopus)). Step 2b: the pages rendered by Scorecard.Web's static export
 (`scorecardVersion`), the script's own page `scorecard.html` the fallback. Step 3: the pages published in a public blob
-container of prod (`infra/own/main.bicep`, [Published pages](#published-pages)).
+container of prod (`infra/own/main.bicep`, [Published pages](#published-pages)). Step 4: the same code for a second
+space, cmdemo2's, driven only by its own configuration file ([More than one space](#more-than-one-space)).
 
 | File | What |
 |---|---|
 | `Invoke-SpaceScorecard.ps1` | The run: get cmis, discover, connections, harvest, compute, render |
 | `cmdemo1.json` | The configuration of the cmdemo1 space (Spaces-355) |
+| `cmdemo2.json` | The configuration of the cmdemo2 space (Spaces-356) |
 | `test-space-scorecard.ps1` | Tests without network: discovery order, the release-notes address, connection ids, rendering, the store package, the export and the published site |
 | `setup-octopus.ps1` | Sets up the nightly runbook in the space (runner identity, project, variables, Azure account, runbook, trigger); idempotent |
 
@@ -97,7 +99,12 @@ Tests: `pwsh -NoProfile -File space-scorecard/test-space-scorecard.ps1` (PASS or
 4. **Harvest.** Per connection: `connections harvest` over the window when the store holds nothing of it, else
    `connections sync` from its watermark (from `Since` when `Since` lies before the first day harvested, which
    `harvest-state.json` keeps). The harvest reaches one UTC day past `Until`, so the last local day of a zone west of
-   UTC is covered. A connection that fails is listed as not measured (the console says why); the others go on.
+   UTC is covered. A connection that fails for a passing cause is tried again 30 s later, four tries in all: GitHub's
+   GraphQL API now and then answers "Something went wrong while executing your query" (a query that times out on its
+   side, mostly on a repository no one has read for a while; cmdemo2-system's first harvest needed three tries), and
+   the same query works moments later; also a timeout, HTTP 500, 502, 503 or 504, and a secondary rate limit. Any other
+   failure (a bad token, a missing repository) is not tried again. A connection that still fails is listed as not
+   measured (the console says why, with the connection's own error from cmis); the others go on.
 5. **Compute.** `connections score --period week` for the space (all connections) and for each project;
    `connections document`; `connections score-drill` for every weekly cell of Work in process, Items started and Items
    delivered that is not zero. A drill list whose length differs from its number, a drill that fails, and a space
@@ -181,9 +188,18 @@ deliveries.
 | `scorecardVersion` | The release of the scorecard deployable whose Scorecard.Web renders the pages (`1.0.40`); without it, the script's own page only |
 | `scorecardRepo` | Its repository, `owner/repo` (`clearmeasure-aisf-sample-apps/cmdemo1-scorecard`) |
 | `scorecardProject` | The Octopus project of its releases (`cmdemo1-scorecard`), whose notes name the commit |
+| `scorecardSpace` | The Octopus space of `scorecardProject` when it is not `space` (`Spaces-355` in `cmdemo2.json`: the scorecard deployable is cmdemo1's). The Octopus key must read it too |
 | `title` | What the pages say they cover. Default: the Octopus space's name |
 | `site.account`, `site.container` | Where `-PublishSite` publishes: storage account and public blob container |
 | `site.resourceGroup`, `site.identity` | The identity `setup-octopus.ps1` makes the Azure account of (it reads its client id) |
+| `site.octopusAccount` | The name of that Azure account in the space. Default `azure-<prefix>-scorecard-site` |
+
+Read by `setup-octopus.ps1` only:
+
+| Key | What |
+|---|---|
+| `sourceRepository` | `owner/repo` whose `space-scorecard` folder the runbook runs (`clearmeasure-aisf-sample-apps/cmdemo1-system` for every space while this repository owns the capability); `-SourceRepository` overrides it |
+| `systemProject` | The Octopus project whose project group and lifecycle the runbook's project joins. Default `<prefix>-system` |
 
 ## Published pages
 
@@ -211,25 +227,25 @@ published: the container keeps the last pages.
 
 ## Every night in Octopus
 
-`setup-octopus.ps1`, run by the operator (`OCTOPUS_ADMIN_API_KEY`, else the kit's `Get-OctopusApiKey`: Space manager
+`setup-octopus.ps1 -Config space-scorecard/<prefix>.json`, run by the operator (`OCTOPUS_ADMIN_API_KEY`, else the kit's `Get-OctopusApiKey`: Space manager
 of the space plus the system permissions UserView, UserEdit, UserRoleView and UserRoleEdit) with `gh` logged in, sets
-up in the configuration's space (names from `prefix`). An object of one of these names that the script did not make
-stops it:
+up in the configuration's space (names from `prefix`; below as for `cmdemo1.json`). An object of one of these names that
+the script did not make stops it:
 
 | What | Name | Notes |
 |---|---|---|
 | User role | `cmdemo1 scorecard store feed` | `FeedView`, `BuiltInFeedDownload`, `BuiltInFeedPush` only (a push never replaces a version). No built-in role lets an account download from the built-in feed without much more (Build server also creates releases, deployments and runbook runs, and deletes packages; Package publisher also pushes and deletes build information) |
 | Service account | `cmdemo1-scorecard-runner` | No login; its API key goes only into `Scorecard.OctopusApiKey`, expires after a year. Octopus lets no AI agent's identity (the operator's ai-ops is one) make an API key: a person makes it in the portal and gives it with `-ReadRunnerKey` (older keys are then deleted in the portal); with a person's own key `-RotateOctopusKey` makes a new one and deletes the older. Until the variable has a key the script ends with exit code 3 and the trigger stays disabled. **In use instead (Jeffrey's decision of 2026-10-22):** `-UseOperatorKey` puts the operator's own key (ai-ops, the key the script runs with) into `Scorecard.OctopusApiKey`, and its description says so; the account and its team are kept, unused, for a runner key later (`-ReadRunnerKey` replaces the operator's). Rerun `-UseOperatorKey` when the operator's key changes: nothing detects an old one, and the nightly runs then fail |
 | Team | `cmdemo1 scorecard runner` | Of the space; the account only; roles Project viewer and the store feed role, unscoped within the space |
-| Project | `cmdemo1-scorecard-space` | Project group and lifecycle of `cmdemo1-system`; no deployment process |
+| Project | `cmdemo1-scorecard-space` | Project group and lifecycle of `systemProject` (`cmdemo1-system`); no deployment process |
 | Variables | `Scorecard.OctopusApiKey`, `Scorecard.GitHubToken` (sensitive), `Scorecard.SourceRef` (prompted, default `main`) | The GitHub token is the operator's `gh auth token`, set when missing or with `-UpdateGitHubToken` |
-| Azure account | `azure-cmdemo1-scorecard-site` | Azure OpenID Connect (no secret), of `site.identity` (its client id read with the operator's `az`), prod only, subject keys space, project, environment |
+| Azure account | `azure-cmdemo1-scorecard-site` (`site.octopusAccount`) | Azure OpenID Connect (no secret), of `site.identity` (its client id read with the operator's `az`), prod only, subject keys space, project, environment |
 | Runbook | `Refresh space scorecard` | prod only; one "Run an Azure Script" step as that account (a "Run a Script" step without `site`) on `Hosted Ubuntu`, on the worker itself (Ubuntu 24.04 with PowerShell 7.6.2, .NET SDK 10 and Azure CLI 2.86 on 2026-10-22; `-ContainerImage` runs it in an execution container instead), the worker's own tools (no bundled tooling); its snapshot is published when anything changed |
 | Trigger | `Nightly space scorecard` | Every day 00:15 in `timeZone` (America/Chicago; `-Schedule`), the published runbook in prod |
 
 The step downloads the `space-scorecard` folder of this repository at `Scorecard.SourceRef` through the GitHub API
 (tarball), sets `GITHUB_TOKEN` and `OCTOPUS_API_KEY` from the sensitive variables in its own process, and runs
-`Invoke-SpaceScorecard.ps1 -Config space-scorecard/cmdemo1.json -WorkDir <the step's folder> -StoreFeed -PublishSite`
+`Invoke-SpaceScorecard.ps1 -Config space-scorecard/<prefix>.json -WorkDir <the step's folder> -StoreFeed -PublishSite`
 (the window: `historyDays` days up to today in `timeZone`; `-PublishSite` with `site` only), `az` signed in by Octopus
 as the site's account. A manual run may name another branch in `Scorecard.SourceRef`, to try a change before it merges;
 the nightly run takes `main`. The pages, the summary and the document are artifacts of each run's task.
@@ -250,3 +266,24 @@ Accepted for this demo space, and to reconsider before another:
 
 A rerun of `setup-octopus.ps1` changes only what differs from the above and says what it did; it prints ids, never a
 key or a token.
+
+## More than one space
+
+Nothing of one space is written in the scripts: a space is one configuration file here, `<prefix>.json`, and its own
+Octopus objects, made by `setup-octopus.ps1 -Config space-scorecard/<prefix>.json`. The code stays in this repository
+for every space (`sourceRepository`) until the capability moves into the kit.
+
+**cmdemo2** (`cmdemo2.json`, Spaces-356 "cmdemo2 demo"): three projects with releases (cmdemo2-system,
+cmdemo2-dashboard, cmdemo2-ui, the work orders of cmdemo2-workorders), all in clearmeasure-aisf-sample-apps.
+
+- The runbook lives in cmdemo2's own space: project `cmdemo2-scorecard-space` in the project group and lifecycle of
+  `cmdemo2-system`, environment prod, its store `cmdemo2-scorecard-store` in that space's built-in feed. The space's
+  history stays in the space, as cmdemo1's does.
+- The pages are Scorecard.Web's of cmdemo1-scorecard release `scorecardVersion`, read in Spaces-355
+  (`scorecardSpace`): cmdemo2 has no scorecard deployable. The runbook's key (the operator's) reads both spaces.
+  A runner key (`-ReadRunnerKey`) would need Project viewer in Spaces-355 as well; without it every run's export fails
+  and the page falls back to `scorecard.html` (a warning).
+- No `site`: the pages are artifacts of each run's task (`scorecard-site.zip`, `index.html`), not published. A public
+  container for them would be cmdemo1's (cmdemo2's Azure stack belongs to cmdemo2-system), with a federated
+  credential for a project of another space; not done.
+- Same automation rules as cmdemo1 (the kit's pins and template syncs).
