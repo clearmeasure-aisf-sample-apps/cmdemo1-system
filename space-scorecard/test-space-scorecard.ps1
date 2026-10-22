@@ -4,8 +4,9 @@
 <#
 .SYNOPSIS
     Tests Invoke-SpaceScorecard.ps1 without network: discovery's resolution order (fake Octopus answers), the
-    release-notes address rule, the connection ids and coordinates, and the page and summary rendered from a small
-    fixture. PASS or FAIL per case; exit 1 on a FAIL.
+    release-notes address rule, the connection ids and coordinates, the page and summary rendered from a small
+    fixture, and the store package (version, which one is restored, what it holds, restore against a fake feed).
+    PASS or FAIL per case; exit 1 on a FAIL.
 .EXAMPLE
     pwsh -NoProfile -File space-scorecard/test-space-scorecard.ps1
 #>
@@ -279,7 +280,113 @@ Test-Case 'config: automation lists trimmed, without blanks and repeats' @($read
 Test-Case 'config: an http server is refused' (Read-Fixture @{ octopusServer = 'http://octo.example' }) "refused: 'octopusServer' must be an https:// address (the API key is sent to it)."
 Test-Case 'config: zero history days is refused' (Read-Fixture @{ historyDays = 0 }) "refused: 'historyDays' must be a whole number of days, 1 or more."
 Test-Case 'config: an invalid pattern is refused' (Read-Fixture @{ automation = @{ branches = @('([') } }) 'refused: automation.branches holds an invalid regular expression: (['
+Test-Case 'config: a prefix that cannot begin a package id is refused' (Read-Fixture @{ prefix = 'Cm Demo' }) "refused: 'prefix' must be lower case letters, digits and '-' (it begins a package id)."
+Test-Case 'config: prefix kept' (Read-Fixture @{ prefix = 'cmdemo1' }).prefix 'cmdemo1'
 Remove-Item -LiteralPath $configFile -Force
+
+# --- Store in the built-in feed --------------------------------------------------------------------------------
+function Utc([int] $Y, [int] $Mo, [int] $D, [int] $H, [int] $Mi, [int] $Se = 0) { [datetime]::new($Y, $Mo, $D, $H, $Mi, $Se, [DateTimeKind]::Utc) }
+Test-Case 'store id: prefix and -scorecard-store' (Get-StorePackageId @{ prefix = 'cmdemo1' }) 'cmdemo1-scorecard-store'
+Test-Case 'store id: no prefix is refused' $(try { Get-StorePackageId @{} } catch { 'refused' }) 'refused'
+Test-Case 'store version: yyyy.M.d.HHmmss in UTC' (Get-StorePackageVersion (Utc 2026 10 22 5 15 7)) '2026.10.22.51507'
+Test-Case 'store version: no leading zeros (00:15:00 is 1500)' (Get-StorePackageVersion (Utc 2027 1 2 0 15)) '2027.1.2.1500'
+Test-Case 'store version: midnight is 1, never .0' (Get-StorePackageVersion (Utc 2026 10 22 0 0)) '2026.10.22.1'
+Test-Case 'store version: last second of the day' (Get-StorePackageVersion (Utc 2026 12 31 23 59 59)) '2026.12.31.235959'
+Test-Case 'store version: two runs in one minute differ' ((Get-StorePackageVersion (Utc 2026 10 22 0 15 1)) -ne (Get-StorePackageVersion (Utc 2026 10 22 0 15 2))) $true
+Test-Case 'store version: a time that is not UTC is refused' $(try { Get-StorePackageVersion ([datetime]::new(2026, 10, 22, 5, 15, 0, [DateTimeKind]::Local)) } catch { 'refused' }) 'refused'
+$v0015 = [version] (Get-StorePackageVersion (Utc 2026 10 22 0 15)); $v0905 = [version] (Get-StorePackageVersion (Utc 2026 10 22 9 5))
+$vLate = [version] (Get-StorePackageVersion (Utc 2026 10 9 23 15)); $vNext = [version] (Get-StorePackageVersion (Utc 2026 10 10 0 15))
+$v0959 = [version] (Get-StorePackageVersion (Utc 2026 10 22 0 9 59)); $v1000 = [version] (Get-StorePackageVersion (Utc 2026 10 22 0 10 0))
+Test-Case 'store version: later times order after earlier ones' @(($v0015 -lt $v0905), ($vLate -lt $vNext), ($v0959 -lt $v1000)) @($true, $true, $true)
+function Pkg([string] $Version) { @{ Id = "packages-cmdemo1-scorecard-store.$Version"; Version = $Version } }
+Test-Case 'restore choice: none listed starts empty' (Select-StorePackage @()) $null
+Test-Case 'restore choice: the newest by its numbers, not as text' (Select-StorePackage @((Pkg '2026.10.9.2315'), (Pkg '2026.10.10.15'), (Pkg '2026.10.10.5'))).Version '2026.10.10.15'
+Test-Case 'restore choice: whatever order the feed answers in' (Select-StorePackage @((Pkg '2026.10.10.15'), (Pkg '2026.10.22.515'), (Pkg '2026.10.22.15'))).Version '2026.10.22.515'
+Test-Case 'restore choice: versions that are not ours are left alone' (Select-StorePackage @((Pkg '9999.1.1'), (Pkg '9999.1.1.1-pre'), (Pkg '2026.10.22.15'))).Version '2026.10.22.15'
+Test-Case 'restore choice: only versions that are not ours start empty' (Select-StorePackage @((Pkg '1.0.0'))) $null
+Test-Case 'restore choice: a trailing line break is not ours' (Select-StorePackage @((Pkg "2026.10.22.1500`n"))) $null
+Test-Case 'restore order: newest first' @(Get-StorePackageOrder @((Pkg '2026.10.9.231500'), (Pkg '2026.10.10.1500'), (Pkg '1.0'), (Pkg '2026.10.10.500')) | ForEach-Object { $_.Version }) @('2026.10.10.1500', '2026.10.10.500', '2026.10.9.231500')
+
+$tmp = Join-Path ([IO.Path]::GetTempPath()) "space-scorecard-test-$([guid]::NewGuid().ToString('N'))"
+$runDir = Join-Path $tmp 'run'; $restoreDir = Join-Path $tmp 'restore'
+foreach ($d in "$runDir/store/raw/GitHubDelivery/x", "$runDir/workspace/.cmis", "$runDir/bin", "$restoreDir/store", "$restoreDir/workspace") { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+Set-Content -LiteralPath "$runDir/store/normalized.db" -Value 'db'; Set-Content -LiteralPath "$runDir/store/raw/GitHubDelivery/x/1.json" -Value '{}'
+Set-Content -LiteralPath "$runDir/workspace/.cmis/work-tracking.json" -Value '{}'; Set-Content -LiteralPath "$runDir/harvest-state.json" -Value '{}'
+Set-Content -LiteralPath "$runDir/discovery.json" -Value '[]'; Set-Content -LiteralPath "$runDir/bin/cmis" -Value 'binary'; Set-Content -LiteralPath "$runDir/scorecard.html" -Value 'page'
+$zipPath = Join-Path $tmp 'store.zip'
+New-StoreArchive $runDir $zipPath
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [IO.Compression.ZipFile]::OpenRead($zipPath); $entries = @($archive.Entries | ForEach-Object { $_.FullName } | Sort-Object); $archive.Dispose()
+Test-Case 'store archive: store, workspace (hidden .cmis too) and the state files; not bin or the outputs' $entries @('discovery.json', 'harvest-state.json', 'store/normalized.db', 'store/raw/GitHubDelivery/x/1.json', 'workspace/.cmis/work-tracking.json')
+
+Test-Case 'store archive: holds no foreign entry' @(Get-ForeignStoreEntries $zipPath) @()
+$badZip = Join-Path $tmp 'bad.zip'
+$bad = [IO.Compression.ZipFile]::Open($badZip, [IO.Compression.ZipArchiveMode]::Create)
+foreach ($n in 'store/ok.db', 'bin/cmis', 'store/../../escape', 'harvest-state.json/x', 'notes.txt') { [void] $bad.CreateEntry($n) }
+$bad.Dispose()
+Test-Case 'store archive: entries outside the store parts are foreign' @(Get-ForeignStoreEntries $badZip) @('bin/cmis', 'store/../../escape', 'harvest-state.json/x', 'notes.txt')
+
+# Restore against a fake feed: the newest package replaces what the work directory held.
+Set-Content -LiteralPath "$restoreDir/store/stale.db" -Value 'old'; Set-Content -LiteralPath "$restoreDir/harvest-state.json" -Value 'old'
+$feedCalls = [Collections.Generic.List[string]]::new()
+$script:feedVersions = @((Pkg '2026.10.9.231500'), (Pkg '2026.10.10.1500'))
+$script:newestBad = $false
+function Invoke-OctopusRequest([hashtable] $Config, [string] $Path) {
+    $feedCalls.Add("Get $Path")
+    if ($Path -like '*/feeds?feedType=BuiltIn*') { return @{ Items = @(@{ Id = 'Feeds-9' }) } }
+    if ($Path -like '*/feeds/Feeds-9/packages/versions?packageId=cmdemo1-scorecard-store*') { return @{ Items = $script:feedVersions } }
+    throw "unexpected Get $Path"
+}
+function Invoke-OctopusTransfer([hashtable] $Config, [string] $Path, [string] $UploadFile, [string] $OutFile) {
+    $feedCalls.Add("Transfer $Path")
+    if (-not $OutFile) { throw "unexpected push $Path" }
+    $source = if ($Path -like '*2026.10.10.1500*' -and $script:newestBad) { $badZip } else { $zipPath }
+    Copy-Item -LiteralPath $source -Destination $OutFile
+}
+$restoreConfig = @{ space = 'Spaces-1'; octopusServer = 'https://octo.example'; prefix = 'cmdemo1' }
+$restoredVersion = Restore-StoreFromFeed $restoreConfig $restoreDir 6>$null
+Test-Case 'restore: the newest version' $restoredVersion '2026.10.10.1500'
+Test-Case 'restore: downloads that package' ($feedCalls[-1]) 'Transfer /api/Spaces-1/packages/packages-cmdemo1-scorecard-store.2026.10.10.1500/raw'
+Test-Case 'restore: replaces the store and the state' @((Test-Path "$restoreDir/store/stale.db"), (Test-Path "$restoreDir/store/normalized.db"), (Get-Content -LiteralPath "$restoreDir/harvest-state.json" -Raw).Trim(), (Test-Path "$restoreDir/workspace/.cmis/work-tracking.json")) @($false, $true, '{}', $true)
+Test-Case 'restore: leaves no staging behind' @(Get-ChildItem -LiteralPath $tmp -Force -Filter '.restore-*').Count 0
+
+$script:newestBad = $true
+Set-Content -LiteralPath "$restoreDir/store/stale.db" -Value 'old'
+$restoredVersion = Restore-StoreFromFeed $restoreConfig $restoreDir 6>$null 3>$null
+Test-Case 'restore: a newest package with foreign entries is skipped for the next one' @($restoredVersion, (Test-Path "$restoreDir/store/stale.db"), (Test-Path "$restoreDir/bin/cmis")) @('2026.10.9.231500', $false, $false)
+$script:feedVersions = @((Pkg '2026.10.10.1500'))
+Set-Content -LiteralPath "$restoreDir/store/kept.db" -Value 'kept'
+$failedRestore = try { Restore-StoreFromFeed $restoreConfig $restoreDir 6>$null 3>$null; 'restored' } catch { 'refused' }
+Test-Case 'restore: no package that can be restored fails and changes nothing' @($failedRestore, (Test-Path "$restoreDir/store/kept.db")) @('refused', $true)
+$script:newestBad = $false
+
+$script:feedVersions = @()
+Test-Case 'restore: none in the feed keeps the work directory as it is' @((Restore-StoreFromFeed $restoreConfig $restoreDir 6>$null), (Test-Path "$restoreDir/store/kept.db")) @($null, $true)
+
+# Push against a fake feed: a redirect answer counts only when the feed lists the version afterwards.
+$pushTime = Utc 2026 10 22 5 15 7
+$script:pushAnswer = $null; $script:listedAfterPush = @()
+function Invoke-OctopusTransfer([hashtable] $Config, [string] $Path, [string] $UploadFile, [string] $OutFile) {
+    if (-not $UploadFile -or -not (Test-Path -LiteralPath $UploadFile)) { throw "unexpected transfer $Path" }
+    $feedCalls.Add("Push $Path $(Split-Path -Leaf $UploadFile)")
+    $script:pushAnswer
+}
+function Invoke-OctopusRequest([hashtable] $Config, [string] $Path) {
+    if ($Path -like '*/feeds?feedType=BuiltIn*') { return @{ Items = @(@{ Id = 'Feeds-9' }) } }
+    if ($Path -like '*/packages/versions*') { return @{ Items = $script:listedAfterPush } }
+    throw "unexpected Get $Path"
+}
+Test-Case 'push: created' (Publish-StoreToFeed $restoreConfig $runDir $pushTime 6>$null) '2026.10.22.51507'
+Test-Case 'push: posts the zip named by id and version' ($feedCalls[-1]) 'Push /api/Spaces-1/packages/raw?overwriteMode=FailIfExists cmdemo1-scorecard-store.2026.10.22.51507.zip'
+$script:pushAnswer = 'redirect to http://octo.example/api/Spaces-1/packages/x (HTTP 303)'; $script:listedAfterPush = @((Pkg '2026.10.22.51507'))
+Test-Case 'push: a redirect answer with the version listed counts' (Publish-StoreToFeed $restoreConfig $runDir $pushTime 6>$null) '2026.10.22.51507'
+$script:listedAfterPush = @((Pkg '2026.10.22.1500'))
+Test-Case 'push: a redirect answer without the version listed fails' $(try { Publish-StoreToFeed $restoreConfig $runDir $pushTime 6>$null; 'pushed' } catch { 'refused' }) 'refused'
+Remove-Item -LiteralPath $tmp -Recurse -Force
+
+# --- Inside Octopus --------------------------------------------------------------------------------------------
+Test-Case 'octopus: not inside an Octopus step here' (Test-InsideOctopus) $false
+Test-Case 'highlight: last full week of the space, measured, store version' (Get-HighlightLine $fixture '2026.10.22.51500') 'Space Spaces-1, 2026-09-28 to 2026-10-14: week of 2026-10-05 started 0, delivered 1, WIP 0, MTTD 5.8 h; 1 of 2 projects measured; store 2026.10.22.51500'
 
 if ($failures) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'All passed'

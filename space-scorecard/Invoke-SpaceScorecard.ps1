@@ -7,11 +7,15 @@
     repository, harvested with cmis (Clear Measure Intelligence Scorecard), written as one static page.
 
 .DESCRIPTION
-    Step 1 of the design "Space-level scorecard on cmis". One run, in this order (each step a function below):
+    Steps 1 and 2 of the design "Space-level scorecard on cmis". One run, in this order (each step a function below):
 
-      Get cmis      The release the configuration pins (cmisVersion) from cmisRepo, by the operator's gh login, its
-                    SHA-256 checked against the release's SHA256SUMS.txt, unpacked into <WorkDir>/bin. Reused when the
-                    binary there already reports that version.
+      Get cmis      The release the configuration pins (cmisVersion) from cmisRepo, through the GitHub REST API with the
+                    GitHub token, its SHA-256 checked against the release's SHA256SUMS.txt, unpacked into <WorkDir>/bin.
+                    Reused when the binary there already reports that version.
+      Restore       With -StoreFeed: the newest version of package <prefix>-scorecard-store of the space's built-in
+                    feed is unpacked into <WorkDir> (store, workspace, harvest-state.json, discovery.json), replacing
+                    what is there; when the feed has none yet, the run starts from what <WorkDir> holds (empty on a
+                    fresh one).
       Discover      The projects of the space (Octopus REST API, key in OCTOPUS_API_KEY). The repository of each,
                     first that answers: the configuration (projects.<name>.repo); the build information of its
                     newest release (VcsRoot); the first github.com/<owner>/<repo> address in the newest release's
@@ -32,14 +36,21 @@
                     number that is not the sum of its projects', and a list whose length is not its number, are
                     warnings on the page.
       Render        scorecard.html (one file, no external request, no script) and summary.md, from
-                    scorecard-data.json, the numbers and lists the compute step gathered (no item titles).
+                    scorecard-data.json, the numbers and lists the compute step gathered (no item titles). One function
+                    (Write-ScorecardFiles), apart from harvest and compute, so another renderer can take its place.
+      Octopus       Inside an Octopus step (OctopusParameters or New-OctopusArtifact is there): scorecard.html,
+                    summary.md and document.json become artifacts of the task, and a line of the space's last full
+                    week is highlighted.
+      Push          With -StoreFeed, after everything above succeeded: store, workspace, harvest-state.json and
+                    discovery.json as <prefix>-scorecard-store.<version>.zip to the built-in feed (never replacing a
+                    version), version yyyy.M.d.HHmmss in UTC. A run that fails pushes nothing.
 
     Weeks are cmis's weekly periods: ISO weeks, Monday 00:00 UTC to the next, as cmdemo1-scorecard's page shows them.
     timeZone only sets the calendar days of document.json and what "today" is.
 
     Credentials stay in this process: CMIS_<ID>_TOKEN (GITHUB_TOKEN, else "gh auth token") and
     CMIS_<ID>_OCTOPUS_TOKEN (OCTOPUS_API_KEY) per connection, ID = the connection id upper-cased with "-" as "_".
-    Nothing is written to disk or printed.
+    Nothing is written to disk or printed. The Octopus key also reads and pushes the store package (-StoreFeed).
 
 .PARAMETER Config
     The space's configuration file (see README.md), for example space-scorecard/cmdemo1.json.
@@ -52,6 +63,10 @@
 .PARAMETER SkipHarvest
     Asks neither Octopus nor GitHub for anything and changes no connection: computes and renders from what the
     store holds, for the projects of the last full run (<WorkDir>/discovery.json).
+.PARAMETER StoreFeed
+    Keeps the store in the space's built-in Octopus feed: restored from the newest <prefix>-scorecard-store package
+    before the harvest, pushed as a new version after a run that succeeded. Needs "prefix" in the configuration and an
+    Octopus key that may view and download from the built-in feed and push to it. Not with -SkipHarvest.
 .PARAMETER LoadOnly
     Defines the functions and stops (for the tests).
 .EXAMPLE
@@ -64,6 +79,7 @@ param(
     [string] $Since,
     [string] $Until,
     [switch] $SkipHarvest,
+    [switch] $StoreFeed,
     [switch] $LoadOnly
 )
 Set-StrictMode -Version Latest
@@ -78,6 +94,8 @@ $script:ItemNumberSpacing = 1000000
 # The id of the space's own block: "_" is in no Octopus slug, so no project's block can have it.
 $script:SpaceScopeId = '_space'
 $script:DrillMetrics = [ordered]@{ workInProcess = 'wip'; itemsStarted = 'itemsstarted'; itemsDelivered = 'itemsdelivered' }
+# The GitHub token once read (Get-GitHubToken); in memory only.
+$script:GitHubToken = $null
 
 # ---------------------------------------------------------------------------------------------------------------
 # Configuration
@@ -89,6 +107,7 @@ function Read-SpaceConfig([string] $Path) {
         if (-not ($c[$key] -is [string] -and $c[$key].Trim())) { throw "$Path`: '$key' is required (a text)." }
     }
     if ($c['octopusServer'] -notmatch '^https://') { throw "$Path`: 'octopusServer' must be an https:// address (the API key is sent to it)." }
+    if ($c['prefix'] -and -not ($c['prefix'] -is [string] -and $c['prefix'] -cmatch '^[a-z0-9][a-z0-9-]*\z')) { throw "$Path`: 'prefix' must be lower case letters, digits and '-' (it begins a package id)." }
     if (-not $c['timeZone']) { $c['timeZone'] = 'UTC' }
     if ($null -eq $c['historyDays']) { $c['historyDays'] = 90 }
     if (-not ($c['historyDays'] -is [long] -or $c['historyDays'] -is [int]) -or $c['historyDays'] -lt 1) { throw "$Path`: 'historyDays' must be a whole number of days, 1 or more." }
@@ -123,6 +142,131 @@ function Resolve-Window([hashtable] $Config, [string] $Since, [string] $Until, [
         # The harvest reaches one UTC day past Until: the last local day of a zone west of UTC ends on the next UTC day,
         # and cmis refuses a document over days the harvest does not cover. A date in the future is accepted.
         HarvestUntil = $u.AddDays(1).ToString('yyyy-MM-dd') }
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# GitHub and Octopus requests
+# ---------------------------------------------------------------------------------------------------------------
+
+# The HTTP status of a failed web request; 0 when no answer came (name, connection, TLS).
+function Get-HttpStatus([Management.Automation.ErrorRecord] $ErrorRecord) {
+    $response = $ErrorRecord.Exception.PSObject.Properties['Response']
+    if ($response -and $response.Value) { return [int] $response.Value.StatusCode }
+    0
+}
+
+# The GitHub token: GITHUB_TOKEN, else "gh auth token" when gh is there (a person's shell). Read once, kept in memory.
+function Get-GitHubToken {
+    if ($script:GitHubToken) { return $script:GitHubToken }
+    $token = $env:GITHUB_TOKEN
+    if (-not $token -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $token = (gh auth token 2>$null | Out-String).Trim()
+    }
+    if (-not $token) { throw 'No GitHub token: GITHUB_TOKEN is not set and "gh auth token" gave none.' }
+    $script:GitHubToken = $token
+    $token
+}
+
+# One GET of the GitHub REST API (a path of https://api.github.com) with the token. -OutFile saves the answer: a
+# release asset answers with a redirect to another host, which is followed without the token (PowerShell drops the
+# Authorization header on a redirect). Otherwise the answer's text is returned.
+function Invoke-GitHubGet([string] $Path, [string] $Accept = 'application/vnd.github+json', [string] $OutFile) {
+    $request = @{ Uri = "https://api.github.com$Path"; Headers = @{ Authorization = "Bearer $(Get-GitHubToken)"; Accept = $Accept; 'X-GitHub-Api-Version' = '2022-11-28' } }
+    if ($OutFile) { Invoke-WebRequest @request -OutFile $OutFile -MaximumRetryCount 2 -RetryIntervalSec 5 | Out-Null; return }
+    (Invoke-WebRequest @request).Content
+}
+
+# Whether GitHub has a repository: true, false on GitHub's 404, and a failure on anything else, so a GitHub outage
+# or a lost login is not reported as "no repository".
+function Test-GitHubRepository([string] $Owner, [string] $Repo) {
+    try { Invoke-GitHubGet "/repos/$([uri]::EscapeDataString($Owner))/$([uri]::EscapeDataString($Repo))" | Out-Null; return $true }
+    catch {
+        $status = Get-HttpStatus $_
+        if ($status -eq 404) { return $false }
+        throw "GitHub did not say whether $Owner/$Repo exists: $(if ($status) { "HTTP $status" } else { $_.Exception.Message })"
+    }
+}
+
+# One GET of the Octopus REST API (a path of octopusServer) with OCTOPUS_API_KEY, tried again on a failure that may
+# pass; the parsed JSON answer.
+function Invoke-OctopusRequest([hashtable] $Config, [string] $Path) {
+    $request = @{ Uri = $Config.octopusServer.TrimEnd('/') + $Path; Headers = @{ 'X-Octopus-ApiKey' = $env:OCTOPUS_API_KEY }; MaximumRetryCount = 3; RetryIntervalSec = 10 }
+    $content = (Invoke-WebRequest @request).Content
+    if ($content) { $content | ConvertFrom-Json -AsHashtable -DateKind String -Depth 100 }
+}
+
+# A package to or from the Octopus REST API with OCTOPUS_API_KEY, through HttpClient without following redirects: the
+# key goes to octopusServer only. -UploadFile POSTs the file as a multipart form (field "file"), once (a push that may
+# have arrived is not sent twice); Octopus Cloud may answer a push that arrived with a redirect to the package (to an
+# http address), which is returned as the text "redirect to <where>" for the caller to check. -OutFile GETs into that
+# file, tried three times; a redirect to octopusServer's own host is asked again over https with the key (three such
+# at most), one to another https host (where Octopus may keep the file) is followed without the key. A redirect
+# otherwise, or a status that is no success, is a failure that names the status and, for a redirect, where it led
+# (scheme, host and path; no query).
+function Invoke-OctopusTransfer([hashtable] $Config, [string] $Path, [string] $UploadFile, [string] $OutFile) {
+    $uri = [uri] ($Config.octopusServer.TrimEnd('/') + $Path)
+    $serverHost = $uri.Host
+    $hops = 0
+    $method = if ($UploadFile) { 'POST' } else { 'GET' }
+    $handler = [Net.Http.HttpClientHandler]::new(); $handler.AllowAutoRedirect = $false
+    $client = [Net.Http.HttpClient]::new($handler); $client.Timeout = [timespan]::FromMinutes(30)
+    try {
+        $attempts = if ($UploadFile) { 1 } else { 3 }
+        for ($attempt = 1; ; $attempt++) {
+            $message = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($method), $uri)
+            [void] $message.Headers.TryAddWithoutValidation('X-Octopus-ApiKey', $env:OCTOPUS_API_KEY)
+            $stream = $null
+            if ($UploadFile) {
+                $stream = [IO.File]::OpenRead($UploadFile)
+                $form = [Net.Http.MultipartFormDataContent]::new()
+                $file = [Net.Http.StreamContent]::new($stream)
+                $file.Headers.ContentType = [Net.Http.Headers.MediaTypeHeaderValue]::new('application/octet-stream')
+                $form.Add($file, 'file', (Split-Path -Leaf $UploadFile))
+                $message.Content = $form
+            }
+            try {
+                $response = $client.SendAsync($message, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+                $status = [int] $response.StatusCode
+                if ($status -ge 300 -and $status -lt 400) {
+                    $location = $response.Headers.Location
+                    if ($location -and -not $location.IsAbsoluteUri) { $location = [uri]::new($uri, $location) }
+                    $where = if ($location) { "$($location.Scheme)://$($location.Host)$($location.AbsolutePath)" } else { 'no address' }
+                    if ($OutFile -and $location -and $location.Host -ieq $serverHost -and $hops -lt 3) {
+                        $uri = [uri] "https://$serverHost$($location.PathAndQuery)"; $hops++; $attempt--
+                        continue
+                    }
+                    if ($OutFile -and $location -and $location.Scheme -eq 'https' -and $location.Host -ine $serverHost) {
+                        try { Invoke-WebRequest -Uri $location -OutFile $OutFile | Out-Null }
+                        catch { throw "Downloading from $where failed (HTTP $(Get-HttpStatus $_))." }
+                        return
+                    }
+                    if ($UploadFile) { return "redirect to $where (HTTP $status)" }
+                    throw "Octopus answered $method $($uri.AbsolutePath) with HTTP $status, a redirect to $where (not followed)."
+                }
+                if ($status -lt 200 -or $status -ge 300) {
+                    $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                    if ($text.Length -gt 500) { $text = $text.Substring(0, 500) }
+                    throw "Octopus $method $($uri.AbsolutePath) failed (HTTP $status): $($text -replace '\s+', ' ')"
+                }
+                if ($OutFile) {
+                    $target = [IO.File]::Create($OutFile)
+                    try { $response.Content.ReadAsStream().CopyTo($target) } finally { $target.Dispose() }
+                }
+                return
+            }
+            catch {
+                $retry = $attempt -lt $attempts -and ("$_" -notmatch 'HTTP (4\d\d|3\d\d)')
+                if (-not $retry) { throw }
+                Start-Sleep -Seconds 10
+            }
+            finally {
+                $message.Dispose()
+                if ($stream) { $stream.Dispose() }
+            }
+        }
+    }
+    finally { $client.Dispose() }
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -166,8 +310,13 @@ function Get-Cmis([hashtable] $Config, [string] $BinDir) {
     New-Item -ItemType Directory -Path $download | Out-Null
     try {
         $PSNativeCommandUseErrorActionPreference = $false
-        gh release download "v$($Config.cmisVersion)" --repo $Config.cmisRepo --pattern $asset --pattern 'SHA256SUMS.txt' --dir $download | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "gh release download of v$($Config.cmisVersion) from $($Config.cmisRepo) failed (exit $LASTEXITCODE)." }
+        $tag = "v$($Config.cmisVersion)"
+        $release = Invoke-GitHubGet "/repos/$($Config.cmisRepo)/releases/tags/$([uri]::EscapeDataString($tag))" | ConvertFrom-Json -AsHashtable
+        foreach ($name in $asset, 'SHA256SUMS.txt') {
+            $found = @($release['assets'] | Where-Object { $_['name'] -ceq $name })
+            if (-not $found.Count) { throw "Release $tag of $($Config.cmisRepo) has no asset $name." }
+            Invoke-GitHubGet ([uri] $found[0]['url']).AbsolutePath 'application/octet-stream' (Join-Path $download $name)
+        }
         $expected = Get-ExpectedSha256 (Get-Content -LiteralPath (Join-Path $download 'SHA256SUMS.txt') -Raw) $asset
         if (-not $expected) { throw "SHA256SUMS.txt of v$($Config.cmisVersion) has no line for $asset." }
         $actual = (Get-FileHash -LiteralPath (Join-Path $download $asset) -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -180,7 +329,7 @@ function Get-Cmis([hashtable] $Config, [string] $BinDir) {
     finally { Remove-Item -LiteralPath $download -Recurse -Force -ErrorAction SilentlyContinue }
     $found = Get-CmisVersion $cmis
     if (-not $found -or $found.Version -cne $Config.cmisVersion) { throw "The unpacked cmis does not report version $($Config.cmisVersion)." }
-    Write-Host "cmis $($Config.cmisVersion): downloaded and checked against SHA256SUMS.txt"
+    Write-Host "cmis $($Config.cmisVersion): downloaded from the GitHub API and checked against SHA256SUMS.txt"
     $cmis
 }
 
@@ -400,12 +549,7 @@ function Read-ConnectionBases([string] $Cmis, $Entries, [hashtable] $Paths) {
 # The credentials of every connection, in this process's environment only.
 function Set-ConnectionCredentials($Entries) {
     if (-not $env:OCTOPUS_API_KEY) { throw 'OCTOPUS_API_KEY is not set.' }
-    $github = $env:GITHUB_TOKEN
-    if (-not $github) {
-        $PSNativeCommandUseErrorActionPreference = $false
-        $github = (gh auth token 2>$null | Out-String).Trim()
-        if ($LASTEXITCODE -ne 0 -or -not $github) { throw 'No GitHub token: GITHUB_TOKEN is not set and "gh auth token" gave none.' }
-    }
+    $github = Get-GitHubToken
     foreach ($e in $Entries) {
         $prefix = ConvertTo-CredentialPrefix $e.connectionId
         [Environment]::SetEnvironmentVariable("$($prefix)_TOKEN", $github)
@@ -826,15 +970,205 @@ function ConvertTo-SummaryMarkdown($Data) {
     ($lines -join "`n") + "`n"
 }
 
+# The render step: scorecard-data.json, scorecard.html and summary.md in the work directory, from the data the compute
+# step gathered. Reads nothing else (not the store, not Octopus, not GitHub), so another renderer can take its place.
+function Write-ScorecardFiles($Data, [string] $Directory) {
+    $Data | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $Directory 'scorecard-data.json')
+    ConvertTo-ScorecardHtml $Data | Set-Content -LiteralPath (Join-Path $Directory 'scorecard.html') -NoNewline
+    ConvertTo-SummaryMarkdown $Data | Set-Content -LiteralPath (Join-Path $Directory 'summary.md') -NoNewline
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Store in the built-in feed (-StoreFeed)
+# ---------------------------------------------------------------------------------------------------------------
+
+# What a store package holds, relative to the work directory: cmis's store directory as cmis writes it (so cmis and
+# Scorecard.Web can both read it), the workspace with the connections, and the two files the harvest step reads.
+$script:StoreParts = @('store', 'workspace', 'harvest-state.json', 'discovery.json')
+
+# The id of the store's package in the space's built-in feed: <prefix>-scorecard-store.
+function Get-StorePackageId([hashtable] $Config) {
+    if (-not $Config['prefix']) { throw "-StoreFeed needs 'prefix' in the configuration: the package is <prefix>-scorecard-store." }
+    "$($Config.prefix)-scorecard-store"
+}
+
+# The version of a store package pushed at $UtcNow: yyyy.M.d.HHmmss in UTC, the time of day as one number (00:15:00
+# is 1500, 09:05:07 is 90507): the parts of a package version have no leading zeros, and the four numbers order as the
+# times. Seconds, so two runs in one minute do not make the same version (the feed refuses the second).
+function Get-StorePackageVersion([datetime] $UtcNow) {
+    if ($UtcNow.Kind -ne [DateTimeKind]::Utc) { throw 'Get-StorePackageVersion takes a UTC time.' }
+    # 00:00:00 is 1, not 0: a feed may shorten a version that ends in .0 to three numbers.
+    $time = [math]::Max(1, $UtcNow.Hour * 10000 + $UtcNow.Minute * 100 + $UtcNow.Second)
+    [string]::Format($script:Invariant, '{0}.{1}.{2}.{3}', $UtcNow.Year, $UtcNow.Month, $UtcNow.Day, $time)
+}
+
+# The store packages of the versions the feed lists, newest first by their four numbers (not as text: 2026.10.10.1500
+# is newer than 2026.10.9.231500), whatever order the feed answers in; a version that is not four numbers is not one
+# of ours and is left alone.
+function Get-StorePackageOrder($Packages) {
+    $ours = @(foreach ($p in @($Packages | Where-Object { $_ })) {
+            $v = $null
+            if ([string] $p['Version'] -match '^\d+\.\d+\.\d+\.\d+\z' -and [version]::TryParse([string] $p['Version'], [ref] $v)) { @{ Package = $p; Version = $v } }
+        })
+    @($ours | Sort-Object { $_.Version } -Descending | ForEach-Object { $_.Package })
+}
+
+# The package to restore: the newest of Get-StorePackageOrder. $null when there is none: the run starts empty.
+function Select-StorePackage($Packages) {
+    $ordered = @(Get-StorePackageOrder $Packages)
+    if ($ordered.Count) { $ordered[0] } else { $null }
+}
+
+# The id of the space's built-in feed.
+function Get-BuiltInFeedId([hashtable] $Config) {
+    $feeds = @((Invoke-OctopusRequest $Config "/api/$($Config.space)/feeds?feedType=BuiltIn&take=1")['Items'])
+    if (-not $feeds.Count) { throw "Space $($Config.space) has no built-in feed (or the key may not view feeds)." }
+    $feeds[0]['Id']
+}
+
+# The entries of a store package that are not under one of the store parts, or that would leave the directory: a
+# package with any is not restored.
+function Get-ForeignStoreEntries([string] $ZipPath) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        @($zip.Entries | ForEach-Object { $_.FullName } | Where-Object {
+                $parts = @(($_ -replace '\\', '/') -split '/')
+                $parts -contains '..' -or $parts[0] -eq '' -or $parts[0] -cnotin $script:StoreParts -or ($parts.Count -gt 1 -and $parts[0] -cnotin 'store', 'workspace')
+            })
+    }
+    finally { $zip.Dispose() }
+}
+
+# Restore: the newest store package of the feed replaces the store, workspace and state files of the work directory.
+# It is unpacked beside the work directory first and swapped in only when that worked, so a package that cannot be
+# restored changes nothing, and the next older one is tried (three at most; when none can be restored the run fails). Returns the version restored, or $null
+# when the feed has none (the work directory is then left as it is).
+function Restore-StoreFromFeed([hashtable] $Config, [string] $Directory) {
+    $id = Get-StorePackageId $Config
+    $feed = Get-BuiltInFeedId $Config
+    $listed = Invoke-OctopusRequest $Config "/api/$($Config.space)/feeds/$feed/packages/versions?packageId=$([uri]::EscapeDataString($id))&take=100"
+    $candidates = @(Get-StorePackageOrder @($listed['Items']) | Select-Object -First 3)
+    if (-not $candidates.Count) { Write-Host "store: the built-in feed has no $id yet; starting from what $Directory holds"; return $null }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    foreach ($package in $candidates) {
+        $staging = Join-Path (Split-Path -Parent $Directory) ".restore-$([guid]::NewGuid().ToString('N'))"
+        $zip = "$staging.zip"
+        try {
+            Invoke-OctopusTransfer $Config "/api/$($Config.space)/packages/$([uri]::EscapeDataString($package['Id']))/raw" -OutFile $zip
+            $foreign = @(Get-ForeignStoreEntries $zip)
+            if ($foreign.Count) { throw "it holds $($foreign.Count) entries outside the store parts (first: $($foreign[0]))" }
+            [IO.Compression.ZipFile]::ExtractToDirectory($zip, $staging)
+            foreach ($part in $script:StoreParts) {
+                $path = Join-Path $Directory $part
+                if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+                $unpacked = Join-Path $staging $part
+                if (Test-Path -LiteralPath $unpacked) { Move-Item -LiteralPath $unpacked -Destination $path }
+            }
+            Write-Host ("store: restored {0} {1} ({2:n1} MB)" -f $id, $package['Version'], ((Get-Item -LiteralPath $zip -Force).Length / 1MB))
+            return [string] $package['Version']
+        }
+        catch { Write-Warning "store: $id $($package['Version']) not restored: $($_.Exception.Message)" }
+        finally {
+            Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    throw "store: none of the newest $($candidates.Count) versions of $id could be restored."
+}
+
+# The store package as a zip: every file of the store parts that the work directory has, by its path relative to it.
+# Written entry by entry (Compress-Archive leaves out hidden files, and cmis keeps the workspace in .cmis).
+function New-StoreArchive([string] $Directory, [string] $ZipPath) {
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $root = (Resolve-Path -LiteralPath $Directory).Path.TrimEnd('/') + '/'
+    $zip = [IO.Compression.ZipFile]::Open($ZipPath, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($part in $script:StoreParts) {
+            $path = Join-Path $Directory $part
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $files = if (Test-Path -LiteralPath $path -PathType Container) { @(Get-ChildItem -LiteralPath $path -Recurse -File -Force) } else { @(Get-Item -LiteralPath $path -Force) }
+            foreach ($f in $files) {
+                [void] [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $f.FullName, $f.FullName.Substring($root.Length), [IO.Compression.CompressionLevel]::Optimal)
+            }
+        }
+    }
+    finally { $zip.Dispose() }
+}
+
+# Push: the store package of this run to the built-in feed, as a new version (overwriteMode=FailIfExists: a version
+# is never overwritten). Returns the version pushed.
+function Publish-StoreToFeed([hashtable] $Config, [string] $Directory, [datetime] $UtcNow = [datetime]::UtcNow) {
+    $id = Get-StorePackageId $Config
+    $version = Get-StorePackageVersion $UtcNow
+    $folder = Join-Path ([IO.Path]::GetTempPath()) "space-scorecard-push-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $folder | Out-Null
+    try {
+        $zip = Join-Path $folder "$id.$version.zip"
+        New-StoreArchive $Directory $zip
+        $redirect = Invoke-OctopusTransfer $Config "/api/$($Config.space)/packages/raw?overwriteMode=FailIfExists" -UploadFile $zip
+        if ($redirect) {
+            # The answer was a redirect, not "created": the push counts only when the feed lists that version now.
+            $feed = Get-BuiltInFeedId $Config
+            $listed = Invoke-OctopusRequest $Config "/api/$($Config.space)/feeds/$feed/packages/versions?packageId=$([uri]::EscapeDataString($id))&take=100"
+            if (-not @($listed['Items'] | Where-Object { [string] $_['Version'] -ceq $version }).Count) { throw "Octopus answered the push of $id $version with a $redirect, and the feed does not list that version." }
+            Write-Host "store: Octopus answered the push with a $redirect; the feed lists $id $version"
+        }
+        Write-Host ("store: pushed {0} {1} ({2:n1} MB)" -f $id, $version, ((Get-Item -LiteralPath $zip).Length / 1MB))
+    }
+    finally { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
+    $version
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Inside Octopus
+# ---------------------------------------------------------------------------------------------------------------
+
+# Whether this runs in an Octopus step: Calamari defines $OctopusParameters and New-OctopusArtifact.
+function Test-InsideOctopus {
+    [bool] ((Get-Variable -Name OctopusParameters -ErrorAction SilentlyContinue) -or (Get-Command New-OctopusArtifact -ErrorAction SilentlyContinue))
+}
+
+# The line the task log highlights: the space's numbers of the last full week, what is measured, the store version.
+function Get-HighlightLine($Data, [string] $StoreVersion) {
+    $space = @($Data.scopes | Where-Object { $_.id -eq $script:SpaceScopeId }) | Select-Object -First 1
+    $full = @($Data.weeks | Where-Object { -not $_.partial })
+    $measured = @($Data.projects | Where-Object { $_.measured }).Count
+    $line = "Space $($Data.space), $($Data.since) to $($Data.until): "
+    if ($full.Count -and $space) {
+        $w = $full[-1].start
+        $n = $space.periods[$w]
+        $mttd = if ($null -eq $n) { $null } else { $n['meanTimeToDelivery'] }
+        $line += "week of $w started $(Get-PeriodNumber $space $w 'itemsStarted'), delivered $(Get-PeriodNumber $space $w 'itemsDelivered'), WIP $(Get-PeriodNumber $space $w 'workInProcess'), MTTD $(Format-Duration $mttd); "
+    }
+    else { $line += 'no full week yet; ' }
+    $line += "$measured of $(@($Data.projects).Count) projects measured"
+    $failed = @($Data.projects | Where-Object { -not $_.measured -and "$($_.reason)" -like '* failed *' }).Count
+    if ($failed) { $line += ", $failed harvest(s) failed" }
+    if (@($Data.warnings).Count) { $line += ", $(@($Data.warnings).Count) warning(s)" }
+    if ($StoreVersion) { $line += "; store $StoreVersion" }
+    $line
+}
+
+# The page, the summary and the document as artifacts of the Octopus task.
+function Publish-OctopusArtifacts([string] $Directory) {
+    foreach ($name in 'scorecard.html', 'summary.md', 'document.json') {
+        $path = Join-Path $Directory $name
+        if (Test-Path -LiteralPath $path) { New-OctopusArtifact -Path $path -Name $name }
+    }
+}
+
 # ---------------------------------------------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------------------------------------------
 
 if ($LoadOnly) { return }
 if (-not $Config -or -not $WorkDir) { throw 'Both -Config and -WorkDir are required.' }
+if ($StoreFeed -and $SkipHarvest) { throw '-StoreFeed and -SkipHarvest exclude each other: -SkipHarvest asks Octopus for nothing.' }
 
 $started = [Diagnostics.Stopwatch]::StartNew()
 $cfg = Read-SpaceConfig $Config
+if ($StoreFeed) { [void] (Get-StorePackageId $cfg) }
 $window = Resolve-Window $cfg $Since $Until
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
 $WorkDir = (Resolve-Path -LiteralPath $WorkDir).Path
@@ -859,17 +1193,12 @@ if ($SkipHarvest) {
     $harvest = [ordered]@{ skipped = $true }
 }
 else {
-    $server = $cfg.octopusServer.TrimEnd('/')
-    $getJson = { param($Path) (Invoke-WebRequest -Uri ($server + $Path) -Headers @{ 'X-Octopus-ApiKey' = $env:OCTOPUS_API_KEY }).Content | ConvertFrom-Json -AsHashtable -DateKind String -Depth 100 }.GetNewClosure()
+    $restored = if ($StoreFeed) { Restore-StoreFromFeed $cfg $WorkDir } else { $null }
+    foreach ($dir in $paths.Workspace, $paths.Store) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    # Not a closure: a closure would not see the functions of this script.
+    $getJson = { param($Path) Invoke-OctopusRequest $cfg $Path }
     # Only GitHub's 404 means "no such repository"; any other failure (network, rate limit, login) stops the run.
-    $repoExists = {
-        param($Owner, $Repo)
-        $PSNativeCommandUseErrorActionPreference = $false
-        $answer = gh api "repos/$Owner/$Repo" --jq '.full_name' 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0) { return $true }
-        if ($answer -match 'HTTP 404') { return $false }
-        throw "GitHub did not say whether $Owner/$Repo exists: $($answer.Trim())"
-    }
+    $repoExists = { param($Owner, $Repo) Test-GitHubRepository $Owner $Repo }
     $projects = @(Get-SpaceProjects $cfg $getJson $repoExists)
     foreach ($p in $projects) {
         Write-Host $(if ($p.measured) { "  $($p.project) -> $($p.owner)/$($p.repo) (from $($p.source), environments $($p.environments))" } else { "  $($p.project): not measured, $($p.reason)" })
@@ -884,8 +1213,16 @@ else {
 }
 
 $data = Get-ScorecardData $cmis $cfg $projects $window $paths $harvest
-$data | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $WorkDir 'scorecard-data.json')
-ConvertTo-ScorecardHtml $data | Set-Content -LiteralPath (Join-Path $WorkDir 'scorecard.html') -NoNewline
-ConvertTo-SummaryMarkdown $data | Set-Content -LiteralPath (Join-Path $WorkDir 'summary.md') -NoNewline
+if ($StoreFeed) { $data.store = [ordered]@{ package = Get-StorePackageId $cfg; restored = $restored } }
+Write-ScorecardFiles $data $WorkDir
 foreach ($w in $data.warnings) { Write-Warning $w }
+$inOctopus = Test-InsideOctopus
+if ($inOctopus) { Publish-OctopusArtifacts $WorkDir }
+# Last: only a run that got this far pushes its store.
+$pushed = if ($StoreFeed) { Publish-StoreToFeed $cfg $WorkDir } else { $null }
+# The store is pushed by now: a highlight that fails is a warning, not a failed run.
+if ($inOctopus) {
+    try { Write-Highlight (Get-HighlightLine $data $pushed) }
+    catch { Write-Warning "No highlight: $($_.Exception.Message)" }
+}
 Write-Host ("Done in {0:n1} s: {1}" -f $started.Elapsed.TotalSeconds, (Join-Path $WorkDir 'scorecard.html'))
