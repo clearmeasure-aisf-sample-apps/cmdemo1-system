@@ -465,11 +465,15 @@ resource gatewayCodexRunner 'Microsoft.Authorization/roleAssignments@2022-04-01'
 // of infra/own. Anonymous reads of single blobs only: the container cannot be listed.
 // The runbook signs in as an identity of its own (the Octopus Azure OpenID Connect account <slug>-scorecard-site that
 // space-scorecard/setup-octopus.ps1 makes), not as the deploy identity: the runbook runs the code of whatever branch a
-// manual run names, so its identity may write this one container and nothing else.
+// manual run names, so its identity may write the site's containers and nothing else.
 var hasScorecardSite = stack.environmentName == 'prod'
 var scorecardSiteName = take(toLower('st${stack.slug}${stack.environmentName}ssc${uniqueString(resourceGroup().id)}'), 24)
 var scorecardSiteContainer = 'scorecard'
 var scorecardSiteTags = union(stack.tags, { purpose: 'space-scorecard' })
+// The other demo spaces whose scorecard this site also publishes (step 4 of the design): each a container of its own,
+// scorecard-<prefix>, which the same identity writes for runs of project <prefix>-scorecard-space of that space's prod
+// (space-scorecard/<prefix>.json, site.container). Their Azure stacks are their systems'; this site is cmdemo1's.
+var scorecardSiteSpaces = loadJsonContent('scorecard-site-spaces.json')
 
 resource scorecardSite 'Microsoft.Storage/storageAccounts@2024-01-01' = if (hasScorecardSite) {
   name: scorecardSiteName
@@ -533,6 +537,42 @@ resource scorecardSiteWriter 'Microsoft.Authorization/roleAssignments@2022-04-01
     roleDefinitionId: blobDataContributor
   }
 }
+
+// Another space's pages: its own public container, a federated credential for its runbook's runs, the same writer role.
+resource scorecardSpacePages 'Microsoft.Storage/storageAccounts/blobServices/containers@2024-01-01' = [for s in scorecardSiteSpaces: if (hasScorecardSite) {
+  parent: scorecardSiteBlobs
+  name: 'scorecard-${s.prefix}'
+  properties: {
+    publicAccess: 'Blob'
+  }
+}]
+
+// One at a time and after the site's own: Azure refuses concurrent writes of federated credentials of one identity.
+@batchSize(1)
+resource scorecardSpaceOctopus 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = [for s in scorecardSiteSpaces: if (hasScorecardSite) {
+  parent: scorecardSiteIdentity
+  name: 'octopus-scorecard-space-${s.prefix}'
+  properties: {
+    issuer: system.octopus.url
+    subject: 'space:${s.spaceSlug}:project:${s.prefix}-scorecard-space:environment:${stack.environmentName}'
+    audiences: [
+      'api://AzureADTokenExchange'
+    ]
+  }
+  dependsOn: [
+    scorecardSiteOctopus
+  ]
+}]
+
+resource scorecardSpaceWriter 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for (s, i) in scorecardSiteSpaces: if (hasScorecardSite) {
+  scope: scorecardSpacePages[i]
+  name: guid(scorecardSpacePages[i].id, 'scorecard-site', blobDataContributor)
+  properties: {
+    principalId: scorecardSiteIdentity!.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: blobDataContributor
+  }
+}]
 
 @description('Settings for container deployables, by deployable and then by name: { "<deployable>": { "<NAME>": "<value>" } }. Each becomes an environment variable of that deployable\'s container app. Never a secret: a value here is readable in the deployment.')
 output settings object = hasStore

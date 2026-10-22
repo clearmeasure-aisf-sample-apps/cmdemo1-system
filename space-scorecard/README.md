@@ -3,7 +3,8 @@
 The delivery scorecard of a whole Octopus Deploy space, as static pages. Every project of the space is paired with
 its GitHub repository, each pair is harvested with cmis (Clear Measure Intelligence Scorecard) as a `GitHubDelivery`
 connection, and the pages of the live scorecard (cmdemo1-scorecard's Scorecard.Web) are exported from that store as
-static files, published at <https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard/index.html>.
+static files, published at <https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard/index.html> (cmdemo1)
+and <https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard-cmdemo2/index.html> (cmdemo2).
 
 Step 1 of the design "Space-level scorecard on cmis": discovery, cmis harvest and a static page, run by hand. Step 2:
 the same run every night as an Octopus runbook of the space, its store kept as a package in the space's built-in feed
@@ -210,6 +211,12 @@ which holds Storage Blob Data Contributor on that container only and signs in on
 `cmdemo1-scorecard-space` in prod (one federated credential, issuer the Octopus server, subject
 `space:cmdemo1-demo:project:cmdemo1-scorecard-space:environment:prod`). `infra/own/test-scorecard-site.ps1` checks it.
 
+Each other space in `infra/own/scorecard-site-spaces.json` (`prefix`, `spaceSlug`; cmdemo2 now) gets a public container
+`scorecard-<prefix>` of the same account, the same role of the same identity on it, and a federated credential for
+runs of `<prefix>-scorecard-space` in that space's prod (subject `space:cmdemo2-demo:project:cmdemo2-scorecard-space:environment:prod`).
+Its configuration names that container in `site.container`; a test checks the two lists agree. The identity can write
+every container of the site from a run of any of these projects: one operator runs them all.
+
 Not a static website: ARM has no setting for one, and under the stack's deny settings only the deploy identity could
 switch one on, which no step of the system's deployment does for a resource of `infra/own`. So the pages are at
 `https://<account>.blob.core.windows.net/scorecard/index.html`, not at the account's root.
@@ -283,7 +290,9 @@ cmdemo2-dashboard, cmdemo2-ui, the work orders of cmdemo2-workorders), all in cl
   (`scorecardSpace`): cmdemo2 has no scorecard deployable. The runbook's key (the operator's) reads both spaces.
   A runner key (`-ReadRunnerKey`) would need Project viewer in Spaces-355 as well; without it every run's export fails
   and the page falls back to `scorecard.html` (a warning).
-- No `site`: the pages are artifacts of each run's task (`scorecard-site.zip`, `index.html`), not published. A public
-  container for them would be cmdemo1's (cmdemo2's Azure stack belongs to cmdemo2-system), with a federated
-  credential for a project of another space; not done.
+- The pages are published by cmdemo1's site, not by cmdemo2's Azure stack, which belongs to cmdemo2-system: container
+  `scorecard-cmdemo2` of `stcmdemo1prodsscj7265dy3`, written as `id-cmdemo1-prod-scorecard-site` through the Octopus
+  account `azure-cmdemo2-scorecard-site` of Spaces-356
+  (<https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard-cmdemo2/index.html>). They are artifacts of each
+  run's task too.
 - Same automation rules as cmdemo1 (the kit's pins and template syncs).
