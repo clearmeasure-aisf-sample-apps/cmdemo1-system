@@ -5,7 +5,8 @@
 .SYNOPSIS
     Tests Invoke-SpaceScorecard.ps1 without network: discovery's resolution order (fake Octopus answers), the
     release-notes address rule, the connection ids and coordinates, the page and summary rendered from a small
-    fixture, and the store package (version, which one is restored, what it holds, restore against a fake feed).
+    fixture, the store package (version, which one is restored, what it holds, restore against a fake feed), and the
+    export and published site (release commit, content types, upload order, stale files, secrets kept out, the zip).
     PASS or FAIL per case; exit 1 on a FAIL.
 .EXAMPLE
     pwsh -NoProfile -File space-scorecard/test-space-scorecard.ps1
@@ -282,6 +283,15 @@ Test-Case 'config: zero history days is refused' (Read-Fixture @{ historyDays = 
 Test-Case 'config: an invalid pattern is refused' (Read-Fixture @{ automation = @{ branches = @('([') } }) 'refused: automation.branches holds an invalid regular expression: (['
 Test-Case 'config: a prefix that cannot begin a package id is refused' (Read-Fixture @{ prefix = 'Cm Demo' }) "refused: 'prefix' must be lower case letters, digits and '-' (it begins a package id)."
 Test-Case 'config: prefix kept' (Read-Fixture @{ prefix = 'cmdemo1' }).prefix 'cmdemo1'
+$scorecard = @{ scorecardVersion = '1.0.40'; scorecardRepo = 'acme/scorecard'; scorecardProject = 'acme-scorecard' }
+Test-Case 'config: scorecard release kept' (Read-Fixture $scorecard).scorecardVersion '1.0.40'
+Test-Case 'config: a scorecard version that is no release number is refused' (Read-Fixture @{ scorecardVersion = 'latest'; scorecardRepo = 'acme/scorecard'; scorecardProject = 'p' }) "refused: 'scorecardVersion' must be a release number such as 1.0.40."
+Test-Case 'config: a scorecard version without its repository is refused' (Read-Fixture @{ scorecardVersion = '1.0.40'; scorecardProject = 'p' }) "refused: 'scorecardRepo' (owner/repo) is required with 'scorecardVersion'."
+Test-Case 'config: a scorecard version without its project is refused' (Read-Fixture @{ scorecardVersion = '1.0.40'; scorecardRepo = 'acme/scorecard' }) "refused: 'scorecardProject' (the Octopus project of the release) is required with 'scorecardVersion'."
+Test-Case 'config: site kept' (Read-Fixture ($scorecard + @{ site = @{ account = 'stacme01'; container = 'scorecard' } })).site.container 'scorecard'
+Test-Case 'config: a site without a scorecard version is refused' (Read-Fixture @{ site = @{ account = 'stacme01'; container = 'scorecard' } }) "refused: 'site' needs 'scorecardVersion': the published pages are the export's."
+Test-Case 'config: a site account with capitals is refused' (Read-Fixture @{ site = @{ account = 'StAcme'; container = 'scorecard' } }) "refused: 'site' needs 'account' (a storage account name) and 'container' (a blob container name)."
+Test-Case 'config: a site without container is refused' (Read-Fixture @{ site = @{ account = 'stacme01' } }) "refused: 'site' needs 'account' (a storage account name) and 'container' (a blob container name)."
 Remove-Item -LiteralPath $configFile -Force
 
 # --- Store in the built-in feed --------------------------------------------------------------------------------
@@ -384,9 +394,38 @@ $script:listedAfterPush = @((Pkg '2026.10.22.1500'))
 Test-Case 'push: a redirect answer without the version listed fails' $(try { Publish-StoreToFeed $restoreConfig $runDir $pushTime 6>$null; 'pushed' } catch { 'refused' }) 'refused'
 Remove-Item -LiteralPath $tmp -Recurse -Force
 
+# --- Export and the published site ----------------------------------------------------------------------------
+Test-Case 'release commit: from the release notes' (Get-ReleaseCommit 'Build https://github.com/acme/s/actions/runs/39732855846 of b6f970025e683bffc3ed0f33424f5c2d7a01d420, committed 2026-10-22T06:15:43Z') 'b6f970025e683bffc3ed0f33424f5c2d7a01d420'
+Test-Case 'release commit: notes without a full commit id' (Get-ReleaseCommit 'Build of b6f9700, committed today') $null
+Test-Case 'release commit: no notes' (Get-ReleaseCommit $null) $null
+Test-Case 'site: address of the pages' (Get-SiteUrl @{ account = 'stacme01'; container = 'scorecard' }) 'https://stacme01.blob.core.windows.net/scorecard/index.html'
+Test-Case 'site: content types by extension' @((Get-SiteContentType '.html'), (Get-SiteContentType '.CSS'), (Get-SiteContentType '.woff2'), (Get-SiteContentType '.png'), (Get-SiteContentType '.bin'), (Get-SiteContentType '')) @('text/html; charset=utf-8', 'text/css; charset=utf-8', 'font/woff2', 'image/png', 'application/octet-stream', 'application/octet-stream')
+Test-Case 'site: assets first, then the pages, index.html last' @((Get-SiteUploadOrder 'css/site.css'), (Get-SiteUploadOrder 'drill/a.html'), (Get-SiteUploadOrder 'split.html'), (Get-SiteUploadOrder 'index.html'), (Get-SiteUploadOrder 'drill/index.html')) @(1, 2, 2, 3, 2)
+Test-Case 'site: what the export no longer has is deleted' @(Get-StaleBlobs @('index.html', 'drill/old.html', 'css/a.css', 'Drill/x.html') @('index.html', 'css/a.css', 'drill/x.html')) @('drill/old.html', 'Drill/x.html')
+Test-Case 'site: nothing to delete from an empty container' @(Get-StaleBlobs @() @('index.html')) @()
+$savedAzure = $env:AZURE_CONFIG_DIR
+$env:CMIS_SHOP_API_TOKEN = 'secret-a'; $env:OCTOPUS_API_KEY = 'secret-b'; $env:AZURE_CONFIG_DIR = '/tmp/az-signed-in'; $env:SPACE_SCORECARD_TEST = 'kept'
+$inside = Invoke-WithoutSecrets { @([bool] $env:CMIS_SHOP_API_TOKEN, [bool] $env:OCTOPUS_API_KEY, [bool] $env:AZURE_CONFIG_DIR, $env:SPACE_SCORECARD_TEST) }
+Test-Case 'secrets: out of the environment of the build and the export' @($inside) @($false, $false, $false, 'kept')
+Test-Case 'secrets: back after it' @($env:CMIS_SHOP_API_TOKEN, $env:OCTOPUS_API_KEY, $env:AZURE_CONFIG_DIR) @('secret-a', 'secret-b', '/tmp/az-signed-in')
+$back = try { Invoke-WithoutSecrets { throw 'export failed' } } catch { $env:CMIS_SHOP_API_TOKEN }
+Test-Case 'secrets: back after a failure too' $back 'secret-a'
+Remove-Item env:CMIS_SHOP_API_TOKEN, env:OCTOPUS_API_KEY, env:SPACE_SCORECARD_TEST
+$env:AZURE_CONFIG_DIR = $savedAzure
+$siteDir = Join-Path ([IO.Path]::GetTempPath()) "space-scorecard-site-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path "$siteDir/site/drill" -Force | Out-Null
+Set-Content -LiteralPath "$siteDir/site/index.html" -Value 'i'; Set-Content -LiteralPath "$siteDir/site/drill/a.html" -Value 'a'
+New-SiteArchive "$siteDir/site" "$siteDir/scorecard-site.zip"
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [IO.Compression.ZipFile]::OpenRead("$siteDir/scorecard-site.zip")
+Test-Case 'site zip: the files by their paths in the site' @($zip.Entries | ForEach-Object { $_.FullName -replace '\\', '/' } | Sort-Object) @('drill/a.html', 'index.html')
+$zip.Dispose()
+Remove-Item -LiteralPath $siteDir -Recurse -Force
+
 # --- Inside Octopus --------------------------------------------------------------------------------------------
 Test-Case 'octopus: not inside an Octopus step here' (Test-InsideOctopus) $false
 Test-Case 'highlight: last full week of the space, measured, store version' (Get-HighlightLine $fixture '2026.10.22.51500') 'Space Spaces-1, 2026-09-28 to 2026-10-14: week of 2026-10-05 started 0, delivered 1, WIP 0, MTTD 5.8 h; 1 of 2 projects measured; store 2026.10.22.51500'
+Test-Case 'highlight: and where the pages are' (Get-HighlightLine $fixture '2026.10.22.51500' 'pages at https://stacme01.blob.core.windows.net/scorecard/index.html') 'Space Spaces-1, 2026-09-28 to 2026-10-14: week of 2026-10-05 started 0, delivered 1, WIP 0, MTTD 5.8 h; 1 of 2 projects measured; store 2026.10.22.51500; pages at https://stacme01.blob.core.windows.net/scorecard/index.html'
 
 if ($failures) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'All passed'

@@ -7,7 +7,7 @@
     repository, harvested with cmis (Clear Measure Intelligence Scorecard), written as one static page.
 
 .DESCRIPTION
-    Steps 1 and 2 of the design "Space-level scorecard on cmis". One run, in this order (each step a function below):
+    Steps 1 to 3 of the design "Space-level scorecard on cmis". One run, in this order (each step a function below):
 
       Get cmis      The release the configuration pins (cmisVersion) from cmisRepo, through the GitHub REST API with the
                     GitHub token, its SHA-256 checked against the release's SHA256SUMS.txt, unpacked into <WorkDir>/bin.
@@ -38,12 +38,25 @@
       Render        scorecard.html (one file, no external request, no script) and summary.md, from
                     scorecard-data.json, the numbers and lists the compute step gathered (no item titles). One function
                     (Write-ScorecardFiles), apart from harvest and compute, so another renderer can take its place.
-      Octopus       Inside an Octopus step (OctopusParameters or New-OctopusArtifact is there): scorecard.html,
-                    summary.md and document.json become artifacts of the task, and a line of the space's last full
-                    week is highlighted.
+      Export        With scorecardVersion in the configuration: the pages of Scorecard.Web (cmdemo1-scorecard) as
+                    static files in <WorkDir>/site (index.html, split.html, people.html, split-people.html, drill/,
+                    css/, fonts/), the same pages as the live scorecard, from this run's store, and the site as
+                    scorecard-site.zip. Scorecard.Web is built here from the commit release scorecardVersion of the
+                    Octopus project scorecardProject names (its notes), with the .NET SDK of the machine. When the
+                    build or the export fails, a warning, and scorecard.html is the page.
+      Publish       With -PublishSite: the exported site into the public blob container site.container of storage
+                    account site.account as the signed-in az identity (in Octopus, the step's Azure account); files
+                    the export no longer has are deleted. The address is in the summary and the highlight. A
+                    failure fails the run at its end, after the push.
+      Octopus       Inside an Octopus step (OctopusParameters or New-OctopusArtifact is there): summary.md,
+                    document.json and the pages (scorecard-site.zip and index.html; scorecard.html without an export)
+                    become artifacts of the task, and a line of the space's last full week is highlighted.
       Push          With -StoreFeed, after everything above succeeded: store, workspace, harvest-state.json and
                     discovery.json as <prefix>-scorecard-store.<version>.zip to the built-in feed (never replacing a
                     version), version yyyy.M.d.HHmmss in UTC. A run that fails pushes nothing.
+
+    cmis and Scorecard.Web run culture-invariant (DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1): Scorecard.Web rebuilds a
+    store that cmis wrote under another culture from its raw files.
 
     Weeks are cmis's weekly periods: ISO weeks, Monday 00:00 UTC to the next, as cmdemo1-scorecard's page shows them.
     timeZone only sets the calendar days of document.json and what "today" is.
@@ -67,6 +80,9 @@
     Keeps the store in the space's built-in Octopus feed: restored from the newest <prefix>-scorecard-store package
     before the harvest, pushed as a new version after a run that succeeded. Needs "prefix" in the configuration and an
     Octopus key that may view and download from the built-in feed and push to it. Not with -SkipHarvest.
+.PARAMETER PublishSite
+    Publishes the exported site to the configuration's "site" (needs "site" and "scorecardVersion", and az signed in
+    as an identity that may write that container).
 .PARAMETER LoadOnly
     Defines the functions and stops (for the tests).
 .EXAMPLE
@@ -80,6 +96,7 @@ param(
     [string] $Until,
     [switch] $SkipHarvest,
     [switch] $StoreFeed,
+    [switch] $PublishSite,
     [switch] $LoadOnly
 )
 Set-StrictMode -Version Latest
@@ -123,6 +140,19 @@ function Read-SpaceConfig([string] $Path) {
         }
     }
     [void] [TimeZoneInfo]::FindSystemTimeZoneById($c.timeZone)
+    # The pages through Scorecard.Web's export: the release of the deployable's Octopus project names the commit.
+    if ($c['scorecardVersion']) {
+        if (-not ($c['scorecardVersion'] -is [string] -and $c['scorecardVersion'] -cmatch '^\d+\.\d+\.\d+\z')) { throw "$Path`: 'scorecardVersion' must be a release number such as 1.0.40." }
+        if (-not ($c['scorecardRepo'] -is [string] -and $c['scorecardRepo'] -cmatch '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+\z')) { throw "$Path`: 'scorecardRepo' (owner/repo) is required with 'scorecardVersion'." }
+        if (-not ($c['scorecardProject'] -is [string] -and $c['scorecardProject'].Trim())) { throw "$Path`: 'scorecardProject' (the Octopus project of the release) is required with 'scorecardVersion'." }
+    }
+    if ($c['site']) {
+        $s = $c['site']
+        if ($s -isnot [Collections.IDictionary] -or -not ("$($s['account'])" -cmatch '^[a-z0-9]{3,24}\z') -or -not ("$($s['container'])" -cmatch '^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]\z')) {
+            throw "$Path`: 'site' needs 'account' (a storage account name) and 'container' (a blob container name)."
+        }
+        if (-not $c['scorecardVersion']) { throw "$Path`: 'site' needs 'scorecardVersion': the published pages are the export's." }
+    }
     $c
 }
 
@@ -350,6 +380,28 @@ function Invoke-Cmis([string] $Cmis, [string[]] $Arguments, [string] $Workspace,
         $envelope['data']
     }
     finally { Remove-Item -LiteralPath $errors -Force -ErrorAction SilentlyContinue }
+}
+
+# A normalized store that cmis wrote under a culture (en-US, before this script ran cmis culture-invariant) cannot be
+# opened culture-invariant: cmis stops with CultureNotFoundException. It is then rebuilt from the raw harvest, offline
+# ("connections renormalize": no tracker is asked, the numbers stay the same). Returns whether it was rebuilt.
+function Repair-StoreCulture([string] $Cmis, [hashtable] $Paths) {
+    $db = Join-Path $Paths.Store 'normalized.db'
+    if (-not (Test-Path -LiteralPath $db)) { return $false }
+    try { Invoke-Cmis $Cmis @('connections', 'inventory') $Paths.Workspace $Paths.Store | Out-Null; return $false }
+    catch { if ("$_" -notmatch 'CultureNotFoundException|is an invalid culture identifier') { throw } }
+    # Kept aside until the rebuild worked: a failed one leaves the store as it was.
+    $aside = "$db.culture-$([guid]::NewGuid().ToString('N'))"
+    Move-Item -LiteralPath $db -Destination $aside
+    try { $rebuilt = Invoke-Cmis $Cmis @('connections', 'renormalize') $Paths.Workspace $Paths.Store }
+    catch {
+        Remove-Item -LiteralPath $db -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $aside -Destination $db
+        throw
+    }
+    Remove-Item -LiteralPath $aside -Force
+    Write-Host "store: normalized.db was written under another culture; rebuilt culture-invariant from the raw harvest ($(@($rebuilt['connections']).Count) connections)"
+    $true
 }
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -979,6 +1031,227 @@ function Write-ScorecardFiles($Data, [string] $Directory) {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
+# Export through Scorecard.Web
+# ---------------------------------------------------------------------------------------------------------------
+
+# The commit a release of the scorecard deployable was built from: its release workflow writes the notes
+# "Build <run address> of <40 hex digits>, committed <time>". $null when the notes name none.
+function Get-ReleaseCommit([string] $Notes) {
+    if ("$Notes" -cmatch '\bof ([0-9a-f]{40})\b') { return $Matches[1] }
+    $null
+}
+
+# Runs a script block with the secrets of this process (GITHUB_TOKEN, OCTOPUS_API_KEY, every CMIS_*_TOKEN, and
+# AZURE_CONFIG_DIR, where Octopus signed az in as the site's identity) taken out of its environment, and puts them back
+# after: the build and the export of Scorecard.Web need none of them, and the processes they start inherit the
+# environment. Not an isolation boundary (they run as the same user), but nothing they start finds a credential in its
+# environment. Returns what the block returns.
+function Invoke-WithoutSecrets([scriptblock] $Script) {
+    $names = @(Get-ChildItem env: | Where-Object { $_.Name -cin 'GITHUB_TOKEN', 'OCTOPUS_API_KEY', 'AZURE_CONFIG_DIR' -or $_.Name -cmatch '^CMIS_.+_TOKEN\z' } | ForEach-Object { $_.Name })
+    $saved = @{}
+    foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n); [Environment]::SetEnvironmentVariable($n, $null) }
+    try { & $Script }
+    finally { foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) } }
+}
+
+# Scorecard.Web of release scorecardVersion of the Octopus project scorecardProject, framework-dependent, in
+# <Directory>: the release's notes name the commit; its source comes through the GitHub REST API (tarball of
+# scorecardRepo) and "dotnet publish" builds Scorecard.Web/Scorecard.Web.csproj (a .NET SDK of the project's
+# framework on the PATH: Hosted Ubuntu has one). Built as the image of that release is (Release, no app host, the
+# release number as the version), without NuGet's vulnerability audit: an advisory published after the release would
+# otherwise stop the build of a commit that built before. Reused when <Directory> holds that build. Returns the path
+# of Scorecard.Web.dll.
+function Get-ScorecardWeb([hashtable] $Config, [string] $Directory) {
+    $version = $Config.scorecardVersion
+    $dll = Join-Path $Directory 'Scorecard.Web.dll'
+    $marker = Join-Path $Directory 'space-scorecard-build.json'
+    if ((Test-Path -LiteralPath $dll) -and (Test-Path -LiteralPath $marker)) {
+        $built = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json -AsHashtable
+        if ($built['version'] -ceq $version -and $built['repository'] -ceq $Config.scorecardRepo) {
+            Write-Host "Scorecard.Web $version`: reused from $Directory (commit $($built['commit']))"
+            return $dll
+        }
+    }
+    $started = [Diagnostics.Stopwatch]::StartNew()
+    $name = $Config.scorecardProject
+    $projects = @(@((Invoke-OctopusRequest $Config "/api/$($Config.space)/projects?partialName=$([uri]::EscapeDataString($name))&take=100")['Items']) | Where-Object { $_ -and $_['Name'] -ceq $name })
+    if ($projects.Count -ne 1) { throw "Space $($Config.space) has $($projects.Count) projects named $name." }
+    $release = Invoke-OctopusRequest $Config "/api/$($Config.space)/projects/$($projects[0]['Id'])/releases/$([uri]::EscapeDataString($version))"
+    $commit = Get-ReleaseCommit ([string] $release['ReleaseNotes'])
+    if (-not $commit) { throw "The notes of release $version of $name name no commit." }
+
+    $work = Join-Path ([IO.Path]::GetTempPath()) "scorecard-web-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $work | Out-Null
+    try {
+        $tarball = Join-Path $work 'source.tar.gz'
+        Invoke-GitHubGet "/repos/$($Config.scorecardRepo)/tarball/$commit" 'application/vnd.github+json' $tarball
+        $source = Join-Path $work 'source'
+        New-Item -ItemType Directory -Path $source | Out-Null
+        $PSNativeCommandUseErrorActionPreference = $false
+        tar -xzf $tarball -C $source --strip-components=1
+        if ($LASTEXITCODE -ne 0) { throw "Unpacking $($Config.scorecardRepo) at $commit failed (exit $LASTEXITCODE)." }
+        $csproj = Join-Path $source 'Scorecard.Web/Scorecard.Web.csproj'
+        if (-not (Test-Path -LiteralPath $csproj)) { throw "$($Config.scorecardRepo) at $commit has no Scorecard.Web/Scorecard.Web.csproj." }
+        if (Test-Path -LiteralPath $Directory) { Remove-Item -LiteralPath $Directory -Recurse -Force }
+        $log = Join-Path $work 'publish.log'
+        $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'; $env:DOTNET_NOLOGO = '1'
+        $exit = Invoke-WithoutSecrets {
+            dotnet publish $csproj --configuration Release --output $Directory -p:UseAppHost=false "-p:Version=$version" -p:NuGetAudit=false *> $log
+            $LASTEXITCODE
+        }
+        if ($exit -ne 0 -or -not (Test-Path -LiteralPath $dll)) {
+            $tail = @(Get-Content -LiteralPath $log -Tail 15 -ErrorAction SilentlyContinue) -join "`n"
+            throw "dotnet publish of Scorecard.Web $version ($commit) failed (exit $exit):`n$tail"
+        }
+        ConvertTo-Json -InputObject ([ordered]@{ version = $version; repository = $Config.scorecardRepo; commit = $commit }) | Set-Content -LiteralPath $marker
+    }
+    finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+    Write-Host ("Scorecard.Web {0}: built from {1} at {2} in {3:n0} s" -f $version, $Config.scorecardRepo, $commit, $started.Elapsed.TotalSeconds)
+    $dll
+}
+
+# The export: the pages Scorecard.Web serves, as static files in <OutDir> (index.html, split.html, people.html,
+# split-people.html, drill/, css/, fonts/, logo, icon), from the cmis store and the workspace's connections. Weeks as
+# Scorecard.Web's own page shows them by default (the first to the last week with data). Throws when the export
+# fails or writes no index.html.
+function Export-ScorecardSite([string] $WebDll, [hashtable] $Paths, [string] $Title, [string] $OutDir) {
+    $connections = Join-Path $Paths.Workspace '.cmis/work-tracking.json'
+    if (-not (Test-Path -LiteralPath $connections)) { throw "There is no $connections to export from." }
+    if (Test-Path -LiteralPath $OutDir) { Remove-Item -LiteralPath $OutDir -Recurse -Force }
+    $arguments = @($WebDll, 'export', '--store', $Paths.Store, '--connections', $connections, '--out', $OutDir, '--title', $Title)
+    $result = Invoke-WithoutSecrets {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $lines = @(dotnet @arguments 2>&1 | ForEach-Object { "$_" })
+        @{ Lines = $lines; Exit = $LASTEXITCODE }
+    }
+    foreach ($line in $result.Lines) { Write-Host "  export: $line" }
+    if ($result.Exit -ne 0) { throw "Scorecard.Web export failed (exit $($result.Exit))." }
+    if (-not (Test-Path -LiteralPath (Join-Path $OutDir 'index.html'))) { throw "Scorecard.Web export wrote no index.html." }
+}
+
+# What the pages say they cover: the configuration's "title", else the Octopus space's name, else its id.
+function Get-SiteTitle([hashtable] $Config) {
+    if ($Config['title']) { return [string] $Config['title'] }
+    if ($env:OCTOPUS_API_KEY) {
+        try { $name = [string] (Invoke-OctopusRequest $Config "/api/spaces/$($Config.space)")['Name']; if ($name) { return $name } }
+        catch { Write-Warning "The space's name could not be read ($($_.Exception.Message)); the pages say $($Config.space)." }
+    }
+    $Config.space
+}
+
+# The exported site as one zip, its files by their paths relative to the site's folder.
+function New-SiteArchive([string] $SiteDir, [string] $ZipPath) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (Test-Path -LiteralPath $ZipPath) { Remove-Item -LiteralPath $ZipPath -Force }
+    [IO.Compression.ZipFile]::CreateFromDirectory($SiteDir, $ZipPath, [IO.Compression.CompressionLevel]::Optimal, $false)
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# The published site (-PublishSite)
+# ---------------------------------------------------------------------------------------------------------------
+
+# The address of the published pages: the blob container's public index.html.
+function Get-SiteUrl([hashtable] $Site) { "https://$($Site.account).blob.core.windows.net/$($Site.container)/index.html" }
+
+# The Content-Type of a file of the site, by its extension: set on upload, as what az guesses depends on its Python.
+function Get-SiteContentType([string] $Extension) {
+    $types = @{
+        '.html' = 'text/html; charset=utf-8'; '.css' = 'text/css; charset=utf-8'; '.js' = 'text/javascript; charset=utf-8'
+        '.json' = 'application/json; charset=utf-8'; '.svg' = 'image/svg+xml'; '.png' = 'image/png'; '.jpg' = 'image/jpeg'
+        '.ico' = 'image/x-icon'; '.woff' = 'font/woff'; '.woff2' = 'font/woff2'; '.ttf' = 'font/ttf'; '.otf' = 'font/otf'
+        '.txt' = 'text/plain; charset=utf-8'; '.map' = 'application/json; charset=utf-8'; '.xml' = 'application/xml'
+        '.gif' = 'image/gif'; '.webp' = 'image/webp'; '.webmanifest' = 'application/manifest+json'
+    }
+    $type = $types[$Extension.ToLowerInvariant()]
+    if ($type) { $type } else { 'application/octet-stream' }
+}
+
+# The upload order of a file of the site: what the pages load first (1), then the pages other than index.html (2),
+# index.html last (3), so a page opened meanwhile finds every file it names.
+function Get-SiteUploadOrder([string] $Blob) {
+    if ($Blob -ceq 'index.html') { 3 } elseif ($Blob.EndsWith('.html', [StringComparison]::OrdinalIgnoreCase)) { 2 } else { 1 }
+}
+
+# The blobs the container held before the upload that this export does not have: deleted after it.
+function Get-StaleBlobs($Before, $Names) {
+    $keep = [Collections.Generic.HashSet[string]]::new([string[]] @($Names | Where-Object { $_ }), [StringComparer]::Ordinal)
+    @($Before | Where-Object { $_ -and -not $keep.Contains([string] $_) })
+}
+
+# One az command: its lines on standard output. A failure (exit code, or an ERROR line, which upload-batch writes for
+# a file it did not upload while it still ends with 0) throws with az's own words.
+function Invoke-Az([string[]] $Arguments) {
+    $PSNativeCommandUseErrorActionPreference = $false
+    $errors = [IO.Path]::GetTempFileName()
+    try {
+        $out = @(az @Arguments --only-show-errors 2> $errors | ForEach-Object { "$_" })
+        $code = $LASTEXITCODE
+        $text = "$(Get-Content -LiteralPath $errors -Raw)"
+        if ($code -ne 0 -or $text -cmatch '(?m)^ERROR') { throw "az $($Arguments[0..2] -join ' ') failed (exit $code): $(($text -replace '\x1b\[[0-9;?]*[ -/]*[@-~]', '' -replace '\s+', ' ').Trim())" }
+        $out
+    }
+    finally { Remove-Item -LiteralPath $errors -Force -ErrorAction SilentlyContinue }
+}
+
+# Publish: the exported site into the blob container site.container of storage account site.account, as the signed-in
+# az identity (Microsoft Entra ID: the account takes no shared key; in Octopus the step's Azure account). Every file is
+# uploaded again (Cache-Control no-cache: the names stay from run to run), by Content-Type, in Get-SiteUploadOrder's
+# order; then what the container held that this export does not have is deleted, and the container is checked to hold
+# exactly the export, and index.html to be served as text/html to anyone. Returns the address of the pages.
+function Publish-ScorecardSite([hashtable] $Site, [string] $SiteDir) {
+    $login = @('--account-name', $Site.account, '--auth-mode', 'login')
+    # '--num-results=*' as one word: PowerShell on Linux expands a lone * passed to a native command to the files of the
+    # current directory.
+    $list = @('storage', 'blob', 'list', '--container-name', $Site.container, '--num-results=*', '--query=[].name', '--output', 'tsv') + $login
+    # A role assigned moments ago can take minutes to reach the data plane.
+    $deadline = [datetime]::UtcNow.AddMinutes(10)
+    while ($true) {
+        try { $before = @(Invoke-Az $list | Where-Object { $_ }); break }
+        catch {
+            if ("$_" -notmatch 'AuthorizationPermissionMismatch|AuthorizationFailure|required permissions' -or [datetime]::UtcNow -gt $deadline) { throw }
+            Write-Host "site: $($Site.account)/$($Site.container) cannot be listed yet (a role assigned moments ago?); again in 30 s"
+            Start-Sleep -Seconds 30
+        }
+    }
+    $names = [Collections.Generic.List[string]]::new()
+    $batches = [ordered]@{}
+    $stage = Join-Path ([IO.Path]::GetTempPath()) "scorecard-site-$([guid]::NewGuid().ToString('N'))"
+    try {
+        foreach ($file in @(Get-ChildItem -LiteralPath $SiteDir -Recurse -File -Force)) {
+            $blob = [IO.Path]::GetRelativePath($SiteDir, $file.FullName).Replace([IO.Path]::DirectorySeparatorChar, '/')
+            $names.Add($blob)
+            $order = Get-SiteUploadOrder $blob
+            $type = Get-SiteContentType $file.Extension
+            $key = "$order $type"
+            if (-not $batches.Contains($key)) { $batches[$key] = @{ Order = $order; Type = $type; Folder = (Join-Path $stage "$($batches.Count)"); Files = 0 } }
+            $batch = $batches[$key]
+            $target = Join-Path $batch.Folder $blob
+            New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+            Copy-Item -LiteralPath $file.FullName -Destination $target
+            $batch.Files++
+        }
+        foreach ($batch in @($batches.Values | Sort-Object { $_.Order }, { $_.Type })) {
+            Invoke-Az (@('storage', 'blob', 'upload-batch', '--destination', $Site.container, '--source', $batch.Folder, '--content-type', $batch.Type, '--content-cache-control', 'no-cache', '--overwrite', 'true', '--max-connections', '8', '--no-progress', '--output', 'none') + $login) | Out-Null
+            Write-Host "site: uploaded $($batch.Files) file(s) as $($batch.Type)"
+        }
+    }
+    finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    $stale = @(Get-StaleBlobs $before $names)
+    foreach ($blob in $stale) { Invoke-Az (@('storage', 'blob', 'delete', '--container-name', $Site.container, '--name', $blob, '--output', 'none') + $login) | Out-Null }
+    if ($stale.Count) { Write-Host "site: deleted $($stale.Count) file(s) this export no longer has" }
+    $held = @(Invoke-Az $list | Where-Object { $_ })
+    $missing = @(Get-StaleBlobs $names $held)
+    $extra = @(Get-StaleBlobs $held $names)
+    if ($missing.Count -or $extra.Count) { throw "$($Site.account)/$($Site.container) does not hold exactly the export: $($missing.Count) missing ($(@($missing | Select-Object -First 3) -join ', ')), $($extra.Count) not of it ($(@($extra | Select-Object -First 3) -join ', '))." }
+    $url = Get-SiteUrl $Site
+    $answer = Invoke-WebRequest -Uri $url -Method Head -SkipHttpErrorCheck -MaximumRetryCount 3 -RetryIntervalSec 10
+    $type = [string] @($answer.Headers['Content-Type'])[0]
+    if ([int] $answer.StatusCode -ne 200 -or -not $type.StartsWith('text/html', [StringComparison]::OrdinalIgnoreCase)) { throw "$url answers HTTP $([int] $answer.StatusCode) with Content-Type '$type' to an anonymous request." }
+    Write-Host "site: $($names.Count) file(s) at $url"
+    $url
+}
+
+# ---------------------------------------------------------------------------------------------------------------
 # Store in the built-in feed (-StoreFeed)
 # ---------------------------------------------------------------------------------------------------------------
 
@@ -1129,8 +1402,9 @@ function Test-InsideOctopus {
     [bool] ((Get-Variable -Name OctopusParameters -ErrorAction SilentlyContinue) -or (Get-Command New-OctopusArtifact -ErrorAction SilentlyContinue))
 }
 
-# The line the task log highlights: the space's numbers of the last full week, what is measured, the store version.
-function Get-HighlightLine($Data, [string] $StoreVersion) {
+# The line the task log highlights: the space's numbers of the last full week, what is measured, the store version,
+# and where the pages are published (or why they are not).
+function Get-HighlightLine($Data, [string] $StoreVersion, [string] $SiteNote) {
     $space = @($Data.scopes | Where-Object { $_.id -eq $script:SpaceScopeId }) | Select-Object -First 1
     $full = @($Data.weeks | Where-Object { -not $_.partial })
     $measured = @($Data.projects | Where-Object { $_.measured }).Count
@@ -1147,14 +1421,18 @@ function Get-HighlightLine($Data, [string] $StoreVersion) {
     if ($failed) { $line += ", $failed harvest(s) failed" }
     if (@($Data.warnings).Count) { $line += ", $(@($Data.warnings).Count) warning(s)" }
     if ($StoreVersion) { $line += "; store $StoreVersion" }
+    if ($SiteNote) { $line += "; $SiteNote" }
     $line
 }
 
-# The page, the summary and the document as artifacts of the Octopus task.
-function Publish-OctopusArtifacts([string] $Directory) {
-    foreach ($name in 'scorecard.html', 'summary.md', 'document.json') {
-        $path = Join-Path $Directory $name
-        if (Test-Path -LiteralPath $path) { New-OctopusArtifact -Path $path -Name $name }
+# The artifacts of the Octopus task: the summary and the document, and the pages: the exported site as
+# scorecard-site.zip and its index.html alone, or, when there is no export, the script's own scorecard.html.
+function Publish-OctopusArtifacts([string] $Directory, [string] $SiteDir) {
+    $files = [ordered]@{ 'summary.md' = Join-Path $Directory 'summary.md'; 'document.json' = Join-Path $Directory 'document.json' }
+    if ($SiteDir) { $files['scorecard-site.zip'] = Join-Path $Directory 'scorecard-site.zip'; $files['index.html'] = Join-Path $SiteDir 'index.html' }
+    else { $files['scorecard.html'] = Join-Path $Directory 'scorecard.html' }
+    foreach ($name in $files.Keys) {
+        if (Test-Path -LiteralPath $files[$name]) { New-OctopusArtifact -Path $files[$name] -Name $name }
     }
 }
 
@@ -1164,10 +1442,23 @@ function Publish-OctopusArtifacts([string] $Directory) {
 
 if ($LoadOnly) { return }
 if (-not $Config -or -not $WorkDir) { throw 'Both -Config and -WorkDir are required.' }
-if ($StoreFeed -and $SkipHarvest) { throw '-StoreFeed and -SkipHarvest exclude each other: -SkipHarvest asks Octopus for nothing.' }
+if ($StoreFeed -and $SkipHarvest) { throw '-StoreFeed and -SkipHarvest exclude each other: -SkipHarvest harvests nothing.' }
 
 $started = [Diagnostics.Stopwatch]::StartNew()
 $cfg = Read-SpaceConfig $Config
+if ($PublishSite -and -not ($cfg['site'] -and $cfg['scorecardVersion'])) { throw "-PublishSite needs 'site' and 'scorecardVersion' in $Config." }
+# cmis writes its store under the culture of its process, and Scorecard.Web reads it culture-invariant: a store written
+# under another culture it rebuilds from the raw files on every export. So cmis runs culture-invariant too (the
+# processes this script starts inherit the variable).
+$env:DOTNET_SYSTEM_GLOBALIZATION_INVARIANT = '1'
+# The site's storage token now, while the sign-in Octopus made at the start of the step is fresh: az keeps it (about an
+# hour) for the upload after harvest, build and export. A failure here is the run's failure at its end, as a failed
+# upload is: the store is still pushed.
+$publishFailure = $null
+if ($PublishSite) {
+    try { Invoke-Az @('account', 'get-access-token', '--resource', 'https://storage.azure.com/', '--output', 'none') | Out-Null; Write-Host 'site: az holds a storage token' }
+    catch { $publishFailure = "no storage token: $($_.Exception.Message)"; Write-Warning "The pages will not be published, $publishFailure" }
+}
 if ($StoreFeed) { [void] (Get-StorePackageId $cfg) }
 $window = Resolve-Window $cfg $Since $Until
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
@@ -1175,6 +1466,7 @@ $WorkDir = (Resolve-Path -LiteralPath $WorkDir).Path
 $paths = @{
     Bin = Join-Path $WorkDir 'bin'; Workspace = Join-Path $WorkDir 'workspace'; Store = Join-Path $WorkDir 'store'
     HarvestState = Join-Path $WorkDir 'harvest-state.json'; Document = Join-Path $WorkDir 'document.json'
+    Web = Join-Path $WorkDir 'web'; Site = Join-Path $WorkDir 'site'
 }
 foreach ($dir in $paths.Workspace, $paths.Store) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 Write-Host "Space $($cfg.space), window $($window.Since) to $($window.Until) ($($cfg.timeZone))"
@@ -1189,12 +1481,14 @@ if ($SkipHarvest) {
     $projects = @(Get-Content -LiteralPath $discovery -Raw | ConvertFrom-Json -AsHashtable)
     $measured = @($projects | Where-Object { $_.measured })
     if (-not $measured.Count) { throw 'No project of the space is measured.' }
+    [void] (Repair-StoreCulture $cmis $paths)
     Read-ConnectionBases $cmis $measured $paths
     $harvest = [ordered]@{ skipped = $true }
 }
 else {
     $restored = if ($StoreFeed) { Restore-StoreFromFeed $cfg $WorkDir } else { $null }
     foreach ($dir in $paths.Workspace, $paths.Store) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [void] (Repair-StoreCulture $cmis $paths)
     # Not a closure: a closure would not see the functions of this script.
     $getJson = { param($Path) Invoke-OctopusRequest $cfg $Path }
     # Only GitHub's 404 means "no such repository"; any other failure (network, rate limit, login) stops the run.
@@ -1216,13 +1510,49 @@ $data = Get-ScorecardData $cmis $cfg $projects $window $paths $harvest
 if ($StoreFeed) { $data.store = [ordered]@{ package = Get-StorePackageId $cfg; restored = $restored } }
 Write-ScorecardFiles $data $WorkDir
 foreach ($w in $data.warnings) { Write-Warning $w }
+
+# The pages through Scorecard.Web's export; when that fails, the script's own scorecard.html (written above) stands in.
+$siteDir = $null
+$siteNote = $null
+if ($cfg['scorecardVersion']) {
+    try {
+        $web = Get-ScorecardWeb $cfg $paths.Web
+        Export-ScorecardSite $web $paths (Get-SiteTitle $cfg) $paths.Site
+        New-SiteArchive $paths.Site (Join-Path $WorkDir 'scorecard-site.zip')
+        $siteDir = $paths.Site
+        Write-Host "site: exported with Scorecard.Web $($cfg.scorecardVersion) to $siteDir"
+    }
+    catch {
+        $siteNote = 'no Scorecard.Web export, the page is scorecard.html'
+        Write-Warning "No Scorecard.Web export; the page is the script's own scorecard.html: $($_.Exception.Message)"
+    }
+}
+
+# Published before the store is pushed, and a failure is the run's failure only at its end: the store is pushed and the
+# artifacts are attached either way.
+if ($PublishSite) {
+    $url = Get-SiteUrl $cfg.site
+    if ($publishFailure) { $siteNote = "pages NOT published to $url" }
+    elseif ($siteDir) {
+        try { $siteNote = "pages at $(Publish-ScorecardSite $cfg.site $siteDir)" }
+        catch {
+            $publishFailure = $_.Exception.Message
+            $siteNote = "pages NOT published to $url"
+            Write-Warning "The pages were not published to $url`: $publishFailure"
+        }
+    }
+    else { $siteNote = "no Scorecard.Web export, so nothing published; $url keeps the last pages" }
+    Add-Content -LiteralPath (Join-Path $WorkDir 'summary.md') -Value "`n## Published pages`n`n$(if ($publishFailure -or -not $siteDir) { $siteNote } else { "The pages of this run: <$url>" })"
+}
+
 $inOctopus = Test-InsideOctopus
-if ($inOctopus) { Publish-OctopusArtifacts $WorkDir }
+if ($inOctopus) { Publish-OctopusArtifacts $WorkDir $siteDir }
 # Last: only a run that got this far pushes its store.
 $pushed = if ($StoreFeed) { Publish-StoreToFeed $cfg $WorkDir } else { $null }
 # The store is pushed by now: a highlight that fails is a warning, not a failed run.
 if ($inOctopus) {
-    try { Write-Highlight (Get-HighlightLine $data $pushed) }
+    try { Write-Highlight (Get-HighlightLine $data $pushed $siteNote) }
     catch { Write-Warning "No highlight: $($_.Exception.Message)" }
 }
-Write-Host ("Done in {0:n1} s: {1}" -f $started.Elapsed.TotalSeconds, (Join-Path $WorkDir 'scorecard.html'))
+if ($publishFailure) { throw "The pages were not published to $(Get-SiteUrl $cfg.site): $publishFailure" }
+Write-Host ("Done in {0:n1} s: {1}" -f $started.Elapsed.TotalSeconds, $(if ($siteDir) { Join-Path $siteDir 'index.html' } else { Join-Path $WorkDir 'scorecard.html' }))
