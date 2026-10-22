@@ -486,11 +486,12 @@ Test-Case 'summary: a project week without data is null' @((SummaryWeek 'shop-ap
 Test-Case 'summary: the recompute check holds' $summary.recomputed 'The rules of llms.txt give every started, delivered, work in process and MTTD number of these weeks from the item files.'
 Test-Case 'summary: the list behind a number' (SummaryWeek '_space' '2026-09-28').lists.itemsStarted 'data/drill/_space/2026-09-28/itemsStarted.json'
 Test-Case 'summary: definitions of the page, in its order' @($summary.metrics | ForEach-Object { $_.key }) @('workInProcess', 'itemsStarted', 'itemsDelivered', 'meanTimeToDelivery', 'throughput', 'rework', 'netThroughput')
-Test-Case 'summary: a project names its items' @($summary.projects | ForEach-Object { "$($_.project) $($_.items)" }) @('shop-api data/items/shop-api.json', 'Retired ')
+Test-Case 'summary: a project names every part of its items' @($summary.projects | ForEach-Object { "$($_.project) $(@($_.items)[0]) $(@($_.items).Count -eq @($layer.ItemFiles[[string] $_.connectionId]).Count)" }) @('shop-api data/items/shop-api.json True', 'Retired  True')
 $drill = Get-Content -LiteralPath "$pagesRoot/data/drill/_space/2026-09-28/itemsStarted.json" -Raw | ConvertFrom-Json -AsHashtable
 $drillItems = @($(if ($drill['partFiles']) { $drill.partFiles } else { 'data/drill/_space/2026-09-28/itemsStarted.json' }) | ForEach-Object { (Get-Content -LiteralPath (Join-Path $pagesRoot $_) -Raw | ConvertFrom-Json -AsHashtable).items })
 Test-Case 'drill file: count, and the items with their titles' @(@($drill.count, $drill.listed) + @($drillItems | ForEach-Object { "$($_.number) $($_.title)" })) @(3, 3, '12 Checkout [beta] *fast*', '13 Basket', '961170 Pin api 1.2.3')
-Test-Case 'drill file: where the items'' histories are' $drill.itemFiles['acme/shop-api'] 'data/items/shop-api.json'
+Test-Case 'summary: items are a list also with one part' ((Get-Content -LiteralPath "$pagesRoot/data/summary.json" -Raw) -match '"items":\["data/items/shop-api\.json"') $true
+Test-Case 'drill file: where the items'' histories are, every part' @($drill.itemFiles['acme/shop-api']) @($layer.ItemFiles['shop-api'])
 $itemFile = Get-Content -LiteralPath "$pagesRoot/data/items/shop-api.json" -Raw | ConvertFrom-Json -AsHashtable
 Test-Case 'items file: in parts when large, each naming them all' @($itemFile.part, $itemFile.parts, ($itemFile.partFiles | ForEach-Object { Test-Path -LiteralPath (Join-Path $pagesRoot $_) })) @(1, $itemFile.parts, @($itemFile.partFiles | ForEach-Object { $true }))
 Test-Case 'items file: every item across the parts' @($itemFile.partFiles | ForEach-Object { (Get-Content -LiteralPath (Join-Path $pagesRoot $_) -Raw | ConvertFrom-Json -AsHashtable).items } | ForEach-Object { $_.number }) @(12, 13, 961170, 14)
@@ -577,15 +578,18 @@ Test-Case 'export: a pinned commit asks Octopus nothing' @(@(Get-ScorecardCommit
 # The configurations in this folder: each reads, and each names its own space, store and runbook project.
 $cmdemo1 = Read-SpaceConfig (Join-Path $PSScriptRoot 'cmdemo1.json')
 $cmdemo2 = Read-SpaceConfig (Join-Path $PSScriptRoot 'cmdemo2.json')
-Test-Case 'cmdemo1.json: space, store, scorecard release in its own space' @($cmdemo1.space, (Get-StorePackageId $cmdemo1), (Get-ScorecardSpace $cmdemo1), $cmdemo1.site.container) @('Spaces-355', 'cmdemo1-scorecard-store', 'Spaces-355', 'scorecard')
+Test-Case 'cmdemo1.json: space, store, scorecard release in its own space' @($cmdemo1.space, (Get-StorePackageId $cmdemo1), (Get-ScorecardSpace $cmdemo1)) @('Spaces-355', 'cmdemo1-scorecard-store', 'Spaces-355')
+Test-Case 'cmdemo1.json: GitHub Pages only, Scorecard.Web by its commit' @($cmdemo1.site.Contains('account'), $cmdemo1.site.pages.repo, $cmdemo1.site.pages.branch, $cmdemo1.site.pages.url, $cmdemo1.scorecardCommit) @($false, 'clearmeasure-aisf-sample-apps/cmdemo1-scorecard-site', 'gh-pages', 'https://legendary-doodle-8lk2k24.pages.github.io/', 'b6f970025e683bffc3ed0f33424f5c2d7a01d420')
+# The storage account of the site infra/own/main.bicep makes in cmdemo1's prod (step 3); cmdemo1's own pages left it in step 5.
+$siteAccount = 'stcmdemo1prodsscj7265dy3'
 Test-Case 'cmdemo2.json: space, store, scorecard release in the space of cmdemo1' @($cmdemo2.space, (Get-StorePackageId $cmdemo2), (Get-ScorecardSpace $cmdemo2), ($cmdemo2.exclude -join ",")) @('Spaces-356', 'cmdemo2-scorecard-store', 'Spaces-355', 'cmdemo2-scorecard-space')
-Test-Case 'cmdemo2.json: pages in a container of their own in the site of cmdemo1' @($cmdemo2.site.account, $cmdemo2.site.container, (Get-SiteUrl $cmdemo2.site)) @($cmdemo1.site.account, 'scorecard-cmdemo2', 'https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard-cmdemo2/index.html')
+Test-Case 'cmdemo2.json: pages in a container of their own in the site of cmdemo1' @($cmdemo2.site.account, $cmdemo2.site.container, (Get-SiteUrl $cmdemo2.site)) @($siteAccount, 'scorecard-cmdemo2', 'https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard-cmdemo2/index.html')
 # Every configuration that publishes into the site of this repository: the space's own container, or one that
 # infra/own/main.bicep makes for that space (scorecard-site-spaces.json), so a run never writes another space's pages.
 $siteSpaces = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot '../infra/own/scorecard-site-spaces.json') -Raw | ConvertFrom-Json -AsHashtable)
-$publishing = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.json' | ForEach-Object { Read-SpaceConfig $_.FullName } | Where-Object { $_['site'] -and $_.site.account -ceq $cmdemo1.site.account })
-Test-Case 'site: cmdemo1 and cmdemo2 publish there' ($publishing.Count -ge 2) $true
-Test-Case 'site: each space that publishes there has a container of its own, made by infra/own' @($publishing | ForEach-Object { if ($_.prefix -ceq $cmdemo1.prefix) { $_.site.container -ceq 'scorecard' } else { $p = $_.prefix; $_.site.container -ceq "scorecard-$p" -and @($siteSpaces | Where-Object { $_.prefix -ceq $p }).Count -eq 1 } }) @($publishing | ForEach-Object { $true })
+$publishing = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.json' | ForEach-Object { Read-SpaceConfig $_.FullName } | Where-Object { $_['site'] -and $_.site['account'] -ceq $siteAccount })
+Test-Case 'site: cmdemo2 publishes there, cmdemo1 no more' @($publishing | ForEach-Object { $_.prefix }) @('cmdemo2')
+Test-Case 'site: each space that publishes there has a container of its own, made by infra/own' @($publishing | ForEach-Object { $p = $_.prefix; $_.site.container -ceq "scorecard-$p" -and @($siteSpaces | Where-Object { $_.prefix -ceq $p }).Count -eq 1 }) @($publishing | ForEach-Object { $true })
 Test-Case 'site: every space infra/own makes a container for has a configuration, a prefix and a space slug a container name and subject take' @($siteSpaces | ForEach-Object { (Test-Path -LiteralPath (Join-Path $PSScriptRoot "$($_.prefix).json")) -and "scorecard-$($_.prefix)".Length -le 63 -and $_.prefix -cmatch '^[a-z0-9](?!.*--)[a-z0-9-]*[a-z0-9]\z' -and $_.spaceSlug -cmatch '^[a-z0-9][a-z0-9-]*\z' }) @($siteSpaces | ForEach-Object { $true })
 $coordinates = Get-ConnectionCoordinates $cmdemo2 @{ owner = 'clearmeasure-aisf-sample-apps'; repo = 'cmdemo2-workorders'; slug = 'cmdemo2-ui'; environments = 'auto' } 0
 Test-Case 'cmdemo2.json: coordinates name its own space' @($coordinates.octopusServer, $coordinates.octopusSpace, $coordinates.octopusProject) @('https://clearmeasure.octopus.app', 'Spaces-356', 'cmdemo2-ui')
@@ -605,7 +609,8 @@ function Get-Setup([string] $Path, [hashtable] $Override = @{}, [string] $Source
 }
 $one = Get-Setup (Join-Path $PSScriptRoot 'cmdemo1.json')
 Test-Case 'setup cmdemo1: as before the generalization' @($one.Space, $one.SourceRepository, $one.SystemProject, $one.StorePackage, $one.ConfigName) @('Spaces-355', 'clearmeasure-aisf-sample-apps/cmdemo1-system', 'cmdemo1-system', 'cmdemo1-scorecard-store', 'cmdemo1.json')
-Test-Case 'setup cmdemo1: names as before' @($one.Names.Role, $one.Names.Account, $one.Names.Team, $one.Names.Project, $one.Names.KeyPurpose, $one.Names.AzureAccount) @('cmdemo1 scorecard store feed', 'cmdemo1-scorecard-runner', 'cmdemo1 scorecard runner', 'cmdemo1-scorecard-space', 'Scorecard.OctopusApiKey of cmdemo1-scorecard-space', 'azure-cmdemo1-scorecard-site')
+Test-Case 'setup cmdemo1: names as before' @($one.Names.Role, $one.Names.Account, $one.Names.Team, $one.Names.Project, $one.Names.KeyPurpose) @('cmdemo1 scorecard store feed', 'cmdemo1-scorecard-runner', 'cmdemo1 scorecard runner', 'cmdemo1-scorecard-space', 'Scorecard.OctopusApiKey of cmdemo1-scorecard-space')
+Test-Case 'setup cmdemo1: GitHub Pages, no Azure account, the one of the blob site goes' @($one.Names.AzureAccount, $one.PublishPages, $one.FormerAzureAccount) @($null, $true, 'azure-cmdemo1-scorecard-site')
 $two = Get-Setup (Join-Path $PSScriptRoot 'cmdemo2.json')
 Test-Case 'setup cmdemo2: its own space, the code of cmdemo1-system' @($two.Space, $two.SourceRepository, $two.SystemProject, $two.StorePackage, $two.ConfigName) @('Spaces-356', 'clearmeasure-aisf-sample-apps/cmdemo1-system', 'cmdemo2-system', 'cmdemo2-scorecard-store', 'cmdemo2.json')
 Test-Case 'setup cmdemo2: its own names and Azure account' @($two.Names.Role, $two.Names.Account, $two.Names.Team, $two.Names.Project, $two.Names.AzureAccount) @('cmdemo2 scorecard store feed', 'cmdemo2-scorecard-runner', 'cmdemo2 scorecard runner', 'cmdemo2-scorecard-space', 'azure-cmdemo2-scorecard-site')
