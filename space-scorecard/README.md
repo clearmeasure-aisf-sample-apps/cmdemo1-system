@@ -5,8 +5,7 @@ its GitHub repository, each pair is harvested with cmis (Clear Measure Intellige
 connection, and the pages of the live scorecard (cmdemo1-scorecard's Scorecard.Web) are exported from that store as
 static files, published at <https://legendary-doodle-8lk2k24.pages.github.io/> (cmdemo1: private GitHub Pages of
 clearmeasure-aisf-sample-apps/cmdemo1-scorecard-site, with its data for AI tools at
-<https://legendary-doodle-8lk2k24.pages.github.io/llms.txt>; also, for now, at
-<https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard/index.html>) and
+<https://legendary-doodle-8lk2k24.pages.github.io/llms.txt>) and
 <https://stcmdemo1prodsscj7265dy3.blob.core.windows.net/scorecard-cmdemo2/index.html> (cmdemo2).
 
 Step 1 of the design "Space-level scorecard on cmis": discovery, cmis harvest and a static page, run by hand. Step 2:
@@ -215,21 +214,21 @@ Read by `setup-octopus.ps1` only:
 ## Published pages
 
 `infra/own/main.bicep` (the system's own module, prod only) declares the storage account `stcmdemo1prodssc<hash>`
-(tag `purpose: space-scorecard`, no shared key) with one container `scorecard` whose blobs anyone can read
-(`publicAccess: Blob`: single blobs; the container cannot be listed), and the identity `id-cmdemo1-prod-scorecard-site`,
-which holds Storage Blob Data Contributor on that container only and signs in only for runs of project
-`cmdemo1-scorecard-space` in prod (one federated credential, issuer the Octopus server, subject
-`space:cmdemo1-demo:project:cmdemo1-scorecard-space:environment:prod`). `infra/own/test-scorecard-site.ps1` checks it.
-
-Each other space in `infra/own/scorecard-site-spaces.json` (`prefix`, `spaceSlug`; cmdemo2 now) gets a public container
-`scorecard-<prefix>` of the same account, the same role of the same identity on it, and a federated credential for
-runs of `<prefix>-scorecard-space` in that space's prod (subject `space:cmdemo2-demo:project:cmdemo2-scorecard-space:environment:prod`).
+(tag `purpose: space-scorecard`, no shared key) and the identity `id-cmdemo1-prod-scorecard-site`. Each space in
+`infra/own/scorecard-site-spaces.json` (`prefix`, `spaceSlug`; cmdemo2 now) gets a container `scorecard-<prefix>`
+whose blobs anyone can read (`publicAccess: Blob`: single blobs; the container cannot be listed), Storage Blob Data
+Contributor of the identity on that container only, and a federated credential for runs of `<prefix>-scorecard-space`
+in that space's prod (issuer the Octopus server, subject `space:cmdemo2-demo:project:cmdemo2-scorecard-space:environment:prod`).
 Its configuration names that container in `site.container`; a test checks the two lists agree. The identity can write
 every container of the site from a run of any of these projects: one operator runs them all.
+`infra/own/test-scorecard-site.ps1` checks it.
+
+cmdemo1's own pages were published here (container `scorecard`, with a federated credential for
+`cmdemo1-scorecard-space`) from step 3 until step 5 moved them to GitHub Pages; both are gone from the template.
 
 Not a static website: ARM has no setting for one, and under the stack's deny settings only the deploy identity could
 switch one on, which no step of the system's deployment does for a resource of `infra/own`. So the pages are at
-`https://<account>.blob.core.windows.net/scorecard/index.html`, not at the account's root.
+`https://<account>.blob.core.windows.net/scorecard-<prefix>/index.html`, not at the account's root.
 
 Not the deploy identity: the runbook runs the code of whatever branch a manual run names, the prod deploy identity is
 Owner of `rg-cmdemo1-prod`, and it trusts no run of this project (a federated credential for it is a change to the
@@ -298,7 +297,7 @@ the script did not make stops it:
 | Team | `cmdemo1 scorecard runner` | Of the space; the account only; roles Project viewer and the store feed role, unscoped within the space |
 | Project | `cmdemo1-scorecard-space` | Project group and lifecycle of `systemProject` (`cmdemo1-system`); no deployment process |
 | Variables | `Scorecard.OctopusApiKey`, `Scorecard.GitHubToken` (sensitive), `Scorecard.SourceRef` (prompted, default `main`) | The GitHub token is the operator's `gh auth token`, set when missing or with `-UpdateGitHubToken` |
-| Azure account | `azure-cmdemo1-scorecard-site` (`site.octopusAccount`) | Azure OpenID Connect (no secret), of `site.identity` (its client id read with the operator's `az`), prod only, subject keys space, project, environment |
+| Azure account | `azure-<prefix>-scorecard-site` (`site.octopusAccount`), with a blob container in `site` only (cmdemo2's; cmdemo1 has none since step 5) | Azure OpenID Connect (no secret), of `site.identity` (its client id read with the operator's `az`), prod only, subject keys space, project, environment |
 | Runbook | `Refresh space scorecard` | prod only; one "Run an Azure Script" step as that account (a "Run a Script" step without a blob container in `site`) on `Hosted Ubuntu`, on the worker itself (Ubuntu 24.04 with PowerShell 7.6.2, .NET SDK 10 and Azure CLI 2.86 on 2026-10-22; `-ContainerImage` runs it in an execution container instead), the worker's own tools (no bundled tooling); its snapshot is published when anything changed |
 | Trigger | `Nightly space scorecard` | Every day 00:15 in `timeZone` (America/Chicago; `-Schedule`), the published runbook in prod |
 

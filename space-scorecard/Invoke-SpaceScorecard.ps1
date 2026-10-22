@@ -1617,12 +1617,13 @@ function Write-PagesDataLayer($Data, $Document, $CmisStatus, $Web, [hashtable] $
                         }
                     })
                 $repositories = [ordered]@{}
-                foreach ($d in @($drill)) { $c = Get-DrillConnection $d $Data; if ($c -and $itemFiles[$c]) { $repositories["$($d['owner'])/$($d['repo'])"] = "$($itemFiles[$c]).json" } }
+                foreach ($d in @($drill)) { $c = Get-DrillConnection $d $Data; if ($c -and $written.Contains($c)) { $repositories["$($d['owner'])/$($d['repo'])"] = @($written[$c]) } }
                 $head = [ordered]@{
                     paths = $script:PathsNote; scope = $scope.id; scopeTitle = $(if ($isSpace) { "All projects of $Title" } else { $scope.title }); repository = $(if ($isSpace) { $null } else { $repoOf[$scope.id] })
                     week = $w.start; weekLabel = $w.label; partial = $w.partial; metric = $m.key; row = $m.row; definition = $m.page
                     count = $(if ($null -eq $n) { 0 } else { $n[$m.key] }); listed = $listed.Count
                     move = 'from, to, at: the stage move that put the item in this list and when (UTC)'
+                    itemFilesAre = 'per repository, every part of its item file (the stage histories of these items)'
                     itemFiles = $repositories
                 }
                 $names = @(Write-DataFile $Root "data/drill/$($scope.id)/$($w.start)/$($m.key)" $head $listed)
@@ -1634,7 +1635,7 @@ function Write-PagesDataLayer($Data, $Document, $CmisStatus, $Web, [hashtable] $
         }
         [ordered]@{
             id = $scope.id; title = $(if ($isSpace) { "All projects of $Title" } else { $scope.title })
-            repository = $(if ($isSpace) { $null } else { $repoOf[$scope.id] }); items = $(if ($isSpace) { $null } else { "$($itemFiles[$scope.id]).json" })
+            repository = $(if ($isSpace) { $null } else { $repoOf[$scope.id] }); items = $(if ($isSpace -or -not $written.Contains($scope.id)) { $null } else { ,@($written[$scope.id]) })
             weeks = @($weeks)
         }
     }
@@ -1642,14 +1643,14 @@ function Write-PagesDataLayer($Data, $Document, $CmisStatus, $Web, [hashtable] $
     $summary = [ordered]@{
         paths = $script:PathsNote; title = $Title; space = $Data.space; octopusServer = $Data.octopusServer; generatedUtc = $Data.generatedUtc
         window = [ordered]@{ since = $Data.since; until = $Data.until; timeZone = $Data.timeZone }
-        weeksAre = 'ISO weeks, Monday 00:00 UTC to the next Monday. partial: the window does not cover the whole week (the page marks it *). null: the scope has no data that week (the page shows a dash).'
+        weeksAre = 'ISO weeks, Monday 00:00 UTC to the next Monday. partial: the window does not cover the whole week (the page marks it *). null: cmis gave no number for the scope that week (the page shows a dash); 0 is a zero.'
         meanTimeToDeliveryIs = 'meanTimeToDelivery in weeks as cmis gives it; meanTimeToDeliveryHours the same in hours; meanTimeToDeliveryText as the page writes it (minutes under 90 minutes, hours with one decimal under 48 hours, else days).'
         cmis = $Data.cmis; scorecardWeb = $Web
         metrics = @($definitions)
         projects = @(foreach ($p in $Data.projects) {
                 [ordered]@{
                     project = $p.project; connectionId = $p.connectionId; repository = $(if ($p.measured) { "$($p.owner)/$($p.repo)" } else { $null }); measured = $p.measured; reason = $p.reason
-                    pairedBy = $p.source; environments = $p.environments; items = $(if ($p.measured) { "$($itemFiles[$p.connectionId]).json" } else { $null })
+                    pairedBy = $p.source; environments = $p.environments; items = $(if ($p.measured -and $written.Contains($p.connectionId)) { ,@($written[$p.connectionId]) } else { $null })
                 }
             })
         scopes = @($scopes)
@@ -1680,7 +1681,7 @@ function Get-LlmsText($Layer, [hashtable] $Config) {
     $measured = @($s.projects | Where-Object { $_.measured })
     Line "# Delivery scorecard of $(ConvertTo-LlmsText $s.title)"
     Line
-    Line "> The weekly delivery scorecard of Octopus Deploy space $($s.space) ($(ConvertTo-LlmsText $s.title)): $($measured.Count) project(s), each paired with its GitHub repository and measured from its issues, pull requests, commits and Octopus deployments with cmis (Clear Measure Intelligence Scorecard) $($s.cmis.version), from $($s.window.since) to $($s.window.until) ($($s.window.timeZone)). Generated $($s.generatedUtc). The pages ([index.html](index.html)) are Scorecard.Web's$(if ($s.scorecardWeb) { " $($s.scorecardWeb.version) (commit $($s.scorecardWeb.commit) of $($s.scorecardWeb.repository))" }); this file and data/ hold the same numbers, and the items behind them, as JSON."
+    Line "> The weekly delivery scorecard of Octopus Deploy space $($s.space) ($(ConvertTo-LlmsText $s.title)): $($measured.Count) measured project(s) of the $(@($s.projects).Count) in the space, each paired with its GitHub repository and measured from its issues, pull requests, commits and Octopus deployments with cmis (Clear Measure Intelligence Scorecard) $($s.cmis.version), from $($s.window.since) to $($s.window.until) ($($s.window.timeZone)). Generated $($s.generatedUtc). The pages ([index.html](index.html)) are Scorecard.Web's$(if ($s.scorecardWeb) { " $($s.scorecardWeb.version) (commit $($s.scorecardWeb.commit) of $($s.scorecardWeb.repository))" }); this file and data/ hold the same numbers, and the items behind them, as JSON."
     Line
     Line "All paths are relative to this file. The window is $($s.window.since) to $($s.window.until), both days included (today in $($s.window.timeZone) the last); the data is what GitHub and Octopus held when the run harvested, shortly before $($s.generatedUtc). Weeks are ISO weeks, Monday 00:00 UTC to the next Monday, named by their Monday (yyyy-MM-dd); a week the window does not cover whole is partial (the page marks it *). The weeks before the first week in which anything happened are left out (the window may begin before the first repository did); summary.json lists the weeks shown. Every time is UTC unless a file says otherwise. Updated every night: this branch holds one commit, the last run."
     Line
@@ -1690,7 +1691,7 @@ function Get-LlmsText($Layer, [hashtable] $Config) {
         Line "- **$($m.row)** (``$($m.key)``): $(ConvertTo-LlmsText $m.page).$(if ($m.cmis) { " cmis: $(ConvertTo-LlmsText $m.cmis) Unit: $($m.unit); several periods: $($m.aggregation)." })$(if ($m.lists) { ' Each weekly number lists its items.' })"
     }
     Line
-    Line 'The page shows Work in process, Items started, Items delivered and MTTD; Throughput, Rework and Net throughput are in its folded "Flow detail" panel. MTTD: summary.json has it in weeks (meanTimeToDelivery, as cmis gives a weekly period), in hours rounded to two decimals, and as the page writes it. Every kind of item counts in every number: issues, pull requests that belong to no issue, branches and direct commits.'
+    Line 'The page shows Work in process, Items started, Items delivered and MTTD; Throughput, Rework and Net throughput are in its folded "Flow detail" panel. MTTD: summary.json has it in weeks (meanTimeToDelivery, as cmis gives a weekly period), in hours rounded to two decimals, and as the page writes it. Every kind of item counts in every number: issues, pull requests that belong to no issue, branches and commits pushed straight to the default branch (also those automation pushes, unless the configuration''s automation rules make them no work item, as pins and template syncs are). One deployment to the last environment often delivers many items at the same instant.'
     Line
     Line '## Stages'
     Line
@@ -1705,7 +1706,7 @@ function Get-LlmsText($Layer, [hashtable] $Config) {
     Line 'An Octopus project and its repository may have different names: the item files are named by repository, data/drill by project (its connection id); the list below pairs them.'
     Line
     foreach ($p in $s.projects) {
-        if ($p.measured) { Line "- $(ConvertTo-LlmsText $p.project): repository [$($p.repository)](https://github.com/$($p.repository)), items [$($p.items)]($($p.items))$(if (@($Layer.ItemFiles[$p.connectionId]).Count -gt 1) { " (continued in $(@($Layer.ItemFiles[$p.connectionId] | Select-Object -Skip 1 | ForEach-Object { "[$_]($_)" }) -join ', '))" })" }
+        if ($p.measured) { Line "- $(ConvertTo-LlmsText $p.project): repository [$($p.repository)](https://github.com/$($p.repository)), items [$(@($p.items)[0])]($(@($p.items)[0]))$(if (@($Layer.ItemFiles[$p.connectionId]).Count -gt 1) { " (continued in $(@($Layer.ItemFiles[$p.connectionId] | Select-Object -Skip 1 | ForEach-Object { "[$_]($_)" }) -join ', '))" })" }
         else { Line "- $(ConvertTo-LlmsText $p.project): not measured, $(ConvertTo-LlmsText $p.reason)" }
     }
     Line

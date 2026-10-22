@@ -456,22 +456,23 @@ resource gatewayCodexRunner 'Microsoft.Authorization/roleAssignments@2022-04-01'
   }
 }
 
-// The space scorecard's published site (space-scorecard/ of this repository, step 3 of the design "Space-level
-// scorecard on cmis"): the static pages the nightly runbook "Refresh space scorecard" (Octopus project
-// <slug>-scorecard-space, environment prod) exports, readable by anyone at
-// https://<account>.blob.core.windows.net/scorecard/index.html. In prod only, where the runbook runs.
+// The space scorecard's published site for other demo spaces (space-scorecard/ of this repository, steps 3 and 4 of the
+// design "Space-level scorecard on cmis"): public blob containers of a storage account in prod, which the nightly
+// runbook "Refresh space scorecard" of each such space (Octopus project <prefix>-scorecard-space of its space,
+// environment prod) writes. cmdemo1's own pages left it for private GitHub Pages in step 5 (repository
+// clearmeasure-aisf-sample-apps/cmdemo1-scorecard-site), with them its container "scorecard" and the federated
+// credential of <slug>-scorecard-space.
 // A public blob container, not a static website: ARM has no static website setting, and under the stack's deny
 // settings only the deploy identity could switch it on, which no step of the system's deployment does for a resource
-// of infra/own. Anonymous reads of single blobs only: the container cannot be listed.
-// The runbook signs in as an identity of its own (the Octopus Azure OpenID Connect account <slug>-scorecard-site that
-// space-scorecard/setup-octopus.ps1 makes), not as the deploy identity: the runbook runs the code of whatever branch a
-// manual run names, so its identity may write the site's containers and nothing else.
+// of infra/own. Anonymous reads of single blobs only: a container cannot be listed.
+// The runbooks sign in as an identity of their own (an Octopus Azure OpenID Connect account <prefix>-scorecard-site
+// that space-scorecard/setup-octopus.ps1 makes), not as the deploy identity: a runbook runs the code of whatever branch
+// a manual run names, so the identity may write the site's containers and nothing else.
 var hasScorecardSite = stack.environmentName == 'prod'
 var scorecardSiteName = take(toLower('st${stack.slug}${stack.environmentName}ssc${uniqueString(resourceGroup().id)}'), 24)
-var scorecardSiteContainer = 'scorecard'
 var scorecardSiteTags = union(stack.tags, { purpose: 'space-scorecard' })
-// The other demo spaces whose scorecard this site also publishes (step 4 of the design): each a container of its own,
-// scorecard-<prefix>, which the same identity writes for runs of project <prefix>-scorecard-space of that space's prod
+// The demo spaces whose scorecard this site publishes (step 4 of the design): each a container of its own,
+// scorecard-<prefix>, which the identity writes for runs of project <prefix>-scorecard-space of that space's prod
 // (space-scorecard/<prefix>.json, site.container). Their Azure stacks are their systems'; this site is cmdemo1's.
 var scorecardSiteSpaces = loadJsonContent('scorecard-site-spaces.json')
 
@@ -485,7 +486,7 @@ resource scorecardSite 'Microsoft.Storage/storageAccounts@2024-01-01' = if (hasS
   }
   properties: {
     accessTier: 'Hot'
-    // Needed for the container's anonymous reads below; no other container of this account allows them.
+    // Needed for the containers' anonymous reads below; no other container is in this account.
     allowBlobPublicAccess: true
     allowSharedKeyAccess: false
     defaultToOAuthAuthentication: true
@@ -499,46 +500,13 @@ resource scorecardSiteBlobs 'Microsoft.Storage/storageAccounts/blobServices@2024
   name: 'default'
 }
 
-resource scorecardSitePages 'Microsoft.Storage/storageAccounts/blobServices/containers@2024-01-01' = if (hasScorecardSite) {
-  parent: scorecardSiteBlobs
-  name: scorecardSiteContainer
-  properties: {
-    publicAccess: 'Blob'
-  }
-}
-
 resource scorecardSiteIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (hasScorecardSite) {
   name: 'id-${stack.slug}-${stack.environmentName}-scorecard-site'
   location: stack.location
   tags: scorecardSiteTags
 }
 
-// Octopus signs in as this identity for a run of a runbook of project <slug>-scorecard-space in this environment, and
-// for nothing else (the account's subject keys: space, project, environment).
-resource scorecardSiteOctopus 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = if (hasScorecardSite) {
-  parent: scorecardSiteIdentity
-  name: 'octopus-scorecard-space'
-  properties: {
-    issuer: system.octopus.url
-    subject: 'space:${system.octopus.spaceSlug}:project:${stack.slug}-scorecard-space:environment:${stack.environmentName}'
-    audiences: [
-      'api://AzureADTokenExchange'
-    ]
-  }
-}
-
-// On the container: the runbook writes and deletes the site's files, and nothing else.
-resource scorecardSiteWriter 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasScorecardSite) {
-  scope: scorecardSitePages
-  name: guid(scorecardSitePages.id, 'scorecard-site', blobDataContributor)
-  properties: {
-    principalId: scorecardSiteIdentity!.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: blobDataContributor
-  }
-}
-
-// Another space's pages: its own public container, a federated credential for its runbook's runs, the same writer role.
+// Each space's pages: its own public container, a federated credential for its runbook's runs, the same writer role.
 resource scorecardSpacePages 'Microsoft.Storage/storageAccounts/blobServices/containers@2024-01-01' = [for s in scorecardSiteSpaces: if (hasScorecardSite) {
   parent: scorecardSiteBlobs
   name: 'scorecard-${s.prefix}'
@@ -547,7 +515,7 @@ resource scorecardSpacePages 'Microsoft.Storage/storageAccounts/blobServices/con
   }
 }]
 
-// One at a time and after the site's own: Azure refuses concurrent writes of federated credentials of one identity.
+// One at a time: Azure refuses concurrent writes of federated credentials of one identity.
 @batchSize(1)
 resource scorecardSpaceOctopus 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = [for s in scorecardSiteSpaces: if (hasScorecardSite) {
   parent: scorecardSiteIdentity
@@ -559,9 +527,6 @@ resource scorecardSpaceOctopus 'Microsoft.ManagedIdentity/userAssignedIdentities
       'api://AzureADTokenExchange'
     ]
   }
-  dependsOn: [
-    scorecardSiteOctopus
-  ]
 }]
 
 resource scorecardSpaceWriter 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for (s, i) in scorecardSiteSpaces: if (hasScorecardSite) {

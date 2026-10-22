@@ -11,13 +11,13 @@
     this repository). Run as an identity that may read the environment's resource group:
 
       1. one storage account tagged purpose space-scorecard; it takes no shared key;
-      2. its containers are "scorecard" and one "scorecard-<prefix>" per other space of scorecard-site-spaces.json,
-         no other; each allows anonymous reads of single blobs (publicAccess Blob, not Container: it cannot be
-         listed);
+      2. its containers are one "scorecard-<prefix>" per space of scorecard-site-spaces.json, no other (cmdemo1's own
+         pages are on GitHub Pages since step 5, its container "scorecard" gone); each allows anonymous reads of single
+         blobs (publicAccess Blob, not Container: it cannot be listed);
       3. the site's identity id-<slug>-<env>-scorecard-site holds Storage Blob Data Contributor at the scope of each
          of those containers, no other role on the account, and signs in only for runs of project
-         <slug>-scorecard-space of this environment and of <prefix>-scorecard-space of each other space's environment
-         of the same name (one federated credential each).
+         <prefix>-scorecard-space of each of those spaces' environment of the same name (one federated credential
+         each; none for <slug>-scorecard-space, whose runbook publishes to GitHub Pages).
 
     The site exists in prod only: in another environment the script checks that there is none, and passes. Exit 1
     when a check fails.
@@ -60,7 +60,7 @@ $account = $accounts[0]
 Test-That "$($account.name) allows no shared key" ($account.allowSharedKeyAccess -eq $false)
 
 $containers = @(az storage container-rm list --storage-account $account.name --resource-group $group --output json | ConvertFrom-Json)
-$wantedContainers = @('scorecard') + @($otherSpaces | ForEach-Object { "scorecard-$($_.prefix)" })
+$wantedContainers = @($otherSpaces | ForEach-Object { "scorecard-$($_.prefix)" })
 $heldContainers = @($containers | ForEach-Object { [string] $_.name })
 Test-That "its containers are $($wantedContainers -join ', ')" ((@($heldContainers | Sort-Object) -join ',') -ceq (@($wantedContainers | Sort-Object) -join ',')) "$($heldContainers -join ', ')"
 foreach ($name in $wantedContainers) {
@@ -84,7 +84,7 @@ $elsewhere = @($roles | Where-Object { $_.scope -notin $scopes -and $_.scope -li
 Test-That 'it holds no role on the account itself' ($elsewhere.Count -eq 0) "$(($elsewhere | ForEach-Object { $_.roleDefinitionName }) -join ', ')"
 
 $credentials = @(az identity federated-credential list --identity-name $identityName --resource-group $group --output json | ConvertFrom-Json)
-$subjects = @("space:$($system.octopus.spaceSlug):project:$slug-scorecard-space:environment:$Environment") + @($otherSpaces | ForEach-Object { "space:$($_.spaceSlug):project:$($_.prefix)-scorecard-space:environment:$Environment" })
+$subjects = @($otherSpaces | ForEach-Object { "space:$($_.spaceSlug):project:$($_.prefix)-scorecard-space:environment:$Environment" })
 $held = @($credentials | ForEach-Object { [string] $_.subject })
 $issuers = @($credentials | Where-Object { $_.issuer -cne $system.octopus.url })
 Test-That "$identityName signs in only for runs of $(($subjects | ForEach-Object { ($_ -split ':')[3] }) -join ', ') in $Environment" ((@($held | Sort-Object) -join ',') -ceq (@($subjects | Sort-Object) -join ',') -and $issuers.Count -eq 0) "$(($credentials | ForEach-Object { "$($_.issuer) $($_.subject)" }) -join '; ')"
