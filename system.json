@@ -306,6 +306,14 @@
         {
           "name": "copilot-tasks-token",
           "env": "COPILOT_TASKS_TOKEN"
+        },
+        {
+          "name": "octopus-runbook-api-key",
+          "env": "OCTOPUS_RUNBOOK_API_KEY"
+        },
+        {
+          "name": "octopus-host-token",
+          "env": "FACTORY_OCTOPUS_HOST_TOKEN"
         }
       ],
       "buildPath": "/_build",
