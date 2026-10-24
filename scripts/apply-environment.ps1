@@ -282,7 +282,9 @@ if (-not (Test-Path -LiteralPath $template)) {
 $versions = Get-DesiredVersion
 $outputs = Get-StackOutput
 $system = Get-Content -LiteralPath (Join-Path $root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
-# A retired deployable (deployables[].retired, decision 0058) is in no environment: nothing below sees it.
+# A retired deployable (deployables[].retired, decision 0058) is in no environment: nothing below sees it, but the
+# app it had here until this apply is still there when the apply starts, and its removal is the change, not downtime.
+$retiredDeployables = @($system.deployables | Where-Object { $_['retired'] -eq $true } | ForEach-Object { [string] $_.name })
 $system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
 # deployables[].environments: a deployable may exist in some environments only; this one's are the rest of the work.
 $deployablesHere = @($system.deployables | Where-Object { -not $_.ContainsKey('environments') -or @($_.environments) -contains $environmentName })
@@ -457,7 +459,7 @@ $ownRuntime = @($system.deployables | Where-Object { $_['hosting'] -eq 'own' } |
 if ($ownRuntime.Count -gt 0) { Write-Host "Not watched here (they bring their own runtime): $($ownRuntime -join ', ')" }
 # A deployable that system.json no longer places in this environment (deployables[].environments, or retired) is
 # removed by this apply, and its app going away is the change, not downtime: it is not watched either.
-$notPlacedHere = @($system.deployables | Where-Object { $deployablesHere.name -notcontains $_.name } | ForEach-Object { [string] $_.name })
+$notPlacedHere = @(@($system.deployables | Where-Object { $deployablesHere.name -notcontains $_.name } | ForEach-Object { [string] $_.name }) + $retiredDeployables)
 if ($notPlacedHere.Count -gt 0) { Write-Host "Not watched here (the apply removes them from $environmentName): $($notPlacedHere -join ', ')" }
 $probe = Start-AvailabilityProbe -Group $resourceGroup -Environment $environmentName -Outputs $outputs -Ignore @($ownRuntime + $notPlacedHere)
 function Invoke-StackApply {
