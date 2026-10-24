@@ -26,7 +26,10 @@ var containerUriSetting = 'Scorecard__Storage__ContainerUri'
 var clientIdSetting = 'Scorecard__Storage__ManagedIdentityClientId'
 var softDeleteDays = 7
 
-// The store exists in the environments in which the deployable exists and has an identity of its own.
+// The store exists in the environments in which the deployable exists and has an identity of its own. Since
+// scorecard is retired (system.json deployables[].retired, decision 0058; its pages are on GitHub Pages) it has no
+// identity anywhere, so hasStore is false and the stack removes the store with its app: what it held was the app's
+// raw harvest, which a harvest makes again.
 var identity = first(filter(stack.identities, i => i.deployable == deployable)) ?? {
   deployable: ''
   principalId: ''

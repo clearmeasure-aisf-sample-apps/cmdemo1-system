@@ -11,6 +11,15 @@
       "Microsoft.App/jobs/start/action",
       "Microsoft.App/jobs/stop/action",
       "Microsoft.App/jobs/stop/execution/action"
+    ],
+    "pipelineSignOffMembers": [
+      "cmdemo1-fworker-gateway-agent"
+    ],
+    "links": [
+      {
+        "text": "Scorecard",
+        "url": "https://legendary-doodle-8lk2k24.pages.github.io/"
+      }
     ]
   },
   "azure": {
@@ -202,13 +211,10 @@
     {
       "name": "scorecard",
       "repository": "cmdemo1-scorecard",
+      "retired": true,
       "port": 8080,
       "healthPath": "/health",
       "buildPath": "/_build",
-      "dashboardLink": {
-        "text": "Scorecard",
-        "path": "/"
-      },
       "environments": [
         "tdd"
       ],
