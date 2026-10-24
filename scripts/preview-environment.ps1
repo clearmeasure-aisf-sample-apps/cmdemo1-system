@@ -38,6 +38,8 @@ $PSNativeCommandUseErrorActionPreference = $true
 $env:AZURE_BICEP_CHECK_VERSION = 'false'
 
 $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
+# A retired deployable (deployables[].retired, decision 0058) is in no environment: nothing below sees it.
+$system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
 $template = Join-Path $Root 'infra' 'main.bicep'
 $summary = if ($SummaryPath) { $SummaryPath } elseif ($env:GITHUB_STEP_SUMMARY) { $env:GITHUB_STEP_SUMMARY } else { Join-Path ([IO.Path]::GetTempPath()) 'preview-summary.md' }
 # What-if reports properties Azure fills in itself as Delete, expressions it cannot evaluate before deployment

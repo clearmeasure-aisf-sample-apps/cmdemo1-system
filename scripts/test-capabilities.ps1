@@ -43,6 +43,8 @@ $env:AZURE_CORE_DISABLE_PROGRESS_BAR = 'true'
 $Only = @($Only | ForEach-Object { $_ -split '[,\s]+' } | Where-Object { $_ })
 if (-not $ListChecks) {
     $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
+    # A retired deployable (deployables[].retired, decision 0058) is in no environment: nothing below sees it.
+    $system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
     $slug = [string] $system.system.slug
     $org = [string] $system.system.githubOrg
     $systemRepo = "$org/$($system.system.repository)"

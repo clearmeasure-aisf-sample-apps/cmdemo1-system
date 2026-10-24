@@ -104,7 +104,21 @@ function Get-DotnetSdk {
     return (Join-Path $installDir 'dotnet')
 }
 
-$workerIp = (Invoke-RestMethod -Uri 'https://api.ipify.org').ToString().Trim()
+# The address is read from three services, five rounds, so one bad answer (a 502 failed a deployment once) does not stop a step.
+$workerIp = $null
+for ($attempt = 1; -not $workerIp -and $attempt -le 5; $attempt++) {
+    foreach ($addressService in 'https://api.ipify.org', 'https://checkip.amazonaws.com', 'https://ifconfig.me/ip') {
+        try {
+            $answer = (Invoke-RestMethod -Uri $addressService -TimeoutSec 15).ToString().Trim()
+            if ($answer -match '^\d{1,3}(\.\d{1,3}){3}$') { $workerIp = $answer; break }
+        }
+        catch {
+            Write-Host "SKIP $addressService did not answer: $($_.Exception.Message)"
+        }
+    }
+    if (-not $workerIp -and $attempt -lt 5) { Start-Sleep -Seconds (5 * $attempt) }
+}
+if (-not $workerIp) { throw 'The address of this worker could not be read from any of three services in five rounds.' }
 Write-Host "Opening $server to the worker ($workerIp) as rule $ruleName"
 az sql server firewall-rule create --resource-group $resourceGroup --server $server --name $ruleName `
     --start-ip-address $workerIp --end-ip-address $workerIp --output none

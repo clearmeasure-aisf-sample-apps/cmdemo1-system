@@ -94,11 +94,13 @@ var sqlServerFqdn = '${sqlServerName}${az.environment().suffixes.sqlServerHostna
 // "storagewebsite": the same site on a storage account's static website (modules/storagewebsite.bicep; opt-in).
 // deployables[].environments (container deployables and static sites, scripts/test-system.ps1): the environments the deployable
 // exists in; left out, it exists in every environment. An environment it does not name gets none of its resources.
+// deployables[].retired (decision 0058): a retired deployable exists in no environment, so none of its resources, its
+// identity, its secret references, its dashboard page or its Front Door origin is made; its Octopus project stays.
 // A deployable with hosting "own" brings its runtime (principle 007): nothing below creates anything for it, and it
 // is no entry of the output "deployables". Its own project deploys and verifies it.
 var hostedDeployables = filter(
   map(system.deployables, d => union({ hosting: 'containerapp', environments: [environmentName] }, d)),
-  d => contains(d.environments, environmentName)
+  d => contains(d.environments, environmentName) && !(d.?retired ?? false)
 )
 // A container deployable may declare more (all optional, modules/containerapps.bicep): a size of its own (cpu), one
 // replica that never scales to zero (alwaysOn; only in the environments alwaysOnEnvironments names, when it names

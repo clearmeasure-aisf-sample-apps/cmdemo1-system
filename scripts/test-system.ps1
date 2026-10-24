@@ -106,6 +106,20 @@ Test-Rule 'deployable names unique' (@($deployableNames | Select-Object -Unique)
 foreach ($deployable in @($system.deployables | Where-Object { $_ -is [Collections.IDictionary] -and $_.ContainsKey('pipelineSignOff') })) {
     Test-Rule "deployable $($deployable.name) pipelineSignOff" ($deployable.pipelineSignOff -is [bool]) 'true or false: whether the service account may answer the Sign-off of this deployable (decision 0048)'
 }
+# system.pipelineSignOffMembers (decision 0057): Octopus usernames of further service accounts that join the team
+# "<slug> pipeline sign-off" (octopus/approvers.tf), while a deployable has pipelineSignOff. A person signs off through
+# octopus.approvers; the system's own <slug>-github is a member already.
+if ($system.system.ContainsKey('pipelineSignOffMembers')) {
+    $members = $system.system.pipelineSignOffMembers
+    $valid = $members -is [array] -and $members.Count -ge 1 -and $members.Count -le 10 -and @($members | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' }).Count -eq 0
+    Test-Rule 'system.pipelineSignOffMembers' $valid 'a list of 1 to 10 Octopus usernames of service accounts (letters, digits, . _ -)'
+    if ($valid) {
+        $names = @($members | ForEach-Object { $_.ToLowerInvariant() })
+        Test-Rule 'system.pipelineSignOffMembers each once, without the system''s own account' (@($names | Select-Object -Unique).Count -eq $names.Count -and $names -notcontains "$slug-github") "an account appears twice, or is $slug-github, which is a member of the team already"
+        Test-Rule 'system.pipelineSignOffMembers not among octopus.approvers' (@($names | Where-Object { @($system.octopus['approvers']) -contains $_ }).Count -eq 0) 'an account of the pipeline team is not also an approver of every project'
+        Test-Rule 'system.pipelineSignOffMembers with a deployable that has pipelineSignOff' (@($system.deployables | Where-Object { $_ -is [Collections.IDictionary] -and $_['pipelineSignOff'] -eq $true }).Count -gt 0) 'the team exists only while a deployable asks for pipelineSignOff'
+    }
+}
 foreach ($deployable in @($system.deployables)) {
     # Optional: the dotnet test filter of the acceptance tests after a deployment (variable AcceptanceTests.Filter),
     # conditions <property><operator><value> (operators = != ~ !~) joined by & or |, parentheses allowed. Without it
@@ -191,8 +205,21 @@ foreach ($login in @($system.deployables | Where-Object { $_['hosting'] -eq 'app
     $vaultSecretNames.Add("$($login.name)-sql-password")
     $vaultSecretNames.Add("$($login.name)-sql-connection-string")
 }
+# deployables[].retired (decision 0058): true takes a container deployable out of every environment (infra/ makes
+# nothing for it, octopus/ keeps only its project, disabled, with its releases and deployments). The deployable stays
+# in this list for that project, needs no environments, secrets or port, and no environment pins a version of it.
+foreach ($deployable in @($system.deployables | Where-Object { $_.ContainsKey('retired') })) {
+    $name = [string] $deployable.name
+    Test-Rule "deployable $name retired" ($deployable.retired -is [bool]) 'true or false'
+    if ($deployable.retired -eq $true) {
+        Test-Rule "deployable $name retired on a container app" (-not $deployable.ContainsKey('hosting') -or $deployable.hosting -ceq 'containerapp') 'only a container deployable can be retired'
+        Test-Rule "deployable $name retired is not the only deployable" (@($system.deployables | Where-Object { $_['retired'] -ne $true }).Count -gt 0) 'a system keeps at least one deployable that is not retired'
+        Test-Rule "deployable $name retired without pipelineSignOff" ($deployable['pipelineSignOff'] -ne $true) 'a retired deployable has no Sign-off to answer'
+    }
+}
 foreach ($deployable in @($system.deployables)) {
     $name = [string] $deployable.name
+    if ($deployable['retired'] -eq $true) { continue }
     $used = @($containerKeys | Where-Object { $deployable.ContainsKey($_) })
     if ($used.Count -eq 0) { continue }
     $isContainer = -not $deployable.ContainsKey('hosting') -or $deployable.hosting -ceq 'containerapp'
@@ -370,8 +397,9 @@ foreach ($environment in $system.environments) {
     $unknown = @($versions.Keys | Where-Object { $deployableNames -notcontains $_ })
     Test-Rule "environment $name versions.json keys" ($unknown.Count -eq 0) "unknown deployables: $($unknown -join ', ')"
     # A deployable with "environments" exists only there: another environment cannot pin a version of it.
-    $elsewhere = @($system.deployables | Where-Object { $_.ContainsKey('environments') -and $_.environments -is [array] -and $_.environments -cnotcontains $name -and $versions.ContainsKey([string] $_.name) } | ForEach-Object { [string] $_.name })
-    if ($elsewhere.Count -gt 0) { Test-Rule "environment $name versions.json pins only its own deployables" $false "$($elsewhere -join ', ') do not exist in $name (deployables[].environments)" }
+    # A retired deployable exists in none.
+    $elsewhere = @($system.deployables | Where-Object { $versions.ContainsKey([string] $_.name) -and ($_['retired'] -eq $true -or ($_.ContainsKey('environments') -and $_.environments -is [array] -and $_.environments -cnotcontains $name)) } | ForEach-Object { [string] $_.name })
+    if ($elsewhere.Count -gt 0) { Test-Rule "environment $name versions.json pins only its own deployables" $false "$($elsewhere -join ', ') do not exist in $name (deployables[].environments, or retired)" }
 
     # nodes.json: what each deployable with hosting "own" reported as its nodes when it was last verified here. The
     # step "Record nodes" writes it (scripts/record-nodes.ps1, which checks every field); this rule keeps a
@@ -408,6 +436,19 @@ if ($system.system.ContainsKey('planSku')) {
 if ($system.system.ContainsKey('sqlGeneration')) {
     $generation = $system.system.sqlGeneration
     Test-Rule 'system.sqlGeneration' (($generation -is [int] -or $generation -is [long]) -and [long] $generation -ge 1) 'a whole number, 1 or more (raised by one to replace every database with a new, empty one)'
+}
+
+# Optional: pages outside the system's apps that every environment's dashboard leads to (scripts/deploy-staticwebapp.ps1
+# writes them into environments[].pages): the words and an absolute https address.
+if ($system.system.ContainsKey('links')) {
+    $links = @($system.system.links)
+    $valid = $system.system.links -is [array] -and $links.Count -ge 1 -and $links.Count -le 10 -and
+        @($links | Where-Object {
+                $_ -isnot [Collections.IDictionary] -or @($_.Keys | Where-Object { @('text', 'url') -cnotcontains $_ }).Count -gt 0 -or
+                $_['text'] -isnot [string] -or $_['text'].Trim().Length -lt 1 -or $_['text'].Length -gt 40 -or $_['text'] -cne $_['text'].Trim() -or
+                $_['url'] -isnot [string] -or $_['url'] -cnotmatch '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~!$&''()*+,;=:@%/?#-]*)?$'
+            }).Count -eq 0
+    Test-Rule 'system.links' $valid 'a list of 1 to 10 objects { "text": the words of the link (1 to 40 characters, no space at either end), "url": an absolute https address }; no other key'
 }
 
 # Optional: control-plane actions the stacks' deny assignment lets through (apply-environment.ps1), such as

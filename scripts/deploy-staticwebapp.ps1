@@ -248,7 +248,8 @@ function ConvertTo-Topology {
     # each environment it exists in an entry of "pages": the words, the deployable, and the path under the address the
     # deployable has in that environment (-PageAddress, by environment and deployable: the address the environment's
     # stack reports). Without an address there, the environment has no such entry; an environment without any has no
-    # key "pages".
+    # key "pages". A page outside the system's apps (system.links: text and absolute url, for example the GitHub Pages
+    # site of a scorecard) is in the pages of every environment, with no deployable, after the pages of the apps.
     param(
         [Parameter(Mandatory)] [hashtable] $System,
         [hashtable] $EndpointHost = @{},
@@ -388,6 +389,12 @@ function ConvertTo-Topology {
                     $address = ([string] $addresses[[string] $app.name]).TrimEnd('/')
                     if ($address -notmatch '^https?://') { continue }
                     [ordered] @{ name = [string] $link.text; url = "$address/$(([string] $link.path).TrimStart('/'))"; deployable = [string] $app.name }
+                })
+            # A page outside the system's apps (system.links: text and absolute url) is in every environment's pages,
+            # after the apps' pages, without a deployable.
+            $pages += @(foreach ($systemLink in @($System.system['links'])) {
+                    if ($systemLink -isnot [Collections.IDictionary] -or -not $systemLink['text'] -or $systemLink['url'] -notmatch '^https?://') { continue }
+                    [ordered] @{ name = [string] $systemLink.text; url = [string] $systemLink.url }
                 })
             $listed = [ordered] @{
                 name               = $environmentName
@@ -1968,6 +1975,8 @@ if ($null -eq $systemText) {
     Fail-Step "$repository has no system.json on main."
 }
 $system = $systemText | ConvertFrom-Json -AsHashtable
+# A retired deployable (deployables[].retired, decision 0058) is in no environment: nothing below sees it.
+$system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
 $ownDeployables = @($system.deployables | Where-Object { $_['hosting'] -eq 'own' } | ForEach-Object { [string] $_.name })
 $nodeRecords = Read-NodeRecord -System $system
 
