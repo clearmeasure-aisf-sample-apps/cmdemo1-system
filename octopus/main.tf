@@ -31,7 +31,12 @@ locals {
   repository   = "${local.system.system.githubOrg}/${local.system.system.repository}"
   environments = { for i, e in local.system.environments : e.name => merge(e, { sort_order = i + 1 }) }
   tiers        = toset([for e in local.system.environments : e.tier])
-  deployables  = { for d in local.system.deployables : d.name => d }
+  # deployables[].retired (decision 0058): a retired deployable is in no environment and has no configuration here
+  # beyond its project, which stays (disabled) with its releases and deployments. Every other local below, and every
+  # resource but octopusdeploy_project.deployable, sees the deployables that are not retired.
+  all_deployables     = { for d in local.system.deployables : d.name => d }
+  retired_deployables = { for name, d in local.all_deployables : name => d if try(d.retired, false) == true }
+  deployables         = { for name, d in local.all_deployables : name => d if try(d.retired, false) != true }
 
   # deployables[].hosting: "containerapp" (default), "appservice" (a web app on the Free plan, zip deployed, with no
   # database of its own) or "staticwebapp" (a site of static files on Azure Static Web Apps: the health dashboard).

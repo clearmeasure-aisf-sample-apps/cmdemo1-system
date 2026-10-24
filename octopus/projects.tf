@@ -12,12 +12,15 @@ resource "octopusdeploy_project" "system" {
   default_guided_failure_mode       = "Off"
 }
 
+# A retired deployable (system.json deployables[].retired) keeps its project, disabled, so its releases and
+# deployments stay as delivery history: this resource takes both kinds, and nothing below takes the retired.
 resource "octopusdeploy_project" "deployable" {
-  for_each = local.deployables
+  for_each = merge(local.deployables, local.retired_deployables)
 
   name                              = "${local.slug}-${each.key}"
   slug                              = "${local.slug}-${each.key}"
-  description                       = "Deployable ${each.key} from ${local.system.system.githubOrg}/${each.value.repository}: pin, migrate, update, verify."
+  description                       = contains(keys(local.retired_deployables), each.key) ? "Retired deployable ${each.key} from ${local.system.system.githubOrg}/${each.value.repository}: in no environment; kept for its releases and deployments (system.json deployables[].retired, decision 0058)." : "Deployable ${each.key} from ${local.system.system.githubOrg}/${each.value.repository}: pin, migrate, update, verify."
+  is_disabled                       = contains(keys(local.retired_deployables), each.key)
   project_group_id                  = octopusdeploy_project_group.system.id
   lifecycle_id                      = contains(keys(local.restricted_deployables), each.key) ? octopusdeploy_lifecycle.deployable[each.key].id : octopusdeploy_lifecycle.system.id
   tenanted_deployment_participation = "Untenanted"

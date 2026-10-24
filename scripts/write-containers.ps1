@@ -156,6 +156,8 @@ function Add-ResourceHealth {
 }
 
 $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
+# A retired deployable (deployables[].retired, decision 0058) is in no environment: nothing below sees it.
+$system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
 $slug = [string] $system.system.slug
 $before = @{}
 $publishedDocument = $null

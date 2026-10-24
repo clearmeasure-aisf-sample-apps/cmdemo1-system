@@ -5,7 +5,7 @@ locals {
   # One entry per project and variable name; environment = null means unscoped.
   project_ids = merge(
     { system = octopusdeploy_project.system.id },
-    { for name, project in octopusdeploy_project.deployable : name => project.id }
+    { for name, project in octopusdeploy_project.deployable : name => project.id if contains(keys(local.deployables), name) }
   )
 
   shared_variables = flatten([
@@ -143,7 +143,7 @@ locals {
         name        = "Availability.TailSeconds"
         value       = tostring(e.availabilityTailSeconds)
         environment = name
-      }
+      } if contains(keys(local.deployables), deployable)
     ] if try(e.availabilityTailSeconds, null) != null
   ])
 
