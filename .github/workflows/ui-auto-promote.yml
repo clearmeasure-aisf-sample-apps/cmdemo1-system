@@ -1,3 +1,4 @@
+# Since 2026-10-24 only fworker: the ui step is off, the fworker gateway promotes ui (see that step). Originally:
 # Automatic promotion of releases of deployables ui (the work-order app) and fworker, by the owner's decision of 2026-10-14 (Jeffrey
 # Palermo): "release candidates automatically deployed to production if there is nothing to flag them. don't let them
 # stop in release queue". ui, and fworker under the same rules (owner's decision of 2026-10-15); every other deployable
@@ -92,7 +93,11 @@ jobs:
             git show FETCH_HEAD:ui-auto-promote.json > "$RUNNER_TEMP/ui-auto-promote.json" || echo '{}' > "$RUNNER_TEMP/ui-auto-promote.json"
           fi
 
+      # Off since 2026-10-24 (owner's decision of 2026-10-23): the fworker gateway promotes cmdemo1-ui itself, gated on
+      # its work items (Auto Merge, Functional Testing PASS, demo video, previous deployment and health), and answers the
+      # Sign-off of its own deployments (cmdemo1-fworker #245). This workflow keeps promoting fworker.
       - name: Promote or hold ui
+        if: ${{ false }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,8 +107,8 @@ jobs:
           $extra = if ($env:DRY_RUN -eq 'true') { @('-DryRun') } else { @() }
           ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable ui -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run @extra
 
-      # After ui, in the same job: never two promotions to one environment at once. Runs also when the ui step failed,
-      # never when the rules, the sign-in or the reads failed.
+      # Runs whenever the rules, the sign-in and the reads succeeded (the ui step above is off: the gateway promotes ui);
+      # never when one of them failed.
       - name: Promote or hold fworker
         if: ${{ !cancelled() && steps.rules.outcome == 'success' && steps.login.outcome == 'success' && steps.fetch.outcome == 'success' }}
         shell: pwsh
