@@ -37,7 +37,8 @@ $environmentEntry = @($system.environments | Where-Object { $_.name -eq $Environ
 if ($environmentEntry.Count -ne 1) { throw "system.json has no environment '$Environment'." }
 $group = [string] $system.azure.resourceGroups[[string] $environmentEntry[0].tier]
 $entry = @($system.deployables | Where-Object { $_.name -eq $deployable })
-$exists = $entry.Count -eq 1 -and (-not $entry[0].ContainsKey('environments') -or $Environment -in @($entry[0].environments))
+# A retired deployable (deployables[].retired, decision 0058) exists in no environment, and its store is gone with it.
+$exists = $entry.Count -eq 1 -and $entry[0]['retired'] -ne $true -and (-not $entry[0].ContainsKey('environments') -or $Environment -in @($entry[0].environments))
 if (-not $exists) {
     Write-Host "SKIP blob store: $deployable does not exist in $Environment."
     exit 0
