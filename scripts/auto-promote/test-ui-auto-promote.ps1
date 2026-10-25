@@ -226,14 +226,16 @@ function New-EnvLookup($deps, $states, $rels, [int] $Total = -1) {
     }
 }
 $lk = New-EnvLookup $allDeps $allStates $allReleases
-$outsideLookup = { param($t) Get-RunningReleaseByEnvironment -Target $t -GetEnvironmentDeployments $lk.GetEnvironmentDeployments -GetRelease $lk.GetRelease -GetTaskState $lk.GetTaskState }.GetNewClosure()
+# The function travels as a value: a closure does not see the script's own functions (run 40239181124).
+$byEnvironment = ${function:Get-RunningReleaseByEnvironment}
+$outsideLookup = { param($t) & $byEnvironment -Max 100 -Target $t -GetEnvironmentDeployments $lk.GetEnvironmentDeployments -GetRelease $lk.GetRelease -GetTaskState $lk.GetTaskState }.GetNewClosure()
 $c = Select-Candidate -Environments $envs3 -Releases @($r587) -GetDeployments { param($id) @($allDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lk.GetTaskState -GetRunningOutside $outsideLookup
 Test-Case 'running release older than the list: candidate goes to uat with the running release as the base' "$($c.Release.Version)|$($c.Target.Name)|$($c.RunningReleaseId)|$($c.Running.Version)|$($null -eq $c.RunningUnknown)" '1.0.587|uat|Releases-50899|1.0.474|True'
 Test-Case 'running release older than the list: the note says how it was found' (@($c.Notes | Where-Object { $_ -like '*running in uat, 1.0.474, is older than the listed releases*' }).Count) 1
 # Through uat: prod runs the same old release.
 $uatDeps = @($allDeps) + @((New-Dep 'Releases-51076' 'E2' '50' 'u587'))
 $lkp = New-EnvLookup $uatDeps ($allStates + @{ u587 = 'Success' }) $allReleases
-$c = Select-Candidate -Environments $envs3 -Releases @($r587) -GetDeployments { param($id) @($uatDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lkp.GetTaskState -GetRunningOutside { param($t) Get-RunningReleaseByEnvironment -Target $t -GetEnvironmentDeployments $lkp.GetEnvironmentDeployments -GetRelease $lkp.GetRelease -GetTaskState $lkp.GetTaskState }.GetNewClosure()
+$c = Select-Candidate -Environments $envs3 -Releases @($r587) -GetDeployments { param($id) @($uatDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lkp.GetTaskState -GetRunningOutside { param($t) & $byEnvironment -Max 100 -Target $t -GetEnvironmentDeployments $lkp.GetEnvironmentDeployments -GetRelease $lkp.GetRelease -GetTaskState $lkp.GetTaskState }.GetNewClosure()
 Test-Case 'running release older than the list: then prod, against the same old release' @($c.Release.Version, $c.Target.Name, $c.Running.Version) @('1.0.587', 'prod', '1.0.474')
 # An old release found outside the list that is newer by version than the candidate still stops it.
 $c = Select-Candidate -Environments $envs3 -Releases @($r474) -GetDeployments { param($id) @((New-Dep 'Releases-50899' 'E1' '01' 'x1')) | Where-Object { $_.ReleaseId -eq $id } } -GetTaskState { param($d) 'Success' } -GetRunningOutside { param($t) $r587 }.GetNewClosure()
