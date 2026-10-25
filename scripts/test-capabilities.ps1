@@ -654,22 +654,25 @@ $checks = [ordered] @{
         # Checked wherever the deployable has been deployed.
         $with = @($system.deployables | Where-Object { @($_['secrets'] | Where-Object { $_ }).Count -gt 0 })
         if ($with.Count -eq 0) { Skip-Check 'no deployable declares secrets yet' }
+        # (Under Set-StrictMode, indexing an empty list with 0 throws "Index was outside the bounds of the array" before the
+        # assertion below can say what is missing: Select-Object -First 1 gives $null.)
         $shown = foreach ($entry in $with) {
             $name = [string] $entry.name
             foreach ($e in $environments) {
                 if ($entry.ContainsKey('environments') -and @($entry.environments) -notcontains $e) { continue }
                 if (-not (Find-LastDeployment "$slug-$name" $e)) { continue }
-                $app = @(Get-ContainerApp $e | Where-Object { $_.deployable -eq $name })[0]
+                $app = Get-ContainerApp $e | Where-Object { $_.deployable -eq $name } | Select-Object -First 1
                 Assert-That ($null -ne $app) "stack-$slug-$e lists no container app for $name (a failed or unfinished apply?)"
-                $shared = @($system.azure.identities.apps | Where-Object { $_.environment -eq $e })[0]
+                $shared = $system.azure.identities.apps | Where-Object { $_.environment -eq $e } | Select-Object -First 1
+                Assert-That ($null -ne $shared) "system.json azure.identities.apps has no shared runtime identity for $e, the one that pulls the image of $($app.name)"
                 $held = @($app.properties.configuration['secrets'] | Where-Object { $_ })
                 $inline = @($held | Where-Object { -not $_['keyVaultUrl'] } | ForEach-Object { [string] $_.name })
                 Assert-That ($inline.Count -eq 0) "$($app.name) in $e holds $($inline -join ', ') as a stored value, not as a vault reference"
                 foreach ($secret in @($entry.secrets)) {
-                    $reference = @($held | Where-Object { $_.name -eq $secret.name })[0]
+                    $reference = $held | Where-Object { $_.name -eq $secret.name } | Select-Object -First 1
                     Assert-That ($null -ne $reference -and ([string] $reference['keyVaultUrl']).EndsWith("/secrets/$name-$($secret.name)") -and $reference['identity']) "$($app.name) in $e does not reference the vault secret $name-$($secret.name) for $($secret.name)"
                     Assert-That ([string] $reference.identity -like "*/userAssignedIdentities/id-$slug-$e-$name") "$($app.name) in $e reads $($secret.name) as $((([string] $reference.identity) -split '/')[-1]), not as its own identity id-$slug-$e-$name"
-                    $variable = @($app.properties.template.containers[0].env | Where-Object { $_.name -eq $secret.env })[0]
+                    $variable = $app.properties.template.containers[0].env | Where-Object { $_.name -eq $secret.env } | Select-Object -First 1
                     Assert-That ($null -ne $variable -and $variable['secretRef'] -eq $secret.name) "$($app.name) in $e does not get $($secret.env) from the secret $($secret.name)"
                 }
                 # The shared identity pulls the image; the app's code must not be able to use it, and it must not
