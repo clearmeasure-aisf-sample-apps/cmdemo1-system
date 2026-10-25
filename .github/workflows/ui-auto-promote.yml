@@ -104,8 +104,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           $run = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          $extra = if ($env:DRY_RUN -eq 'true') { @('-DryRun') } else { @() }
-          ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable ui -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run @extra
+          ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable ui -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run -DryRun:($env:DRY_RUN -eq 'true')
 
       # Runs whenever the rules, the sign-in and the reads succeeded (the ui step above is off: the gateway promotes ui);
       # never when one of them failed.
@@ -117,8 +116,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           $run = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          $extra = if ($env:DRY_RUN -eq 'true') { @('-DryRun') } else { @() }
-          ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable fworker -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run @extra
+          ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable fworker -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run -DryRun:($env:DRY_RUN -eq 'true')
 
       - name: Keep the health reads for the next job
         if: ${{ always() }}
