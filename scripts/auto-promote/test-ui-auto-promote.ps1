@@ -210,6 +210,67 @@ Test-Case '2.4.10 is newer than 2.4.9 (numeric, not text)' ((Compare-Release @{ 
 $c = Select-With @($r3) @((New-Dep 'R3' 'E1' '10' 't3')) @{ t3 = 'Running' }
 Test-Case 'a deployment still running in tdd is not a success' $c.Release $null
 
+# The running release older than the listed releases (issue #314: fworker 1.0.587 held before uat, "no base commit",
+# while 1.0.474, about 113 versions back, ran in uat and prod).
+$r474 = New-Rel 'Releases-50899' '1.0.474' 1; $r587 = New-Rel 'Releases-51076' '1.0.587' 9
+$oldDeps = @((New-Dep 'Releases-50899' 'E2' '20' 'o474u'), (New-Dep 'Releases-50899' 'E3' '30' 'o474p'), (New-Dep 'Releases-50870' 'E2' '10' 'o470u'))
+$allDeps = @($oldDeps) + @((New-Dep 'Releases-51076' 'E1' '40' 't587'))
+$allStates = @{ o474u = 'Success'; o474p = 'Success'; o470u = 'Success'; t587 = 'Success' }
+$allReleases = @{ 'Releases-50899' = $r474; 'Releases-50870' = (New-Rel 'Releases-50870' '1.0.470' 1) }
+function New-EnvLookup($deps, $states, $rels, [int] $Total = -1) {
+    # GetEnvironmentDeployments, GetRelease and GetTaskState over fixed data; Total: what the listing says it holds.
+    @{
+        GetEnvironmentDeployments = { param($e, $take) $i = @($deps | Where-Object { $_.EnvironmentId -eq $e } | Sort-Object { [datetimeoffset] $_.Created } -Descending | Select-Object -First $take); @{ Items = $i; Total = $(if ($Total -ge 0) { $Total } else { @($deps | Where-Object { $_.EnvironmentId -eq $e }).Count }) } }.GetNewClosure()
+        GetRelease                = { param($id) if (-not $rels.ContainsKey($id)) { throw "404 $id" }; $rels[$id] }.GetNewClosure()
+        GetTaskState              = { param($d) $states[$d.TaskId] }.GetNewClosure()
+    }
+}
+$lk = New-EnvLookup $allDeps $allStates $allReleases
+$outsideLookup = { param($t) Get-RunningReleaseByEnvironment -Target $t -GetEnvironmentDeployments $lk.GetEnvironmentDeployments -GetRelease $lk.GetRelease -GetTaskState $lk.GetTaskState }.GetNewClosure()
+$c = Select-Candidate -Environments $envs3 -Releases @($r587) -GetDeployments { param($id) @($allDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lk.GetTaskState -GetRunningOutside $outsideLookup
+Test-Case 'running release older than the list: candidate goes to uat with the running release as the base' "$($c.Release.Version)|$($c.Target.Name)|$($c.RunningReleaseId)|$($c.Running.Version)|$($null -eq $c.RunningUnknown)" '1.0.587|uat|Releases-50899|1.0.474|True'
+Test-Case 'running release older than the list: the note says how it was found' (@($c.Notes | Where-Object { $_ -like '*running in uat, 1.0.474, is older than the listed releases*' }).Count) 1
+# Through uat: prod runs the same old release.
+$uatDeps = @($allDeps) + @((New-Dep 'Releases-51076' 'E2' '50' 'u587'))
+$lkp = New-EnvLookup $uatDeps ($allStates + @{ u587 = 'Success' }) $allReleases
+$c = Select-Candidate -Environments $envs3 -Releases @($r587) -GetDeployments { param($id) @($uatDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lkp.GetTaskState -GetRunningOutside { param($t) Get-RunningReleaseByEnvironment -Target $t -GetEnvironmentDeployments $lkp.GetEnvironmentDeployments -GetRelease $lkp.GetRelease -GetTaskState $lkp.GetTaskState }.GetNewClosure()
+Test-Case 'running release older than the list: then prod, against the same old release' @($c.Release.Version, $c.Target.Name, $c.Running.Version) @('1.0.587', 'prod', '1.0.474')
+# An old release found outside the list that is newer by version than the candidate still stops it.
+$c = Select-Candidate -Environments $envs3 -Releases @($r474) -GetDeployments { param($id) @((New-Dep 'Releases-50899' 'E1' '01' 'x1')) | Where-Object { $_.ReleaseId -eq $id } } -GetTaskState { param($d) 'Success' } -GetRunningOutside { param($t) $r587 }.GetNewClosure()
+Test-Case 'running release outside the list that is newer: no candidate' $c.Release $null
+# The lookup fails: the candidate is still evaluated, and the evaluation flags "comparison incomplete" with the reason.
+$c = Select-Candidate -Environments $envs3 -Releases @($r587) -GetDeployments { param($id) @($allDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lk.GetTaskState -GetRunningOutside { param($t) throw "the release running in $($t.Name) was not found: boom" }
+Test-Case 'running release lookup that fails: running unknown, with the reason' "$($c.Release.Version)|$($null -eq $c.RunningReleaseId)|$($null -eq $c.Running)|$($c.RunningUnknown)" '1.0.587|True|True|the release running in uat was not found: boom'
+$msg = try { Select-Candidate -Environments $envs3 -Releases @($r587) -GetDeployments { param($id) @($allDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lk.GetTaskState -GetRunningOutside { param($t) throw 'Response status code does not indicate success: 503' }; 'no throw' } catch { $_.Exception.Message }
+Test-Case 'running release lookup whose call fails: the run stops (no hold issue)' $msg 'Response status code does not indicate success: 503'
+# Without the lookup (the old behaviour): no running release known.
+$c = Select-Candidate -Environments $envs3 -Releases @($r587) -GetDeployments { param($id) @($allDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lk.GetTaskState
+Test-Case 'running release older than the list, no lookup: unknown base' "$($c.Release.Version)|$($null -eq $c.RunningReleaseId)" '1.0.587|True'
+
+# Get-RunningReleaseByEnvironment
+function Run-Lookup($lookup, $target, [int] $Max = 100) { Get-RunningReleaseByEnvironment -Target $target -GetEnvironmentDeployments $lookup.GetEnvironmentDeployments -GetRelease $lookup.GetRelease -GetTaskState $lookup.GetTaskState -Max $Max }
+Test-Case 'environment lookup: the newest successful deployment names the running release' (Run-Lookup $lk $envs3[1]).Version '1.0.474'
+$lkq = New-EnvLookup (@($allDeps) + @((New-Dep 'Releases-51076' 'E2' '55' 'q587'), (New-Dep 'Releases-51075' 'E2' '54' 'f586'))) ($allStates + @{ q587 = 'Queued'; f586 = 'Failed' }) $allReleases
+Test-Case 'environment lookup: newer queued and failed deployments are not running' (Run-Lookup $lkq $envs3[1]).Version '1.0.474'
+Test-Case 'environment lookup: nothing deployed there is none' ($null -eq (Run-Lookup $lk @{ Id = 'E9'; Name = 'dev' })) $true
+$lkn = New-EnvLookup @((New-Dep 'Releases-50899' 'E2' '20' 'n1')) @{ n1 = 'Failed' } $allReleases
+Test-Case 'environment lookup: no success in a whole listing is none' ($null -eq (Run-Lookup $lkn $envs3[1])) $true
+$lkb = New-EnvLookup @((New-Dep 'Releases-50899' 'E2' '20' 'b1'), (New-Dep 'Releases-50899' 'E2' '10' 'b2')) @{ b1 = 'Failed'; b2 = 'Success' } $allReleases
+$msg = try { Run-Lookup $lkb $envs3[1] -Max 1; 'no throw' } catch { $_.Exception.Message }
+Test-Case 'environment lookup: no success among the newest Max of more throws, naming the bound' $msg 'the release running in uat was not found: none of the newest 1 of 2 deployments there succeeded'
+$lkr = New-EnvLookup @((New-Dep 'Releases-404' 'E2' '20' 'g1')) @{ g1 = 'Success' } $allReleases
+$msg = try { Run-Lookup $lkr $envs3[1]; 'no throw' } catch { $_.Exception.Message }
+Test-Case 'environment lookup: a failed release read throws its own error (the run stops)' $msg '404 Releases-404'
+$lke = New-EnvLookup @((New-Dep 'Releases-50899' 'E2' '20' 'g2')) @{ g2 = 'Success' } @{ 'Releases-50899' = @{ Version = '1.0.474' } }
+$msg = try { Run-Lookup $lke $envs3[1]; 'no throw' } catch { $_.Exception.Message }
+Test-Case 'environment lookup: an answer without a release throws a lookup error' $msg 'the release running in uat could not be read: release Releases-50899 of deployment D-Releases-50899-E2-g2'
+Test-Case 'environment lookup: the default bound' $RunningLookupDeployments 100
+# Recovery: the release that ran before a waiting deployment, outside the list.
+$run = Get-RunningRelease -Target $envs3[1] -Releases @($r587) -GetDeployments { param($id) @($allDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lk.GetTaskState -GetRunningOutside $outsideLookup
+Test-Case 'running release (recovery): found outside the list' $run.Version '1.0.474'
+$run = Get-RunningRelease -Target $envs3[1] -Releases @($r587) -GetDeployments { param($id) @($allDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState $lk.GetTaskState
+Test-Case 'running release (recovery): without the lookup none' ($null -eq $run) $true
+
 function Merge-Hash($a, $b) { $c = $a.Clone(); foreach ($k in $b.Keys) { $c[$k] = $b[$k] }; $c }
 # Sign-off targeting
 $so = @{ Type = 'ManualIntervention'; TaskId = 'T1'; Title = 'Sign-off'; IsPending = $true; ResponsibleUserId = $null; HasResponsibility = $false; Id = 'I1' }
@@ -254,6 +315,21 @@ Test-Case 'hold facts: cross-repository reference is read in its own repository'
 $many = [pscustomobject] @{ sha = 'c3'; commit = [pscustomobject] @{ message = ((1..5 | ForEach-Object { "#$_" }) -join ' ') } }
 $h = Get-HoldFacts -Commits @($many) -Repo 'org/app' -GetPulls { param($s) @() } -GetClosing { param($n) @() } -GetItem { param($r, $n) @{ Number = $n; Url = ''; Labels = @() } } -Max 3
 Test-Case 'hold facts: more than the cap is unknown' @($h.Items.Count, $h.Unknown.Count) @(3, 1)
+# A #N the application repository answers 404 for is no item (fworker PR bodies name cmdemo1-workorders items as #N, 1.0.587).
+$h = Get-HoldFacts -Commits @($commit) -Repo 'org/app' -GetPulls { param($s) @() } -GetClosing { param($n) @() } -GetItem { param($r, $n) if ($n -eq 16) { $null } else { @{ Number = $n; Url = "i$n"; Labels = @() } } }
+Test-Case 'hold facts: an item that does not exist is neither an item nor unknown' "$(@($h.Items | ForEach-Object Number) -join ',') $($h.Unknown.Count)" '58 0'
+$notFound = '{"message":"Not Found","documentation_url":"https://docs.github.com/rest/issues/issues#get-an-issue","status":"404"}'
+Test-Case 'issue read: 404 of the application repository is no item' ($null -eq (ConvertFrom-IssueRead -ExitCode 1 -Output $notFound -Repo 'Org/App' -Number 406 -AppRepo 'org/app')) $true
+$msg = try { ConvertFrom-IssueRead -ExitCode 1 -Output $notFound -Repo 'org/other' -Number 9 -AppRepo 'org/app'; 'no throw' } catch { $_.Exception.Message }
+Test-Case 'issue read: 404 of another repository is not read' $msg 'org/other#9 not read (gh exit 1, HTTP 404)'
+$msg = try { ConvertFrom-IssueRead -ExitCode 1 -Output '{"message":"Server Error","status":"502"}' -Repo 'org/app' -Number 5 -AppRepo 'org/app'; 'no throw' } catch { $_.Exception.Message }
+Test-Case 'issue read: another failure of the application repository is not read' $msg 'org/app#5 not read (gh exit 1, HTTP 502)'
+$msg = try { ConvertFrom-IssueRead -ExitCode 1 -Output '' -Repo 'org/app' -Number 5 -AppRepo 'org/app'; 'no throw' } catch { $_.Exception.Message }
+Test-Case 'issue read: no answer at all is not read' $msg 'org/app#5 not read (gh exit 1)'
+$ok = ConvertFrom-IssueRead -ExitCode 0 -Output '{"html_url":"https://x/16","labels":[{"name":"Hold"},{"name":"bug"}]}' -Repo 'org/app' -Number 16 -AppRepo 'org/app'
+Test-Case 'issue read: an answered issue keeps its labels' "$($ok.Number) $($ok.Url) $($ok.Labels -join ',')" '16 https://x/16 Hold,bug'
+$msg = try { ConvertFrom-IssueRead -ExitCode 0 -Output 'garbage' -Repo 'org/app' -Number 5 -AppRepo 'org/app'; 'no throw' } catch { $_.Exception.Message }
+Test-Case 'issue read: an answer that is not an issue is not read' $msg 'org/app#5 not read (no issue in the answer)'
 
 # State
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "uap-$([guid]::NewGuid()).json"

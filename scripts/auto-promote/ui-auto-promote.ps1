@@ -16,7 +16,8 @@
     parsable one; Assembled only between equal or unparsable versions: releases can be assembled out of order); the first whose latest deployment to the previous
     environment (tdd before uat, uat before prod) succeeded. It is the candidate when it has no deployment at all to the
     next environment (any state: a canceled one is a person's no) and is newer than the release running there; prod is
-    looked at before uat. A newer release that ended otherwise in the previous environment is skipped and the run log says so.
+    looked at before uat. The newest $ReleaseWindow releases are listed; a running release older than those is found through
+    the newest deployments to that environment (issue #314). A newer release that ended otherwise in the previous environment is skipped and the run log says so.
     Nothing is promoted while any deployment or runbook run (any project) to the target environment, or any ui
     deployment to a later-than-first environment, is queued, running, cancelling or waiting at an interruption; a call that
     fails or a listing that is incomplete also stops the run (fail closed).
@@ -44,7 +45,11 @@
                  read failed) flags as "comparison incomplete".
       4 hold      Flag: a pull request in the commits between those two, or an issue they close or reference (#N and
                  owner/repo#N in titles, bodies and commit messages, GitHub's closing references) labelled Hold (case
-                 ignored). Wait: any read of that chain failed or was cut (more than 300 items).
+                 ignored). Wait: any read of that chain failed or was cut (more than 300 items). A #N that the application
+                 repository answers 404 for is no item there, so nothing to hold (fworker pull requests name work items of
+                 cmdemo1-workorders as bare #N; such an item's Hold label is not looked up). This relies on the application
+                 repository being readable (it is public; the comparison read it). A 404 from another repository still
+                 waits (it may be one not readable).
 
     Flagged: the deployment is NOT created, so no Sign-off waits in the environment and holds it for every other
     deployable. One issue "<deployable> <version> held before <env>" (label release-held, no assignee) lists each flag with its
@@ -115,6 +120,11 @@ $DeployableSettings = @{
 # change is promoted anyway this many minutes after its deployment to the previous environment finished, when master of
 # the application repository is green.
 $PipelineOverrideMinutes = 60
+# The newest releases looked at for a candidate; the release running in an environment can be older: then it is found
+# through the newest deployments to that environment, at most this many (issue #314; fewer than one success among them
+# leaves the running release unknown: "comparison incomplete").
+$ReleaseWindow = 40
+$RunningLookupDeployments = 100
 $PromotionMarker = 'Promoted by workflow ui-auto-promote'
 
 $Settings = $DeployableSettings[$Deployable]
@@ -318,24 +328,55 @@ function Get-ReleasesNewestFirst([object[]] $Releases) {
     @($l)
 }
 
+function Get-RunningReleaseByEnvironment {
+    <# The release that runs in Target when no release of the listed window ran there: the window holds only the newest
+       releases, and the running one can be older (fworker 1.0.474, about 113 versions back, issue #314). The release of the
+       newest deployment to Target whose task succeeded, read by its id. GetEnvironmentDeployments {param($environmentId,
+       $take)} -> @{ Items (deployments of the project to that environment, newest first); Total }; GetRelease
+       {param($releaseId)}; GetTaskState {param($deployment)}. $null when the listing is whole and no deployment there
+       succeeded (nothing runs there). Throws "the release running in ..." when none of the newest $Max deployments
+       succeeded and there are more, or when the release answered is empty; a failed call throws its own error (the run
+       stops, as for every failed call). #>
+    param($Target, [scriptblock] $GetEnvironmentDeployments, [scriptblock] $GetRelease, [scriptblock] $GetTaskState, [int] $Max = $RunningLookupDeployments)
+    $list = & $GetEnvironmentDeployments $Target.Id $Max
+    $items = @(@($list.Items) | Where-Object { $_ -and $_.EnvironmentId -eq $Target.Id } | Sort-Object { [datetimeoffset] $_.Created } -Descending)
+    foreach ($d in $items) {
+        if ((& $GetTaskState $d) -ne 'Success') { continue }
+        $r = & $GetRelease $d.ReleaseId
+        $rid = if ($r) { try { [string] $r.Id } catch { '' } } else { '' }
+        if (-not $rid) { throw "the release running in $($Target.Name) could not be read: release $($d.ReleaseId) of deployment $($d.Id)" }
+        return $r
+    }
+    if ([int] $list.Total -gt @($list.Items).Count) { throw "the release running in $($Target.Name) was not found: none of the newest $(@($list.Items).Count) of $($list.Total) deployments there succeeded" }
+    $null
+}
+
+function Test-RunningLookupError($ErrorRecord) { "$($ErrorRecord.Exception.Message)" -like 'the release running in *' }
+
 function Get-RunningRelease {
     <# The release that runs in Target: the newest (by version) with a deployment there whose task succeeded. A queued or
-       waiting deployment is not running. Releases; GetDeployments {param($releaseId)}; GetTaskState {param($deployment)}. #>
-    param($Target, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState)
+       waiting deployment is not running. Releases; GetDeployments {param($releaseId)}; GetTaskState {param($deployment)};
+       GetRunningOutside {param($target)}: when no listed release ran there (Get-RunningReleaseByEnvironment; may throw). #>
+    param($Target, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState, [scriptblock] $GetRunningOutside = $null)
     foreach ($o in @(Get-ReleasesNewestFirst $Releases)) {
         $ran = @(& $GetDeployments $o.Id | Where-Object { $_.EnvironmentId -eq $Target.Id } | Where-Object { (& $GetTaskState $_) -eq 'Success' }) | Select-Object -First 1
         if ($ran) { return $o }
     }
+    if ($GetRunningOutside) { return (& $GetRunningOutside $Target) }
     $null
 }
 
 function Select-Candidate {
     <# Environments ordered; Releases (Id, Version, Assembled); GetDeployments {param($releaseId)} -> deployments (Id, ReleaseId,
-       EnvironmentId, TaskId, Created); GetTaskState {param($deployment)} -> Octopus task state. Returns
-       @{ Release; Target; Previous; RunningReleaseId; Notes } or $null with Notes. Looks at the last environment first. #>
-    param([object[]] $Environments, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState)
+       EnvironmentId, TaskId, Created); GetTaskState {param($deployment)} -> Octopus task state; GetRunningOutside
+       {param($target)} -> the release running in the target when no listed release ran there (it may be older than the
+       list; Get-RunningReleaseByEnvironment), or $null; when it throws, the running release is unknown: RunningUnknown
+       says why, and the evaluation flags "comparison incomplete" (no base commit). Returns
+       @{ Release; Target; Previous; RunningReleaseId; Running; RunningUnknown; Notes } or $null with Notes. Looks at the
+       last environment first. #>
+    param([object[]] $Environments, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState, [scriptblock] $GetRunningOutside = $null)
     $sorted = @(Get-ReleasesNewestFirst $Releases)
-    $cache = @{}
+    $cache = @{}; $outside = @{}
     $deps = { param($r) if (-not $cache.ContainsKey($r.Id)) { $cache[$r.Id] = @(& $GetDeployments $r.Id) }; $cache[$r.Id] }
     $notes = [Collections.Generic.List[string]]::new()
     for ($i = $Environments.Count - 1; $i -ge 1; $i--) {
@@ -349,18 +390,25 @@ function Select-Candidate {
             if ($state -ne 'Success') { if (-not $skipped) { $skipped = "$($r.Version) ended $state in $($previous.Name)" }; continue }
             if (@($here | Where-Object { $_.EnvironmentId -eq $target.Id }).Count -gt 0) { break }
             # Newer than the release running in the target?
-            $runningId = $null
+            $running = $null; $unknown = $null
             foreach ($o in $sorted) {
                 $ran = @(& $deps $o | Where-Object { $_.EnvironmentId -eq $target.Id } | Sort-Object { [datetimeoffset] $_.Created } -Descending | Where-Object { (& $GetTaskState $_) -eq 'Success' }) | Select-Object -First 1
-                if ($ran) { $runningId = $o.Id; break }
+                if ($ran) { $running = $o; break }
             }
-            if ($runningId -eq $r.Id) { break }
-            if ($runningId) {
-                $running = $sorted | Where-Object Id -eq $runningId
-                if ((Compare-Release $running $r) -ge 0) { break }
+            if (-not $running -and $GetRunningOutside) {
+                # Not among the listed releases: read through the environment's own deployments (issue #314).
+                if (-not $outside.ContainsKey($target.Id)) {
+                    # Only the lookup's own "not found" leaves it unknown; a failed call stops the run (fail closed).
+                    $outside[$target.Id] = try { @{ Release = (& $GetRunningOutside $target); Unknown = $null } } catch { if (-not (Test-RunningLookupError $_)) { throw }; @{ Release = $null; Unknown = $_.Exception.Message } }
+                    if ($outside[$target.Id].Release) { $notes.Add("the release running in $($target.Name), $($outside[$target.Id].Release.Version), is older than the listed releases: read through its deployment") }
+                }
+                $running = $outside[$target.Id].Release; $unknown = $outside[$target.Id].Unknown
             }
+            $runningId = if ($running) { $running.Id } else { $null }
+            if ($runningId -and $runningId -eq $r.Id) { break }
+            if ($running -and (Compare-Release $running $r) -ge 0) { break }
             if ($skipped) { $notes.Add("newer release ${skipped}: the older release $($r.Version) is considered for $($target.Name)") }
-            return @{ Release = $r; Target = $target; Previous = $previous; RunningReleaseId = $runningId; Notes = @($notes) }
+            return @{ Release = $r; Target = $target; Previous = $previous; RunningReleaseId = $runningId; Running = $running; RunningUnknown = $unknown; Notes = @($notes) }
         }
     }
     @{ Release = $null; Notes = @($notes) }
@@ -412,8 +460,8 @@ function Get-ReferencedNumbers {
 
 function Get-HoldFacts {
     <# Commits (sha, commit.message); GetPulls {param($sha)} -> pull requests (number, title, body, labels, html_url);
-       GetClosing {param($pullNumber)} -> issue refs (@{Repo;Number}); GetItem {param($repo,$number)} -> @{Number;Url;Labels}.
-       Any scriptblock may throw: that becomes an entry of Unknown. #>
+       GetClosing {param($pullNumber)} -> issue refs (@{Repo;Number}); GetItem {param($repo,$number)} -> @{Number;Url;Labels},
+       or $null when there is no such item (ConvertFrom-IssueRead). Any scriptblock may throw: that becomes an entry of Unknown. #>
     param([object[]] $Commits, [string] $Repo, [scriptblock] $GetPulls, [scriptblock] $GetClosing, [scriptblock] $GetItem, [int] $Max = 300)
     $refs = [Collections.Generic.Dictionary[string, hashtable]]::new()
     $items = @{}; $unknown = [Collections.Generic.List[string]]::new()
@@ -431,9 +479,24 @@ function Get-HoldFacts {
     if ($todo.Count -gt $Max) { $unknown.Add("$($todo.Count) referenced items (more than $Max)"); $todo = @($todo | Select-Object -First $Max) }
     foreach ($k in $todo) {
         $r = $refs[$k]
-        try { $items[$k] = & $GetItem $r.Repo $r.Number } catch { $unknown.Add("$k not read") }
+        try { $it = & $GetItem $r.Repo $r.Number; if ($null -ne $it) { $items[$k] = $it } } catch { $unknown.Add("$k not read") }
     }
     @{ Items = @($items.Values); Unknown = @($unknown) }
+}
+
+function ConvertFrom-IssueRead {
+    <# The answer of gh api repos/<Repo>/issues/<Number> (exit code, standard output): @{ Number; Url; Labels }; $null when the
+       application repository (AppRepo, public, read by this run already) answers 404: no such issue or pull request there,
+       nothing to hold. Throws on any other failure, a 404 of another repository included (it may be one that is not readable). #>
+    param([int] $ExitCode, [string] $Output, [string] $Repo, [int] $Number, [string] $AppRepo)
+    $j = try { $Output | ConvertFrom-Json -Depth 30 } catch { $null }
+    if ($ExitCode -ne 0) {
+        $status = if ($j -and $j.PSObject.Properties['status']) { [string] $j.status } else { '' }
+        if ($status -eq '404' -and $Repo -ieq $AppRepo) { return $null }
+        throw "$Repo#$Number not read (gh exit $ExitCode$(if ($status) { ", HTTP $status" }))"
+    }
+    if (-not $j -or -not $j.PSObject.Properties['html_url']) { throw "$Repo#$Number not read (no issue in the answer)" }
+    @{ Number = $Number; Url = $j.html_url; Labels = @($j.labels | ForEach-Object name) }
 }
 
 function Read-State {
@@ -550,10 +613,17 @@ $envs = @(Invoke-Octopus "/api/$space/environments/all" | Sort-Object SortOrder)
 $project = (@(Invoke-Octopus "/api/$space/projects/all" | Where-Object { $_.Name -eq "$slug-$Deployable" }) | Select-Object -First 1)
 if (-not $project) { throw "project $slug-$Deployable not found" }
 $first = $envs[0]
-$releases = @((Invoke-Octopus "/api/$space/projects/$($project.Id)/releases?take=40").Items)
+$releases = @((Invoke-Octopus "/api/$space/projects/$($project.Id)/releases?take=$ReleaseWindow").Items)
 $taskCache = @{}
 function Get-TaskState($d) { if (-not $taskCache.ContainsKey($d.TaskId)) { $taskCache[$d.TaskId] = Invoke-Octopus "/api/tasks/$($d.TaskId)" }; $taskCache[$d.TaskId].State }
 function Get-ReleaseDeployments($releaseId) { Get-OctopusAll "/api/$space/releases/$releaseId/deployments" }
+function Get-RunningOutsideList($target) {
+    # The release running in the target when none of the listed releases ran there (issue #314).
+    Get-RunningReleaseByEnvironment -Target $target `
+        -GetEnvironmentDeployments { param($environmentId, $take) $r = Invoke-Octopus "/api/$space/deployments?projects=$($project.Id)&environments=$environmentId&take=$take"; @{ Items = @($r.Items); Total = $r.TotalResults } } `
+        -GetRelease { param($releaseId) Invoke-Octopus "/api/$space/releases/$releaseId" } `
+        -GetTaskState { param($d) Get-TaskState $d }
+}
 function Get-Commit($release) { if ($release -and "$($release.ReleaseNotes)" -match 'of ([0-9a-f]{40})') { $Matches[1] } }
 
 $heldIssues = @(& gh issue list -R $ownRepo --label release-held --state open --json number,title,body --limit 50 | ConvertFrom-Json)
@@ -595,7 +665,8 @@ function Read-MasterState {
 }
 
 function Get-Evaluation {
-    param($Release, $Target, $Previous, $RunningRelease)
+    # RunningUnknown: why the release running in the target could not be determined (it then names no base commit).
+    param($Release, $Target, $Previous, $RunningRelease, [string] $RunningUnknown = '')
     $sha = Get-Commit $Release
     if (-not $sha) { throw "release $($Release.Version) names no commit in its notes" }
     $facts = @{ HoldUnknown = @() }
@@ -644,7 +715,8 @@ function Get-Evaluation {
     $baseAddress = if ($addresses) { [string] $addresses.($Target.Name).$Deployable } else { '' }
     if ($baseAddress) { $baseSha = try { [string] (Invoke-RestMethod "$baseAddress/_build" -TimeoutSec 30).commit } catch { $null } }
     if ($baseSha -notmatch '^[0-9a-f]{40}$') { $baseSha = Get-Commit $RunningRelease }
-    $pathsKnown = $false; $pathsReason = 'no base commit: neither /_build nor the running release names one'; $paths = @(); $holdItems = @()
+    $pathsKnown = $false; $paths = @(); $holdItems = @()
+    $pathsReason = if ($RunningUnknown) { "no base commit: /_build names none and $RunningUnknown" } else { 'no base commit: neither /_build nor the running release names one' }
     if ($baseSha -match '^[0-9a-f]{40}$') {
         try {
             $pages = @(); $page = 1
@@ -662,7 +734,11 @@ function Get-Evaluation {
                     $q = 'query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){closingIssuesReferences(first:50){nodes{number repository{nameWithOwner}}}}}}'
                     $g = (& gh api graphql -f query=$q -f "o=$($system.system.githubOrg)" -f "r=$($app.repository)" -F "n=$n") | ConvertFrom-Json
                     @($g.data.repository.pullRequest.closingIssuesReferences.nodes | ForEach-Object { @{ Repo = $_.repository.nameWithOwner; Number = [int] $_.number } }) } `
-                -GetItem { param($repo, $n) $it = Invoke-Gh @("repos/$repo/issues/$n"); @{ Number = $n; Url = $it.html_url; Labels = @($it.labels | ForEach-Object name) } }
+                -GetItem { param($repo, $n)
+                    # A failed gh answers its exit code here (not an exception), so a 404 can be told from other failures.
+                    $PSNativeCommandUseErrorActionPreference = $false
+                    $out = (& gh api "repos/$repo/issues/$n" 2>$null) -join "`n"
+                    ConvertFrom-IssueRead -ExitCode $LASTEXITCODE -Output $out -Repo $repo -Number $n -AppRepo $appRepo }
             $holdItems = $hold.Items; $facts.HoldUnknown = $hold.Unknown
         } catch { $pathsKnown = $false; $pathsReason = "comparison failed: $($_.Exception.Message)" }
     }
@@ -736,8 +812,9 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
     $target = $envs[$tIndex]; $previous = $envs[$tIndex - 1]
     Say "Recovery: $Deployable $($rel.Version) waits at its Sign-off in $($target.Name) ($($b.TaskId))."
     # The base of the comparison is the release that ran there before this deployment, not the waiting one.
-    $runningBefore = Get-RunningRelease -Target $target -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d }
-    $ev = Get-Evaluation -Release $rel -Target $target -Previous $previous -RunningRelease $runningBefore
+    $runningUnknown = ''
+    $runningBefore = try { Get-RunningRelease -Target $target -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t } } catch { if (-not (Test-RunningLookupError $_)) { throw }; $runningUnknown = $_.Exception.Message; $null }
+    $ev = Get-Evaluation -Release $rel -Target $target -Previous $previous -RunningRelease $runningBefore -RunningUnknown $runningUnknown
     if ($ev.Behind -or $ev.Decision.Decision -ne 'promote') {
         if (-not $ev.Behind -and $ev.Decision.Decision -eq 'hold') { Set-HeldIssue -Release $rel -Target $target -Evaluation $ev -DeploymentNote "The deployment $($b.Deployment.Id) was created earlier and waits at its Sign-off: a person decides." }
         else { Say "Left waiting: $(@($ev.Decision.Waiting) -join '; ')" }
@@ -748,7 +825,7 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
 }
 
 # 3. Candidate.
-$candidate = Select-Candidate -Environments $envs -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d }
+$candidate = Select-Candidate -Environments $envs -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t }
 $candidate.Notes | ForEach-Object { Say $_ }
 if (-not $candidate.Release) { Say "No $Deployable release waits for a next environment."; Close-HeldIssues $candidate $activeTaskIds; return }
 $release = $candidate.Release; $target = $candidate.Target; $previous = $candidate.Previous
@@ -757,8 +834,9 @@ $busy = Get-BusyReason -Items $busyItems -TargetEnvironmentId $target.Id -FirstE
 if ($busy) { Say "Nothing to do: $busy."; return }
 Say "Candidate: $Deployable $($release.Version) to $($target.Name) (commit $(Get-Commit $release))"
 
-$running = (@($releases | Where-Object Id -eq $candidate.RunningReleaseId) | Select-Object -First 1)
-$ev = Get-Evaluation -Release $release -Target $target -Previous $previous -RunningRelease $running
+$running = $candidate.Running
+if ($candidate.RunningUnknown) { Say "The release running in $($target.Name) is unknown: $($candidate.RunningUnknown)" }
+$ev = Get-Evaluation -Release $release -Target $target -Previous $previous -RunningRelease $running -RunningUnknown ([string] $candidate.RunningUnknown)
 if ($ev.Behind) { Say "commit $($ev.Sha) is behind the running $($ev.BaseSha): not promoted."; return }
 $decision = $ev.Decision
 Say "Decision: $($decision.Decision)"
