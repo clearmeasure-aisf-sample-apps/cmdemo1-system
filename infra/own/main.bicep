@@ -542,12 +542,83 @@ resource scorecardSpaceWriter 'Microsoft.Authorization/roleAssignments@2022-04-0
   }
 }]
 
+// The factory worker gateway's own database (cmdemo1-fworker W2.2; Jeffrey, 2026-10-27), in tdd only: a small
+// serverless database on tdd's SQL server, which the gateway reaches as its own identity id-<slug>-tdd-fworker (no
+// password anywhere). Entra authentication needs an Entra administrator on the server: the operator identity cm-ai-ops,
+// which gives the gateway's identity its contained user (infra/own/grant-fworker-database.ps1, run by the operator
+// after a deployment that creates the database). The kit's SQL administrator login stays as it is; the ui app still
+// connects with it. Nothing reads FACTORY_DB_CONNECTION until fworker W2.2 ships.
+var factoryDatabaseEnvironments = ['tdd']
+var hasFactoryDatabase = contains(factoryDatabaseEnvironments, stack.environmentName) && !empty(gateway.deployable)
+// The server ../main.bicep makes (sqlServerName there): its region is system.sqlLocation, and a region of its own gives
+// it a suffix of its own.
+var sqlLocation = string(union({ sqlLocation: stack.location }, system.system).sqlLocation)
+var sqlSuffix = sqlLocation == stack.location
+  ? take(uniqueString(subscription().id, resourceGroup().id, stack.environmentName), 5)
+  : take(uniqueString(subscription().id, resourceGroup().id, stack.environmentName, sqlLocation), 5)
+var sqlServerName = 'sql-${stack.slug}-${stack.environmentName}-${sqlSuffix}'
+var factoryDatabaseName = 'sqldb-${stack.slug}-${stack.environmentName}-fworker'
+// The operator identity: service principal cm-ai-ops, as which the operator account aiops signs in. An application's
+// SID is its client ID, not the object ID of its service principal.
+var sqlEntraAdministrator = {
+  login: 'cm-ai-ops'
+  clientId: '2ad8c83f-2bb4-4a2e-abe4-3a7ff2ff089b'
+}
+
+resource sqlServer 'Microsoft.Sql/servers@2023-08-01' existing = if (hasFactoryDatabase) {
+  name: sqlServerName
+}
+
+resource sqlEntraAdmin 'Microsoft.Sql/servers/administrators@2023-08-01' = if (hasFactoryDatabase) {
+  parent: sqlServer
+  name: 'ActiveDirectory'
+  properties: {
+    administratorType: 'ActiveDirectory'
+    login: sqlEntraAdministrator.login
+    sid: sqlEntraAdministrator.clientId
+    tenantId: tenant().tenantId
+  }
+}
+
+// Serverless General Purpose, 0.5 to 1 vCore, paused after an hour without a connection; 2 GB; backups in the region only.
+resource factoryDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = if (hasFactoryDatabase) {
+  parent: sqlServer
+  name: factoryDatabaseName
+  location: sqlLocation
+  tags: union(stack.tags, { purpose: 'fworker' })
+  sku: {
+    name: 'GP_S_Gen5'
+    tier: 'GeneralPurpose'
+    family: 'Gen5'
+    capacity: 1
+  }
+  properties: {
+    autoPauseDelay: 60
+    minCapacity: json('0.5')
+    maxSizeBytes: 2147483648
+    requestedBackupStorageRedundancy: 'Local'
+    zoneRedundant: false
+  }
+}
+
+// No secret: the gateway signs in as its identity (the client ID says which of the app's identities).
+var factoryDatabaseConnection = 'Server=tcp:${sqlServerName}${environment().suffixes.sqlServerHostname},1433;Database=${factoryDatabaseName};Authentication=Active Directory Managed Identity;User Id=${gateway.clientId};Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;'
+
 @description('Settings for container deployables, by deployable and then by name: { "<deployable>": { "<NAME>": "<value>" } }. Each becomes an environment variable of that deployable\'s container app. Never a secret: a value here is readable in the deployment.')
-output settings object = hasStore
-  ? {
-      '${deployable}': {
-        '${containerUriSetting}': '${account!.properties.primaryEndpoints.blob}${containerName}'
-        '${clientIdSetting}': identity.clientId
+output settings object = union(
+  hasStore
+    ? {
+        '${deployable}': {
+          '${containerUriSetting}': '${account!.properties.primaryEndpoints.blob}${containerName}'
+          '${clientIdSetting}': identity.clientId
+        }
       }
-    }
-  : {}
+    : {},
+  hasFactoryDatabase
+    ? {
+        fworker: {
+          FACTORY_DB_CONNECTION: factoryDatabaseConnection
+        }
+      }
+    : {}
+)
