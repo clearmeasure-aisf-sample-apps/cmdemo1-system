@@ -543,7 +543,7 @@ resource scorecardSpaceWriter 'Microsoft.Authorization/roleAssignments@2022-04-0
 }]
 
 // The factory worker gateway's own database (cmdemo1-fworker W2.2; Jeffrey, 2026-10-27), in tdd only: a small
-// serverless database on tdd's SQL server, which the gateway reaches as its own identity id-<slug>-tdd-fworker (no
+// database (DTU Basic, see below) on tdd's SQL server, which the gateway reaches as its own identity id-<slug>-tdd-fworker (no
 // password anywhere). Entra authentication needs an Entra administrator on the server: the operator identity cm-ai-ops,
 // which gives the gateway's identity its contained user (infra/own/grant-fworker-database.ps1, run by the operator
 // after a deployment that creates the database). The kit's SQL administrator login stays as it is; the ui app still
@@ -580,21 +580,21 @@ resource sqlEntraAdmin 'Microsoft.Sql/servers/administrators@2023-08-01' = if (h
   }
 }
 
-// Serverless General Purpose, 0.5 to 1 vCore, paused after an hour without a connection; 2 GB; backups in the region only.
+// DTU Basic, 5 DTU and 2 GB, always on at a small fixed price (about $4.90 a month). It was serverless General Purpose
+// (GP_S_Gen5, 0.5 to 1 vCore), but the gateway's Wolverine host keeps the database busy, so it never paused and billed
+// about $309 a month (measured app_cpu_billed ~2,440 vCore-seconds an hour). The data is ~47 MB. Fallback if Basic is too
+// small: Standard S0 (about $14.72 a month). Backups in the region only.
 resource factoryDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = if (hasFactoryDatabase) {
   parent: sqlServer
   name: factoryDatabaseName
   location: sqlLocation
   tags: union(stack.tags, { purpose: 'fworker' })
   sku: {
-    name: 'GP_S_Gen5'
-    tier: 'GeneralPurpose'
-    family: 'Gen5'
-    capacity: 1
+    name: 'Basic'
+    tier: 'Basic'
+    capacity: 5
   }
   properties: {
-    autoPauseDelay: 60
-    minCapacity: json('0.5')
     maxSizeBytes: 2147483648
     requestedBackupStorageRedundancy: 'Local'
     zoneRedundant: false
