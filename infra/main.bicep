@@ -359,6 +359,9 @@ module storageSites 'modules/storagewebsite.bicep' = if (!empty(storageDeployabl
 module own 'own/main.bicep' = {
   name: 'own-${environmentName}'
   params: {
+    // cmdemo1 (tdd, 2026-10-30): the generated secrets, for the one that is also part of an Azure resource, the secret in
+    // the address of the incident action group's webhook (infra/own/main.bicep). The module returns none of them.
+    generatedSecrets: generatedSecrets
     stack: {
       slug: slug
       environmentName: environmentName

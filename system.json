@@ -321,6 +321,11 @@
         {
           "name": "octopus-host-token",
           "env": "FACTORY_OCTOPUS_HOST_TOKEN"
+        },
+        {
+          "name": "webhook-secret-azure-monitor",
+          "env": "FACTORY_WEBHOOK_SECRET_AZURE_MONITOR",
+          "generate": true
         }
       ],
       "buildPath": "/_build",
