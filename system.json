@@ -257,7 +257,8 @@
       "environmentSettings": {
         "tdd": {
           "FACTORY_ENVIRONMENT": "tdd",
-          "FACTORY_RUNTIME_ENABLED": "false"
+          "FACTORY_RUNTIME_ENABLED": "false",
+          "FACTORY_V2_OFF": "0"
         },
         "uat": {
           "FACTORY_ENVIRONMENT": "uat",
