@@ -44,8 +44,35 @@ $headers = @{
     'X-GitHub-Api-Version' = '2022-11-28'
 }
 
+function Get-HttpStatus {
+    # The status GitHub answered with, or 0 when it did not answer at all.
+    param([Parameter(Mandatory)] [Management.Automation.ErrorRecord] $ErrorRecord)
+    $response = if ($ErrorRecord.Exception.PSObject.Properties['Response']) { $ErrorRecord.Exception.Response } else { $null }
+    if ($response) { return [int] $response.StatusCode }
+    return 0
+}
+
+function Invoke-GitHub {
+    # One call of the contents API, sent again only for a failure that is known to pass (principle 004): no answer,
+    # or 408, 429, 500, 502, 503 or 504. Four attempts, 5, 10 and 15 seconds apart; each retry is one line of
+    # information, not a warning. Any other failure, and the fourth of these, is thrown as it came. The write may be
+    # sent again too: it names the version of the file it replaces (sha), so a write whose answer was lost and that is
+    # sent a second time is refused (409), and the loop below reads the file again (cmdemo1-fworker, 2026-10-30: one
+    # 500 on the write failed a deployment that nothing retried).
+    param([Parameter(Mandatory)] [hashtable] $Call, [Parameter(Mandatory)] [string] $What)
+    for ($try = 1; $true; $try++) {
+        try { return Invoke-RestMethod @Call }
+        catch {
+            $status = Get-HttpStatus -ErrorRecord $_
+            if ($try -ge 4 -or $status -notin 0, 408, 429, 500, 502, 503, 504) { throw }
+            Write-Host "GitHub did not $What ($(if ($status) { "HTTP $status" } else { 'no answer' }), attempt $try of 4); asking again in $(5 * $try) seconds."
+            Start-Sleep -Seconds (5 * $try)
+        }
+    }
+}
+
 for ($attempt = 1; $attempt -le 4; $attempt++) {
-    $file = Invoke-RestMethod -Uri "${uri}?ref=main" -Headers $headers
+    $file = Invoke-GitHub -Call @{ Uri = "${uri}?ref=main"; Headers = $headers } -What "read $path"
     $versions = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($file.content -replace '\s', ''))) | ConvertFrom-Json -AsHashtable
     if (-not $versions.ContainsKey($deployable) -or [string] $versions[$deployable] -ne $version) {
         Write-Highlight "$path no longer pins $deployable ${version}; nothing to revert."
@@ -69,12 +96,12 @@ for ($attempt = 1; $attempt -le 4; $attempt++) {
         sha     = $file.sha
     }
     try {
-        $commit = Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -Body ($body | ConvertTo-Json) -ContentType 'application/json'
+        $commit = Invoke-GitHub -Call @{ Uri = $uri; Method = 'Put'; Headers = $headers; Body = ($body | ConvertTo-Json); ContentType = 'application/json' } -What "write $path"
         Write-Highlight "Reverted $deployable in $environmentName to $(if ($previous) { $previous } else { 'no version' }): $($commit.commit.html_url)"
         return
     }
     catch {
-        if ($_.Exception.Response -and [int] $_.Exception.Response.StatusCode -eq 409 -and $attempt -lt 4) {
+        if ((Get-HttpStatus -ErrorRecord $_) -eq 409 -and $attempt -lt 4) {
             Write-Warning "versions.json changed while reverting (attempt $attempt of 4); reading it again."
             Start-Sleep -Seconds (5 * $attempt)
             continue
