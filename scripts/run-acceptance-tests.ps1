@@ -49,13 +49,16 @@ New-Item -ItemType Directory -Path $results -Force | Out-Null
 
 $clock = [Diagnostics.Stopwatch]::StartNew()
 # The suite's Chromium, before .NET 10 below: the suite's playwright.ps1 runs in a child pwsh, which is a .NET 8 app
-# and cannot start once DOTNET_ROOT points at the .NET 10 folder (cmdemo1, Playwright 1.61 on the 1.54 image,
-# 2026-10-26). Zip extraction drops the execute bit of Playwright's Node driver.
+# (framework-dependent) and cannot start once DOTNET_ROOT points at the .NET 10 folder (cmdemo1, Playwright 1.61 on the
+# 1.54 image, 2026-10-26). Zip extraction drops the execute bit of Playwright's Node driver. A headless run uses the
+# headless shell since Playwright 1.49: both are checked, and "install chromium" brings both.
 Get-ChildItem -LiteralPath (Join-Path $package '.playwright') -Recurse -File -Force -Filter 'node' | ForEach-Object { chmod +x $_.FullName }
-$revision = ((Get-Content -LiteralPath (Join-Path $package '.playwright' 'package' 'browsers.json') -Raw | ConvertFrom-Json).browsers |
-        Where-Object { $_.name -eq 'chromium' }).revision
-if (-not (Test-Path -LiteralPath (Join-Path ([string] $env:PLAYWRIGHT_BROWSERS_PATH) "chromium-$revision"))) {
-    Write-Warning "The image has no Chromium $revision (the suite's Playwright version changed): installing it."
+$browsers = @((Get-Content -LiteralPath (Join-Path $package '.playwright' 'package' 'browsers.json') -Raw | ConvertFrom-Json).browsers)
+$revision = @($browsers | Where-Object { $_.name -eq 'chromium' })[0].revision
+$wanted = @("chromium-$revision") + @($browsers | Where-Object { $_.name -eq 'chromium-headless-shell' } | ForEach-Object { "chromium_headless_shell-$($_.revision)" })
+$absent = @($wanted | Where-Object { -not (Test-Path -LiteralPath (Join-Path ([string] $env:PLAYWRIGHT_BROWSERS_PATH) $_)) })
+if ($absent.Count -gt 0) {
+    Write-Warning "The image has no $($absent -join ', ') (the suite's Playwright version changed): installing Chromium."
     pwsh -NoProfile -File (Join-Path $package 'playwright.ps1') install chromium
     Write-Host "Chromium $revision installed in $([int] $clock.Elapsed.TotalSeconds) s"
 }
@@ -72,7 +75,7 @@ $env:DOTNET_NOLOGO = '1'
 Write-Host ".NET $(dotnet --version) SDK in $([int] $clock.Elapsed.TotalSeconds) s"
 
 # Before the try: the data reload in finally needs the deployed environment's database, whatever failed first
-# (without it the loader falls back to SQLite and fails on its own).
+# (without it the loader falls back to SQLite and fails on its own, which hides the cause).
 $env:ApplicationBaseUrl = $baseUrl
 $env:ConnectionStrings__SqlConnectionString = $connectionString
 $env:StartLocalServer = 'false'
