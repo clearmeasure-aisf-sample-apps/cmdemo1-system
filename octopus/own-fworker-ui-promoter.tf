@@ -3,7 +3,9 @@
 # own gate passes (Jeffrey, 2026-10-23; cmdemo1-system #300). Answering the Sign-off of those deployments comes from
 # the kit's team "cmdemo1 pipeline sign-off" (system.pipelineSignOffMembers, decision 0057); this team grants what
 # that one does not: seeing ui's releases, deployments and tasks, creating deployments in uat and prod, and viewing and
-# submitting their manual interventions (InterruptionView, InterruptionSubmit). Decision 0057 leaves extra scoped teams
+# submitting their manual interventions (InterruptionView, InterruptionSubmit). Since 2026-10-30 (owner's default, W8.2b of
+# the fworker plan, #568) it also creates deployments of ui in tdd, and only there for tdd: the factory's automatic rollback
+# of the app in tdd (a deployment of the previous release) is the gateway's own act. Decision 0057 leaves extra scoped teams
 # and roles to the system's own octopus/ files until a second system needs the same.
 #
 # The team was made by hand on 2026-10-23 and is imported (the import blocks below), so it keeps its ids: Teams-404,
@@ -33,7 +35,7 @@ locals {
       id           = "UserRoles-150"
       name         = "fworker ui promoter"
       permissions  = ["DeploymentCreate", "DeploymentView", "EnvironmentView", "InterruptionSubmit", "InterruptionView", "ProjectView", "ReleaseView", "TaskView"]
-      environments = ["uat", "prod"]
+      environments = ["tdd", "uat", "prod"]
     }
   }
 }
