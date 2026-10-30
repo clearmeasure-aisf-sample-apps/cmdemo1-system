@@ -18,6 +18,13 @@ param stack {
   }[]
 }
 
+@description('The generated secrets of the container deployables by vault name (<deployable>-<secret>), from ../main.bicep (infra/main.bicep passes its parameter of the same name; cmdemo1 edited that line, 2026-10-30). This file reads fworker-webhook-secret-azure-monitor only, for the address of the incident action group\'s webhook. Empty when ../main.bicep passes none (the preview of this file on its own): the webhook then stays off.')
+@secure()
+param generatedSecrets object = {}
+
+@description('Whether the action group ag-<slug>-<env>-incident delivers to the gateway. FALSE until tdd runs the v2 engine (docs/deploy/incident-alert-rules.md of cmdemo1-fworker: before that the route answers 404 and Azure would retry every alert); the alert rules exist and fire into a group that does nothing. The cutover (W9.9) enables the webhook with this one default.')
+param incidentWebhookEnabled bool = false
+
 // The system's choices: the deployable that gets the store, the container's name, the names of the two settings the
 // app reads, and how many days a deleted or overwritten blob can be brought back.
 var deployable = 'scorecard'
@@ -604,6 +611,311 @@ resource factoryDatabase 'Microsoft.Sql/servers/databases@2023-08-01' = if (hasF
 
 // No secret: the gateway signs in as its identity (the client ID says which of the app's identities).
 var factoryDatabaseConnection = 'Server=tcp:${sqlServerName}${environment().suffixes.sqlServerHostname},1433;Database=${factoryDatabaseName};Authentication=Active Directory Managed Identity;User Id=${gateway.clientId};Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;'
+
+// Incident alerts of the factory worker (cmdemo1-fworker W8.2b, issue 568; the specification is
+// docs/deploy/incident-alert-rules.md of that repository), in tdd only: no rule for uat or prod.
+//   - ag-<slug>-<env>-incident: the webhook to the gateway's /webhooks/azure-monitor, for the alerts of the app (deployable
+//     ui). Its address carries the secret fworker-webhook-secret-azure-monitor (generated once in the vault by
+//     apply-environment.ps1 and read by the gateway as FACTORY_WEBHOOK_SECRET_AZURE_MONITOR). The group is DISABLED while
+//     incidentWebhookEnabled is false, and the rules below exist all the same.
+//   - ag-<slug>-<env>-factory-owner: mail to the owners of the subscription (the role Owner; no address is written in this
+//     public repository) for the alerts of the factory itself. It has no webhook on purpose: the factory's bus and database
+//     cannot carry the report of their own failure.
+// The address of the webhook shows in the action group to whoever can read it in the portal (Azure does not hide it): the
+// secret protects a route that only opens, stores and joins incidents, and it is rotated in the vault and this stack together.
+var incidentEnvironments = ['tdd']
+// The Container Apps environment is the one the runner jobs use (managedEnvironment above): tdd's own, where the apps are.
+var hasIncident = contains(incidentEnvironments, stack.environmentName) && hasRunner
+var incidentTags = union(stack.tags, { purpose: 'incident-alerts' })
+var incidentApp = 'ca-${stack.slug}-${stack.environmentName}-ui'
+var factoryApp = 'ca-${stack.slug}-${stack.environmentName}-fworker'
+var incidentSecret = string(generatedSecrets[?'fworker-webhook-secret-azure-monitor'] ?? '')
+var incidentGroupName = 'ag-${stack.slug}-${stack.environmentName}-incident'
+var ownerGroupName = 'ag-${stack.slug}-${stack.environmentName}-factory-owner'
+// Locations of the standard web tests: South Central US, North Central US, West US, East US and Central US.
+var webTestLocations = [
+  { Id: 'us-tx-sn1-azr' }
+  { Id: 'us-il-ch1-azr' }
+  { Id: 'us-ca-sjc-azr' }
+  { Id: 'us-va-ash-azr' }
+  { Id: 'us-fl-mia-edge' }
+]
+
+// The things the alerts look at; all exist before this file runs on an existing environment, and are named as ../main.bicep
+// names them (tdd owns its Container Apps environment and its apps carry no suffix).
+resource incidentUi 'Microsoft.App/containerApps@2025-01-01' existing = if (hasIncident) {
+  name: incidentApp
+}
+
+resource incidentFactory 'Microsoft.App/containerApps@2025-01-01' existing = if (hasIncident) {
+  name: factoryApp
+}
+
+resource incidentInsights 'Microsoft.Insights/components@2020-02-02' existing = if (hasIncident) {
+  name: 'appi-${stack.slug}-${stack.environmentName}'
+}
+
+resource incidentWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = if (hasIncident) {
+  name: 'log-${stack.slug}-${stack.environmentName}'
+}
+
+resource incidentGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (hasIncident) {
+  name: incidentGroupName
+  location: 'global'
+  tags: incidentTags
+  properties: {
+    groupShortName: take('${stack.environmentName}incident', 12)
+    // Off without the switch, and off without the secret: an address with an empty secret would only collect 401s.
+    enabled: incidentWebhookEnabled && !empty(incidentSecret)
+    webhookReceivers: [
+      {
+        name: 'fworker-${stack.environmentName}'
+        // One action group per deployable and environment: the address is the subject of the alert (the common schema does
+        // not name the factory's deployable). useCommonAlertSchema is required: the gateway reads that schema only.
+        serviceUri: 'https://${factoryApp}.${managedEnvironment!.properties.defaultDomain}/webhooks/azure-monitor?deployable=ui&environment=${stack.environmentName}&secret=${incidentSecret}'
+        useCommonAlertSchema: true
+        useAadAuth: false
+      }
+    ]
+  }
+}
+
+resource ownerGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (hasIncident) {
+  name: ownerGroupName
+  location: 'global'
+  tags: incidentTags
+  properties: {
+    groupShortName: 'factoryown'
+    enabled: true
+    // Mail to the people who own the subscription (role Owner). Never a webhook receiver here.
+    armRoleReceivers: [
+      {
+        name: 'subscription-owners'
+        roleId: '8e3af657-a8ff-443c-a75c-2fe8c4bcb635'
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+// Metric alerts (docs/deploy/incident-alert-rules.md sections 4 and 5). target: ui and fworker are the Container Apps; db is
+// the factory's database. group: incident (the webhook) for the app's, owner for the factory's. Rule names as in the
+// specification. The app's rules resolve themselves (autoMitigate) so a Resolved reaches the factory.
+var metricRules = [
+  { name: 'tdd-ui-replicas-zero', target: 'ui', namespace: 'Microsoft.App/containerApps', metric: 'Replicas', aggregation: 'Minimum', operator: 'LessThan', threshold: 1, window: 'PT5M', severity: 1, group: 'incident', dimensions: [] }
+  { name: 'tdd-ui-5xx', target: 'ui', namespace: 'Microsoft.App/containerApps', metric: 'Requests', aggregation: 'Total', operator: 'GreaterThanOrEqual', threshold: 10, window: 'PT5M', severity: 2, group: 'incident', dimensions: [{ name: 'statusCodeCategory', operator: 'Include', values: ['5xx'] }] }
+  { name: 'tdd-ui-restarts', target: 'ui', namespace: 'Microsoft.App/containerApps', metric: 'RestartCount', aggregation: 'Total', operator: 'GreaterThanOrEqual', threshold: 3, window: 'PT15M', severity: 2, group: 'incident', dimensions: [] }
+  { name: 'tdd-fworker-replicas-zero', target: 'fworker', namespace: 'Microsoft.App/containerApps', metric: 'Replicas', aggregation: 'Minimum', operator: 'LessThan', threshold: 1, window: 'PT5M', severity: 1, group: 'owner', dimensions: [] }
+  { name: 'tdd-fworker-5xx', target: 'fworker', namespace: 'Microsoft.App/containerApps', metric: 'Requests', aggregation: 'Total', operator: 'GreaterThanOrEqual', threshold: 10, window: 'PT5M', severity: 2, group: 'owner', dimensions: [{ name: 'statusCodeCategory', operator: 'Include', values: ['5xx'] }] }
+  { name: 'tdd-fworker-db-connections', target: 'db', namespace: 'Microsoft.Sql/servers/databases', metric: 'connection_failed', aggregation: 'Total', operator: 'GreaterThanOrEqual', threshold: 5, window: 'PT5M', severity: 2, group: 'owner', dimensions: [] }
+  // W8.2b (2026-10-30): DTU at 80% and size at 70% of the factory's database (S0: 10 DTU, 2 GB), earlier than the 85% of the specification.
+  { name: 'tdd-fworker-db-dtu', target: 'db', namespace: 'Microsoft.Sql/servers/databases', metric: 'dtu_consumption_percent', aggregation: 'Average', operator: 'GreaterThan', threshold: 80, window: 'PT15M', severity: 3, group: 'owner', dimensions: [] }
+  { name: 'tdd-fworker-db-size', target: 'db', namespace: 'Microsoft.Sql/servers/databases', metric: 'storage_percent', aggregation: 'Maximum', operator: 'GreaterThan', threshold: 70, window: 'PT15M', severity: 3, group: 'owner', dimensions: [] }
+]
+var activeMetricRules = filter(metricRules, r => hasIncident && (r.target != 'db' || hasFactoryDatabase))
+
+resource metricAlerts 'Microsoft.Insights/metricAlerts@2018-03-01' = [
+  for r in activeMetricRules: {
+    name: r.name
+    location: 'global'
+    tags: incidentTags
+    properties: {
+      description: 'Incident alert rule ${r.name} (cmdemo1-fworker docs/deploy/incident-alert-rules.md).'
+      severity: r.severity
+      enabled: true
+      scopes: [
+        r.target == 'ui' ? incidentUi!.id : (r.target == 'fworker' ? incidentFactory!.id : factoryDatabase.id)
+      ]
+      evaluationFrequency: 'PT1M'
+      windowSize: r.window
+      autoMitigate: true
+      criteria: {
+        'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+        allOf: [
+          {
+            name: 'condition'
+            criterionType: 'StaticThresholdCriterion'
+            metricName: r.metric
+            metricNamespace: r.namespace
+            operator: r.operator
+            threshold: r.threshold
+            timeAggregation: r.aggregation
+            dimensions: r.dimensions
+          }
+        ]
+      }
+      actions: [
+        {
+          actionGroupId: r.group == 'incident' ? incidentGroup.id : ownerGroup.id
+        }
+      ]
+    }
+  }
+]
+
+// Standard availability tests of Application Insights, every 5 minutes from 5 locations, and the metric alerts on them (a
+// test that fails from two locations at once confirms an outage; this keeps the phantom incidents of 2026-09-13 away).
+var webTests = [
+  { key: 'ui-availability', rule: 'tdd-ui-availability', description: 'The detailed health check of the app in tdd (expects 200).', app: incidentApp, path: '/_healthcheck/detailed', window: 'PT5M', severity: 1, group: 'incident' }
+  { key: 'fworker-not-ready', rule: 'tdd-fworker-not-ready', description: 'The /ready of the factory gateway in tdd (503 while it is not ready or was replaced).', app: factoryApp, path: '/ready', window: 'PT10M', severity: 1, group: 'owner' }
+]
+
+resource availabilityTests 'Microsoft.Insights/webtests@2022-06-15' = [
+  for t in (hasIncident ? webTests : []): {
+    name: 'wt-${stack.slug}-${stack.environmentName}-${t.key}'
+    location: stack.location
+    tags: union(incidentTags, { 'hidden-link:${incidentInsights!.id}': 'Resource' })
+    kind: 'standard'
+    properties: {
+      SyntheticMonitorId: 'wt-${stack.slug}-${stack.environmentName}-${t.key}'
+      Name: t.rule
+      Description: t.description
+      Enabled: true
+      Frequency: 300
+      Timeout: 30
+      Kind: 'standard'
+      RetryEnabled: true
+      Locations: webTestLocations
+      Request: {
+        RequestUrl: 'https://${t.app}.${managedEnvironment!.properties.defaultDomain}${t.path}'
+        HttpVerb: 'GET'
+        ParseDependentRequests: false
+      }
+      ValidationRules: {
+        ExpectedHttpStatusCode: 200
+        IgnoreHttpStatusCode: false
+        SSLCheck: true
+        SSLCertRemainingLifetimeCheck: 7
+      }
+    }
+  }
+]
+
+resource availabilityAlerts 'Microsoft.Insights/metricAlerts@2018-03-01' = [
+  for (t, i) in (hasIncident ? webTests : []): {
+    name: t.rule
+    location: 'global'
+    tags: union(incidentTags, {
+      'hidden-link:${incidentInsights!.id}': 'Resource'
+      'hidden-link:${availabilityTests[i].id}': 'Resource'
+    })
+    properties: {
+      description: t.description
+      severity: t.severity
+      enabled: true
+      scopes: [
+        availabilityTests[i].id
+        incidentInsights!.id
+      ]
+      evaluationFrequency: 'PT1M'
+      windowSize: t.window
+      autoMitigate: true
+      criteria: {
+        'odata.type': 'Microsoft.Azure.Monitor.WebtestLocationAvailabilityCriteria'
+        webTestId: availabilityTests[i].id
+        componentId: incidentInsights!.id
+        failedLocationCount: 2
+      }
+      actions: [
+        {
+          actionGroupId: t.group == 'incident' ? incidentGroup.id : ownerGroup.id
+        }
+      ]
+    }
+  }
+]
+
+// Log alerts (scheduled query rules). Exceptions of the app: 20 in 5 minutes. And the one the alert ingress itself feeds: the
+// gateway writes {"alertIngress":"not-stored",...} whenever it could not put an alert into its inbox, which means incidents
+// of the app arrive at a factory that cannot take them (the owner is told out of band).
+resource exceptionsAlert 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = if (hasIncident) {
+  name: 'tdd-ui-exceptions'
+  location: stack.location
+  tags: incidentTags
+  properties: {
+    displayName: 'tdd-ui-exceptions'
+    description: 'Twenty or more exceptions of the app in five minutes.'
+    severity: 2
+    enabled: true
+    evaluationFrequency: 'PT1M'
+    windowSize: 'PT5M'
+    scopes: [incidentInsights!.id]
+    criteria: {
+      allOf: [
+        {
+          query: 'exceptions'
+          timeAggregation: 'Count'
+          operator: 'GreaterThanOrEqual'
+          threshold: 20
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [incidentGroup.id]
+    }
+  }
+}
+
+resource alertsNotStoredAlert 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = if (hasIncident) {
+  name: 'tdd-fworker-alerts-not-stored'
+  location: stack.location
+  tags: incidentTags
+  properties: {
+    displayName: 'tdd-fworker-alerts-not-stored'
+    description: 'The gateway could not store an alert of the app: incidents arrive at a factory that cannot take them.'
+    severity: 1
+    enabled: true
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    scopes: [incidentWorkspace!.id]
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs_CL | where ContainerAppName_s == \'${factoryApp}\' | where Log_s has \'"alertIngress":"not-stored"\''
+          timeAggregation: 'Count'
+          operator: 'GreaterThanOrEqual'
+          threshold: 1
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [ownerGroup.id]
+    }
+  }
+}
+
+// Reader access for the incident triage (a read-only look at Application Insights and the logs): the factory gateway's
+// identity, on the environment's Application Insights and Log Analytics workspace only, and read-only roles only.
+var monitoringReader = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '43d0d8ad-25c7-4714-9337-8ba259a9fe05')
+var logAnalyticsReader = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '73c42c96-874c-492b-b04d-ab87d138a893')
+
+resource triageInsights 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasIncident && !empty(gateway.deployable)) {
+  scope: incidentInsights
+  name: guid(incidentInsights.id, gateway.principalId, monitoringReader)
+  properties: {
+    principalId: gateway.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: monitoringReader
+  }
+}
+
+resource triageWorkspace 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasIncident && !empty(gateway.deployable)) {
+  scope: incidentWorkspace
+  name: guid(incidentWorkspace.id, gateway.principalId, logAnalyticsReader)
+  properties: {
+    principalId: gateway.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: logAnalyticsReader
+  }
+}
 
 @description('Settings for container deployables, by deployable and then by name: { "<deployable>": { "<NAME>": "<value>" } }. Each becomes an environment variable of that deployable\'s container app. Never a secret: a value here is readable in the deployment.')
 output settings object = union(
