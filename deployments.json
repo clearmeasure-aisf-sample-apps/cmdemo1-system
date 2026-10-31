@@ -1,0 +1,220 @@
+{
+  "generated": "2026-10-31T18:43:31Z",
+  "system": "cmdemo1",
+  "octopus": "https://clearmeasure.octopus.app/app#/Spaces-355",
+  "deployments": [
+    {
+      "project": "cmdemo1-fworker",
+      "environment": "tdd",
+      "release": "1.0.1084",
+      "state": "succeeded",
+      "since": "2026-10-31T18:39:13Z",
+      "finished": "2026-10-31T18:43:10Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12157714"
+    },
+    {
+      "project": "cmdemo1-fworker",
+      "environment": "tdd",
+      "release": "1.0.1083",
+      "state": "succeeded",
+      "since": "2026-10-31T18:33:35Z",
+      "finished": "2026-10-31T18:37:23Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12157691"
+    }
+  ],
+  "recent": [
+    {
+      "project": "cmdemo1-fworker",
+      "release": "1.0.1084",
+      "environment": "tdd",
+      "result": "succeeded",
+      "finished": "2026-10-31T18:43:10Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12157714"
+    },
+    {
+      "project": "cmdemo1-system",
+      "release": "1.0.161",
+      "environment": "prod",
+      "result": "succeeded",
+      "finished": "2026-10-31T05:15:28Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12153720"
+    },
+    {
+      "project": "cmdemo1-system",
+      "release": "1.0.161",
+      "environment": "uat",
+      "result": "succeeded",
+      "finished": "2026-10-31T05:02:45Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12153661"
+    },
+    {
+      "project": "cmdemo1-dashboard",
+      "release": "1.0.21",
+      "environment": "tdd",
+      "result": "succeeded",
+      "finished": "2026-10-31T03:15:16Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12153157"
+    },
+    {
+      "project": "cmdemo1-system",
+      "release": "1.0.161",
+      "environment": "tdd",
+      "result": "succeeded",
+      "finished": "2026-10-30T21:07:48Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12151364"
+    },
+    {
+      "project": "cmdemo1-ui",
+      "release": "2.4.1298",
+      "environment": "tdd",
+      "result": "succeeded",
+      "finished": "2026-10-27T12:05:48Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12126952"
+    },
+    {
+      "project": "cmdemo1-fworker",
+      "release": "1.0.631",
+      "environment": "prod",
+      "result": "succeeded",
+      "finished": "2026-10-26T11:03:16Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12119359"
+    },
+    {
+      "project": "cmdemo1-fworker",
+      "release": "1.0.631",
+      "environment": "uat",
+      "result": "succeeded",
+      "finished": "2026-10-26T09:58:33Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12119030"
+    },
+    {
+      "project": "cmdemo1-ui",
+      "release": "2.4.1120",
+      "environment": "prod",
+      "result": "succeeded",
+      "finished": "2026-10-25T12:05:56Z",
+      "startedBy": "cmdemo1-fworker-gateway-agent",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12112544"
+    },
+    {
+      "project": "cmdemo1-ui",
+      "release": "2.4.1120",
+      "environment": "uat",
+      "result": "succeeded",
+      "finished": "2026-10-25T11:44:49Z",
+      "startedBy": "cmdemo1-fworker-gateway-agent",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12112436"
+    },
+    {
+      "project": "cmdemo1-dashboard",
+      "release": "1.0.21",
+      "environment": "prod",
+      "result": "succeeded",
+      "finished": "2026-10-25T01:31:53Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12109439"
+    },
+    {
+      "project": "cmdemo1-dashboard",
+      "release": "1.0.21",
+      "environment": "uat",
+      "result": "succeeded",
+      "finished": "2026-10-24T17:15:44Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12106974"
+    },
+    {
+      "project": "cmdemo1-scorecard",
+      "release": "1.0.40",
+      "environment": "prod",
+      "result": "succeeded",
+      "finished": "2026-10-22T12:34:00Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12091541"
+    },
+    {
+      "project": "cmdemo1-scorecard",
+      "release": "1.0.40",
+      "environment": "uat",
+      "result": "succeeded",
+      "finished": "2026-10-22T12:29:38Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12091498"
+    },
+    {
+      "project": "cmdemo1-scorecard",
+      "release": "1.0.40",
+      "environment": "tdd",
+      "result": "succeeded",
+      "finished": "2026-10-22T06:31:53Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12089839"
+    },
+    {
+      "project": "cmdemo1-aisf",
+      "release": "1.0.22",
+      "environment": "prod",
+      "result": "succeeded",
+      "finished": "2026-10-15T04:48:40Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12041953"
+    },
+    {
+      "project": "cmdemo1-app2-ui",
+      "release": "2.4.28",
+      "environment": "prod",
+      "result": "succeeded",
+      "finished": "2026-10-15T04:21:52Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12042035"
+    },
+    {
+      "project": "cmdemo1-app2-ui",
+      "release": "2.4.28",
+      "environment": "uat",
+      "result": "succeeded",
+      "finished": "2026-10-15T04:17:10Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12041987"
+    },
+    {
+      "project": "cmdemo1-aisf",
+      "release": "1.0.22",
+      "environment": "uat",
+      "result": "succeeded",
+      "finished": "2026-10-15T04:01:14Z",
+      "startedBy": "ai-ops",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12041894"
+    },
+    {
+      "project": "cmdemo1-app2-ui",
+      "release": "2.4.28",
+      "environment": "tdd",
+      "result": "succeeded",
+      "finished": "2026-10-14T18:05:49Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12039073"
+    },
+    {
+      "project": "cmdemo1-aisf",
+      "release": "1.0.22",
+      "environment": "tdd",
+      "result": "succeeded",
+      "finished": "2026-10-14T17:43:37Z",
+      "startedBy": "cmdemo1-github",
+      "url": "https://clearmeasure.octopus.app/app#/Spaces-355/tasks/ServerTasks-12038960"
+    }
+  ],
+  "freezes": [],
+  "missing": []
+}
