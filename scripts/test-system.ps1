@@ -178,6 +178,7 @@ foreach ($deployable in @($system.deployables)) {
 #                        out: every environment the deployable exists in
 #   database             false: no SQL connection string
 #   cpu                  0.5, 1, 1.5 or 2 vCPU, with twice as many GiB (the environment's appCpu when left out)
+#   environmentCpu       { "<environment>": "<cpu>" }: the cpu of one environment, over cpu there (same values as cpu)
 #   settings             { "<environment variable>": "<text>" }, in every environment
 #   environmentSettings  { "<environment>": { "<environment variable>": "<text>" } }, on top of settings there
 #   urlSetting           the environment variable that gets the app's own public address
@@ -185,7 +186,7 @@ foreach ($deployable in @($system.deployables)) {
 #                        <deployable>-<name>. The operator writes its value to the vault (the kit's
 #                        set-demo-secret.ps1); with "generate": true the deployment generates it. Never a value here.
 $environmentNamesDeclared = @($system.environments | ForEach-Object { [string] $_.name })
-$containerKeys = @('environments', 'alwaysOn', 'alwaysOnEnvironments', 'database', 'cpu', 'settings', 'environmentSettings', 'urlSetting', 'secrets', 'dashboardLink')
+$containerKeys = @('environments', 'alwaysOn', 'alwaysOnEnvironments', 'database', 'cpu', 'environmentCpu', 'settings', 'environmentSettings', 'urlSetting', 'secrets', 'dashboardLink')
 $variableName = '^[A-Za-z_][A-Za-z0-9_]{0,254}$'
 # Set by the template itself, or by Container Apps.
 $reservedVariables = @('ConnectionStrings__SqlConnectionString', 'OTEL_SERVICE_NAME', 'APPLICATIONINSIGHTS_CONNECTION_STRING')
@@ -255,6 +256,11 @@ foreach ($deployable in @($system.deployables)) {
     }
     if ($deployable.ContainsKey('cpu')) {
         Test-Rule "deployable $name cpu" ($deployable.cpu -is [string] -and @('0.5', '1', '1.5', '2') -ccontains $deployable.cpu) 'one of "0.5", "1", "1.5", "2" (vCPU, as text; the memory is twice as many GiB)'
+    }
+    if ($deployable.ContainsKey('environmentCpu')) {
+        $perEnvironment = $deployable.environmentCpu
+        $valid = $perEnvironment -is [Collections.IDictionary] -and $perEnvironment.Count -gt 0 -and @($perEnvironment.GetEnumerator() | Where-Object { $here -cnotcontains $_.Key -or $_.Value -isnot [string] -or @('0.5', '1', '1.5', '2') -cnotcontains $_.Value }).Count -eq 0
+        Test-Rule "deployable $name environmentCpu" $valid "an object of environment ($($here -join ', ')) to one of ""0.5"", ""1"", ""1.5"", ""2"" (vCPU, as text)"
     }
 
     # A page of this app that the system's dashboard leads to, in every environment the app exists in: the words of
