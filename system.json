@@ -247,6 +247,9 @@
       ],
       "database": false,
       "cpu": "1",
+      "environmentCpu": {
+        "tdd": "1.5"
+      },
       "settings": {
         "FACTORY_OWNER_MODE": "1",
         "FACTORY_AUTHOR_APP": "1",

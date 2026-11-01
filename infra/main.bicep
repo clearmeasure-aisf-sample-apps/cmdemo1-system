@@ -102,13 +102,15 @@ var hostedDeployables = filter(
   map(system.deployables, d => union({ hosting: 'containerapp', environments: [environmentName] }, d)),
   d => contains(d.environments, environmentName) && !(d.?retired ?? false)
 )
-// A container deployable may declare more (all optional, modules/containerapps.bicep): a size of its own (cpu), one
+// A container deployable may declare more (all optional, modules/containerapps.bicep): a size of its own (cpu, and
+// environmentCpu.<env> for one environment's size, the memory follows from it), one
 // replica that never scales to zero (alwaysOn; only in the environments alwaysOnEnvironments names, when it names
 // any), no database (database false: no SQL connection string), plain
 // settings as environment variables (settings, and environmentSettings.<env> on top of them), its own public address
 // as a setting (urlSetting), and secrets from the environment's vault (secrets: operator-supplied, or generated).
 var containerDefaults = {
   cpu: string(environment.appCpu)
+  environmentCpu: {}
   alwaysOn: false
   alwaysOnEnvironments: []
   database: true
@@ -138,7 +140,7 @@ var containerApps = map(containerDeployables, d => {
   name: d.name
   port: d.port
   healthPath: d.healthPath
-  cpu: string(d.cpu)
+  cpu: string(d.environmentCpu[?environmentName] ?? d.cpu)
   alwaysOn: d.alwaysOn && (empty(d.alwaysOnEnvironments) || contains(d.alwaysOnEnvironments, environmentName))
   database: d.database
   urlSetting: d.urlSetting
