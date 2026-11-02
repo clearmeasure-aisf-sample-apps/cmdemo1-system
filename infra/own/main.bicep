@@ -892,6 +892,40 @@ resource alertsNotStoredAlert 'Microsoft.Insights/scheduledQueryRules@2022-06-15
   }
 }
 
+// The gateway's HostSilenceWatch writes {"hostReports":"none",...} every 5 minutes while no host has reported for 30 minutes
+// (2026-11-01: a stale Unavailable on the host silenced its reports for 6 hours and stalled the runtime slots of v2).
+resource noHostReportAlert 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = if (hasIncident) {
+  name: 'tdd-fworker-no-host-report'
+  location: stack.location
+  tags: incidentTags
+  properties: {
+    displayName: 'tdd-fworker-no-host-report'
+    description: 'No host has reported to the gateway for 30 minutes: the runtime slots of v2 stall.'
+    severity: 2
+    enabled: true
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT10M'
+    scopes: [incidentWorkspace!.id]
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs_CL | where ContainerAppName_s == \'${factoryApp}\' | where Log_s has \'"hostReports":"none"\''
+          timeAggregation: 'Count'
+          operator: 'GreaterThanOrEqual'
+          threshold: 1
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [ownerGroup.id]
+    }
+  }
+}
+
 // Reader access for the incident triage (a read-only look at Application Insights and the logs): the factory gateway's
 // identity, on the environment's Application Insights and Log Analytics workspace only, and read-only roles only.
 var monitoringReader = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '43d0d8ad-25c7-4714-9337-8ba259a9fe05')
