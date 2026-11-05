@@ -128,20 +128,6 @@
       ]
     },
     {
-      "name": "app2-ui",
-      "repository": "cmdemo1-app2-ui",
-      "hosting": "appservice",
-      "healthPath": "/_healthcheck",
-      "buildPath": "/_build",
-      "telemetryPath": "/_telemetry",
-      "trafficPaths": [
-        "/",
-        "/api/work-orders/status-counts"
-      ],
-      "healthDetailPath": "/_healthcheck/detailed",
-      "startupAssembly": "ClearMeasure.Bootcamp.UI.Server.dll"
-    },
-    {
       "name": "aisf",
       "repository": "cmdemo1-aisf",
       "port": 8080,
