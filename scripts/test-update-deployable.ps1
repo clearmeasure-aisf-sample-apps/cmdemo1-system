@@ -10,6 +10,9 @@
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandArgumentPassing = 'Standard'
+$PSNativeCommandUseErrorActionPreference = $true
+$ProgressPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot 'update-deployable.ps1') -LoadOnly
 
 $failures = 0

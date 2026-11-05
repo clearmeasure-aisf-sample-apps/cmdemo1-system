@@ -10,6 +10,9 @@
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandArgumentPassing = 'Standard'
+$PSNativeCommandUseErrorActionPreference = $true
+$ProgressPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot 'ensure-ui-feature-toggles.ps1') -LoadOnly
 
 $failures = 0
