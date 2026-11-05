@@ -6,9 +6,9 @@
     Creates BuildingManagement and VendorManagement on Octopus project cmdemo1-ui, or flips one environment.
 
 .DESCRIPTION
-    The toggles live on project cmdemo1-ui (Projects-981) in space cmdemo1-demo (Spaces-355). Octopus calls them
-    feature flags. Provider 1.20.0 has no feature-toggle resource, so octopus-apply does not create them and does
-    not put a flipped environment back. This script is the create.
+    The toggles live on project cmdemo1-ui (Projects-981) in space cmdemo1-demo (Spaces-355). The API is
+    /featuretoggles. The project UI may label the same screen Feature Flags. Provider 1.20.0 has no feature-toggle
+    resource, so octopus-apply does not create them and does not put a flipped environment back. This script is the create.
 
     Ensure (the default) creates a missing toggle with tdd on, uat off, prod off, and the flag default off. A
     toggle that already exists is left as it was, including a later flip, except an environment that is missing
@@ -342,9 +342,21 @@ function Select-UiFeatureToggleSpecs([string] $ActionName, [string] $ToggleName)
 
 function Find-UiFeatureToggle($Items, [string] $ToggleName, [string] $Slug) {
     $matches = @(ConvertTo-ObjectList $Items | Where-Object { $null -ne $_ -and ($_.Name -eq $ToggleName -or $_.Slug -eq $Slug) })
-    if ($matches.Count -gt 1) { throw "More than one feature flag matches $ToggleName ($Slug)." }
+    if ($matches.Count -gt 1) { throw "More than one feature toggle matches $ToggleName ($Slug)." }
     if ($matches.Count -eq 1) { return $matches[0] }
     return $null
+}
+
+function Get-UiFeatureToggleCollectionUri([string] $ProjectBase) {
+    return "$ProjectBase/featuretoggles"
+}
+
+function Get-UiFeatureToggleItemUri([string] $ProjectBase, [string] $ToggleId) {
+    return "$ProjectBase/featuretoggles/$ToggleId"
+}
+
+function Get-UiFeatureToggleListUri([string] $ProjectBase, [int] $Skip, [int] $Take) {
+    return "$(Get-UiFeatureToggleCollectionUri $ProjectBase)?skip=$Skip&take=$Take"
 }
 
 function Assert-UiFeatureToggleSystem($System) {
@@ -394,21 +406,29 @@ function Get-OctopusError($ErrorRecord) {
     [pscustomobject]@{ Status = $status; Detail = (Protect-OctopusDetail $detail) }
 }
 
-function Invoke-Octopus([string] $Method, [string] $Uri, [string] $Body) {
+function Invoke-Octopus {
+    param(
+        [string] $Method,
+        [string] $Uri,
+        $Body
+    )
     $headers = Get-OctopusHeaders
     $call = @{ Uri = $Uri; Headers = $headers; Method = $Method }
-    if ($null -ne $Body) {
+    # $Body stays untyped. A typed [string] plus `return Invoke-RestMethod` wraps a JSON array in an extra
+    # Object[], so the environment list is one value whose Name is "tdd uat prod".
+    if ($PSBoundParameters.ContainsKey('Body') -and $null -ne $Body) {
         $call.Body = $Body
         $call.ContentType = 'application/json'
     }
-    return Invoke-RestMethod @call
+    $response = Invoke-RestMethod @call
+    return $response
 }
 
-function Get-UiFeatureFlagList([string] $Uri) {
+function Get-UiFeatureToggleList([string] $ProjectBase) {
     $skip = 0
     $all = [System.Collections.Generic.List[object]]::new()
     while ($true) {
-        $page = Invoke-Octopus -Method Get -Uri "${Uri}?skip=$skip&take=100"
+        $page = Invoke-Octopus -Method Get -Uri (Get-UiFeatureToggleListUri $ProjectBase $skip 100)
         if ($page -is [System.Array]) {
             foreach ($item in $page) { if ($null -ne $item) { $all.Add($item) } }
             break
@@ -424,42 +444,81 @@ function Get-UiFeatureFlagList([string] $Uri) {
         }
         if ($skip -ge $total -or @($items | Where-Object { $null -ne $_ }).Count -eq 0) { break }
     }
-    return $all
+    return ,$all
 }
 
-function Get-ProjectFeatureFlags([string] $Base) {
-    $lastError = $null
-    foreach ($suffix in @('/feature-flags/v2', '/feature-flags')) {
-        try {
-            return Get-UiFeatureFlagList -Uri "$Base$suffix"
-        } catch {
-            $lastError = Get-OctopusError $_
-            if ($lastError.Status -eq 404) { continue }
-            throw "Octopus feature flags ($($lastError.Status)): $($lastError.Detail)"
+function Get-ProjectFeatureToggles([string] $Base) {
+    try {
+        return Get-UiFeatureToggleList -ProjectBase $Base
+    } catch {
+        $lastError = Get-OctopusError $_
+        if ($lastError.Status -eq 404) {
+            throw "Octopus answered 404 for feature toggles on $($script:UiFeatureToggleProjectSlug). Create BuildingManagement and VendorManagement in the project UI (docs/ops/ui-feature-toggles.md). $($lastError.Detail)"
         }
+        if ($lastError.Status -eq 403) {
+            throw "Octopus refused to read feature toggles (403). $($lastError.Detail)"
+        }
+        throw "Octopus feature toggles ($($lastError.Status)): $($lastError.Detail)"
     }
-    throw "Octopus answered 404 for feature flags on $($script:UiFeatureToggleProjectSlug). Create BuildingManagement and VendorManagement in the project UI (docs/ops/ui-feature-toggles.md). $($lastError.Detail)"
+}
+
+function Get-UiFeatureToggleResource([string] $ProjectBase, $Summary) {
+    $id = [string](Get-NoteProperty $Summary 'Id')
+    if (-not $id) { return $Summary }
+    return Invoke-Octopus -Method Get -Uri (Get-UiFeatureToggleItemUri $ProjectBase $id)
+}
+
+function ConvertTo-FeatureToggleEnvironmentWire($Configured) {
+    $wire = [ordered]@{
+        DeploymentEnvironmentId = [string](Get-NoteProperty $Configured 'DeploymentEnvironmentId')
+        IsEnabled               = ConvertTo-Boolean (Get-NoteProperty $Configured 'IsEnabled')
+    }
+    $names = if ($Configured -is [System.Collections.IDictionary]) {
+        @($Configured.Keys)
+    } else {
+        @($Configured.PSObject.Properties.Name)
+    }
+    foreach ($propertyName in $names) {
+        if ($propertyName -in @('DeploymentEnvironmentId', 'IsEnabled', 'Links', 'Phases')) { continue }
+        $propertyValue = Get-NoteProperty $Configured $propertyName
+        if ($null -ne $propertyValue) { $wire[$propertyName] = $propertyValue }
+    }
+    return $wire
+}
+
+function New-FeatureToggleEnvironmentWires($Environments) {
+    $list = [System.Collections.Generic.List[object]]::new()
+    foreach ($configured in @(ConvertTo-ObjectList $Environments)) {
+        if ($null -eq $configured) { continue }
+        $list.Add((ConvertTo-FeatureToggleEnvironmentWire $configured))
+    }
+    return ,$list
 }
 
 function New-FeatureToggleBody($ProjectId, $SpaceId, $Spec, $Plan, $Existing) {
+    # CreateFeatureToggleCommand is Name, ProjectId, SpaceId, and Environments of DeploymentEnvironmentId
+    # plus IsEnabled. Slug and DefaultIsEnabled belong on the resource and on the modify.
+    $environments = New-FeatureToggleEnvironmentWires $Plan.Environments
+    if ($null -eq $Existing) {
+        return [ordered]@{
+            Name         = [string]$Spec.Name
+            ProjectId    = [string]$ProjectId
+            SpaceId      = [string]$SpaceId
+            Environments = $environments
+        }
+    }
     $body = [ordered]@{
-        Name         = if ($Existing) { [string]$Existing.Name } else { [string]$Spec.Name }
-        Description  = [string]$Plan.Description
-        ProjectId    = [string]$ProjectId
-        SpaceId      = [string]$SpaceId
-        Environments = $Plan.Environments
+        Id               = [string](Get-NoteProperty $Existing 'Id')
+        Name             = [string](Get-NoteProperty $Existing 'Name')
+        ProjectId        = [string]$ProjectId
+        SpaceId          = [string]$SpaceId
+        DefaultIsEnabled = [bool]$Plan.DefaultIsEnabled
+        Environments     = $environments
     }
-    if ($Existing) {
-        $body['Id'] = [string]$Existing.Id
-        $body['Slug'] = [string]$Existing.Slug
-        $body['DefaultIsEnabled'] = [bool]$Plan.DefaultIsEnabled
-        $tags = Get-NoteProperty $Existing 'Tags'
-        if ($null -ne $tags) { $body['Tags'] = ConvertTo-PhaseList $tags }
-        $rolloutGroup = Get-NoteProperty $Existing 'RolloutGroupId'
-        if ($rolloutGroup) { $body['RolloutGroupId'] = [string]$rolloutGroup }
-    } else {
-        $body['Slug'] = [string]$Spec.Slug
-    }
+    $slug = Get-NoteProperty $Existing 'Slug'
+    if ($slug) { $body['Slug'] = [string]$slug }
+    $description = [string]$Plan.Description
+    if (-not [string]::IsNullOrWhiteSpace($description)) { $body['Description'] = $description }
     return $body
 }
 
@@ -523,20 +582,21 @@ foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) {
 }
 
 $base = "$url/api/$space/projects/$($project.Id)"
-$flags = Get-ProjectFeatureFlags $base
+$toggles = Get-ProjectFeatureToggles $base
 $mode = if ($Action -eq 'Set') { 'Set' } elseif ($ResetDefaults) { 'ResetDefaults' } else { 'Ensure' }
-$wrote = $false
 
 foreach ($spec in @(Select-UiFeatureToggleSpecs $Action $Name)) {
-    $current = Find-UiFeatureToggle $flags $spec.Name $spec.Slug
+    $current = Find-UiFeatureToggle $toggles $spec.Name $spec.Slug
+    if ($null -ne $current) { $current = Get-UiFeatureToggleResource $base $current }
     if ($Action -eq 'Show') {
         if ($null -eq $current) {
             Write-Host "$($spec.Name): missing"
             continue
         }
-        $slugNote = if ([string]$current.Slug -cne $spec.Slug) { " (requested slug $($spec.Slug))" } else { '' }
+        $slug = [string](Get-NoteProperty $current 'Slug')
+        $slugNote = if ($slug -and $slug -cne $spec.Slug) { " (requested slug $($spec.Slug))" } else { '' }
         $defaultState = if (Test-DefaultIsOff $current) { 'off' } else { 'on' }
-        Write-Host "$($spec.Name): slug=$($current.Slug)$slugNote default=$defaultState id=$($current.Id)"
+        Write-Host "$($spec.Name): slug=$slug$slugNote default=$defaultState id=$($current.Id)"
         $seen = @{}
         foreach ($configured in (ConvertTo-ObjectList (Get-NoteProperty $current 'Environments'))) {
             if ($null -eq $configured) { continue }
@@ -560,7 +620,7 @@ foreach ($spec in @(Select-UiFeatureToggleSpecs $Action $Name)) {
     $line = Format-UiFeatureTogglePlan -Plan $plan -IdToName $idToName
     if ($plan.Action -eq 'none') {
         Write-Host $line
-        if ($null -ne $current -and [string]$current.Slug -cne $spec.Slug) {
+        if ($null -ne $current -and (Get-NoteProperty $current 'Slug') -and [string]$current.Slug -cne $spec.Slug) {
             Write-Host "NOTE: $($spec.Name) evaluation key (slug) is '$($current.Slug)', not '$($spec.Slug)'."
         }
         continue
@@ -574,61 +634,40 @@ foreach ($spec in @(Select-UiFeatureToggleSpecs $Action $Name)) {
         $body = New-FeatureToggleBody $project.Id $space $spec $plan $null
         $json = ConvertTo-OctopusJson $body
         try {
-            $created = Invoke-Octopus -Method Post -Uri "$base/feature-flags" -Body $json
+            $created = Invoke-Octopus -Method Post -Uri (Get-UiFeatureToggleCollectionUri $base) -Body $json
         } catch {
             $createError = Get-OctopusError $_
-            $slugRejected = $createError.Status -eq 400 -and $createError.Detail -match '(?i)slug'
-            if (-not $slugRejected) {
-                if ($createError.Status -eq 404) {
-                    throw "Octopus answered 404 creating a feature flag. Create the toggles in the project UI (docs/ops/ui-feature-toggles.md). $($createError.Detail)"
-                }
-                if ($createError.Status -eq 403) {
-                    throw "Octopus refused to create feature flags (403). The credential can read the project and cannot edit its feature flags. $($createError.Detail)"
-                }
-                throw "Octopus feature flags ($($createError.Status)): $($createError.Detail)"
+            if ($createError.Status -eq 404) {
+                throw "Octopus answered 404 creating a feature toggle. Create the toggles in the project UI (docs/ops/ui-feature-toggles.md). $($createError.Detail)"
             }
-            $flags = Get-ProjectFeatureFlags $base
-            $created = Find-UiFeatureToggle $flags $spec.Name $spec.Slug
-            if ($null -eq $created) {
-                Write-Host "Octopus rejected slug '$($spec.Slug)'; creating '$($spec.Name)' so Octopus assigns the slug."
-                $body.Remove('Slug')
-                $created = Invoke-Octopus -Method Post -Uri "$base/feature-flags" -Body (ConvertTo-OctopusJson $body)
+            if ($createError.Status -eq 403) {
+                throw "Octopus refused to create feature toggles (403). The credential can read the project and cannot edit its feature toggles. $($createError.Detail)"
             }
+            throw "Octopus feature toggles ($($createError.Status)): $($createError.Detail)"
         }
-        if ($null -eq $created -or -not $created.Id) {
-            $flags = Get-ProjectFeatureFlags $base
-            $created = Find-UiFeatureToggle $flags $spec.Name $spec.Slug
+        if ($null -eq $created -or -not (Get-NoteProperty $created 'Id')) {
+            $toggles = Get-ProjectFeatureToggles $base
+            $created = Find-UiFeatureToggle $toggles $spec.Name $spec.Slug
+            if ($null -ne $created) { $created = Get-UiFeatureToggleResource $base $created }
         }
         if ($null -eq $created) { throw "Created $($spec.Name) but could not read it back." }
         $current = $created
         if (-not (Test-DefaultIsOff $created)) {
-            $plan = Get-UiFeatureTogglePlan -Spec $spec -Current $created -EnvironmentIds $environmentIds -Mode ResetDefaults
-            $created = Invoke-Octopus -Method Put -Uri "$base/feature-flags/$($created.Id)" -Body (ConvertTo-OctopusJson (New-FeatureToggleBody $project.Id $space $spec $plan $created))
-            $current = $created
+            $defaultPlan = [pscustomobject]@{
+                Description      = if ([string]::IsNullOrWhiteSpace([string](Get-NoteProperty $created 'Description'))) { [string]$plan.Description } else { [string](Get-NoteProperty $created 'Description') }
+                DefaultIsEnabled = $false
+                Environments     = if ($null -ne (Get-NoteProperty $created 'Environments')) { Get-NoteProperty $created 'Environments' } else { $plan.Environments }
+            }
+            $current = Invoke-Octopus -Method Put -Uri (Get-UiFeatureToggleItemUri $base $created.Id) -Body (ConvertTo-OctopusJson (New-FeatureToggleBody $project.Id $space $spec $defaultPlan $created))
         }
     } else {
-        $current = Invoke-Octopus -Method Put -Uri "$base/feature-flags/$($current.Id)" -Body (ConvertTo-OctopusJson (New-FeatureToggleBody $project.Id $space $spec $plan $current))
+        $current = Invoke-Octopus -Method Put -Uri (Get-UiFeatureToggleItemUri $base $current.Id) -Body (ConvertTo-OctopusJson (New-FeatureToggleBody $project.Id $space $spec $plan $current))
     }
 
-    $wrote = $true
     Write-Host $line
-    if ([string]$current.Slug -cne $spec.Slug) {
+    if ([string](Get-NoteProperty $current 'Slug') -and [string]$current.Slug -cne $spec.Slug) {
         Write-Host "NOTE: $($spec.Name) evaluation key (slug) is '$($current.Slug)', not '$($spec.Slug)'. The app evaluates the slug."
     }
 }
 
 if ($Action -eq 'Show') { return }
-if (-not $wrote) { return }
-if ($WhatIfPreference) { return }
-
-try {
-    $null = Invoke-Octopus -Method Post -Uri "$base/feature-flags/publish" -Body '{}'
-    Write-Host 'Published the project feature-flag manifest.'
-} catch {
-    $publishError = Get-OctopusError $_
-    if ($publishError.Status -eq 404) {
-        Write-Host "Feature flags were saved. The publish route returned 404; open the flag in Octopus and save once if evaluation stays stale. $($publishError.Detail)"
-        return
-    }
-    throw "Feature flags were saved, and publishing the manifest failed ($($publishError.Status)): $($publishError.Detail)"
-}

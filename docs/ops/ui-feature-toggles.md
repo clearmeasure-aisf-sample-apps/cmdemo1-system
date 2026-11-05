@@ -1,6 +1,6 @@
 # cmdemo1-ui feature toggles
 
-Building management and vendor management are Octopus feature flags on project **cmdemo1-ui** (`Projects-981`) in space **cmdemo1-demo** (`Spaces-355`). Octopus shows them under the project's **Feature Flags**. This runbook calls them toggles.
+Building management and vendor management are Octopus feature toggles on project **cmdemo1-ui** (`Projects-981`) in space **cmdemo1-demo** (`Spaces-355`). The API is `/api/Spaces-355/projects/Projects-981/featuretoggles`. The project UI may label that screen **Feature Flags**. This runbook calls them toggles.
 
 | Toggle | Slug the script requests | tdd | uat | prod | Flag default |
 |---|---|---|---|---|---|
@@ -34,7 +34,7 @@ From a checkout of this repository, with no credential, this prints the create a
 pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -WhatIf
 ```
 
-With a credential that can edit feature flags on `cmdemo1-ui`:
+With a credential that can edit feature toggles on `cmdemo1-ui`:
 
 ```pwsh
 pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1
@@ -46,7 +46,7 @@ Ensure creates a missing toggle at the defaults above. Running it again does not
 pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -ResetDefaults
 ```
 
-After this workflow is on `main`, Actions → **ui-feature-toggles** → Run workflow runs that same Ensure as the system's Octopus service account (`OctopusDeploy/login`, GitHub environment `octopus`). It does not run on push, so a merge does not reset a demo flip. If the run stops with 403, that account can read the project and cannot edit feature flags: run the script as a user who can. If Octopus answers 404, the instance is not serving the feature-flag API the script calls. Create the two flags in the UI instead (next section) with the same names and the same on/off values, and leave the flag default off.
+After this workflow is on `main`, Actions → **ui-feature-toggles** → Run workflow runs that same Ensure as the system's Octopus service account (`OctopusDeploy/login`, GitHub environment `octopus`). It does not run on push, so a merge does not reset a demo flip. If the run stops with 403, that account can read the project and cannot edit feature toggles: run the script as a user who can. If Octopus answers 404, the instance is not serving `/featuretoggles` on this project. Create the two toggles in the UI instead (next section) with the same names and the same on/off values, and leave the toggle default off.
 
 Read what is stored:
 

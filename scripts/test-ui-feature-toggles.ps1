@@ -46,11 +46,13 @@ Test-Case 'json empty phases' ([regex]::Matches($json, '"Phases":\[\]').Count) 3
 Test-Case 'json has no api key' ($json -match 'API-') $false
 $createBody = ConvertTo-OctopusJson (New-FeatureToggleBody 'Projects-981' 'Spaces-355' $building $create $null)
 Test-Case 'create body name' $createBody.Contains('"Name":"BuildingManagement"') $true
-Test-Case 'create body slug' $createBody.Contains('"Slug":"BuildingManagement"') $true
 Test-Case 'create body project' $createBody.Contains('"ProjectId":"Projects-981"') $true
 Test-Case 'create body space' $createBody.Contains('"SpaceId":"Spaces-355"') $true
 Test-Case 'create body environments array' $createBody.Contains('"Environments":[') $true
-Test-Case 'create body empty phases' $createBody.Contains('"Phases":[]') $true
+Test-Case 'create body environment id' $createBody.Contains('"DeploymentEnvironmentId":"Environments-1"') $true
+Test-Case 'create body omits slug' $createBody.Contains('"Slug"') $false
+Test-Case 'create body omits default' $createBody.Contains('"DefaultIsEnabled"') $false
+Test-Case 'create body omits phases' $createBody.Contains('"Phases"') $false
 
 $current = [pscustomobject]@{
     Name             = 'BuildingManagement'
@@ -106,6 +108,10 @@ $defaultOn = [pscustomobject]@{
 }
 $resetDefault = Get-UiFeatureTogglePlan -Spec $building -Current $defaultOn -EnvironmentIds $ids -Mode ResetDefaults
 Test-Case 'reset turns a default off' @($resetDefault.DefaultIsEnabled, $resetDefault.ChangeDefault) @($false, $true)
+$modifyJson = ConvertTo-OctopusJson (New-FeatureToggleBody 'Projects-981' 'Spaces-355' $building $reset $current)
+Test-Case 'modify keeps rollout' $modifyJson.Contains('"RolloutPercentage":10') $true
+Test-Case 'modify omits phases' $modifyJson.Contains('"Phases"') $false
+Test-Case 'modify default off' $modifyJson.Contains('"DefaultIsEnabled":false') $true
 
 $set = Get-UiFeatureTogglePlan -Spec $vendor -Current $current -EnvironmentIds $ids -Mode Set -EnvironmentName prod -EnvironmentEnabled $true
 Test-Case 'set prod on' (ConvertTo-Boolean ($set.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' }).IsEnabled) $true
@@ -132,6 +138,62 @@ Test-Case 'repo system accepted' $true $true
 $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ensure-ui-feature-toggles.ps1') -Raw
 Test-Case 'script has no api key literal' ($source -match 'API-[A-Za-z0-9]{8,}') $false
 Test-Case 'script does not say fleet' ($source -match '(?i)fleet') $false
+Test-Case 'script calls featuretoggles' ($source -match '/featuretoggles') $true
+Test-Case 'script does not call feature-flags' ($source -match '/feature-flags') $false
+
+$projectBase = 'https://example.test/api/Spaces-355/projects/Projects-981'
+Test-Case 'list uri' (Get-UiFeatureToggleListUri $projectBase 0 100) "$projectBase/featuretoggles?skip=0&take=100"
+Test-Case 'create uri' (Get-UiFeatureToggleCollectionUri $projectBase) "$projectBase/featuretoggles"
+Test-Case 'item uri' (Get-UiFeatureToggleItemUri $projectBase 'FeatureToggles-1') "$projectBase/featuretoggles/FeatureToggles-1"
+
+$savedKey = $env:OCTOPUS_API_KEY
+$env:OCTOPUS_API_KEY = 'test-only'
+$script:octopusCalls = [System.Collections.Generic.List[object]]::new()
+function Invoke-RestMethod {
+    param(
+        [Parameter(Mandatory)] [string] $Uri,
+        $Headers,
+        [string] $Method,
+        $Body,
+        [string] $ContentType
+    )
+    $script:octopusCalls.Add([pscustomobject]@{
+            Uri      = [string]$Uri
+            Method   = [string]$Method
+            BodySent = [bool]$PSBoundParameters.ContainsKey('Body')
+        })
+    if ($Uri -like '*/environments/all') {
+        $items = @(
+            [pscustomobject]@{ Name = 'tdd'; Id = 'Environments-1' }
+            [pscustomobject]@{ Name = 'uat'; Id = 'Environments-2' }
+            [pscustomobject]@{ Name = 'prod'; Id = 'Environments-3' }
+        )
+        Write-Output $items -NoEnumerate
+        return
+    }
+    return [pscustomobject]@{
+        Items        = @([pscustomobject]@{ Id = 'FeatureToggles-1'; Name = 'BuildingManagement'; Slug = 'BuildingManagement' })
+        TotalResults = 1
+    }
+}
+try {
+    $envs = @(Invoke-Octopus -Method Get -Uri 'https://example.test/api/Spaces-355/environments/all')
+    Test-Case 'environments stay three' @($envs).Count 3
+    Test-Case 'environment names stay apart' ((@($envs) | ForEach-Object { $_.Name }) -join ',') 'tdd,uat,prod'
+    Test-Case 'get omits body' $script:octopusCalls[0].BodySent $false
+    $script:octopusCalls.Clear()
+    $listed = @(Get-UiFeatureToggleList -ProjectBase $projectBase)
+    Test-Case 'list calls featuretoggles' $script:octopusCalls[0].Uri "$projectBase/featuretoggles?skip=0&take=100"
+    Test-Case 'list reads the toggle' $listed[0].Name 'BuildingManagement'
+    $script:octopusCalls.Clear()
+    $null = Invoke-Octopus -Method Post -Uri (Get-UiFeatureToggleCollectionUri $projectBase) -Body '{"Name":"BuildingManagement"}'
+    Test-Case 'post sends body' $script:octopusCalls[0].BodySent $true
+    Test-Case 'post uri' $script:octopusCalls[0].Uri "$projectBase/featuretoggles"
+} finally {
+    if ($null -eq $savedKey) { Remove-Item Env:OCTOPUS_API_KEY -ErrorAction SilentlyContinue }
+    else { $env:OCTOPUS_API_KEY = $savedKey }
+    Remove-Item function:Invoke-RestMethod -ErrorAction SilentlyContinue
+}
 
 if ($failures -gt 0) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'OK'
