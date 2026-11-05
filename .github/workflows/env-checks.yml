@@ -35,6 +35,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-system.ps1
 
+      - name: UI feature toggle planner
+        shell: pwsh
+        run: ./scripts/test-ui-feature-toggles.ps1
+
       - name: Bicep build
         # Warnings fail like errors (no broken windows): Bicep writes its diagnostics to stderr with exit code 0. The
         # setting keeps az from reporting its own config change when it installs Bicep.

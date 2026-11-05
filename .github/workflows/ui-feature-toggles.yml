@@ -1,0 +1,34 @@
+# Creates BuildingManagement and VendorManagement on cmdemo1-ui when someone runs this workflow.
+# It is not on push: a merge must not put a flipped uat or prod environment back to the default.
+# Ensure only adds a toggle that is missing (and an environment row that is missing). See
+# docs/ops/ui-feature-toggles.md. Credentials: GitHub OIDC only, the system's Octopus service account
+# (OctopusDeploy/login). No API key in the workflow.
+name: ui-feature-toggles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ui-feature-toggles
+  cancel-in-progress: false
+
+jobs:
+  ensure:
+    runs-on: ubuntu-24.04
+    environment: octopus
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: Sign in to Octopus
+        uses: OctopusDeploy/login@v2
+        with:
+          server: ${{ vars.OCTOPUS_URL }}
+          service_account_id: ${{ vars.OCTOPUS_SERVICE_ACCOUNT_ID }}
+
+      - name: Ensure UI feature toggles
+        shell: pwsh
+        run: ./scripts/ensure-ui-feature-toggles.ps1

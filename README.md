@@ -18,6 +18,7 @@ Every change to an environment is a pull request here:
 | `infra/` | Bicep for one environment: `main.bicep` reads `system.json`; `modules/` holds one module per capability | People, by pull request |
 | `octopus/` | Terraform for the Octopus configuration, also read from `system.json` | People, by pull request |
 | `scripts/` | The Octopus step scripts and the checks | People, by pull request |
+| `docs/ops/` | Runbooks an operator applies by hand or by `workflow_dispatch` (the cmdemo1-ui feature toggles) | People, by pull request |
 | `docs/architecture/` | The architecture after each phase of the demo-environment skill: C4-PlantUML sources and rendered PNG files | The operator, by pull request after each phase |
 | `bootstrap/seed.bicep` | The resource groups, the registry (only for a system with a container app), the state account and the identities. Applied once by the operator, never by a pipeline | The operator |
 
@@ -28,6 +29,7 @@ Every change to an environment is a pull request here:
 | `env-checks` | Every pull request | Required check: `system.json` rules, Bicep build, Terraform format and validate. A what-if preview per environment appears in the job summary, but doesn't block |
 | `system` | Every merge to `main`, except what a deployment records (a pin, an application's nodes) | Configures Octopus from `octopus/`, packages the commit, then creates a release of `<slug>-system`. Octopus deploys it to the first environment automatically and to later ones on promotion |
 | `drift` | Nightly | What-if of `main` against every environment; the run turns red when an environment differs from Git |
+| `ui-feature-toggles` | On demand, after the workflow is on `main` | Creates the cmdemo1-ui feature toggles if they are missing. It does not run on push, and it does not reset a flip. See `docs/ops/ui-feature-toggles.md` |
 
 In Octopus, two kinds of project run against these environments:
 - **`<slug>-system`** applies `infra/` to one environment as the deployment stack `stack-<slug>-<env>`. Deny settings block changes from anyone except the deploy identity.
@@ -57,5 +59,6 @@ In Octopus, two kinds of project run against these environments:
 | Change who signs off | Edit `octopus.approvers` in `system.json`: the Octopus usernames or email addresses of the people in the team `<slug> approvers`, the responsible team of every "Sign-off" step (`[]`: only automation signs off). Each must already be an Octopus user. The operator identity (`octopus.operator`) stays in the team for sign-offs with a recorded reason |
 | Remove an environment | Delete it from `system.json` and its folder, and delete its stack (`az stack group delete --action-on-unmanage deleteResources`) |
 | Check what the system adds itself | Add a script `infra/own/test-<name>.ps1` that takes `-Environment <name>` and exits 0 when that environment is as it should be. Job `own` of workflow `capabilities` runs each such script in every environment, nightly and after every system build, as `id-<slug>-plan` (a reader), ten minutes at most a run; no run starts once 45 minutes have passed since `scripts/test-own.ps1` started, so the last one ends within the job's hour, and a run not started fails. A failure keeps the issue labelled `capability` open. `infra/own/` is this repository's own: no template sync changes it. By hand, from the repository's root: `pwsh -NoProfile -File scripts/test-own.ps1` (every script in every environment) or `pwsh -NoProfile -File infra/own/test-<name>.ps1 -Environment <env>` (one), as whoever `az` is signed in as |
+| Flip Buildings or Vendors in one environment | Feature toggles on project `cmdemo1-ui`, not an app setting and not a redeploy. `tdd` starts on; `uat` and `prod` start off. `octopus/` does not model them. The create, the flip, and what is still manual are in `docs/ops/ui-feature-toggles.md` |
 
-Local check before a pull request: `pwsh -NoProfile -File scripts/test-system.ps1`.
+Local check before a pull request: `pwsh -NoProfile -File scripts/test-system.ps1` and `pwsh -NoProfile -File scripts/test-ui-feature-toggles.ps1`.
