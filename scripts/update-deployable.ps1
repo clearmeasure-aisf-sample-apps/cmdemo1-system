@@ -11,13 +11,86 @@
     container app the stack created. The pin step already wrote the same version to Git, so the next apply of the
     stack (an environment release, or the nightly drift check) agrees with what runs. The deploy identity is excluded
     from the stack's deny settings, so it may make this change. It then waits until the new revision is ready, and fails
-    at once, with the container's last console lines, when the revision cannot start.
+    at once, with the container's last console lines, when the revision cannot start. When the deployable is ui and
+    Octopus.FeatureToggles.ClientIdentifier has text, that same update sets the container app environment variable
+    Octopus__FeatureFlags__ClientIdentifier. A container app has no package transform. The variable empty, or any
+    other deployable, leaves the update as it was.
+
+.PARAMETER LoadOnly
+    Defines the planner functions and stops, for scripts/test-update-deployable.ps1. Octopus runs this file with the
+    switch off.
 #>
 [CmdletBinding()]
-param()
+param(
+    [switch] $LoadOnly
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Get-FeatureFlagClientInject {
+    # Octopus feature toggles: the client identifier is Octopus.FeatureToggles.ClientIdentifier, a variable of a
+    # project that has toggles. A container app has no package transform, so the ui deploy writes it as the
+    # environment variable the OpenFeature provider reads. Empty, missing, or any deployable other than ui: nothing
+    # is added, and the container app update is the one it was.
+    param(
+        [Parameter(Mandatory)] [string] $Deployable,
+        [AllowEmptyString()] [string] $ClientIdentifier
+    )
+    $name = 'Octopus__FeatureFlags__ClientIdentifier'
+    if ($Deployable -cne 'ui' -or [string]::IsNullOrWhiteSpace($ClientIdentifier)) {
+        return [pscustomobject]@{ Apply = $false; Name = $name; Value = ''; Arguments = @() }
+    }
+    return [pscustomobject]@{
+        Apply     = $true
+        Name      = $name
+        Value     = $ClientIdentifier
+        Arguments = @('--set-env-vars', "${name}=${ClientIdentifier}")
+    }
+}
+
+function Merge-FeatureFlagClientEnv {
+    # The express update sends the container it read, with the image changed. This adds the client identifier to
+    # that container's env and leaves every other variable, including a secret reference, as it was.
+    param(
+        $Env,
+        [Parameter(Mandatory)] $Inject
+    )
+    $entries = @($Env | Where-Object { $_ })
+    if (-not $Inject.Apply) {
+        # One array, so a single variable stays an array for the caller.
+        Write-Output -NoEnumerate @($entries)
+        return
+    }
+    $result = [System.Collections.Generic.List[object]]::new()
+    $found = $false
+    foreach ($entry in $entries) {
+        if ([string] $entry.name -ceq $Inject.Name) {
+            $result.Add(@{ name = $Inject.Name; value = $Inject.Value })
+            $found = $true
+        }
+        else {
+            $result.Add($entry)
+        }
+    }
+    if (-not $found) {
+        $result.Add(@{ name = $Inject.Name; value = $Inject.Value })
+    }
+    Write-Output -NoEnumerate $result.ToArray()
+}
+
+function Get-FeatureFlagUpdateArguments {
+    # The container app update splats this array. Empty adds no argument. Two entries are two arguments.
+    param([Parameter(Mandatory)] $Inject)
+    if (-not $Inject.Apply) {
+        Write-Output -NoEnumerate @()
+        return
+    }
+    Write-Output -NoEnumerate @('--set-env-vars', "$($Inject.Name)=$($Inject.Value)")
+}
+
+if ($LoadOnly) { return }
+
 $PSNativeCommandArgumentPassing = 'Standard'
 $PSNativeCommandUseErrorActionPreference = $true
 
@@ -300,12 +373,18 @@ if ($currentImage -eq $image) {
 }
 else {
     Write-Host "Updating $app from $currentImage to $image"
+    # Feature toggles on ui only. The arguments are empty unless the client identifier is set, so every other
+    # deployable keeps the update it had. A project without the variable reads as empty here.
+    $featureFlags = Get-FeatureFlagClientInject -Deployable $deployable -ClientIdentifier ([string] $OctopusParameters['Octopus.FeatureToggles.ClientIdentifier'])
     if ($express) {
         # The environment's shared identity pulls the image (the seed gave it AcrPull); the app carries it already.
         $pullIdentity = [string] (@($current.identity.userAssignedIdentities.Keys | Where-Object { $_ -match "/id-$([regex]::Escape($slug))-$([regex]::Escape($environmentName))-app$" }) | Select-Object -First 1)
         if (-not $pullIdentity) { Fail-Step "$app carries no identity id-$slug-$environmentName-app to pull $image with: deploy the latest release of $slug-system to $environmentName first." }
         $containers = @($current.properties.template.containers)
         $containers[0].image = $image
+        if ($featureFlags.Apply) {
+            $containers[0].env = Merge-FeatureFlagClientEnv -Env $containers[0].env -Inject $featureFlags
+        }
         $bodyFile = Join-Path ([IO.Path]::GetTempPath()) "update-$app-$([Guid]::NewGuid().ToString('N')).json"
         @{ properties = @{ configuration = @{ registries = @(@{ server = $registry; identity = $pullIdentity }) }; template = @{ containers = $containers } } } |
             ConvertTo-Json -Depth 20 -Compress | Set-Content -LiteralPath $bodyFile -Encoding utf8NoBOM
@@ -315,7 +394,8 @@ else {
         Start-Sleep -Seconds 5
     }
     else {
-        az containerapp update --name $app --resource-group $resourceGroup --image $image --no-wait --output none
+        $featureFlagArguments = Get-FeatureFlagUpdateArguments -Inject $featureFlags
+        az containerapp update --name $app --resource-group $resourceGroup --image $image @featureFlagArguments --no-wait --output none
     }
 }
 

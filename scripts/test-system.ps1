@@ -191,8 +191,8 @@ foreach ($deployable in @($system.deployables)) {
 $environmentNamesDeclared = @($system.environments | ForEach-Object { [string] $_.name })
 $containerKeys = @('environments', 'alwaysOn', 'alwaysOnEnvironments', 'database', 'cpu', 'environmentCpu', 'settings', 'environmentSettings', 'urlSetting', 'secrets', 'dashboardLink')
 $variableName = '^[A-Za-z_][A-Za-z0-9_]{0,254}$'
-# Set by the template itself, or by Container Apps.
-$reservedVariables = @('ConnectionStrings__SqlConnectionString', 'OTEL_SERVICE_NAME', 'APPLICATIONINSIGHTS_CONNECTION_STRING')
+# Set by the template itself, by Container Apps, or by Update deployable (the ui feature-toggle client identifier).
+$reservedVariables = @('ConnectionStrings__SqlConnectionString', 'OTEL_SERVICE_NAME', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'Octopus__FeatureFlags__ClientIdentifier')
 function Test-VariableName {
     param($Name)
     return $Name -is [string] -and $Name -cmatch $variableName -and $reservedVariables -cnotcontains $Name -and $Name -cnotmatch '^CONTAINER_APP_'

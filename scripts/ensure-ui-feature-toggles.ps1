@@ -18,8 +18,8 @@
 
     The credential is OCTOPUS_API_KEY, or OCTOPUS_ACCESS_TOKEN from OctopusDeploy/login. It is read from the
     environment only, never from an argument. Nothing here prints it. The client identifier
-    (Octopus.FeatureToggles.ClientIdentifier) is not read and not written: the demo platform kit injects it
-    (demo-platform-kit issue 191). The app evaluates the toggle only after cmdemo1-workorders issue 1466.
+    (Octopus.FeatureToggles.ClientIdentifier) is not read and not written here: scripts/update-deployable.ps1
+    writes it onto the ui container app. The app evaluates the toggle only after cmdemo1-workorders issue 1466.
 
     Runbook: docs/ops/ui-feature-toggles.md.
 
