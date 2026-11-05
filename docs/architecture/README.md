@@ -70,11 +70,13 @@ Source: [07-telemetry-tdd.puml](07-telemetry-tdd.puml)
 
 Source: [09-safe-path-to-prod.puml](09-safe-path-to-prod.puml)
 
-## A second app that shares the database (2026-10-04)
+## One app on the database: app2-ui retired (2026-11-05)
 
-![A second app that shares the database (2026-10-04)](10-second-app-appservice.png)
+The second app, app2-ui on App Service (added 2026-10-04), is retired: ui on Container Apps is the only app that signs in to the database, and this system keeps no App Service hosting.
 
-Source: [10-second-app-appservice.puml](10-second-app-appservice.puml)
+![One app on the database: app2-ui retired (2026-11-05)](10-app2-ui-retired.png)
+
+Source: [10-app2-ui-retired.puml](10-app2-ui-retired.puml)
 
 ## Placement by pull request, zero downtime measured (2026-10-04)
 

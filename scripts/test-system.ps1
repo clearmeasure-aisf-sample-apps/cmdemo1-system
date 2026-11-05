@@ -11,8 +11,10 @@
     Prints PASS or FAIL per check and exits 1 when any check fails.
 
     - The slug, environment and deployable names follow the naming rules every template relies on.
-    - Each deployable's hosting is one the templates know: containerapp (the default), appservice, staticwebapp,
-      storagewebsite (the same static site on a storage account's static website) or own.
+    - Each deployable's hosting is one the templates know: containerapp (the default), staticwebapp, storagewebsite
+      (the same static site on a storage account's static website) or own. This system keeps no App Service hosting
+      (the kit's appservice): infra/ and octopus/ have no module and no step for it, so it is refused, and so is a
+      standby region (environments[].standbyLocation), which only App Service apps had.
     - With a container app among the deployables, azure.registry names the system's registry (the seed creates one
       only for a system that needs it).
     - Each environment has a tier (nonprod or prod), a runtime identity from the seed and a folder
@@ -32,7 +34,7 @@
       (true or false), alwaysOnEnvironments (environments of the deployable, with alwaysOn true), cpu, settings and
       environmentSettings (environment variable to text), urlSetting, and secrets (name, env, generate; never a value).
     - azure.appEnvironment, where present (the system owns its Container Apps environment), has the seed's shape, and
-      then no environment chooses a placement of its own and no deployable runs on App Service.
+      then no environment chooses a placement of its own.
 #>
 [CmdletBinding()]
 param(
@@ -138,7 +140,7 @@ foreach ($deployable in @($system.deployables)) {
 # templates read, and the environments then choose no placement of their own: no appLocation, no
 # sharesAppEnvironmentWith. Its apps run on Container Apps, the system's (containerapp) or the application's own
 # (own); the dashboard (staticwebapp) is a static site that needs no Container Apps environment and may stand next
-# to them. An App Service deployable is not combined with it.
+# to them.
 if ($system.azure.ContainsKey('appEnvironment')) {
     $appEnvironment = $system.azure.appEnvironment
     $shape = $appEnvironment -is [Collections.IDictionary] -and
@@ -162,8 +164,9 @@ if ($system.azure.ContainsKey('appEnvironment')) {
 
 # Where a deployable runs: infra/main.bicep and octopus/main.tf have a module and an "Update deployable" step per
 # hosting, and a value they do not know would get neither. "own": the application brings its runtime (infra/ has
-# nothing for it; its project runs the deploy.ps1 and verify.ps1 of its release's package).
-$hostings = @('containerapp', 'appservice', 'staticwebapp', 'storagewebsite', 'own')
+# nothing for it; its project runs the deploy.ps1 and verify.ps1 of its release's package). No "appservice": this
+# system's templates leave the kit's App Service hosting out.
+$hostings = @('containerapp', 'staticwebapp', 'storagewebsite', 'own')
 foreach ($deployable in @($system.deployables)) {
     if ($deployable.ContainsKey('hosting')) {
         Test-Rule "deployable $($deployable.name) hosting" ($hostings -ccontains [string] $deployable.hosting) "'$($deployable.hosting)' is not one of $($hostings -join ', ') (containerapp when left out)"
@@ -202,10 +205,6 @@ function Test-SettingMap {
 }
 # The vault's own secrets (infra/modules/keyvault.bicep): a deployable's secret may not take one of their names.
 $vaultSecretNames = [Collections.Generic.List[string]] @('sql-admin-password', 'sql-connection-string')
-foreach ($login in @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' })) {
-    $vaultSecretNames.Add("$($login.name)-sql-password")
-    $vaultSecretNames.Add("$($login.name)-sql-connection-string")
-}
 # deployables[].retired (decision 0058): true takes a container deployable out of every environment (infra/ makes
 # nothing for it, octopus/ keeps only its project, disabled, with its releases and deployments). The deployable stays
 # in this list for that project, needs no environments, secrets or port, and no environment pins a version of it.
@@ -317,7 +316,7 @@ foreach ($deployable in @($system.deployables)) {
 }
 
 # A container app's image comes from the system's registry (azure.registry { name, loginServer }, from the seed). A
-# system whose deployables all run on App Service or Static Web Apps has no registry, and no azure.registry.
+# system whose deployables all run on Static Web Apps has no registry, and no azure.registry.
 if (@($system.deployables | Where-Object { -not $_.ContainsKey('hosting') -or $_.hosting -ceq 'containerapp' }).Count -gt 0) {
     Test-Rule 'azure.registry' ($system.azure.ContainsKey('registry') -and $system.azure.registry -is [Collections.IDictionary] -and $system.azure.registry['name'] -and $system.azure.registry['loginServer']) 'a container app needs azure.registry { name, loginServer }: the seed creates the registry for a system with a container app (new-demo-seed.ps1)'
 }
@@ -357,16 +356,9 @@ foreach ($environment in $system.environments) {
         }
     }
 
-    # A standby region (the App Service apps a second time, behind the environment's Front Door endpoint) and the
-    # capability "frontdoor" (an endpoint in the system's profile, azure.frontDoor).
-    if ($environment.ContainsKey('standbyLocation')) {
-        $standby = [string] $environment.standbyLocation
-        $appServiceNames = @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' } | ForEach-Object { [string] $_.name })
-        Test-Rule "environment $name standby region" ($standby -cmatch '^[a-z0-9]+$' -and $standby -cne [string] $system.system.location -and $appServiceNames.Count -gt 0 -and @($environment.capabilities) -contains 'frontdoor') 'an Azure region other than system.location, with an App Service deployable and capability frontdoor (only the Front Door endpoint sends traffic to the standby)'
-        foreach ($deployableName in $appServiceNames) {
-            Test-Rule "environment $name standby app name length ($deployableName)" (("app-$slug-$name-$deployableName-$standby").Length -le 60) 'slug, environment, deployable and region too long for a web app name (60 characters)'
-        }
-    }
+    # A standby region ran the App Service apps a second time: without App Service hosting there is nothing to put
+    # there. The capability "frontdoor" is an endpoint in the system's profile (azure.frontDoor).
+    Test-Rule "environment $name without standbyLocation" (-not $environment.ContainsKey('standbyLocation')) 'a standby region holds App Service apps, which this system does not have; remove standbyLocation'
     if (@($environment.capabilities) -contains 'frontdoor') {
         Test-Rule "environment $name Front Door profile" ($system.azure.ContainsKey('frontDoor') -and $system.azure.frontDoor['profile'] -and $system.azure.frontDoor['resourceGroup']) 'capability frontdoor needs azure.frontDoor { resourceGroup, profile } (the seed creates the profile)'
     }

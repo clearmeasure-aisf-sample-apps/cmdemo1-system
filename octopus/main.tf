@@ -38,14 +38,12 @@ locals {
   retired_deployables = { for name, d in local.all_deployables : name => d if try(d.retired, false) == true }
   deployables         = { for name, d in local.all_deployables : name => d if try(d.retired, false) != true }
 
-  # deployables[].hosting: "containerapp" (default), "appservice" (a web app on the Free plan, zip deployed, with no
-  # database of its own) or "staticwebapp" (a site of static files on Azure Static Web Apps: the health dashboard).
-  # Only deployables with a databasePackage own the database: they migrate it and, in the prod tier, record a restore
-  # point first; an App Service deployable gets a login of its own (system step "Grant database access"); a static
-  # deployable has no database access at all.
-  container_deployables  = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "containerapp" }
-  appservice_deployables = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "appservice" }
-  static_deployables     = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "staticwebapp" }
+  # deployables[].hosting: "containerapp" (default) or "staticwebapp" (a site of static files on Azure Static Web Apps:
+  # the health dashboard); this system keeps no App Service hosting. Only deployables with a databasePackage own the
+  # database: they migrate it and, in the prod tier, record a restore point first; a static deployable has no database
+  # access at all.
+  container_deployables = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "containerapp" }
+  static_deployables    = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "staticwebapp" }
   # "storagewebsite": the same site on a storage account's static website (opt-in; decision 0035).
   storage_deployables = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "storagewebsite" }
   # deployables[].hosting "own": the application brings its runtime (principle 007). infra/ creates nothing for it;

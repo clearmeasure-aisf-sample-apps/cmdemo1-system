@@ -18,10 +18,6 @@ param sqlAdminPassword string = ''
 @description('Principal ID of the deploy identity of this tier; it may read and write the vault secrets.')
 param deployPrincipalId string
 
-@description('Password of the database login of each App Service deployable, by name; apply-environment.ps1 reads them from the vault, or generates them for a new deployable.')
-@secure()
-param loginPasswords object = {}
-
 @description('Vault names (<deployable>-<secret>) of the operator-supplied secrets of container deployables that exist in the environment\'s vault; apply-environment.ps1 lists them. A container app references only the secrets named here.')
 param presentSecrets array = []
 
@@ -84,11 +80,10 @@ var databaseName = sqlGeneration > 1 ? 'sqldb-${slug}-${environmentName}-${sqlGe
 var sqlAdminLogin = 'sqladmin'
 var sqlServerFqdn = '${sqlServerName}${az.environment().suffixes.sqlServerHostname}'
 
-// A deployable runs as a container app (modules/containerapps.bicep) unless deployables[].hosting is "appservice": then
-// a Linux web app on the Free plan (modules/appservice.bicep). An App Service deployable reaches the system's database
-// with a login of its own (scripts/grant-database-access.ps1), whose connection string only its identity may read. One
-// with a databasePackage owns the database (Octopus migrates it as the administrator, and its login may change the
-// schema: the app creates its message queues at startup); the others share it, read and write.
+// A deployable runs as a container app (modules/containerapps.bicep) unless deployables[].hosting says otherwise.
+// This system keeps no App Service hosting (the kit's "appservice" and modules/appservice.bicep are left out here:
+// scripts/test-system.ps1 refuses it), so the container deployable with a databasePackage owns the database and is the
+// only app that reaches it.
 // deployables[].hosting "staticwebapp": a site of static files on Azure Static Web Apps (modules/staticwebapp.bicep):
 // the health dashboard, which has no server, no identity and no database login.
 // "storagewebsite": the same site on a storage account's static website (modules/storagewebsite.bicep; opt-in).
@@ -156,19 +151,17 @@ var containerApps = map(containerDeployables, d => {
     s => s.deployable == d.name && (s.generate || contains(presentSecrets, s.vaultName))
   )
 })
-var appServiceDeployables = filter(hostedDeployables, d => d.hosting == 'appservice')
 var staticDeployables = filter(hostedDeployables, d => d.hosting == 'staticwebapp')
 var storageDeployables = filter(hostedDeployables, d => d.hosting == 'storagewebsite')
-// The environment has a database when an app in it uses one: a container deployable with database (the default), or an
-// App Service deployable (which shares the first app's database). Without one (an app of the person's own,
-// app.source "repository"), the environment has no SQL server and its vault holds no SQL secret.
-var hasDatabase = !empty(filter(containerDeployables, d => d.database)) || !empty(appServiceDeployables)
+// The environment has a database when an app in it uses one: a container deployable with database (the default).
+// Without one (an app of the person's own, app.source "repository"), the environment has no SQL server and its vault
+// holds no SQL secret.
+var hasDatabase = !empty(filter(containerDeployables, d => d.database))
 // The Free plan of Static Web Apps exists in a few regions only; the files are served from edge locations everywhere,
 // so the region of the resource need not be the system's (system.staticLocation, optional).
 var staticLocation = union({ staticLocation: 'centralus' }, system.system).staticLocation
 // The dashboard runs in the browser and calls the health and version endpoints of every app itself, so with a static
-// deployable the App Service apps answer requests from other origins (CORS), and so do the container apps, whose
-// health path the page probes while it shows them (decision 0038; a setting of their ingress, GET only). Every origin
+// deployable the container apps answer requests from other origins (CORS): the page probes their health path while it shows them (decision 0038; a setting of their ingress, GET only). Every origin
 // (*), not the dashboard's address: each environment's dashboard shows the nodes of every environment, so the origins
 // to allow would be the sites of all environments, of both tiers; the endpoints it calls are public health and version
 // endpoints that answer anyone anyway; and no credentials are sent or allowed. Without a static deployable nothing is
@@ -180,14 +173,6 @@ resource secretIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023
   for d in secretDeployables: {
     name: 'id-${slug}-${environmentName}-${d.name}'
     location: location
-    tags: union(tags, { deployable: d.name })
-  }
-]
-
-resource loginIdentities 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = [
-  for d in appServiceDeployables: {
-    name: 'id-${slug}-${environmentName}-${d.name}${placementSuffix}'
-    location: appLocation
     tags: union(tags, { deployable: d.name })
   }
 ]
@@ -234,15 +219,6 @@ module vault 'modules/keyvault.bicep' = {
     sqlConnectionString: hasDatabase
       ? 'Server=tcp:${sqlServerFqdn},1433;Database=${databaseName};User ID=${sqlAdminLogin};Password=${sqlAdminPassword};Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;'
       : ''
-    logins: [
-      for (d, i) in appServiceDeployables: {
-        name: d.name
-        // Only an identity that placement renamed gets a role assignment of its own (see modules/keyvault.bicep).
-        renamedIdentity: empty(placementSuffix) ? '' : loginIdentities[i].name
-        principalId: loginIdentities[i].properties.principalId
-      }
-    ]
-    loginPasswords: loginPasswords
     generatedSecretNames: generatedSecretNames
     generatedSecrets: generatedSecrets
     narrowReaders: !empty(secretDeployables)
@@ -257,73 +233,6 @@ module vault 'modules/keyvault.bicep' = {
       filter(containerSecrets, s => s.generate || contains(presentSecrets, s.vaultName)),
       s => { deployable: s.deployable, vaultName: s.vaultName }
     )
-    loginConnectionStrings: toObject(
-      appServiceDeployables,
-      d => d.name,
-      d =>
-        'Server=tcp:${sqlServerFqdn},1433;Database=${databaseName};User ID=${d.name};Password=${loginPasswords[d.name]};Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;'
-    )
-  }
-}
-
-// Azure allows one Free Linux App Service plan per resource group (FreeLinuxSkuNotAllowedInResourceGroup): the first
-// environment of a tier owns the tier's plan, the others in the tier run their web apps on it. App Service uses the
-// system's location (appLocation is a Container Apps quota matter).
-var planOwner = first(filter(system.environments, e => e.tier == environment.tier))!.name
-// system.planSku: { "<tier>": "B1" } gives a tier's plans, in the system's location and in its standby regions, a size
-// without the Free plan's daily quotas (60 CPU minutes, 165 MB of outbound data for the whole plan: one run of browser
-// acceptance tests exceeds it, as do a few visitors who each download the app, and Azure then stops every app on the
-// plan until midnight UTC; a standby on a Free plan would be stopped by the very failover it exists for). While the system is
-// dormant (azure.frontDoor.dormant, set-demo-frontdoor.ps1) every plan is Free again: nothing costs money between classes.
-var planSkus = union({ nonprod: 'F1', prod: 'F1' }, union({ planSku: {} }, system.system).planSku)
-var dormant = bool(union({ dormant: false }, union({ frontDoor: {} }, system.azure).frontDoor).dormant)
-var planSku = (!dormant && string(planSkus[environment.tier]) == 'B1') ? 'B1' : 'F1'
-// environments[].standbyLocation: the App Service apps a second time, in that region (primary and standby behind the
-// environment's Front Door endpoint, capability "frontdoor"). The standby region's Free plan belongs to the first
-// environment of the tier that has this standby region.
-var standbyLocation = string(union({ standbyLocation: '' }, rawEnvironment).standbyLocation)
-var standbyPlanOwner = empty(standbyLocation)
-  ? environmentName
-  : first(filter(system.environments, e => e.tier == environment.tier && union({ standbyLocation: '' }, e).standbyLocation == standbyLocation))!.name
-
-module appService 'modules/appservice.bicep' = if (!empty(appServiceDeployables)) {
-  name: 'appservice-${environmentName}'
-  params: {
-    slug: slug
-    environmentName: environmentName
-    location: location
-    planName: 'asp-${slug}-${planOwner}'
-    ownsPlan: planOwner == environmentName
-    planSku: planSku
-    tags: tags
-    deployables: appServiceDeployables
-    versions: versions
-    identityResourceIds: [for (d, i) in appServiceDeployables: loginIdentities[i].id]
-    connectionStringSecretUris: vault.outputs.loginConnectionStringUris
-    applicationInsightsConnectionString: contains(capabilities, 'telemetry') ? telemetry!.outputs.connectionString : ''
-    corsAllowedOrigins: corsAllowedOrigins
-  }
-}
-
-module appServiceStandby 'modules/appservice.bicep' = if (!empty(appServiceDeployables) && !empty(standbyLocation)) {
-  name: 'appservice-${environmentName}-standby'
-  params: {
-    slug: slug
-    environmentName: environmentName
-    location: standbyLocation
-    planName: 'asp-${slug}-${standbyPlanOwner}-${standbyLocation}'
-    ownsPlan: standbyPlanOwner == environmentName
-    nameSuffix: '-${standbyLocation}'
-    role: 'standby'
-    planSku: planSku
-    // The standby reports like the primary: its requests matter most after a failover.
-    applicationInsightsConnectionString: contains(capabilities, 'telemetry') ? telemetry!.outputs.connectionString : ''
-    tags: tags
-    deployables: appServiceDeployables
-    versions: versions
-    identityResourceIds: [for (d, i) in appServiceDeployables: loginIdentities[i].id]
-    connectionStringSecretUris: vault.outputs.loginConnectionStringUris
-    corsAllowedOrigins: corsAllowedOrigins
   }
 }
 
@@ -381,8 +290,7 @@ module own 'own/main.bicep' = {
   }
 }
 
-// Only with a container deployable: a system whose apps all run on App Service has no Container Apps environment, and
-// no registry either (system.json then has no azure.registry: the seed creates none).
+// Only with a container deployable.
 module apps 'modules/containerapps.bicep' = if (!empty(containerDeployables)) {
   name: 'apps-${environmentName}'
   dependsOn: [
@@ -422,11 +330,7 @@ output databaseName string = hasDatabase ? databaseName : ''
 output sqlAdminLogin string = hasDatabase ? sqlAdminLogin : ''
 output deployables array = concat(
   empty(containerDeployables) ? [] : apps!.outputs.deployables,
-  empty(appServiceDeployables) ? [] : appService!.outputs.deployables,
   empty(staticDeployables) ? [] : staticSites!.outputs.deployables,
   empty(storageDeployables) ? [] : storageSites!.outputs.deployables
 )
-// The same App Service deployables in the standby region (empty without a standbyLocation): the scripts deploy to and
-// verify both, and the Front Door endpoint has both as origins.
-output standby array = (empty(appServiceDeployables) || empty(standbyLocation)) ? [] : appServiceStandby!.outputs.deployables
 output capabilities array = capabilities

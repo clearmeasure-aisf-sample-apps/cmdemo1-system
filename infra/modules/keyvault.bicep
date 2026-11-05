@@ -16,15 +16,6 @@ param sqlAdminPassword string = ''
 @secure()
 param sqlConnectionString string = ''
 
-@description('Database logins of App Service deployables: name, and the principal ID of the one identity that may read its connection string.')
-param logins array = []
-@description('Password of each login, by name.')
-@secure()
-param loginPasswords object = {}
-@description('Connection string of each login, by name.')
-@secure()
-param loginConnectionStrings object = {}
-
 @description('Vault names of the generated secrets of container deployables (<deployable>-<secret>).')
 param generatedSecretNames array = []
 @description('Value of each generated secret, by vault name.')
@@ -115,45 +106,6 @@ resource connectionStringReaders 'Microsoft.Authorization/roleAssignments@2022-0
   }
 ]
 
-// A login's password (read by the deploy identity's grant step) and its connection string, which only the
-// deployable's own identity may read: the role is assigned on the secret, not on the vault.
-resource loginPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [
-  for l in logins: {
-    parent: vault
-    name: '${l.name}-sql-password'
-    properties: {
-      value: loginPasswords[l.name]
-      contentType: 'text/plain'
-    }
-  }
-]
-
-resource loginConnectionString 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [
-  for l in logins: {
-    parent: vault
-    name: '${l.name}-sql-connection-string'
-    properties: {
-      value: loginConnectionStrings[l.name]
-      contentType: 'text/plain'
-    }
-  }
-]
-
-resource loginReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for (l, i) in logins: {
-    // A role assignment cannot change its principal, and an identity, role and scope allow only one assignment. So the
-    // assignment keeps its name while the identity keeps its name, and an identity that placement renamed (a moved
-    // environment: a new principal) gets an assignment of its own, next to the old one, which the stack then removes.
-    name: empty(l.renamedIdentity) ? guid(vault.id, l.name, 'login-secret-user') : guid(vault.id, l.name, l.renamedIdentity, 'login-secret-user')
-    scope: loginConnectionString[i]
-    properties: {
-      principalId: l.principalId
-      principalType: 'ServicePrincipal'
-      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
-    }
-  }
-]
-
 // A secret the deployment generates for a container deployable (system.json deployables[].secrets[] with "generate":
 // true): apply-environment.ps1 keeps its value, as it keeps the SQL passwords. Operator-supplied secrets are not here:
 // the operator writes them to the vault (data plane), and the container app references them by name.
@@ -195,8 +147,5 @@ resource secretReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
 
 output name string = vault.name
 output vaultUri string = vault.properties.vaultUri
-output loginConnectionStringUris array = [
-  for (l, i) in logins: '${vault.properties.vaultUri}secrets/${loginConnectionString[i].name}'
-]
 // Versionless URI: the container app picks up a rotated value without a new revision. Empty without a database.
 output connectionStringSecretUri string = database ? '${vault.properties.vaultUri}secrets/sql-connection-string' : ''

@@ -1,0 +1,32 @@
+@startuml 10-app2-ui-retired
+!include _c4.iuml
+title Clear Measure work orders demo 1 | One app on the database: app2-ui retired (2026-11-05)
+
+Person(signer, "Space Manager", "Signs off uat and prod for ui")
+
+Boundary(gh, "GitHub org clearmeasure-aisf-sample-apps") {
+  Container(apprepo, "cmdemo1-workorders", "Build, Release (image)", "Owns the database: migrations, acceptance tests")
+  Container(sysrepo, "cmdemo1-system", "system.json", "deployables: ui (container app) and the other container apps, dashboard (Static Web App); no App Service hosting: test-system refuses it", $tags="new")
+}
+
+Boundary(octo, "Octopus space cmdemo1 demo") {
+  Container(proj_sys, "cmdemo1-system", "every environment", "Sign-off, Apply environment, Verify; no Grant database access", $tags="new")
+  Container(proj_app, "cmdemo1-ui", "tdd, uat, prod", "Pin, Migrate, Update, Verify, acceptance tests in tdd")
+}
+
+Boundary(env, "Every environment: stack-cmdemo1-<env>") {
+  Container(ca, "ca-cmdemo1-<env>-ui", "Container Apps", "The only app with a SQL connection string", $tags="new")
+  ContainerDb(kv, "Key Vault of <env>", "RBAC", "sql-admin-password, sql-connection-string; no app2-ui secrets", $tags="new")
+  ContainerDb(sql, "sqldb-cmdemo1-<env>", "Azure SQL", "Owned by ui; no contained user app2-ui", $tags="new")
+}
+
+Rel(apprepo, proj_app, "create release", "OIDC")
+Rel(signer, proj_app, "Proceed with a note")
+Rel(sysrepo, proj_sys, "system release", "OIDC")
+Rel(proj_sys, env, "apply stack: removes the web apps, plans, identity and secrets of app2-ui", $tags="new")
+Rel(proj_app, ca, "deploy")
+Rel(ca, kv, "sql-connection-string", "managed identity")
+Rel(ca, sql, "administrator: migrations, work orders, NServiceBus queue UI.Server", $tags="new")
+
+SHOW_LEGEND()
+@enduml

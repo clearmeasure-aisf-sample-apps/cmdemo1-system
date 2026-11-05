@@ -65,11 +65,11 @@ locals {
     }
   }
   # The database runbooks exist only in a system with a database: a container deployable that uses one (database is
-  # true unless it says false) or an App Service deployable (which shares it), the rule of infra/main.bicep. An app of
-  # the person's own (app.source "repository") has none, so there is nothing to restore or rotate.
+  # true unless it says false), the rule of infra/main.bicep. An app of the person's own (app.source "repository") has
+  # none, so there is nothing to restore or rotate.
   has_database = length([
     for name, d in local.deployables : name
-    if(try(d.hosting, "containerapp") == "containerapp" && try(d.database, true)) || try(d.hosting, "containerapp") == "appservice"
+    if try(d.hosting, "containerapp") == "containerapp" && try(d.database, true)
   ]) > 0
   database_runbooks = { for key, runbook in {
     restore_test = {
@@ -82,7 +82,7 @@ locals {
     }
     rotate_sql_password = {
       name         = "Rotate SQL password"
-      description  = "New SQL administrator password through Key Vault; container apps restart and answer their health path. The logins of App Service deployables are not rotated (scripts/rotate-sql-password.ps1)."
+      description  = "New SQL administrator password through Key Vault; container apps restart and answer their health path (scripts/rotate-sql-password.ps1)."
       script       = "rotate-sql-password.ps1"
       environments = [for name, e in local.environments : name]
       cron         = "0 ${local.schedule_minute} ${8 + local.schedule_hours} 1 * *"
