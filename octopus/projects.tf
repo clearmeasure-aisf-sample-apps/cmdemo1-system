@@ -103,29 +103,8 @@ resource "octopusdeploy_process_step" "system_verify" {
   }
 }
 
-# Only with an App Service deployable: its database login (scripts/grant-database-access.ps1), right after the apply
-# that keeps the login's password in the vault.
-resource "octopusdeploy_process_step" "system_grant" {
-  count = length(local.appservice_deployables) > 0 ? 1 : 0
-
-  process_id     = octopusdeploy_process.system.id
-  name           = "Grant database access"
-  type           = "Octopus.AzurePowerShell"
-  worker_pool_id = local.worker_pool_id
-  container      = local.container
-
-  execution_properties = {
-    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
-    "Octopus.Action.RunOnServer"         = "true"
-    "Octopus.Action.Script.ScriptSource" = "Inline"
-    "Octopus.Action.Script.Syntax"       = "PowerShell"
-    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/grant-database-access.ps1")
-    "OctopusUseBundledTooling"           = "False"
-  }
-}
-
 # Only where an environment declares employeeMiddleNames in system.json, and only in those environments: the demo data
-# (scripts/set-employee-middle-names.ps1, variable Employee.MiddleNames), after the database logins.
+# (scripts/set-employee-middle-names.ps1, variable Employee.MiddleNames), after the apply.
 resource "octopusdeploy_process_step" "system_middle_names" {
   count = length(local.middle_name_environments) > 0 ? 1 : 0
 
@@ -151,7 +130,6 @@ resource "octopusdeploy_process_steps_order" "system" {
   steps = concat(
     [octopusdeploy_process_step.system_sign_off.id],
     [octopusdeploy_process_step.system_apply.id],
-    [for step in octopusdeploy_process_step.system_grant : step.id],
     [for step in octopusdeploy_process_step.system_middle_names : step.id],
     [octopusdeploy_process_step.system_verify.id],
   )
@@ -435,40 +413,6 @@ resource "octopusdeploy_process_step" "update" {
     "Octopus.Action.Script.ScriptSource" = "Inline"
     "Octopus.Action.Script.Syntax"       = "PowerShell"
     "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/update-deployable.ps1")
-    "OctopusUseBundledTooling"           = "False"
-  }
-}
-
-# App Service deployables: the release's zip (package <slug>-<deployable> in the built-in feed, not extracted) onto the
-# web app the stack created (scripts/deploy-appservice.ps1).
-resource "octopusdeploy_process_step" "deploy_appservice" {
-  for_each = local.appservice_deployables
-
-  process_id     = octopusdeploy_process.deployable[each.key].id
-  name           = "Update deployable"
-  type           = "Octopus.AzurePowerShell"
-  worker_pool_id = local.worker_pool_id
-  container      = local.container
-
-  packages = {
-    app = {
-      package_id           = "${local.slug}-${each.key}"
-      feed_id              = local.built_in_feed_id
-      acquisition_location = "Server"
-      properties = {
-        Extract       = "False"
-        Purpose       = ""
-        SelectionMode = "immediate"
-      }
-    }
-  }
-
-  execution_properties = {
-    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
-    "Octopus.Action.RunOnServer"         = "true"
-    "Octopus.Action.Script.ScriptSource" = "Inline"
-    "Octopus.Action.Script.Syntax"       = "PowerShell"
-    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/deploy-appservice.ps1")
     "OctopusUseBundledTooling"           = "False"
   }
 }
@@ -793,7 +737,6 @@ resource "octopusdeploy_process_steps_order" "deployable" {
     contains(keys(local.seeded_deployables), each.key) ? [octopusdeploy_process_step.seed_demo_employees[each.key].id] : [],
     contains(keys(local.schema_deployables), each.key) ? [octopusdeploy_process_step.record_schema[each.key].id] : [],
     contains(keys(local.container_deployables), each.key) ? [octopusdeploy_process_step.update[each.key].id] : [],
-    contains(keys(local.appservice_deployables), each.key) ? [octopusdeploy_process_step.deploy_appservice[each.key].id] : [],
     contains(keys(local.static_deployables), each.key) ? [octopusdeploy_process_step.deploy_staticwebapp[each.key].id] : [],
     contains(keys(local.storage_deployables), each.key) ? [octopusdeploy_process_step.deploy_storagewebsite[each.key].id] : [],
     contains(keys(local.own_deployables), each.key) ? [
