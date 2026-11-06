@@ -502,5 +502,9 @@ try {
 Test-Case 'pwsh file false still binds' (($pwshFalseCode -eq 1) -and ($pwshFalse -match 'no Octopus credential') -and ($pwshFalse -notmatch 'argument transformation')) $true
 Test-Case 'pwsh file true still binds' (($pwshTrueCode -eq 1) -and ($pwshTrue -match 'no Octopus credential')) $true
 
+# The nested pwsh and bash calls exit 1 on the missing-credential path. Actions' pwsh
+# shell then exits with that LASTEXITCODE, which would fail the step after a passing run.
+$global:LASTEXITCODE = 0
 if ($failures -gt 0) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'OK'
+exit 0
