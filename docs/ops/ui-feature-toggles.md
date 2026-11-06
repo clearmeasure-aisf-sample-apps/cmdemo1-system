@@ -59,13 +59,26 @@ pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Show
 1. Open project `cmdemo1-ui` in space `cmdemo1-demo`: [cmdemo1-ui](https://clearmeasure.octopus.app/app#/Spaces-355/projects/Projects-981).
 2. Open **Feature Flags**, then `BuildingManagement` or `VendorManagement`.
 3. Turn the environment row on or off (`tdd`, `uat`, or `prod`). Save. Octopus publishes the manifest on save. This is not a release and not a new container image.
-4. Or, with a credential in the environment:
+4. Or, with a credential in the environment. These lines work as written in bash and in pwsh. `-Enabled:false` and `-Enabled:true` contain no `$`, so both shells pass that text through:
 
-```pwsh
-pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name VendorManagement -Environment uat -Enabled $true
+```text
+pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name BuildingManagement -Environment tdd -Enabled:false
+pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Show
+pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name BuildingManagement -Environment tdd -Enabled:true
+pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Show
 ```
 
-`-Enabled $false` turns that environment off. Set refuses a toggle that has not been created yet.
+`-Action Show` prints each toggle and the stored `tdd`, `uat`, and `prod` row (on or off). It does not write. After the first command, Show includes `BuildingManagement` with `tdd off`. After the third, that row is `tdd on`.
+
+`-Enabled` accepts `true`, `false`, `on`, `off`, `1`, and `0`. Quoted `'$true'` and `'$false'` select those same values. `-Enable` and `-Disable` flip with no value. The same shape turns Vendor management off in uat, then reads it back:
+
+```text
+pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name VendorManagement -Environment uat -Disable
+pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Show
+pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name VendorManagement -Environment uat -Enable
+```
+
+From pwsh, `-Enabled $true` and `-Enabled $false` still bind. Set refuses a toggle that has not been created yet.
 
 5. When the UI process is evaluating live flags, refresh the site. No redeploy is required for the flip itself. A short cache can take a few seconds. Confirm with `GET /api/features/flags` on that environment's UI: the slug is true or false with the row you set.
 6. The client identifier reaches the running container on the next `ui` release after the system configuration that inlines `scripts/update-deployable.ps1` is applied. Until [cmdemo1-workorders#1466](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1466) has shipped, stop after the save. The row in Octopus is the record of the flip. The running app does not read it yet, and a missing client identifier stays off once it does.
