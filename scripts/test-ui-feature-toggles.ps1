@@ -198,5 +198,313 @@ try {
     Remove-Item function:Invoke-RestMethod -ErrorAction SilentlyContinue
 }
 
+foreach ($case in @(
+        @{ In = $true; Out = $true; Label = 'bool true' }
+        @{ In = $false; Out = $false; Label = 'bool false' }
+        @{ In = 'true'; Out = $true; Label = 'string true' }
+        @{ In = 'false'; Out = $false; Label = 'string false' }
+        @{ In = 'TRUE'; Out = $true; Label = 'string TRUE' }
+        @{ In = 'False'; Out = $false; Label = 'string False' }
+        @{ In = 'on'; Out = $true; Label = 'string on' }
+        @{ In = 'off'; Out = $false; Label = 'string off' }
+        @{ In = 'ON'; Out = $true; Label = 'string ON' }
+        @{ In = 'OFF'; Out = $false; Label = 'string OFF' }
+        @{ In = '1'; Out = $true; Label = 'string 1' }
+        @{ In = '0'; Out = $false; Label = 'string 0' }
+        @{ In = '$true'; Out = $true; Label = 'text dollar true' }
+        @{ In = '$false'; Out = $false; Label = 'text dollar false' }
+        @{ In = '$True'; Out = $true; Label = 'text dollar True' }
+        @{ In = '$False'; Out = $false; Label = 'text dollar False' }
+        @{ In = 1; Out = $true; Label = 'int 1' }
+        @{ In = 0; Out = $false; Label = 'int 0' }
+        @{ In = '  false  '; Out = $false; Label = 'padded false' }
+    )) {
+    Test-Case "parse $($case.Label)" (ConvertTo-UiFeatureToggleEnabled $case.In) $case.Out
+}
+Test-Case 'switch enable' (Resolve-UiFeatureToggleEnabled -Enable) $true
+Test-Case 'switch disable' (Resolve-UiFeatureToggleEnabled -Disable) $false
+
+foreach ($bad in @('', '   ', 'yes', 'no', '2', 'maybe', '$fals', 'falsey')) {
+    $rejected = $false
+    try { ConvertTo-UiFeatureToggleEnabled $bad | Out-Null } catch { $rejected = $true }
+    Test-Case "reject [$bad]" $rejected $true
+}
+$secret = -join @('credential-sentinel-', [guid]::NewGuid().ToString('N'))
+$secretMessage = ''
+$secretRejected = $false
+try { ConvertTo-UiFeatureToggleEnabled $secret | Out-Null } catch { $secretRejected = $true; $secretMessage = [string]$_.Exception.Message }
+Test-Case 'parser rejects an arbitrary string' $secretRejected $true
+if ($secretMessage.Contains($secret)) { Write-Host 'FAIL parser error contained the value'; $failures++ }
+else { Write-Host 'PASS parser error omits the value' }
+
+$runbook = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..' 'docs' 'ops' 'ui-feature-toggles.md') -Raw
+Test-Case 'runbook turns tdd off' ($runbook.Contains('-Name BuildingManagement -Environment tdd -Enabled:false')) $true
+Test-Case 'runbook turns tdd on' ($runbook.Contains('-Name BuildingManagement -Environment tdd -Enabled:true')) $true
+Test-Case 'runbook reads back with show' ($runbook -match '(?s)-Enabled:false\r?\n.*-Action Show\r?\n.*-Enabled:true\r?\n.*-Action Show') $true
+$fencesHaveDollarBool = $false
+foreach ($fence in [regex]::Matches($runbook, '(?s)```[a-z]*\r?\n(.*?)```')) {
+    if ($fence.Groups[1].Value -match '\$true|\$false') { $fencesHaveDollarBool = $true }
+}
+Test-Case 'runbook commands omit dollar bools' $fencesHaveDollarBool $false
+
+$script:toggleState = @{
+    'FeatureToggles-1' = @{
+        Name             = 'BuildingManagement'
+        Slug             = 'BuildingManagement'
+        Description      = 'buildings'
+        DefaultIsEnabled = $false
+        Environments     = [ordered]@{
+            'Environments-1' = $true
+            'Environments-2' = $false
+            'Environments-3' = $false
+        }
+    }
+    'FeatureToggles-2' = @{
+        Name             = 'VendorManagement'
+        Slug             = 'VendorManagement'
+        Description      = 'vendors'
+        DefaultIsEnabled = $false
+        Environments     = [ordered]@{
+            'Environments-1' = $true
+            'Environments-2' = $false
+            'Environments-3' = $false
+        }
+    }
+}
+$script:octopusCalls = [System.Collections.Generic.List[object]]::new()
+
+function New-FakeToggle([string] $Id) {
+    $entry = $script:toggleState[$Id]
+    $environments = foreach ($environmentId in @($entry.Environments.Keys)) {
+        [pscustomobject]@{
+            DeploymentEnvironmentId = [string]$environmentId
+            IsEnabled               = [bool]$entry.Environments[$environmentId]
+            Phases                  = @()
+        }
+    }
+    return [pscustomobject]@{
+        Id               = $Id
+        Name             = [string]$entry.Name
+        Slug             = [string]$entry.Slug
+        Description      = [string]$entry.Description
+        DefaultIsEnabled = [bool]$entry.DefaultIsEnabled
+        Environments     = @($environments)
+    }
+}
+
+function Invoke-RestMethod {
+    throw 'live Invoke-RestMethod was called'
+}
+
+function Invoke-Octopus {
+    param(
+        [string] $Method,
+        [string] $Uri,
+        $Body
+    )
+    $bodyText = if ($PSBoundParameters.ContainsKey('Body') -and $null -ne $Body) { [string]$Body } else { '' }
+    if ($bodyText.Contains($script:toggleCredential) -or $Uri.Contains($script:toggleCredential)) {
+        throw 'octopus call carried the credential'
+    }
+    $script:octopusCalls.Add([pscustomobject]@{
+            Method = [string]$Method
+            Uri    = [string]$Uri
+            Body   = $bodyText
+        })
+    if ($Uri -match '/projects/cmdemo1-ui$' -and $Method -eq 'Get') {
+        return [pscustomobject]@{ Id = 'Projects-981'; Slug = 'cmdemo1-ui' }
+    }
+    if ($Uri -match '/environments/all$' -and $Method -eq 'Get') {
+        # return enumerates, which is what Invoke-Octopus does with the environment list.
+        return @(
+            [pscustomobject]@{ Name = 'tdd'; Id = 'Environments-1' }
+            [pscustomobject]@{ Name = 'uat'; Id = 'Environments-2' }
+            [pscustomobject]@{ Name = 'prod'; Id = 'Environments-3' }
+        )
+    }
+    if ($Uri -match '/featuretoggles\?' -and $Method -eq 'Get') {
+        $items = foreach ($id in @($script:toggleState.Keys)) {
+            $entry = $script:toggleState[$id]
+            [pscustomobject]@{ Id = $id; Name = [string]$entry.Name; Slug = [string]$entry.Slug }
+        }
+        return [pscustomobject]@{ Items = @($items); TotalResults = @($items).Count }
+    }
+    if ($Uri -match '/featuretoggles/(FeatureToggles-\d+)$' -and $Method -eq 'Get') {
+        return New-FakeToggle $Matches[1]
+    }
+    if ($Uri -match '/featuretoggles/(FeatureToggles-\d+)$' -and $Method -eq 'Put') {
+        $id = $Matches[1]
+        $parsed = $bodyText | ConvertFrom-Json
+        foreach ($configured in @(ConvertTo-ObjectList $parsed.Environments)) {
+            $environmentId = [string]$configured.DeploymentEnvironmentId
+            $script:toggleState[$id].Environments[$environmentId] = [bool]$configured.IsEnabled
+        }
+        return New-FakeToggle $id
+    }
+    throw "unexpected octopus call $Method $Uri"
+}
+
+$savedKey = $env:OCTOPUS_API_KEY
+$savedToken = $env:OCTOPUS_ACCESS_TOKEN
+$script:toggleCredential = -join @('credential-sentinel-', [guid]::NewGuid().ToString('N'))
+$env:OCTOPUS_API_KEY = $script:toggleCredential
+Remove-Item Env:OCTOPUS_ACCESS_TOKEN -ErrorAction SilentlyContinue
+$script:hostLines = [System.Collections.Generic.List[string]]::new()
+function Write-Host {
+    param([Parameter(Position = 0)] [object] $Object)
+    $script:hostLines.Add([string]$Object)
+}
+$showOff = @()
+$showOn = @()
+$ensureMessage = ''
+$bothMessage = ''
+$mixedMessage = ''
+$setOffLine = ''
+$setOnLine = ''
+$callsAfterReject = 0
+try {
+    try { Invoke-UiFeatureToggleCommand -Action Ensure -Enable } catch { $ensureMessage = [string]$_.Exception.Message }
+    try { Invoke-UiFeatureToggleCommand -Action Set -Name BuildingManagement -Environment tdd -Enable -Disable } catch { $bothMessage = [string]$_.Exception.Message }
+    try { Invoke-UiFeatureToggleCommand -Action Set -Name BuildingManagement -Environment tdd -Enabled 'false' -Disable } catch { $mixedMessage = [string]$_.Exception.Message }
+    $callsAfterReject = $script:octopusCalls.Count
+
+    $script:hostLines.Clear()
+    Invoke-UiFeatureToggleCommand -Action Set -Name BuildingManagement -Environment tdd -Enabled '$false'
+    $setOffLine = @($script:hostLines) -join "`n"
+
+    $script:hostLines.Clear()
+    Invoke-UiFeatureToggleCommand -Action Show
+    $showOff = @($script:hostLines)
+
+    $script:hostLines.Clear()
+    Invoke-UiFeatureToggleCommand -Action Set -Name BuildingManagement -Environment tdd -Enabled:true
+    $setOnLine = @($script:hostLines) -join "`n"
+
+    $script:hostLines.Clear()
+    Invoke-UiFeatureToggleCommand -Action Show
+    $showOn = @($script:hostLines)
+
+    Invoke-UiFeatureToggleCommand -Action Set -Name BuildingManagement -Environment tdd -Disable
+    Invoke-UiFeatureToggleCommand -Action Set -Name BuildingManagement -Environment tdd -Enable
+} finally {
+    Remove-Item function:Write-Host -ErrorAction SilentlyContinue
+    Remove-Item function:Invoke-Octopus -ErrorAction SilentlyContinue
+    Remove-Item function:Invoke-RestMethod -ErrorAction SilentlyContinue
+    if ($null -eq $savedKey) { Remove-Item Env:OCTOPUS_API_KEY -ErrorAction SilentlyContinue }
+    else { $env:OCTOPUS_API_KEY = $savedKey }
+    if ($null -eq $savedToken) { Remove-Item Env:OCTOPUS_ACCESS_TOKEN -ErrorAction SilentlyContinue }
+    else { $env:OCTOPUS_ACCESS_TOKEN = $savedToken }
+}
+
+Test-Case 'ensure rejects enable' ($ensureMessage -match 'Ensure takes no') $true
+Test-Case 'ensure reject made no call' $callsAfterReject 0
+Test-Case 'enable and disable conflict' ($bothMessage -match 'not both') $true
+Test-Case 'conflict made no call' $callsAfterReject 0
+Test-Case 'enabled and disable conflict' ($mixedMessage -match 'not both') $true
+Test-Case 'bash false string updates tdd' ($setOffLine -match 'BuildingManagement: update default=off tdd=off uat=off prod=off') $true
+Test-Case 'colon true updates tdd' ($setOnLine -match 'BuildingManagement: update default=off tdd=on uat=off prod=off') $true
+
+function Get-ShownEnvironment([string[]] $Lines, [string] $Toggle, [string] $Environment) {
+    $inside = $false
+    foreach ($line in $Lines) {
+        if ($line -like "$Toggle`: *") { $inside = $true; continue }
+        if ($inside -and $line -match '^\S') { break }
+        if ($inside -and $line -match "^\s+$([regex]::Escape($Environment))\s+(on|off)$") { return $Matches[1] }
+    }
+    return ''
+}
+Test-Case 'show after off' (Get-ShownEnvironment $showOff 'BuildingManagement' 'tdd') 'off'
+Test-Case 'show after off leaves uat' (Get-ShownEnvironment $showOff 'BuildingManagement' 'uat') 'off'
+Test-Case 'show after off leaves prod' (Get-ShownEnvironment $showOff 'BuildingManagement' 'prod') 'off'
+Test-Case 'show after on' (Get-ShownEnvironment $showOn 'BuildingManagement' 'tdd') 'on'
+Test-Case 'show after on leaves uat' (Get-ShownEnvironment $showOn 'BuildingManagement' 'uat') 'off'
+Test-Case 'show after on leaves prod' (Get-ShownEnvironment $showOn 'BuildingManagement' 'prod') 'off'
+Test-Case 'vendor tdd stays on' (Get-ShownEnvironment $showOn 'VendorManagement' 'tdd') 'on'
+
+$puts = @($script:octopusCalls | Where-Object { $_.Method -eq 'Put' })
+Test-Case 'four writes for off on disable enable' $puts.Count 4
+$putTargetsOk = $true
+$uatProdStayOff = $true
+foreach ($put in $puts) {
+    if ($put.Uri -notmatch '/featuretoggles/FeatureToggles-1$') { $putTargetsOk = $false }
+    $parsed = $put.Body | ConvertFrom-Json
+    $byId = @{}
+    foreach ($configured in @($parsed.Environments)) { $byId[[string]$configured.DeploymentEnvironmentId] = [bool]$configured.IsEnabled }
+    if ($byId['Environments-2'] -or $byId['Environments-3']) { $uatProdStayOff = $false }
+}
+Test-Case 'writes touch only building management' $putTargetsOk $true
+Test-Case 'writes leave uat and prod off' $uatProdStayOff $true
+$posted = @($script:octopusCalls | Where-Object { $_.Method -eq 'Post' })
+Test-Case 'mock did not create' $posted.Count 0
+$carriedCredential = $false
+foreach ($call in $script:octopusCalls) {
+    if ($call.Uri.Contains($script:toggleCredential) -or $call.Body.Contains($script:toggleCredential)) { $carriedCredential = $true }
+}
+$shown = ($showOff + $showOn) -join "`n"
+if ($carriedCredential -or $shown.Contains($script:toggleCredential) -or $setOffLine.Contains($script:toggleCredential) -or $setOnLine.Contains($script:toggleCredential)) {
+    Write-Host 'FAIL output contained the credential'
+    $failures++
+} else {
+    Write-Host 'PASS output omits the credential'
+}
+
+function Invoke-ToggleScriptFromBash {
+    param([string[]] $Argument)
+    $scriptPath = (Resolve-Path (Join-Path $PSScriptRoot 'ensure-ui-feature-toggles.ps1')).Path
+    $quoted = ($Argument | ForEach-Object { "'" + ($_ -replace "'", "'\''") + "'" }) -join ' '
+    $command = "env -u OCTOPUS_API_KEY -u OCTOPUS_ACCESS_TOKEN pwsh -NoProfile -File '$scriptPath' $quoted"
+    $previous = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+    try {
+        $output = & bash -lc $command 2>&1 | Out-String
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    } finally {
+        $PSNativeCommandUseErrorActionPreference = $previous
+    }
+}
+
+$whatIf = Invoke-ToggleScriptFromBash -Argument @('-WhatIf')
+Test-Case 'whatif exits clean' $whatIf.ExitCode 0
+Test-Case 'whatif prints both creates' (($whatIf.Output -match 'BuildingManagement: create') -and ($whatIf.Output -match 'VendorManagement: create')) $true
+
+$bashForms = @(
+    @{ Label = 'colon false'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled:false') }
+    @{ Label = 'colon true'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled:true') }
+    @{ Label = 'word false'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled', 'false') }
+    @{ Label = 'word true'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled', 'true') }
+    @{ Label = 'word off'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled', 'off') }
+    @{ Label = 'word on'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled', 'on') }
+    @{ Label = 'word 0'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled', '0') }
+    @{ Label = 'word 1'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled', '1') }
+    @{ Label = 'quoted dollar false'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled', '$false') }
+    @{ Label = 'quoted dollar true'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled', '$true') }
+    @{ Label = 'disable switch'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Disable') }
+    @{ Label = 'enable switch'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enable') }
+)
+foreach ($form in $bashForms) {
+    $result = Invoke-ToggleScriptFromBash -Argument $form.Args
+    $parsed = ($result.ExitCode -eq 1) -and ($result.Output -match 'no Octopus credential') -and ($result.Output -notmatch 'argument transformation') -and ($result.Output -notmatch 'Missing an argument')
+    Test-Case "bash accepts $($form.Label)" $parsed $true
+}
+$badBash = Invoke-ToggleScriptFromBash -Argument @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled', 'maybe')
+Test-Case 'bash rejects maybe' (($badBash.Output -match 'Enabled must be true') -and ($badBash.Output -notmatch 'no Octopus credential')) $true
+
+$previousNative = $PSNativeCommandUseErrorActionPreference
+$PSNativeCommandUseErrorActionPreference = $false
+try {
+    $pwshFalse = & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'ensure-ui-feature-toggles.ps1') -Action Set -Name BuildingManagement -Environment tdd -Enabled $false 2>&1 | Out-String
+    $pwshFalseCode = $LASTEXITCODE
+    $pwshTrue = & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'ensure-ui-feature-toggles.ps1') -Action Set -Name BuildingManagement -Environment tdd -Enabled $true 2>&1 | Out-String
+    $pwshTrueCode = $LASTEXITCODE
+} finally {
+    $PSNativeCommandUseErrorActionPreference = $previousNative
+}
+Test-Case 'pwsh file false still binds' (($pwshFalseCode -eq 1) -and ($pwshFalse -match 'no Octopus credential') -and ($pwshFalse -notmatch 'argument transformation')) $true
+Test-Case 'pwsh file true still binds' (($pwshTrueCode -eq 1) -and ($pwshTrue -match 'no Octopus credential')) $true
+
+# The nested pwsh and bash calls exit 1 on the missing-credential path. Actions' pwsh
+# shell then exits with that LASTEXITCODE, which would fail the step after a passing run.
+$global:LASTEXITCODE = 0
 if ($failures -gt 0) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'OK'
+exit 0

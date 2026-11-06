@@ -33,7 +33,14 @@
     For Set: tdd, uat, or prod.
 
 .PARAMETER Enabled
-    For Set: $true or $false.
+    For Set: true or false. Also on, off, 1, 0, and the text $true or $false. A bash command that
+    passes those characters literally still selects a value. $true and $false from PowerShell still work.
+
+.PARAMETER Enable
+    For Set: turn that environment on. Same as -Enabled:true. Do not combine with -Enabled or -Disable.
+
+.PARAMETER Disable
+    For Set: turn that environment off. Same as -Enabled:false. Do not combine with -Enabled or -Enable.
 
 .PARAMETER ResetDefaults
     With Ensure: tdd on, uat off, prod off, flag default off. Phases already stored on an environment stay.
@@ -48,7 +55,12 @@
     pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1
 
 .EXAMPLE
-    pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name VendorManagement -Environment uat -Enabled $true
+    pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name BuildingManagement -Environment tdd -Enabled:false
+
+    The colon form works in bash and in pwsh. -Action Show reads the row back.
+
+.EXAMPLE
+    pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name VendorManagement -Environment uat -Disable
 
 .EXAMPLE
     pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Show
@@ -62,7 +74,11 @@ param(
 
     [string] $Environment,
 
-    [Nullable[bool]] $Enabled,
+    [object] $Enabled,
+
+    [switch] $Enable,
+
+    [switch] $Disable,
 
     [switch] $ResetDefaults,
 
@@ -79,6 +95,8 @@ $ProgressPreference = 'SilentlyContinue'
 $script:UiFeatureToggleSpaceId = 'Spaces-355'
 $script:UiFeatureToggleProjectId = 'Projects-981'
 $script:UiFeatureToggleProjectSlug = 'cmdemo1-ui'
+# Captured while this file is the executing script. A function called from the test file still finds system.json.
+$script:UiFeatureToggleScriptRoot = $PSScriptRoot
 
 function Get-UiFeatureToggleDefaults {
     [ordered]@{
@@ -145,6 +163,40 @@ function ConvertTo-Boolean([object] $Value) {
         if ($Value -eq 'false') { return $false }
     }
     return [bool]$Value
+}
+
+function ConvertTo-UiFeatureToggleEnabled([object] $Value) {
+    # pwsh -File hands the script text. Bash does not treat $false as a Boolean: an unquoted $false
+    # disappears, and a quoted one arrives as the characters $false. true/false/on/off/1/0 and those
+    # two tokens are the same choice as a PowerShell $true or $false. The value is not echoed: a
+    # pasted credential must not land in the error.
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [bool]) { return $Value }
+    if ($Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or $Value -is [int] -or $Value -is [uint32] -or $Value -is [long] -or $Value -is [uint64]) {
+        $number = [long]$Value
+        if ($number -eq 1) { return $true }
+        if ($number -eq 0) { return $false }
+        throw 'Enabled must be true, false, on, off, 1, or 0. -Enable and -Disable take no value.'
+    }
+    $text = ([string]$Value).Trim()
+    if ($text -match '^(?i:\$true|true|on|1)$') { return $true }
+    if ($text -match '^(?i:\$false|false|off|0)$') { return $false }
+    throw 'Enabled must be true, false, on, off, 1, or 0. A shell may pass the text $true or $false. -Enable and -Disable take no value.'
+}
+
+function Resolve-UiFeatureToggleEnabled {
+    param(
+        [object] $Enabled,
+        [switch] $HasEnabled,
+        [switch] $Enable,
+        [switch] $Disable
+    )
+    if ($Enable -and $Disable) { throw 'Pass -Enable or -Disable, not both.' }
+    if ($HasEnabled -and ($Enable -or $Disable)) { throw 'Pass -Enabled or -Enable/-Disable, not both.' }
+    if ($Enable) { return $true }
+    if ($Disable) { return $false }
+    if (-not $HasEnabled) { return $null }
+    return ConvertTo-UiFeatureToggleEnabled $Enabled
 }
 
 function ConvertTo-ClrValue($Value) {
@@ -529,147 +581,170 @@ function Test-DefaultIsOff($Flag) {
     return $null -ne $value -and -not (ConvertTo-Boolean $value)
 }
 
-if ($LoadOnly) { return }
+function Invoke-UiFeatureToggleCommand {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [ValidateSet('Ensure', 'Set', 'Show')]
+        [string] $Action = 'Ensure',
 
-if ($Action -eq 'Ensure') {
-    if ($PSBoundParameters.ContainsKey('Name') -or $PSBoundParameters.ContainsKey('Environment') -or $PSBoundParameters.ContainsKey('Enabled')) {
-        throw 'Ensure takes no -Name, -Environment, or -Enabled. Use -Action Set to flip one environment, or -ResetDefaults to restore tdd on and uat and prod off.'
+        [string] $Name,
+
+        [string] $Environment,
+
+        [object] $Enabled,
+
+        [switch] $Enable,
+
+        [switch] $Disable,
+
+        [switch] $ResetDefaults
+    )
+
+    if ($Action -eq 'Ensure') {
+        if ($PSBoundParameters.ContainsKey('Name') -or $PSBoundParameters.ContainsKey('Environment') -or $PSBoundParameters.ContainsKey('Enabled') -or $Enable -or $Disable) {
+            throw 'Ensure takes no -Name, -Environment, -Enabled, -Enable, or -Disable. Use -Action Set to flip one environment, or -ResetDefaults to restore tdd on and uat and prod off.'
+        }
     }
-}
-if ($Action -eq 'Show') {
-    if ($ResetDefaults -or $PSBoundParameters.ContainsKey('Name') -or $PSBoundParameters.ContainsKey('Environment') -or $PSBoundParameters.ContainsKey('Enabled')) {
-        throw 'Show only reads. It takes no -Name, -Environment, -Enabled, or -ResetDefaults.'
-    }
-}
-if ($Action -eq 'Set') {
-    if ($ResetDefaults) { throw 'Set and -ResetDefaults exclude each other.' }
-    if (-not $Name -or -not $Environment -or $null -eq $Enabled) { throw 'Set needs -Name, -Environment, and -Enabled.' }
-}
-
-$systemPath = Join-Path $PSScriptRoot '..' 'system.json'
-$system = Get-Content -LiteralPath $systemPath -Raw | ConvertFrom-Json
-Assert-UiFeatureToggleSystem $system
-
-if ($WhatIfPreference -and $Action -eq 'Ensure' -and -not (Test-OctopusCredential)) {
-    foreach ($plan in Get-OfflineEnsurePlans) {
-        $labels = @{}
-        foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) { $labels[$environmentName] = $environmentName }
-        Write-Host (Format-UiFeatureTogglePlan -Plan $plan -IdToName $labels)
-    }
-    Write-Host 'WhatIf only: no Octopus credential, so Octopus was not called. This is the create the script would send, not a diff against the space.'
-    return
-}
-if (-not (Test-OctopusCredential)) {
-    throw 'no Octopus credential: OCTOPUS_ACCESS_TOKEN (OctopusDeploy/login) or OCTOPUS_API_KEY. The value stays in the environment; do not pass it as an argument.'
-}
-
-$url = [string]$system.octopus.url
-$space = [string]$system.octopus.spaceId
-$project = Invoke-Octopus -Method Get -Uri "$url/api/$space/projects/$($script:UiFeatureToggleProjectSlug)"
-if ([string]$project.Id -ne $script:UiFeatureToggleProjectId) {
-    throw "Project $($script:UiFeatureToggleProjectSlug) is $($project.Id), not $($script:UiFeatureToggleProjectId). Nothing was written."
-}
-
-$environmentIds = @{}
-$idToName = @{}
-foreach ($octopusEnvironment in @(Invoke-Octopus -Method Get -Uri "$url/api/$space/environments/all")) {
-    $environmentName = [string]$octopusEnvironment.Name
-    if ($environmentName -in @(Get-UiFeatureToggleDefaults).Keys) {
-        $environmentIds[$environmentName] = [string]$octopusEnvironment.Id
-        $idToName[[string]$octopusEnvironment.Id] = $environmentName
-    }
-}
-foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) {
-    if (-not $environmentIds.Contains($environmentName)) { throw "Octopus space $space has no environment '$environmentName'." }
-}
-
-$base = "$url/api/$space/projects/$($project.Id)"
-$toggles = Get-ProjectFeatureToggles $base
-$mode = if ($Action -eq 'Set') { 'Set' } elseif ($ResetDefaults) { 'ResetDefaults' } else { 'Ensure' }
-
-foreach ($spec in @(Select-UiFeatureToggleSpecs $Action $Name)) {
-    $current = Find-UiFeatureToggle $toggles $spec.Name $spec.Slug
-    if ($null -ne $current) { $current = Get-UiFeatureToggleResource $base $current }
     if ($Action -eq 'Show') {
-        if ($null -eq $current) {
-            Write-Host "$($spec.Name): missing"
+        if ($ResetDefaults -or $PSBoundParameters.ContainsKey('Name') -or $PSBoundParameters.ContainsKey('Environment') -or $PSBoundParameters.ContainsKey('Enabled') -or $Enable -or $Disable) {
+            throw 'Show only reads. It takes no -Name, -Environment, -Enabled, -Enable, -Disable, or -ResetDefaults.'
+        }
+    }
+    if ($Action -eq 'Set') {
+        if ($ResetDefaults) { throw 'Set and -ResetDefaults exclude each other.' }
+        $Enabled = Resolve-UiFeatureToggleEnabled -Enabled $Enabled -HasEnabled:$PSBoundParameters.ContainsKey('Enabled') -Enable:$Enable -Disable:$Disable
+        if (-not $Name -or -not $Environment -or $null -eq $Enabled) { throw 'Set needs -Name, -Environment, and a value (-Enabled true or false, or -Enable / -Disable).' }
+    }
+
+    $systemPath = Join-Path $script:UiFeatureToggleScriptRoot '..' 'system.json'
+    $system = Get-Content -LiteralPath $systemPath -Raw | ConvertFrom-Json
+    Assert-UiFeatureToggleSystem $system
+
+    if ($WhatIfPreference -and $Action -eq 'Ensure' -and -not (Test-OctopusCredential)) {
+        foreach ($plan in Get-OfflineEnsurePlans) {
+            $labels = @{}
+            foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) { $labels[$environmentName] = $environmentName }
+            Write-Host (Format-UiFeatureTogglePlan -Plan $plan -IdToName $labels)
+        }
+        Write-Host 'WhatIf only: no Octopus credential, so Octopus was not called. This is the create the script would send, not a diff against the space.'
+        return
+    }
+    if (-not (Test-OctopusCredential)) {
+        throw 'no Octopus credential: OCTOPUS_ACCESS_TOKEN (OctopusDeploy/login) or OCTOPUS_API_KEY. The value stays in the environment; do not pass it as an argument.'
+    }
+
+    $url = [string]$system.octopus.url
+    $space = [string]$system.octopus.spaceId
+    $project = Invoke-Octopus -Method Get -Uri "$url/api/$space/projects/$($script:UiFeatureToggleProjectSlug)"
+    if ([string]$project.Id -ne $script:UiFeatureToggleProjectId) {
+        throw "Project $($script:UiFeatureToggleProjectSlug) is $($project.Id), not $($script:UiFeatureToggleProjectId). Nothing was written."
+    }
+
+    $environmentIds = @{}
+    $idToName = @{}
+    foreach ($octopusEnvironment in @(Invoke-Octopus -Method Get -Uri "$url/api/$space/environments/all")) {
+        $environmentName = [string]$octopusEnvironment.Name
+        if ($environmentName -in @(Get-UiFeatureToggleDefaults).Keys) {
+            $environmentIds[$environmentName] = [string]$octopusEnvironment.Id
+            $idToName[[string]$octopusEnvironment.Id] = $environmentName
+        }
+    }
+    foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) {
+        if (-not $environmentIds.Contains($environmentName)) { throw "Octopus space $space has no environment '$environmentName'." }
+    }
+
+    $base = "$url/api/$space/projects/$($project.Id)"
+    $toggles = Get-ProjectFeatureToggles $base
+    $mode = if ($Action -eq 'Set') { 'Set' } elseif ($ResetDefaults) { 'ResetDefaults' } else { 'Ensure' }
+
+    foreach ($spec in @(Select-UiFeatureToggleSpecs $Action $Name)) {
+        $current = Find-UiFeatureToggle $toggles $spec.Name $spec.Slug
+        if ($null -ne $current) { $current = Get-UiFeatureToggleResource $base $current }
+        if ($Action -eq 'Show') {
+            if ($null -eq $current) {
+                Write-Host "$($spec.Name): missing"
+                continue
+            }
+            $slug = [string](Get-NoteProperty $current 'Slug')
+            $slugNote = if ($slug -and $slug -cne $spec.Slug) { " (requested slug $($spec.Slug))" } else { '' }
+            $defaultState = if (Test-DefaultIsOff $current) { 'off' } else { 'on' }
+            Write-Host "$($spec.Name): slug=$slug$slugNote default=$defaultState id=$($current.Id)"
+            $seen = @{}
+            foreach ($configured in (ConvertTo-ObjectList (Get-NoteProperty $current 'Environments'))) {
+                if ($null -eq $configured) { continue }
+                $configuredId = [string](Get-NoteProperty $configured 'DeploymentEnvironmentId')
+                $label = if ($idToName.Contains($configuredId)) { $idToName[$configuredId] } else { $configuredId }
+                $seen[$label] = $true
+                $state = if (ConvertTo-Boolean (Get-NoteProperty $configured 'IsEnabled')) { 'on' } else { 'off' }
+                Write-Host "  $label $state"
+            }
+            foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) {
+                if (-not $seen.Contains($environmentName)) { Write-Host "  $environmentName not configured (evaluates the flag default)" }
+            }
             continue
         }
-        $slug = [string](Get-NoteProperty $current 'Slug')
-        $slugNote = if ($slug -and $slug -cne $spec.Slug) { " (requested slug $($spec.Slug))" } else { '' }
-        $defaultState = if (Test-DefaultIsOff $current) { 'off' } else { 'on' }
-        Write-Host "$($spec.Name): slug=$slug$slugNote default=$defaultState id=$($current.Id)"
-        $seen = @{}
-        foreach ($configured in (ConvertTo-ObjectList (Get-NoteProperty $current 'Environments'))) {
-            if ($null -eq $configured) { continue }
-            $configuredId = [string](Get-NoteProperty $configured 'DeploymentEnvironmentId')
-            $label = if ($idToName.Contains($configuredId)) { $idToName[$configuredId] } else { $configuredId }
-            $seen[$label] = $true
-            $state = if (ConvertTo-Boolean (Get-NoteProperty $configured 'IsEnabled')) { 'on' } else { 'off' }
-            Write-Host "  $label $state"
-        }
-        foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) {
-            if (-not $seen.Contains($environmentName)) { Write-Host "  $environmentName not configured (evaluates the flag default)" }
-        }
-        continue
-    }
 
-    if ($Action -eq 'Set' -and $null -eq $current) {
-        throw "Toggle '$($spec.Name)' is not on $($script:UiFeatureToggleProjectSlug). Run Ensure first (docs/ops/ui-feature-toggles.md)."
-    }
+        if ($Action -eq 'Set' -and $null -eq $current) {
+            throw "Toggle '$($spec.Name)' is not on $($script:UiFeatureToggleProjectSlug). Run Ensure first (docs/ops/ui-feature-toggles.md)."
+        }
 
-    $plan = Get-UiFeatureTogglePlan -Spec $spec -Current $current -EnvironmentIds $environmentIds -Mode $mode -EnvironmentName $Environment -EnvironmentEnabled $Enabled
-    $line = Format-UiFeatureTogglePlan -Plan $plan -IdToName $idToName
-    if ($plan.Action -eq 'none') {
+        $plan = Get-UiFeatureTogglePlan -Spec $spec -Current $current -EnvironmentIds $environmentIds -Mode $mode -EnvironmentName $Environment -EnvironmentEnabled $Enabled
+        $line = Format-UiFeatureTogglePlan -Plan $plan -IdToName $idToName
+        if ($plan.Action -eq 'none') {
+            Write-Host $line
+            if ($null -ne $current -and (Get-NoteProperty $current 'Slug') -and [string]$current.Slug -cne $spec.Slug) {
+                Write-Host "NOTE: $($spec.Name) evaluation key (slug) is '$($current.Slug)', not '$($spec.Slug)'."
+            }
+            continue
+        }
+        if (-not $PSCmdlet.ShouldProcess($spec.Name, $plan.Action)) {
+            Write-Host $line
+            continue
+        }
+
+        if ($plan.Action -eq 'create') {
+            $body = New-FeatureToggleBody $project.Id $space $spec $plan $null
+            $json = ConvertTo-OctopusJson $body
+            try {
+                $created = Invoke-Octopus -Method Post -Uri (Get-UiFeatureToggleCollectionUri $base) -Body $json
+            } catch {
+                $createError = Get-OctopusError $_
+                if ($createError.Status -eq 404) {
+                    throw "Octopus answered 404 creating a feature toggle. Create the toggles in the project UI (docs/ops/ui-feature-toggles.md). $($createError.Detail)"
+                }
+                if ($createError.Status -eq 403) {
+                    throw "Octopus refused to create feature toggles (403). The credential can read the project and cannot edit its feature toggles. $($createError.Detail)"
+                }
+                throw "Octopus feature toggles ($($createError.Status)): $($createError.Detail)"
+            }
+            if ($null -eq $created -or -not (Get-NoteProperty $created 'Id')) {
+                $toggles = Get-ProjectFeatureToggles $base
+                $created = Find-UiFeatureToggle $toggles $spec.Name $spec.Slug
+                if ($null -ne $created) { $created = Get-UiFeatureToggleResource $base $created }
+            }
+            if ($null -eq $created) { throw "Created $($spec.Name) but could not read it back." }
+            $current = $created
+            if (-not (Test-DefaultIsOff $created)) {
+                $defaultPlan = [pscustomobject]@{
+                    Description      = if ([string]::IsNullOrWhiteSpace([string](Get-NoteProperty $created 'Description'))) { [string]$plan.Description } else { [string](Get-NoteProperty $created 'Description') }
+                    DefaultIsEnabled = $false
+                    Environments     = if ($null -ne (Get-NoteProperty $created 'Environments')) { Get-NoteProperty $created 'Environments' } else { $plan.Environments }
+                }
+                $current = Invoke-Octopus -Method Put -Uri (Get-UiFeatureToggleItemUri $base $created.Id) -Body (ConvertTo-OctopusJson (New-FeatureToggleBody $project.Id $space $spec $defaultPlan $created))
+            }
+        } else {
+            $current = Invoke-Octopus -Method Put -Uri (Get-UiFeatureToggleItemUri $base $current.Id) -Body (ConvertTo-OctopusJson (New-FeatureToggleBody $project.Id $space $spec $plan $current))
+        }
+
         Write-Host $line
-        if ($null -ne $current -and (Get-NoteProperty $current 'Slug') -and [string]$current.Slug -cne $spec.Slug) {
-            Write-Host "NOTE: $($spec.Name) evaluation key (slug) is '$($current.Slug)', not '$($spec.Slug)'."
+        if ([string](Get-NoteProperty $current 'Slug') -and [string]$current.Slug -cne $spec.Slug) {
+            Write-Host "NOTE: $($spec.Name) evaluation key (slug) is '$($current.Slug)', not '$($spec.Slug)'. The app evaluates the slug."
         }
-        continue
-    }
-    if (-not $PSCmdlet.ShouldProcess($spec.Name, $plan.Action)) {
-        Write-Host $line
-        continue
     }
 
-    if ($plan.Action -eq 'create') {
-        $body = New-FeatureToggleBody $project.Id $space $spec $plan $null
-        $json = ConvertTo-OctopusJson $body
-        try {
-            $created = Invoke-Octopus -Method Post -Uri (Get-UiFeatureToggleCollectionUri $base) -Body $json
-        } catch {
-            $createError = Get-OctopusError $_
-            if ($createError.Status -eq 404) {
-                throw "Octopus answered 404 creating a feature toggle. Create the toggles in the project UI (docs/ops/ui-feature-toggles.md). $($createError.Detail)"
-            }
-            if ($createError.Status -eq 403) {
-                throw "Octopus refused to create feature toggles (403). The credential can read the project and cannot edit its feature toggles. $($createError.Detail)"
-            }
-            throw "Octopus feature toggles ($($createError.Status)): $($createError.Detail)"
-        }
-        if ($null -eq $created -or -not (Get-NoteProperty $created 'Id')) {
-            $toggles = Get-ProjectFeatureToggles $base
-            $created = Find-UiFeatureToggle $toggles $spec.Name $spec.Slug
-            if ($null -ne $created) { $created = Get-UiFeatureToggleResource $base $created }
-        }
-        if ($null -eq $created) { throw "Created $($spec.Name) but could not read it back." }
-        $current = $created
-        if (-not (Test-DefaultIsOff $created)) {
-            $defaultPlan = [pscustomobject]@{
-                Description      = if ([string]::IsNullOrWhiteSpace([string](Get-NoteProperty $created 'Description'))) { [string]$plan.Description } else { [string](Get-NoteProperty $created 'Description') }
-                DefaultIsEnabled = $false
-                Environments     = if ($null -ne (Get-NoteProperty $created 'Environments')) { Get-NoteProperty $created 'Environments' } else { $plan.Environments }
-            }
-            $current = Invoke-Octopus -Method Put -Uri (Get-UiFeatureToggleItemUri $base $created.Id) -Body (ConvertTo-OctopusJson (New-FeatureToggleBody $project.Id $space $spec $defaultPlan $created))
-        }
-    } else {
-        $current = Invoke-Octopus -Method Put -Uri (Get-UiFeatureToggleItemUri $base $current.Id) -Body (ConvertTo-OctopusJson (New-FeatureToggleBody $project.Id $space $spec $plan $current))
-    }
-
-    Write-Host $line
-    if ([string](Get-NoteProperty $current 'Slug') -and [string]$current.Slug -cne $spec.Slug) {
-        Write-Host "NOTE: $($spec.Name) evaluation key (slug) is '$($current.Slug)', not '$($spec.Slug)'. The app evaluates the slug."
-    }
+    if ($Action -eq 'Show') { return }
 }
 
-if ($Action -eq 'Show') { return }
+if ($LoadOnly) { return }
+
+Invoke-UiFeatureToggleCommand @PSBoundParameters
