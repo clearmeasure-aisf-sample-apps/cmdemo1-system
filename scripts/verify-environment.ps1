@@ -12,7 +12,7 @@
     Deployable.Name limits the check to one deployable. The deadline covers a scale-from-zero start and a SQL
     database resuming from auto-pause; a revision that cannot start (crash loop, image pull failure, failed
     provisioning) fails the step at once, with the container's last console lines. A static site (hosting
-    "staticwebapp" or "storagewebsite") has no revision to ask: only its URL is polled. A storage website
+    "staticwebapp" or "storagewebsite") has no revision and no plan to ask: only its URL is polled. A storage website
     serves nothing before its first release, so "Verify environment" passes over one the stack knows no version of.
 
     A deployable that brings its own runtime (hosting "own") is not in the stack and verifies itself, in its own
@@ -52,6 +52,10 @@ $deadlineMinutes = 10
 
 $stack = az stack group show --name "stack-$slug-$environmentName" --resource-group $resourceGroup --output json | ConvertFrom-Json -AsHashtable
 $deployables = @($stack.outputs.deployables.value | Where-Object { -not $only -or $_.name -eq $only })
+# The same apps in the standby region (environments[].standbyLocation) are verified like the primary ones.
+if ($stack.outputs.ContainsKey('standby')) {
+    $deployables += @($stack.outputs.standby.value | Where-Object { -not $only -or $_.name -eq $only })
+}
 if ($deployables.Count -eq 0) {
     # A deployable that brings its own runtime (hosting "own") is not in the stack: infra/ creates nothing for it, and
     # it verifies itself in its own project. Only a system that has one has these two variables (octopus/variables.tf):
@@ -106,6 +110,22 @@ function Get-RevisionProblem {
     return $null
 }
 
+# An App Service site on a Free plan that exhausted a quota answers 403 until the quota resets (hourly or daily): say
+# so at once instead of waiting out the deadline. A crash-looping app on the tier's shared plan is the usual cause.
+function Get-SiteProblem {
+    param([Parameter(Mandatory)] [string] $WebApp)
+    $PSNativeCommandUseErrorActionPreference = $false
+    $siteId = ([string] (az resource show --resource-group $resourceGroup --name $WebApp --resource-type Microsoft.Web/sites --query id --output tsv 2>$null)).Trim()
+    $siteJson = if ($siteId) { az rest --method get --url "https://management.azure.com${siteId}?api-version=2024-04-01" --output json 2>$null } else { $null }
+    $PSNativeCommandUseErrorActionPreference = $true
+    if (-not $siteJson) { return $null }
+    $site = ($siteJson | ConvertFrom-Json -AsHashtable).properties
+    if ($site.usageState -eq 'Exceeded') {
+        return "site $WebApp is $($site.state): its Free plan exhausted a quota; an app crash-looping on the same plan is the usual cause"
+    }
+    return $null
+}
+
 function Write-RevisionLog {
     param([Parameter(Mandatory)] [string] $App)
     $PSNativeCommandUseErrorActionPreference = $false
@@ -121,7 +141,7 @@ foreach ($deployable in $deployables) {
         Write-Highlight "SKIP $($deployable.name) in ${environmentName}: no release of it here yet, and a storage website serves nothing before the first ($($deployable.url))"
         continue
     }
-    # Only a container app has one: empty for a static site.
+    # Only a container app has one: empty for App Service and for a static site.
     $app = [string] $deployable['containerApp']
     $path = if ($only -and $healthPath) { $healthPath } else { [string] $deployable.healthPath }
     $uri = "$($deployable.url.TrimEnd('/'))$path"
@@ -137,9 +157,10 @@ foreach ($deployable in $deployables) {
         if ($status -eq 200) {
             break
         }
-        # What the platform says about an app that does not answer: the revision for a container app. A static site
-        # (hosting "staticwebapp") has none: its URL is all there is to ask.
+        # What the platform says about an app that does not answer: the site for App Service, the revision for a
+        # container app. A static site (hosting "staticwebapp") has neither: its URL is all there is to ask.
         $problem = switch ([string] $deployable['hosting']) {
+            'appservice' { Get-SiteProblem -WebApp ([string] $deployable.webApp) }
             'staticwebapp' { $null }
             'storagewebsite' { $null }
             default { Get-RevisionProblem -App $app }
@@ -154,7 +175,7 @@ foreach ($deployable in $deployables) {
         Start-Sleep -Seconds 15
     }
     if ($status -eq 200) {
-        Write-Highlight "PASS $($deployable.name) in ${environmentName}: $uri"
+        Write-Highlight "PASS $($deployable.name) in ${environmentName}$(if ($deployable['role'] -eq 'standby') { " (standby, $($deployable.region))" }): $uri"
     }
     elseif ($status -eq -1) {
         $failed++

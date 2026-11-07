@@ -191,6 +191,39 @@ function Get-SqlPassword {
     Fail-Step "Cannot read sql-admin-password from vault $vault as the deploy identity. Check its Key Vault Secrets Officer assignment."
 }
 
+function Get-LoginPassword {
+    # One database login per App Service deployable (system.json hosting "appservice"). Its password stays in the
+    # vault; a new deployable or a new environment gets a generated one. Either way the grant step then sets the
+    # login's password to the vault's, so a value generated after a failed read still matches.
+    param([hashtable] $Outputs, [string[]] $Names)
+    $result = @{}
+    foreach ($name in $Names) {
+        $value = $null
+        if ($Outputs -and $Outputs.ContainsKey('keyVaultName')) {
+            # Only a secret that does not exist yet gets a new password; another failure to read it stops the step.
+            for ($attempt = 1; $attempt -le 3 -and -not $value; $attempt++) {
+                $PSNativeCommandUseErrorActionPreference = $false
+                $read = az keyvault secret show --vault-name ([string] $Outputs.keyVaultName.value) --name "$name-sql-password" --query value --output tsv 2>&1
+                $code = $LASTEXITCODE
+                $PSNativeCommandUseErrorActionPreference = $true
+                if ($code -eq 0) { $value = [string] $read; break }
+                if ("$read" -match 'SecretNotFound|was not found') { break }
+                if ($attempt -eq 3) { Fail-Step "Cannot read $name-sql-password: the vault answered $("$read" -replace '\s+', ' ')" }
+                Write-Host "Reading $name-sql-password failed (attempt $attempt of 3); retrying in 30 seconds."
+                Start-Sleep -Seconds 30
+            }
+        }
+        if ($value) {
+            $result[$name] = ([string] $value).Trim()
+        }
+        else {
+            Write-Host "Generating the database login password of $name."
+            $result[$name] = New-SqlPassword
+        }
+    }
+    return $result
+}
+
 function Read-VaultSecret {
     # The value of a vault secret, or $null when the vault or the secret does not exist yet. Any other failure to read
     # it is retried, then stops the step: taking an unreadable secret for a missing one would replace it.
@@ -256,13 +289,29 @@ $system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $
 # deployables[].environments: a deployable may exist in some environments only; this one's are the rest of the work.
 $deployablesHere = @($system.deployables | Where-Object { -not $_.ContainsKey('environments') -or @($_.environments) -contains $environmentName })
 # The same rule as infra/main.bicep (hasDatabase): a container deployable uses the database unless it says
-# "database": false. Without one the environment has no SQL server, and there is no administrator password to read or
-# generate.
+# "database": false, and an App Service deployable shares it. Without one the environment has no SQL server, and there
+# is no administrator password to read or generate.
 $hasDatabase = @($deployablesHere | Where-Object {
         $hosting = if ($_.ContainsKey('hosting')) { [string] $_.hosting } else { 'containerapp' }
-        $hosting -eq 'containerapp' -and -not ($_.ContainsKey('database') -and $_.database -eq $false)
+        ($hosting -eq 'containerapp' -and -not ($_.ContainsKey('database') -and $_.database -eq $false)) -or $hosting -eq 'appservice'
     }).Count -gt 0
 $password = if ($hasDatabase) { Get-SqlPassword -Outputs $outputs } else { Write-Host "No app in $environmentName uses a database: no SQL server, no SQL password."; '' }
+$loginNames = @($deployablesHere | Where-Object { $_['hosting'] -eq 'appservice' } | ForEach-Object { [string] $_.name })
+# A change of an App Service plan's size (system.planSku, or the dormant switch, which makes every plan Free) restarts
+# the apps on that plan: Azure moves them to other workers. The plans this environment owns carry its tag; one whose
+# size differs from the size system.json now declares will be resized by this apply, and the restart is then reported
+# below, not counted as downtime the apply caused by mistake.
+$tierName = [string] ($system.environments | Where-Object { $_.name -eq $environmentName } | Select-Object -First 1).tier
+$isDormant = $system.azure.ContainsKey('frontDoor') -and $system.azure.frontDoor['dormant']
+$wantedPlan = if (-not $isDormant -and $system.system.ContainsKey('planSku') -and $system.system.planSku[$tierName]) { [string] $system.system.planSku[$tierName] } else { 'F1' }
+$PSNativeCommandUseErrorActionPreference = $false
+$ownedPlans = @(az resource list --resource-group $resourceGroup --resource-type Microsoft.Web/serverfarms --query "[?tags.environment=='$environmentName'].{name: name, sku: sku.name}" --output json 2>$null | ConvertFrom-Json)
+$PSNativeCommandUseErrorActionPreference = $true
+$resizedPlans = @($ownedPlans | Where-Object { $_ -and $_.sku -ne $wantedPlan } | ForEach-Object { "$($_.name) $($_.sku) to $wantedPlan" })
+if ($resizedPlans.Count -gt 0) {
+    Write-Host "This apply changes a plan size ($($resizedPlans -join ', ')): the apps on it restart."
+}
+$loginPasswords = Get-LoginPassword -Outputs $outputs -Names $loginNames
 $secrets = Get-DeployableSecret -Outputs $outputs -Deployables $deployablesHere
 foreach ($name in $secrets.Missing.Keys) {
     $absent = @($secrets.Missing[$name])
@@ -284,6 +333,7 @@ $parameters = @{
         versions          = @{ value = $versions }
         sqlAdminPassword  = @{ value = $password }
         deployPrincipalId = @{ value = $deployPrincipalId }
+        loginPasswords    = @{ value = $loginPasswords }
         presentSecrets    = @{ value = @($secrets.Present) }
         generatedSecrets  = @{ value = $secrets.Generated }
     }
@@ -307,8 +357,8 @@ function Start-AvailabilityProbe {
     if ($Outputs -and $Outputs.ContainsKey('deployables')) {
         foreach ($entry in @($Outputs.deployables.value)) {
             $paths[[string] $entry.name] = [string] $entry.healthPath
-            # Static sites keep the URL the stack reports; container apps are listed below.
-            if ($entry['hosting'] -eq 'staticwebapp') { $static[[string] $entry.name] = [string] $entry.url }
+            # App Service apps and static sites keep the URL the stack reports; container apps are listed below.
+            if (@('appservice', 'staticwebapp') -contains $entry['hosting']) { $static[[string] $entry.name] = [string] $entry.url }
         }
     }
     $probe = [hashtable]::Synchronized(@{ Stop = $false; Samples = [Collections.Generic.List[object]]::new(); Error = '' })
@@ -475,34 +525,37 @@ function Invoke-StackApply {
     }
 }
 
-# This system has no App Service hosting, so an App Service plan an earlier apply made for this environment (its tag)
-# leaves the stack with this apply, and Azure refuses to delete a plan that still holds a web app. The tier's other
-# environments ran their web apps on the plan of the tier's first environment (app2-ui in uat on asp-<slug>-tdd), so
-# every web app on such a plan is deleted first, as this tier's deploy identity, which the stacks' deny settings
-# exclude. The stack that listed a deleted web app finds it gone at its own next apply. Without such a plan: nothing.
-$PSNativeCommandUseErrorActionPreference = $false
-$retiredPlans = @(az resource list --resource-group $resourceGroup --resource-type Microsoft.Web/serverfarms --query "[?tags.environment=='$environmentName'].id" --output json 2>$null | ConvertFrom-Json)
-$PSNativeCommandUseErrorActionPreference = $true
-if ($retiredPlans.Count -gt 0) {
-    $sites = @(az webapp list --resource-group $resourceGroup --query '[].{id: id, name: name, plan: serverFarmId}' --output json | ConvertFrom-Json)
-    foreach ($site in @($sites | Where-Object { $plan = [string] $_.plan; @($retiredPlans | Where-Object { $_ -ieq $plan }).Count -gt 0 })) {
-        Write-Host "Deleting web app $($site.name): its App Service plan leaves stack $stackName with this apply."
-        az resource delete --ids ([string] $site.id) --output none
-    }
-}
-
 try {
     $result = Invoke-StackApply -Name $stackName -Group $resourceGroup -TemplateFile $template -ParametersFile $parametersFile
 }
 finally {
     Remove-Item -LiteralPath $parametersFile -Force -ErrorAction SilentlyContinue
 }
+# App Service resolves Key Vault references when a site starts and caches them for up to a day. A site whose identity
+# the apply just replaced (a moved environment) may have tried before its new role on the secret took effect: check the
+# references, and force a new resolution while one is not resolved yet (up to five minutes).
 $applied = ($result | ConvertFrom-Json -AsHashtable).outputs
+# The same apps in the standby region (environments[].standbyLocation); empty without one.
+$standbySites = @(if ($applied.ContainsKey('standby')) { $applied.standby.value })
+foreach ($site in @($applied.deployables.value | Where-Object { $_['hosting'] -eq 'appservice' }) + $standbySites) {
+    $siteId = ([string] (az resource show --resource-group $resourceGroup --name ([string] $site.webApp) --resource-type Microsoft.Web/sites --query id --output tsv)).Trim()
+    $deadline = (Get-Date).AddMinutes(5)
+    while ($true) {
+        $pending = @((az rest --method get --url "https://management.azure.com$siteId/config/configreferences/appsettings?api-version=2022-03-01" --output json | ConvertFrom-Json -AsHashtable).value |
+                Where-Object { $_.properties.status -ne 'Resolved' } | ForEach-Object { "$($_.name): $($_.properties.status)" })
+        if ($pending.Count -eq 0) { break }
+        if ((Get-Date) -gt $deadline) { Fail-Step "Key Vault references of $($site.webApp) did not resolve within 5 minutes: $($pending -join '; ')" }
+        Write-Host "Key Vault references of $($site.webApp) not resolved yet ($($pending -join '; ')); refreshing in 30 seconds."
+        Start-Sleep -Seconds 30
+        az rest --method post --url "https://management.azure.com$siteId/config/configreferences/appsettings/refresh?api-version=2022-03-01" --output none
+    }
+}
+
 # Capability "frontdoor": the environment's public address, one Front Door endpoint per deployable in the system's
 # profile (system.json azure.frontDoor; the seed creates it in a resource group of its own, shared by both tiers). It is
-# a stack of its own in that group, stack-<slug>-<env>-edge, with the apps this stack reports as origins. Its deny
-# settings exclude only this tier's deploy identity. Without the capability, a stack left from before is removed with
-# its endpoints.
+# a stack of its own in that group, stack-<slug>-<env>-edge, with the apps this stack reports as origins: the primary at
+# priority 1 and the standby at priority 2. Its deny settings exclude only this tier's deploy identity. Without the
+# capability, a stack left from before is removed with its endpoints.
 $frontDoor = if ($system.azure.ContainsKey('frontDoor')) { $system.azure.frontDoor } else { @{} }
 $edgeStackName = "$stackName-edge"
 $endpoints = @()
@@ -515,9 +568,13 @@ if (@($applied.capabilities.value) -contains 'frontdoor' -and -not $dormant) {
         Fail-Step "Environment $environmentName has capability frontdoor, but system.json has no azure.frontDoor: run the seed with azure.frontDoor in the demo file, and add its output to system.json."
     }
     # A static site (hosting "staticwebapp" or "storagewebsite") gets no endpoint: it is served under an address of
-    # its own.
+    # its own, and it has no standby to fail over to.
     $edgeDeployables = @(foreach ($deployable in @($applied.deployables.value | Where-Object { $_['hosting'] -notin 'staticwebapp', 'storagewebsite' })) {
-            @{ name = [string] $deployable.name; origins = @(@{ name = 'primary'; hostName = ([uri] [string] $deployable.url).Host; priority = 1 }) }
+            $origins = @(@{ name = 'primary'; hostName = ([uri] [string] $deployable.url).Host; priority = 1 })
+            foreach ($site in @($standbySites | Where-Object { $_.name -eq $deployable.name })) {
+                $origins += @{ name = 'standby'; hostName = ([uri] [string] $site.url).Host; priority = 2 }
+            }
+            @{ name = [string] $deployable.name; origins = $origins }
         })
     $edgeParameters = @{
         '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
@@ -576,7 +633,10 @@ elseif ($frontDoor['resourceGroup']) {
 # A little longer than the apply: the stack removes replaced apps at its end, and the new ones take over.
 Start-Sleep -Seconds 30
 $downtime = Stop-AvailabilityProbe -Handle $probe
-if ($downtime -gt 0) {
+if ($downtime -gt 0 -and $resizedPlans.Count -gt 0) {
+    Write-Highlight "The plan size changed ($($resizedPlans -join ', ')): Azure restarts the apps on a resized plan, so the $downtime downtime period(s) above are that restart, measured and expected, and do not fail the apply."
+}
+elseif ($downtime -gt 0) {
     Fail-Step "The apply of $stackName caused $downtime downtime period(s); the timeline is above."
 }
 
@@ -585,6 +645,9 @@ foreach ($deployable in $stack.outputs.deployables.value) {
     $label = if ($deployable.version) { $deployable.version } else { 'placeholder' }
     Write-Highlight "$($deployable.name) in ${environmentName}: $($deployable.url) ($label)"
     Set-OctopusVariable -name "Url.$($deployable.name)" -value $deployable.url
+}
+foreach ($site in $standbySites) {
+    Write-Highlight "$($site.name) in ${environmentName}, standby in $($site.region): $($site.url)"
 }
 foreach ($endpoint in $endpoints) {
     Write-Highlight "$($endpoint.name) in ${environmentName} behind Front Door: $($endpoint.url) ($(@($endpoint.origins).Count) origin(s), probe $($endpoint.probePath))"
