@@ -11,86 +11,18 @@
     container app the stack created. The pin step already wrote the same version to Git, so the next apply of the
     stack (an environment release, or the nightly drift check) agrees with what runs. The deploy identity is excluded
     from the stack's deny settings, so it may make this change. It then waits until the new revision is ready, and fails
-    at once, with the container's last console lines, when the revision cannot start. When the deployable is ui and
-    Octopus.FeatureToggles.ClientIdentifier has text, that same update sets the container app environment variable
-    Octopus__FeatureFlags__ClientIdentifier. A container app has no package transform. The variable empty, or any
-    other deployable, leaves the update as it was.
+    at once, with the container's last console lines, when the revision cannot start.
 
-.PARAMETER LoadOnly
-    Defines the planner functions and stops, for scripts/test-update-deployable.ps1. Octopus runs this file with the
-    switch off.
+    When the project supplies Octopus.FeatureToggles.ClientIdentifier and the deployable is ui, the same update sets
+    the environment variable Octopus__FeatureFlags__ClientIdentifier, which OpenFeature reads as
+    Octopus:FeatureFlags:ClientIdentifier. Container Apps has no package transform. A project without that parameter,
+    and every deployable other than ui, is unchanged, and the step does not fail.
 #>
 [CmdletBinding()]
-param(
-    [switch] $LoadOnly
-)
+param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-function Get-FeatureFlagClientInject {
-    # Octopus feature toggles: the client identifier is Octopus.FeatureToggles.ClientIdentifier, a variable of a
-    # project that has toggles. A container app has no package transform, so the ui deploy writes it as the
-    # environment variable the OpenFeature provider reads. Empty, missing, or any deployable other than ui: nothing
-    # is added, and the container app update is the one it was.
-    param(
-        [Parameter(Mandatory)] [string] $Deployable,
-        [AllowEmptyString()] [string] $ClientIdentifier
-    )
-    $name = 'Octopus__FeatureFlags__ClientIdentifier'
-    if ($Deployable -cne 'ui' -or [string]::IsNullOrWhiteSpace($ClientIdentifier)) {
-        return [pscustomobject]@{ Apply = $false; Name = $name; Value = ''; Arguments = @() }
-    }
-    return [pscustomobject]@{
-        Apply     = $true
-        Name      = $name
-        Value     = $ClientIdentifier
-        Arguments = @('--set-env-vars', "${name}=${ClientIdentifier}")
-    }
-}
-
-function Merge-FeatureFlagClientEnv {
-    # The express update sends the container it read, with the image changed. This adds the client identifier to
-    # that container's env and leaves every other variable, including a secret reference, as it was.
-    param(
-        $Env,
-        [Parameter(Mandatory)] $Inject
-    )
-    $entries = @($Env | Where-Object { $_ })
-    if (-not $Inject.Apply) {
-        # One array, so a single variable stays an array for the caller.
-        Write-Output -NoEnumerate @($entries)
-        return
-    }
-    $result = [System.Collections.Generic.List[object]]::new()
-    $found = $false
-    foreach ($entry in $entries) {
-        if ([string] $entry.name -ceq $Inject.Name) {
-            $result.Add(@{ name = $Inject.Name; value = $Inject.Value })
-            $found = $true
-        }
-        else {
-            $result.Add($entry)
-        }
-    }
-    if (-not $found) {
-        $result.Add(@{ name = $Inject.Name; value = $Inject.Value })
-    }
-    Write-Output -NoEnumerate $result.ToArray()
-}
-
-function Get-FeatureFlagUpdateArguments {
-    # The container app update splats this array. Empty adds no argument. Two entries are two arguments.
-    param([Parameter(Mandatory)] $Inject)
-    if (-not $Inject.Apply) {
-        Write-Output -NoEnumerate @()
-        return
-    }
-    Write-Output -NoEnumerate @('--set-env-vars', "$($Inject.Name)=$($Inject.Value)")
-}
-
-if ($LoadOnly) { return }
-
 $PSNativeCommandArgumentPassing = 'Standard'
 $PSNativeCommandUseErrorActionPreference = $true
 
@@ -170,6 +102,45 @@ function Test-SystemAppEnvironment {
     # app's own group, the tier's. From the two names alone: it asks nothing.
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $EnvironmentId, [Parameter(Mandatory)] [string] $ResourceGroup)
     return [bool] ($EnvironmentId -and $EnvironmentId -notmatch "/resourceGroups/$([regex]::Escape($ResourceGroup))/")
+}
+
+function Get-FeatureFlagClientSetting {
+    # The one environment variable OpenFeature reads, or $null when this step must not touch environment variables.
+    # Only the ui container app, and only when Octopus supplied a Feature Toggles client identifier. The value is
+    # not a secret: it is the public client id of the project. It is not printed.
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Deployable,
+        [AllowEmptyString()] [string] $ClientIdentifier
+    )
+    if ($Deployable -cne 'ui') { return $null }
+    if ([string]::IsNullOrWhiteSpace($ClientIdentifier)) { return $null }
+    return @{ Name = 'Octopus__FeatureFlags__ClientIdentifier'; Value = [string] $ClientIdentifier }
+}
+
+function Test-ContainerHasEnvValue {
+    # $true when $Setting is already the container's plain value, or when there is nothing to set. Comparison is
+    # case-sensitive: a client identifier that differs only by case is still a change.
+    param($Variables, [hashtable] $Setting)
+    if (-not $Setting) { return $true }
+    foreach ($entry in @($Variables)) {
+        if (-not $entry) { continue }
+        if ([string] $entry.name -ceq $Setting.Name -and [string] $entry.value -ceq $Setting.Value) { return $true }
+    }
+    return $false
+}
+
+function Merge-ContainerEnv {
+    # $Variables with $Setting set or replaced as a plain value. Every other entry stays, including a secret
+    # reference. $Setting null returns the entries it was given.
+    param($Variables, [hashtable] $Setting)
+    $merged = [Collections.Generic.List[object]]::new()
+    foreach ($entry in @($Variables)) {
+        if (-not $entry) { continue }
+        if ($Setting -and [string] $entry.name -ceq $Setting.Name) { continue }
+        $merged.Add($entry)
+    }
+    if ($Setting) { $merged.Add(@{ name = $Setting.Name; value = $Setting.Value }) }
+    return @($merged.ToArray())
 }
 
 function Write-RevisionLog {
@@ -367,46 +338,77 @@ if ($currentPort -ne $port) {
     Write-Host "Ingress of $app now targets port $port (was $currentPort)"
 }
 
+# OpenFeature reads Octopus:FeatureFlags:ClientIdentifier from the process environment. The key is absent on a
+# project that has no Feature Toggles, and ContainsKey then leaves the app's environment variables alone.
+$featureFlagClient = ''
+if ($OctopusParameters.ContainsKey('Octopus.FeatureToggles.ClientIdentifier')) {
+    $featureFlagClient = [string] $OctopusParameters['Octopus.FeatureToggles.ClientIdentifier']
+}
+$featureFlagSetting = Get-FeatureFlagClientSetting -Deployable $deployable -ClientIdentifier $featureFlagClient
+$containerEnv = $current.properties.template.containers[0].env
+$clientChanged = $null -ne $featureFlagSetting -and -not (Test-ContainerHasEnvValue -Variables $containerEnv -Setting $featureFlagSetting)
+
 $currentImage = [string] $current.properties.template.containers[0].image
-if ($currentImage -eq $image) {
+$imageChanged = $currentImage -ne $image
+$changing = $imageChanged -or $clientChanged
+if (-not $changing) {
     Write-Host "$app already runs $image"
+}
+elseif ($express) {
+    # The environment's shared identity pulls the image (the seed gave it AcrPull); the app carries it already.
+    # An express app keeps no registry setting, so the request that changes the image, or that starts a revision
+    # for the client identifier, sends the identity again.
+    $pullIdentity = [string] (@($current.identity.userAssignedIdentities.Keys | Where-Object { $_ -match "/id-$([regex]::Escape($slug))-$([regex]::Escape($environmentName))-app$" }) | Select-Object -First 1)
+    if (-not $pullIdentity) { Fail-Step "$app carries no identity id-$slug-$environmentName-app to pull $image with: deploy the latest release of $slug-system to $environmentName first." }
+    $containers = @($current.properties.template.containers)
+    if ($imageChanged) {
+        Write-Host "Updating $app from $currentImage to $image"
+        $containers[0].image = $image
+    }
+    if ($clientChanged) {
+        Write-Host "Setting $($featureFlagSetting.Name) on $app for OpenFeature"
+        $containers[0].env = @(Merge-ContainerEnv -Variables $containerEnv -Setting $featureFlagSetting)
+    }
+    $bodyFile = Join-Path ([IO.Path]::GetTempPath()) "update-$app-$([Guid]::NewGuid().ToString('N')).json"
+    @{ properties = @{ configuration = @{ registries = @(@{ server = $registry; identity = $pullIdentity }) }; template = @{ containers = $containers } } } |
+        ConvertTo-Json -Depth 20 -Compress | Set-Content -LiteralPath $bodyFile -Encoding utf8NoBOM
+    try { az rest --method patch --url $appUri --body "@$bodyFile" --headers 'Content-Type=application/json' --output none }
+    finally { Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue }
+    # The change is accepted at once; a moment later the app shows it as in progress.
+    Start-Sleep -Seconds 5
+}
+elseif ($clientChanged) {
+    if ($imageChanged) { Write-Host "Updating $app from $currentImage to $image" }
+    # The name only: the client identifier is not written to the task log. --set-env-vars adds or replaces this one
+    # name. Other variables, including secret references, stay. The image-only command below is what a project
+    # without Feature Toggles runs.
+    Write-Host "Setting $($featureFlagSetting.Name) on $app for OpenFeature"
+    $update = @('containerapp', 'update', '--name', $app, '--resource-group', $resourceGroup)
+    if ($imageChanged) { $update += @('--image', $image) }
+    $update += @('--set-env-vars', "$($featureFlagSetting.Name)=$($featureFlagSetting.Value)", '--no-wait', '--output', 'none')
+    az @update
 }
 else {
     Write-Host "Updating $app from $currentImage to $image"
-    # Feature toggles on ui only. The arguments are empty unless the client identifier is set, so every other
-    # deployable keeps the update it had. A project without the variable reads as empty here.
-    $featureFlags = Get-FeatureFlagClientInject -Deployable $deployable -ClientIdentifier ([string] $OctopusParameters['Octopus.FeatureToggles.ClientIdentifier'])
-    if ($express) {
-        # The environment's shared identity pulls the image (the seed gave it AcrPull); the app carries it already.
-        $pullIdentity = [string] (@($current.identity.userAssignedIdentities.Keys | Where-Object { $_ -match "/id-$([regex]::Escape($slug))-$([regex]::Escape($environmentName))-app$" }) | Select-Object -First 1)
-        if (-not $pullIdentity) { Fail-Step "$app carries no identity id-$slug-$environmentName-app to pull $image with: deploy the latest release of $slug-system to $environmentName first." }
-        $containers = @($current.properties.template.containers)
-        $containers[0].image = $image
-        if ($featureFlags.Apply) {
-            $containers[0].env = Merge-FeatureFlagClientEnv -Env $containers[0].env -Inject $featureFlags
-        }
-        $bodyFile = Join-Path ([IO.Path]::GetTempPath()) "update-$app-$([Guid]::NewGuid().ToString('N')).json"
-        @{ properties = @{ configuration = @{ registries = @(@{ server = $registry; identity = $pullIdentity }) }; template = @{ containers = $containers } } } |
-            ConvertTo-Json -Depth 20 -Compress | Set-Content -LiteralPath $bodyFile -Encoding utf8NoBOM
-        try { az rest --method patch --url $appUri --body "@$bodyFile" --headers 'Content-Type=application/json' --output none }
-        finally { Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue }
-        # The change is accepted at once; a moment later the app shows it as in progress.
-        Start-Sleep -Seconds 5
-    }
-    else {
-        $featureFlagArguments = Get-FeatureFlagUpdateArguments -Inject $featureFlags
-        az containerapp update --name $app --resource-group $resourceGroup --image $image @featureFlagArguments --no-wait --output none
-    }
+    az containerapp update --name $app --resource-group $resourceGroup --image $image --no-wait --output none
 }
 
-# Ready when a new revision (or, for an unchanged image, the current one) is the latest and the latest ready one; a
-# revision that cannot start fails at once.
+# Ready when a new revision (or, when nothing changed, the current one) is the latest and the latest ready one; a
+# revision that cannot start fails at once. Express keeps one revision name, so the image and, when this step set
+# it, the client identifier say when the change has landed.
 $deadline = (Get-Date).AddMinutes(10)
 while ($true) {
-    $state = az containerapp show --name $app --resource-group $resourceGroup --query '{latest: properties.latestRevisionName, ready: properties.latestReadyRevisionName, provisioning: properties.provisioningState, image: properties.template.containers[0].image}' --output json | ConvertFrom-Json -AsHashtable
-    # Express: the one revision keeps its name and is never listed as the latest ready one (above).
-    $isNew = $currentImage -eq $image -or $state.latest -ne $before -or ($express -and $state.image -eq $image)
-    $isReady = if ($express) { $state.image -eq $image } else { $state.latest -and $state.latest -eq $state.ready }
+    $state = az containerapp show --name $app --resource-group $resourceGroup --query '{latest: properties.latestRevisionName, ready: properties.latestReadyRevisionName, provisioning: properties.provisioningState, image: properties.template.containers[0].image, client: properties.template.containers[0].env[?name==`Octopus__FeatureFlags__ClientIdentifier`].value | [0]}' --output json | ConvertFrom-Json -AsHashtable
+    $reportedClient = [string] $state.client
+    $clientReady = -not $clientChanged -or $reportedClient -ceq $featureFlagSetting.Value
+    if ($express) {
+        $isNew = ([string] $state.image -eq $image) -and $clientReady
+        $isReady = $isNew
+    }
+    else {
+        $isNew = -not $changing -or $state.latest -ne $before
+        $isReady = ($state.latest -and $state.latest -eq $state.ready) -and $clientReady
+    }
     if ($isNew -and $state.provisioning -eq 'Succeeded' -and $isReady) {
         Write-Host "Revision $($state.latest) is ready"
         break
