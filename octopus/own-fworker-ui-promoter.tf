@@ -5,7 +5,9 @@
 # that one does not: seeing ui's releases, deployments and tasks, creating deployments in uat and prod, and viewing and
 # submitting their manual interventions (InterruptionView, InterruptionSubmit). Since 2026-10-30 (owner's default, W8.2b of
 # the fworker plan, #568) it also creates deployments of ui in tdd, and only there for tdd: the factory's automatic rollback
-# of the app in tdd (a deployment of the previous release) is the gateway's own act. Decision 0057 leaves extra scoped teams
+# of the app in tdd (a deployment of the previous release) is the gateway's own act. Since 2026-11-09 (owner) workflow
+# ui-auto-promote is again the only promoter of ui to uat and prod: the promoter role is scoped to tdd only (the rollback),
+# the viewer role keeps tdd, uat and prod (the gateway still follows ui's deployments there). Decision 0057 leaves extra scoped teams
 # and roles to the system's own octopus/ files until a second system needs the same.
 #
 # The team was made by hand on 2026-10-23 and is imported (the import blocks below), so it keeps its ids: Teams-404,
@@ -35,7 +37,7 @@ locals {
       id           = "UserRoles-150"
       name         = "fworker ui promoter"
       permissions  = ["DeploymentCreate", "DeploymentView", "EnvironmentView", "InterruptionSubmit", "InterruptionView", "ProjectView", "ReleaseView", "TaskView"]
-      environments = ["tdd", "uat", "prod"]
+      environments = ["tdd"]
     }
   }
 }
@@ -75,7 +77,7 @@ import {
 
 resource "octopusdeploy_team" "fworker_ui_promoter" {
   name        = "fworker ui promoter"
-  description = "The fworker gateway (Agent account) promoting cmdemo1-ui when its gate passes. Jeffrey 2026-10-23."
+  description = "The fworker gateway (Agent account): views cmdemo1-ui everywhere, deploys it in tdd only (rollback). uat and prod: workflow ui-auto-promote (Jeffrey 2026-11-09)."
   space_id    = local.system.octopus.spaceId
   users       = [one([for u in data.octopusdeploy_users.fworker_ui_promoter.users : u.id if lower(u.username) == local.fworker_ui_promoter_login])]
 }

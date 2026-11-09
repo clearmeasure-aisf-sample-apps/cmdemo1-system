@@ -1,4 +1,10 @@
-# Since 2026-10-24 only fworker: the ui step is off, the fworker gateway promotes ui (see that step). Originally:
+# Since 2026-11-09 (owner, Jeffrey Palermo) this workflow is again the only promoter of cmdemo1-ui to uat and prod: the
+# fworker gateway's own promotion of ui (2026-10-24 to 2026-11-09) stopped at uat..master over GitHub's 250-commit compare
+# limit and promoted only Auto Merge items with its FT verdict. The gateway's switch is delivery.autoPromote.enabled in
+# cmdemo1-fworker's config/deploy.overrides.json (false: its delivery train only observes uat and prod); its Octopus team
+# (octopus/own-fworker-ui-promoter.tf) creates ui deployments in tdd only. Started by the schedule, by hand
+# (workflow_dispatch), or by another system (repository_dispatch, type ui-auto-promote, e.g. cm-ai-ops-bot); inputs
+# deployable (all, ui, fworker) and dry_run, in client_payload for repository_dispatch.
 # Automatic promotion of releases of deployables ui (the work-order app) and fworker, by the owner's decision of 2026-10-14 (Jeffrey
 # Palermo): "release candidates automatically deployed to production if there is nothing to flag them. don't let them
 # stop in release queue". ui, and fworker under the same rules (owner's decision of 2026-10-15); every other deployable
@@ -24,8 +30,9 @@
 #      changed path outside the deployable's application paths (ui: src/; fworker: gateway/, plugin/, tests/,
 #      config/instance.json) or a build/project file inside them (Directory.Build.*, global.json, nuget.config, *.csproj,
 #      *.sln, *.props, *.targets, Dockerfile*). Never a flag: for ui src/Database/ (migrations; owner, 2026-10-14) and .github/private-build/ (the kit's script; owner, 2026-10-14); for both
-#      documentation (docs/**, arch/**, *.md anywhere: proposed, one list in the script for the owner to edit). A
-#      comparison that is incomplete (no base commit, over 250 commits, 300 files or more) flags.
+#      documentation (docs/**, arch/**, *.md anywhere: proposed, one list in the script for the owner to edit). The
+#      comparison is read from a clone of the application repository (no commit or file cap, unlike GitHub's compare);
+#      one that is incomplete (no base commit, a read failed) flags.
 #   4. Hold label: a pull request in those commits, or an issue they close or reference (also owner/repo#N), labelled
 #      Hold. A read of that chain that fails or is cut makes the run wait.
 # Health reads of both deployables share one state file (keys "<deployable>/<deployment id>").
@@ -47,10 +54,24 @@ on:
     - cron: "3-59/10 * * * *"
   workflow_dispatch:
     inputs:
+      deployable:
+        description: "Which deployable to evaluate (all: ui, then fworker)"
+        type: choice
+        options: [all, ui, fworker]
+        default: all
       dry_run:
         description: "Decide and print, change nothing"
         type: boolean
         default: false
+  # For a system that reacts to events (cm-ai-ops-bot): POST /repos/<this repository>/dispatches with event_type
+  # ui-auto-promote and client_payload {"deployable": "ui", "dry_run": false} (both optional). Its token needs Contents: write
+  # here; workflow_dispatch needs Actions: write. Either run takes the same gates and waits its turn (concurrency below).
+  repository_dispatch:
+    types: [ui-auto-promote]
+
+env:
+  DEPLOYABLE: ${{ github.event_name == 'workflow_dispatch' && inputs.deployable || github.event_name == 'repository_dispatch' && github.event.client_payload.deployable || 'all' }}
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || github.event_name == 'repository_dispatch' && (github.event.client_payload.dry_run == true || github.event.client_payload.dry_run == 'true') }}
 
 permissions:
   contents: read
@@ -67,6 +88,11 @@ jobs:
     environment: octopus
     timeout-minutes: 55
     steps:
+      - name: Check the request
+        run: |
+          case "$DEPLOYABLE" in all|ui|fworker) echo "Deployable: $DEPLOYABLE; dry run: $DRY_RUN; event: ${{ github.event_name }}" ;;
+            *) echo "::error::deployable '$DEPLOYABLE' is not all, ui or fworker"; exit 1 ;; esac
+
       - uses: actions/checkout@v6.0.1
         with:
           persist-credentials: false
@@ -93,27 +119,22 @@ jobs:
             git show FETCH_HEAD:ui-auto-promote.json > "$RUNNER_TEMP/ui-auto-promote.json" || echo '{}' > "$RUNNER_TEMP/ui-auto-promote.json"
           fi
 
-      # Off since 2026-10-24 (owner's decision of 2026-10-23): the fworker gateway promotes cmdemo1-ui itself, gated on
-      # its work items (Auto Merge, Functional Testing PASS, demo video, previous deployment and health), and answers the
-      # Sign-off of its own deployments (cmdemo1-fworker #245). This workflow keeps promoting fworker.
+      # Each deployable's step runs whenever the rules, the sign-in and the reads succeeded and the run asks for it; never
+      # when one of them failed. fworker runs after ui, also when ui's step failed (one promotion at a time either way).
       - name: Promote or hold ui
-        if: ${{ false }}
+        if: ${{ !cancelled() && steps.rules.outcome == 'success' && steps.login.outcome == 'success' && steps.fetch.outcome == 'success' && (env.DEPLOYABLE == 'all' || env.DEPLOYABLE == 'ui') }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           $run = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable ui -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run -DryRun:($env:DRY_RUN -eq 'true')
 
-      # Runs whenever the rules, the sign-in and the reads succeeded (the ui step above is off: the gateway promotes ui);
-      # never when one of them failed.
       - name: Promote or hold fworker
-        if: ${{ !cancelled() && steps.rules.outcome == 'success' && steps.login.outcome == 'success' && steps.fetch.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rules.outcome == 'success' && steps.login.outcome == 'success' && steps.fetch.outcome == 'success' && (env.DEPLOYABLE == 'all' || env.DEPLOYABLE == 'fworker') }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           $run = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable fworker -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run -DryRun:($env:DRY_RUN -eq 'true')
@@ -129,7 +150,8 @@ jobs:
   publish:
     # Its own job: the step that runs PowerShell has no write token for the repository.
     needs: promote
-    if: ${{ always() && inputs.dry_run != true }}
+    # The DRY_RUN expression of the workflow's env (a job's if cannot read env).
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.dry_run || github.event_name == 'repository_dispatch' && (github.event.client_payload.dry_run == true || github.event.client_payload.dry_run == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
