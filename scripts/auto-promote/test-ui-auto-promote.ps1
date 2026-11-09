@@ -284,18 +284,46 @@ Test-Case 'a person holding responsibility is yielded to' (Get-SignOffAction @((
 Test-Case 'our own responsibility is answered' (Get-SignOffAction @((Merge-Hash $so @{ ResponsibleUserId = 'Users-8'; HasResponsibility = $true })) 'T1').Action 'answer'
 Test-Case 'answered Sign-off is not answered again' (Get-SignOffAction @((Merge-Hash $so @{ IsPending = $false })) 'T1').Action 'answered'
 
-# Compare pages
-function New-Page($n, $files, $total, $status = 'ahead') { @{ status = $status; total_commits = $total; files = @($files | ForEach-Object { [pscustomobject] @{ filename = $_ } }); commits = @(1..$n | ForEach-Object { [pscustomobject] @{ sha = "s$($_)p$($files.Count)$total" } }) } }
-$m = Merge-ComparePages @((New-Page 3 @('src/a.cs') 3))
-Test-Case 'complete comparison is known' @($m.Known, $m.Paths) @($true, @('src/a.cs'))
-$m = Merge-ComparePages @((New-Page 100 @('src/a.cs') 120))
-Test-Case 'half-read commits are unknown' $m.Known $false
-$m = Merge-ComparePages @((New-Page 100 @('src/a.cs') 251))
-Test-Case 'more than 250 commits is unknown' $m.Reason '251 commits (more than 250)'
-$m = Merge-ComparePages @((New-Page 3 (1..300 | ForEach-Object { "src/f$_.cs" }) 3))
-Test-Case '300 files is unknown' $m.Known $false
-$page = @{ status = 'ahead'; total_commits = 1; files = @([pscustomobject] @{ filename = 'new.cs'; previous_filename = 'old.cs' }); commits = @([pscustomobject] @{ sha = 'a' }) }
-Test-Case 'a rename counts both names' (Merge-ComparePages @($page)).Paths @('new.cs', 'old.cs')
+# Comparison from the clone (git diff --name-only --no-renames -z, git log --format=%H%x1f%B%x1e)
+function New-Sha([int] $i) { '{0:x40}' -f $i }
+function New-GitLog([int] $n) { ((1..$n | ForEach-Object { "$(New-Sha $_)$([char] 0x1f)Change $_ (#$_)`n$([char] 0x1e)" }) -join "`n") + "`n" }
+$m = ConvertFrom-GitComparison -NameOnly "src/a.cs`0" -Log (New-GitLog 3) -Count 3 -Status 'ahead'
+Test-Case 'complete comparison is known' @($m.Known, $m.Paths, $m.Status) @($true, @('src/a.cs'), 'ahead')
+Test-Case 'commits keep their sha and message' @($m.Commits[1].sha, $m.Commits[1].commit.message.Trim()) @((New-Sha 2), 'Change 2 (#2)')
+$m = ConvertFrom-GitComparison -NameOnly "src/a.cs`0" -Log (New-GitLog 2) -Count 3 -Status 'ahead'
+Test-Case 'fewer commits read than counted is unknown' @($m.Known, $m.Reason) @($false, '2 of 3 commits read')
+# ui 2.4.1120 to 2.4.2060: 405 commits and 687 files, over GitHub compare's 250 commits and 300 files
+$m = ConvertFrom-GitComparison -NameOnly ((1..687 | ForEach-Object { "src/f$_.cs" }) -join "`0") -Log (New-GitLog 405) -Count 405 -Status 'ahead'
+Test-Case 'a 405-commit, 687-file comparison is known whole' @($m.Known, @($m.Commits).Count, @($m.Paths).Count) @($true, 405, 687)
+Test-Case 'a rename (no rename detection) counts both names' (ConvertFrom-GitComparison -NameOnly "new.cs`0old.cs`0" -Log (New-GitLog 1) -Count 1 -Status 'ahead').Paths @('new.cs', 'old.cs')
+Test-Case 'a path with spaces is kept' (ConvertFrom-GitComparison -NameOnly "docs/a b.md`0" -Log (New-GitLog 1) -Count 1 -Status 'ahead').Paths @('docs/a b.md')
+Test-Case 'an empty comparison is known' @((ConvertFrom-GitComparison -NameOnly '' -Log '' -Count 0 -Status 'identical').Known) @($true)
+Test-Case 'a message with a separator-like line keeps one commit' @((ConvertFrom-GitComparison -NameOnly '' -Log "$(New-Sha 1)$([char] 0x1f)subject`n`nbody`n$([char] 0x1e)`n" -Count 1 -Status 'ahead').Commits).Count 1
+
+# Pull requests of commits (one batched GraphQL answer)
+function New-PullNode($n, [string[]] $labels = @(), $closes = @(), $labelTotal = $null) {
+    [pscustomobject] @{ number = $n; title = "t$n"; body = "b$n"; url = "pr$n"
+        labels = [pscustomobject] @{ totalCount = ($labelTotal ?? $labels.Count); nodes = @($labels | ForEach-Object { [pscustomobject] @{ name = $_ } }) }
+        closingIssuesReferences = [pscustomobject] @{ nodes = @($closes | ForEach-Object { [pscustomobject] @{ number = $_; repository = [pscustomobject] @{ nameWithOwner = 'org/app' } } }) } }
+}
+$repoNode = [pscustomobject] @{
+    c0 = [pscustomobject] @{ associatedPullRequests = [pscustomobject] @{ totalCount = 1; nodes = @(New-PullNode 58 @('Hold') @(16)) } }
+    c1 = [pscustomobject] @{ associatedPullRequests = [pscustomobject] @{ totalCount = 0; nodes = @() } }
+    c2 = $null
+    c3 = [pscustomobject] @{ associatedPullRequests = [pscustomobject] @{ totalCount = 7; nodes = @(1..5 | ForEach-Object { New-PullNode $_ }) } }
+    c4 = [pscustomobject] @{ associatedPullRequests = [pscustomobject] @{ totalCount = 1; nodes = @(New-PullNode 60 @('a') @() 80) } }
+}
+$g = ConvertFrom-CommitPullsGraph -Repository $repoNode -Shas @('s0', 's1', 's2', 's3', 's4')
+Test-Case 'graph: a pull request is answered like GET commits/<sha>/pulls' @($g['s0'].Pulls[0].number, $g['s0'].Pulls[0].html_url, $g['s0'].Pulls[0].labels[0].name, $g['s0'].Error) @(58, 'pr58', 'Hold', $null)
+Test-Case 'graph: closing references by pull request' @($g['s0'].Closing[58] | ForEach-Object { "$($_.Repo)#$($_.Number)" }) @('org/app#16')
+Test-Case 'graph: a commit without a pull request has none and no error' @(@($g['s1'].Pulls).Count, $g['s1'].Error) @(0, $null)
+Test-Case 'graph: an unknown commit is an error' $g['s2'].Error 'commit s2 not found'
+Test-Case 'graph: more pull requests than read is an error' $g['s3'].Error '7 pull requests of s3 (more than 5)'
+Test-Case 'graph: labels not read whole is an error' $g['s4'].Error 'labels of #60 not read whole'
+$h = Get-HoldFacts -Commits @([pscustomobject] @{ sha = 's0'; commit = [pscustomobject] @{ message = 'x' } }) -Repo 'org/app' -GetPulls { param($s) $e = $g[$s]; if ($e.Error) { throw $e.Error }; $e.Pulls } -GetClosing { param($n) $g['s0'].Closing[[int] $n] } -GetItem { param($r, $n) @{ Number = $n; Url = "i$n"; Labels = @() } }
+Test-Case 'graph answers feed the hold facts: the Hold pull request flags' (Flags (New-Facts @{ HoldItems = $h.Items })) @('Hold label')
+$h = Get-HoldFacts -Commits @([pscustomobject] @{ sha = 's3'; commit = [pscustomobject] @{ message = 'x' } }) -Repo 'org/app' -GetPulls { param($s) $e = $g[$s]; if ($e.Error) { throw $e.Error }; $e.Pulls } -GetClosing { param($n) @() } -GetItem { param($r, $n) $null }
+Test-Case 'graph: a commit whose pull requests are not known waits' (Get-PromotionDecision -Facts (New-Facts @{ HoldItems = $h.Items; HoldUnknown = $h.Unknown })).Decision 'wait'
 
 # References and hold extraction
 Test-Case 'plain and cross-repository references' @(Get-ReferencedNumbers 'Closes #5, org/other#7 and AB#60 in http://x/y#8' 'org/app' | ForEach-Object { "$($_.Repo)#$($_.Number)" }) @('org/app#5', 'org/other#7')
@@ -320,6 +348,15 @@ Test-Case 'hold facts: more than the cap is unknown' @($h.Items.Count, $h.Unknow
 # A #N the application repository answers 404 for is no item (fworker PR bodies name cmdemo1-workorders items as #N, 1.0.587).
 $h = Get-HoldFacts -Commits @($commit) -Repo 'org/app' -GetPulls { param($s) @() } -GetClosing { param($n) @() } -GetItem { param($r, $n) if ($n -eq 16) { $null } else { @{ Number = $n; Url = "i$n"; Labels = @() } } }
 Test-Case 'hold facts: an item that does not exist is neither an item nor unknown' "$(@($h.Items | ForEach-Object Number) -join ',') $($h.Unknown.Count)" '58 0'
+# The application repository's Hold items listed once (Get-RepoHeld): its references need no read and no cap.
+$seen = [Collections.Generic.List[string]]::new()
+$wide = [pscustomobject] @{ sha = 'c4'; commit = [pscustomobject] @{ message = ((1..400 | ForEach-Object { "#$_" }) -join ' ') + ' org/other#9' } }
+$h = Get-HoldFacts -Commits @($wide) -Repo 'org/app' -GetPulls { param($s) @() } -GetClosing { param($n) @() } -GetItem { param($r, $n) $seen.Add("$r#$n"); @{ Number = $n; Url = ''; Labels = @() } } -RepoHeld @{ 77 = @{ Number = 77; Url = 'i77'; Labels = @('HOLD') } }
+Test-Case 'repo held: only other repositories are read' @($seen) @('org/other#9')
+Test-Case 'repo held: 400 references of the repository are not over the cap' $h.Unknown.Count 0
+Test-Case 'repo held: a listed Hold item flags (case ignored)' (Flags (New-Facts @{ HoldItems = $h.Items })) @('Hold label')
+$h = Get-HoldFacts -Commits @($commit) -Repo 'org/app' -GetPulls { param($s) @() } -GetClosing { param($n) @() } -GetItem { param($r, $n) throw 'no read expected' } -RepoHeld @{}
+Test-Case 'repo held: an empty listing holds nothing and reads nothing' @(@($h.Items).Count, $h.Unknown.Count) @(0, 0)
 $notFound = '{"message":"Not Found","documentation_url":"https://docs.github.com/rest/issues/issues#get-an-issue","status":"404"}'
 Test-Case 'issue read: 404 of the application repository is no item' ($null -eq (ConvertFrom-IssueRead -ExitCode 1 -Output $notFound -Repo 'Org/App' -Number 406 -AppRepo 'org/app')) $true
 $msg = try { ConvertFrom-IssueRead -ExitCode 1 -Output $notFound -Repo 'org/other' -Number 9 -AppRepo 'org/app'; 'no throw' } catch { $_.Exception.Message }

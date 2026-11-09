@@ -41,11 +41,16 @@
                  the release running there), a changed path (a renamed file counts both names) outside the deployable's
                  ApplicationPaths (ui: src/), or a build or project file anywhere (BuildFiles list), unless it is documentation (DocumentationPaths list:
                  docs/**, arch/**, *.md anywhere, including .github/x.md). UnflaggedFolders never flag (ui: src/Database/ and .github/private-build/, owner 2026-10-14).
-                 A comparison that is unknown or incomplete (no base commit, more than 250 commits, 300 files or more, a
-                 read failed) flags as "comparison incomplete".
+                 The comparison is read from a clone of the application repository without blobs (Get-AppComparison), so
+                 it has no commit or file cap: GitHub's compare answers 250 commits and 300 files at most, and the jump
+                 of ui from 2.4.1120 to 2.4.2060 is 405 commits and 687 files. A comparison that is unknown or incomplete
+                 (no base commit, a read failed) flags as "comparison incomplete".
       4 hold      Flag: a pull request in the commits between those two, or an issue they close or reference (#N and
                  owner/repo#N in titles, bodies and commit messages, GitHub's closing references) labelled Hold (case
-                 ignored). Wait: any read of that chain failed or was cut (more than 300 items). A #N that the application
+                 ignored). The pull requests of the commits are read in batched GraphQL queries (Get-CommitPulls) and the
+                 application repository's Hold items in one listing (Get-RepoHeld), so a large comparison costs a few
+                 calls. Wait: any read of that chain failed or was cut (more than 5 pull requests on one commit, more than
+                 300 items of other repositories). A #N that the application
                  repository answers 404 for is no item there, so nothing to hold (fworker pull requests name work items of
                  cmdemo1-workorders as bare #N; such an item's Hold label is not looked up). This relies on the application
                  repository being readable (it is public; the comparison read it). A 404 from another repository still
@@ -432,22 +437,107 @@ function Get-SignOffAction {
     @{ Action = 'none'; Interruption = $null }
 }
 
-function Merge-ComparePages {
-    # Pages of GET compare: paths, unique commits, status, and whether everything was read (cap: 250 commits, 300 files).
-    param([object[]] $Pages)
-    $paths = @(); $commits = @()
-    foreach ($p in $Pages) {
-        foreach ($f in @($p.files)) { $paths += $f.filename; if ($f.PSObject.Properties['previous_filename'] -and $f.previous_filename) { $paths += $f.previous_filename } }
-        $commits += @($p.commits)
+function ConvertFrom-GitComparison {
+    <# The comparison of the commit running in the next environment (base) with the release's commit, read from a clone of
+       the application repository, so it has no commit or file cap (GitHub's compare answers 250 commits and 300 files at
+       most: 2.4.1120 to 2.4.2060 of ui is 405 commits and 687 files). NameOnly: git diff --name-only --no-renames -z
+       base...head (a rename is a deletion and an addition: both names count). Log: git log --format=%H%x1f%B%x1e base..head.
+       Count: git rev-list --count base..head. Returns @{ Paths; Commits (sha, commit.message, as GET compare answers them);
+       Status; Known; Reason }. #>
+    param([string] $NameOnly, [string] $Log, [int] $Count, [string] $Status)
+    $paths = @(($NameOnly ?? '') -split "`0" | ForEach-Object { $_.Trim("`r", "`n") } | Where-Object { $_ })
+    $commits = @(($Log ?? '') -split [char] 0x1e | ForEach-Object {
+            $parts = $_.TrimStart("`r", "`n") -split [char] 0x1f, 2
+            if ($parts[0] -match '^[0-9a-f]{40}$') { [pscustomobject] @{ sha = $parts[0]; commit = [pscustomobject] @{ message = ($parts.Count -gt 1 ? $parts[1] : '') } } }
+        })
+    $reason = if ($commits.Count -ne $Count) { "$($commits.Count) of $Count commits read" }
+    @{ Paths = $paths; Commits = $commits; Status = $Status; Known = ($null -eq $reason); Reason = $reason }
+}
+
+function Get-AppComparison {
+    # Clones the application repository once per run (no blobs: trees and commits are enough for the paths), fetches a
+    # commit it lacks, and compares. Status: identical, ahead, behind (the release's commit is an ancestor of the base) or
+    # diverged. Throws when a read fails.
+    param([string] $AppRepo, [string] $Directory, [string] $BaseSha, [string] $Sha)
+    $PSNativeCommandUseErrorActionPreference = $false
+    function Invoke-Git { $out = & git -C $Directory @args; if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed (exit $LASTEXITCODE)" }; $out }
+    if (-not (Test-Path -LiteralPath (Join-Path $Directory '.git'))) {
+        & git clone --quiet --filter=blob:none --no-checkout "https://github.com/$AppRepo.git" $Directory
+        if ($LASTEXITCODE -ne 0) { throw "git clone of $AppRepo failed (exit $LASTEXITCODE)" }
     }
-    $commits = @($commits | Sort-Object { $_.sha } -Unique)
-    $last = $Pages[-1]
-    $fileCount = @($Pages | ForEach-Object { @($_.files).Count } | Measure-Object -Sum).Sum
-    $reason = $null
-    if ($last.total_commits -gt 250) { $reason = "$($last.total_commits) commits (more than 250)" }
-    elseif ($commits.Count -lt $last.total_commits) { $reason = "$($commits.Count) of $($last.total_commits) commits read" }
-    elseif ($fileCount -ge 300) { $reason = "$fileCount files (300 or more)" }
-    @{ Paths = $paths; Commits = $commits; Status = $last.status; Known = ($null -eq $reason); Reason = $reason }
+    foreach ($c in $BaseSha, $Sha) {
+        & git -C $Directory cat-file -e "$c^{commit}" 2>$null
+        if ($LASTEXITCODE -ne 0) { Invoke-Git fetch --quiet --filter=blob:none origin $c | Out-Null }
+    }
+    function Test-Ancestor([string] $A, [string] $B) {
+        & git -C $Directory merge-base --is-ancestor $A $B
+        switch ($LASTEXITCODE) { 0 { $true } 1 { $false } default { throw "git merge-base --is-ancestor $A $B failed (exit $LASTEXITCODE)" } }
+    }
+    $status = if ($BaseSha -eq $Sha) { 'identical' } elseif (Test-Ancestor $Sha $BaseSha) { 'behind' } elseif (Test-Ancestor $BaseSha $Sha) { 'ahead' } else { 'diverged' }
+    $names = (Invoke-Git -c core.quotePath=false diff --name-only --no-renames -z "$BaseSha...$Sha") -join "`n"
+    $log = (Invoke-Git log --format=%H%x1f%B%x1e "$BaseSha..$Sha") -join "`n"
+    $count = [int] (Invoke-Git rev-list --count "$BaseSha..$Sha")
+    ConvertFrom-GitComparison -NameOnly $names -Log $log -Count $count -Status $status
+}
+
+function ConvertFrom-CommitPullsGraph {
+    <# The answer of one batched GraphQL query (Get-CommitPulls): repository.c<i> is the commit Shas[i]. Returns, per sha,
+       @{ Pulls (number, title, body, html_url, labels.name: as GET commits/<sha>/pulls answers them); Closing (pull
+       request number -> @{ Repo; Number }); Error } where Error says why that commit's pull requests are not known (the
+       commit is unknown, more pull requests or labels than the query read). #>
+    param($Repository, [string[]] $Shas, [int] $MaxPulls = 5)
+    $out = @{}
+    for ($i = 0; $i -lt $Shas.Count; $i++) {
+        $o = if ($Repository -and $Repository.PSObject.Properties["c$i"]) { $Repository."c$i" } else { $null }
+        if (-not $o -or -not $o.PSObject.Properties['associatedPullRequests']) { $out[$Shas[$i]] = @{ Pulls = @(); Closing = @{}; Error = "commit $($Shas[$i]) not found" }; continue }
+        $a = $o.associatedPullRequests
+        if ([int] $a.totalCount -gt @($a.nodes).Count) { $out[$Shas[$i]] = @{ Pulls = @(); Closing = @{}; Error = "$($a.totalCount) pull requests of $($Shas[$i]) (more than $MaxPulls)" }; continue }
+        $pulls = @(); $closing = @{}; $err = $null
+        foreach ($p in @($a.nodes)) {
+            if ([int] $p.labels.totalCount -gt @($p.labels.nodes).Count) { $err = "labels of #$($p.number) not read whole" }
+            $pulls += [pscustomobject] @{ number = [int] $p.number; title = [string] $p.title; body = [string] $p.body; html_url = [string] $p.url; labels = @($p.labels.nodes | ForEach-Object { [pscustomobject] @{ name = [string] $_.name } }) }
+            $closing[[int] $p.number] = @($p.closingIssuesReferences.nodes | ForEach-Object { @{ Repo = [string] $_.repository.nameWithOwner; Number = [int] $_.number } })
+        }
+        $out[$Shas[$i]] = @{ Pulls = $pulls; Closing = $closing; Error = $err }
+    }
+    $out
+}
+
+function Get-CommitPulls {
+    # The pull requests of many commits in few GraphQL queries ($Batch commits each; one REST call per commit and one
+    # GraphQL call per pull request would spend the run's token on a large comparison). A query that fails leaves its
+    # commits out: their pull requests are not read (Get-HoldFacts waits).
+    param([string] $AppRepo, [string[]] $Shas, [int] $Batch = 40, [int] $MaxPulls = 5)
+    $owner, $name = $AppRepo.Split('/', 2)
+    $all = @{}
+    for ($i = 0; $i -lt $Shas.Count; $i += $Batch) {
+        $chunk = @($Shas[$i..([Math]::Min($i + $Batch, $Shas.Count) - 1)])
+        $fields = for ($j = 0; $j -lt $chunk.Count; $j++) {
+            "c${j}: object(oid: `"$($chunk[$j])`") { ... on Commit { associatedPullRequests(first: $MaxPulls) { totalCount nodes { number title body url labels(first: 50) { totalCount nodes { name } } closingIssuesReferences(first: 50) { nodes { number repository { nameWithOwner } } } } } } }"
+        }
+        $q = "query(`$o: String!, `$r: String!) { repository(owner: `$o, name: `$r) { $($fields -join ' ') } }"
+        try {
+            $g = (& gh api graphql -f "query=$q" -f "o=$owner" -f "r=$name") | ConvertFrom-Json -Depth 30
+            $part = ConvertFrom-CommitPullsGraph -Repository $g.data.repository -Shas $chunk -MaxPulls $MaxPulls
+            foreach ($k in $part.Keys) { $all[$k] = $part[$k] }
+        } catch { Write-Host "Pull requests of $($chunk.Count) commits not read: $($_.Exception.Message)" }
+    }
+    $all
+}
+
+function Get-RepoHeld {
+    # Every issue and pull request of the application repository labelled Hold (case ignored), open or closed, by number:
+    # one listing instead of one read per referenced item. Throws when a read fails.
+    param([string] $AppRepo)
+    $held = @{}
+    $labels = @(& gh api "repos/$AppRepo/labels?per_page=100" --paginate --jq '.[].name')
+    foreach ($l in @($labels | Where-Object { $_ -ieq 'Hold' })) {
+        foreach ($line in @(& gh api "repos/$AppRepo/issues?labels=$([uri]::EscapeDataString($l))&state=all&per_page=100" --paginate --jq '.[] | [.number, .html_url] | @tsv')) {
+            $n, $url = "$line" -split "`t", 2
+            if ($n -match '^\d+$') { $held[[int] $n] = @{ Number = [int] $n; Url = $url; Labels = @($l) } }
+        }
+    }
+    $held
 }
 
 function Get-ReferencedNumbers {
@@ -461,8 +551,10 @@ function Get-ReferencedNumbers {
 function Get-HoldFacts {
     <# Commits (sha, commit.message); GetPulls {param($sha)} -> pull requests (number, title, body, labels, html_url);
        GetClosing {param($pullNumber)} -> issue refs (@{Repo;Number}); GetItem {param($repo,$number)} -> @{Number;Url;Labels},
-       or $null when there is no such item (ConvertFrom-IssueRead). Any scriptblock may throw: that becomes an entry of Unknown. #>
-    param([object[]] $Commits, [string] $Repo, [scriptblock] $GetPulls, [scriptblock] $GetClosing, [scriptblock] $GetItem, [int] $Max = 300)
+       or $null when there is no such item (ConvertFrom-IssueRead). Any scriptblock may throw: that becomes an entry of Unknown.
+       RepoHeld (Get-RepoHeld): when given, the complete list of Repo's items labelled Hold, by number; a reference to Repo
+       is then answered from it without a read, and only the references to other repositories count against Max. #>
+    param([object[]] $Commits, [string] $Repo, [scriptblock] $GetPulls, [scriptblock] $GetClosing, [scriptblock] $GetItem, [int] $Max = 300, [hashtable] $RepoHeld = $null)
     $refs = [Collections.Generic.Dictionary[string, hashtable]]::new()
     $items = @{}; $unknown = [Collections.Generic.List[string]]::new()
     function Add-Ref($r) { $refs["$($r.Repo)#$($r.Number)"] = $r }
@@ -476,6 +568,10 @@ function Get-HoldFacts {
         }
     }
     $todo = @($refs.Keys | Where-Object { -not $items.ContainsKey($_) } | Sort-Object)
+    if ($null -ne $RepoHeld) {
+        foreach ($k in @($todo | Where-Object { $refs[$_].Repo -ieq $Repo })) { $n = [int] $refs[$k].Number; if ($RepoHeld.ContainsKey($n)) { $items[$k] = $RepoHeld[$n] } }
+        $todo = @($todo | Where-Object { $refs[$_].Repo -ine $Repo })
+    }
     if ($todo.Count -gt $Max) { $unknown.Add("$($todo.Count) referenced items (more than $Max)"); $todo = @($todo | Select-Object -First $Max) }
     foreach ($k in $todo) {
         $r = $refs[$k]
@@ -569,6 +665,7 @@ $space = [string] $system.octopus.spaceId
 $ownRepo = "$($system.system.githubOrg)/$($system.system.repository)"
 $app = (@($system.deployables | Where-Object { $_.name -eq $Deployable }) | Select-Object -First 1)
 $appRepo = "$($system.system.githubOrg)/$($app.repository)"
+$appClone = Join-Path ($env:RUNNER_TEMP ? $env:RUNNER_TEMP : [IO.Path]::GetTempPath()) "ui-auto-promote-$Deployable-$PID"
 if (-not $env:OCTOPUS_ACCESS_TOKEN -and -not $env:OCTOPUS_API_KEY) { throw 'no Octopus credential: OCTOPUS_ACCESS_TOKEN (OctopusDeploy/login) or OCTOPUS_API_KEY' }
 
 function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
@@ -719,21 +816,16 @@ function Get-Evaluation {
     $pathsReason = if ($RunningUnknown) { "no base commit: /_build names none and $RunningUnknown" } else { 'no base commit: neither /_build nor the running release names one' }
     if ($baseSha -match '^[0-9a-f]{40}$') {
         try {
-            $pages = @(); $page = 1
-            do {
-                $cmp = Invoke-Gh @("repos/$appRepo/compare/${baseSha}...${sha}?per_page=100&page=$page")
-                $pages += $cmp
-                $merged = Merge-ComparePages -Pages $pages
-                $page++
-            } while ($merged.Commits.Count -lt $cmp.total_commits -and $page -le 5 -and @($cmp.commits).Count -gt 0)
+            $merged = Get-AppComparison -AppRepo $appRepo -Directory $appClone -BaseSha $baseSha -Sha $sha
             $paths = $merged.Paths; $pathsKnown = $merged.Known; $pathsReason = $merged.Reason
+            Say "Comparison $baseSha...${sha}: $($merged.Status), $(@($merged.Commits).Count) commits, $(@($paths).Count) paths."
             if ($merged.Status -eq 'behind') { return @{ Behind = $true; Sha = $sha; BaseSha = $baseSha } }
-            $hold = Get-HoldFacts -Commits $merged.Commits -Repo $appRepo `
-                -GetPulls { param($c) $r = @(); $pg = 1; do { $x = @(Invoke-Gh @("repos/$appRepo/commits/$c/pulls?per_page=100&page=$pg")); $r += $x; $pg++ } while ($x.Count -eq 100 -and $pg -le 5); $r } `
-                -GetClosing { param($n)
-                    $q = 'query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){closingIssuesReferences(first:50){nodes{number repository{nameWithOwner}}}}}}'
-                    $g = (& gh api graphql -f query=$q -f "o=$($system.system.githubOrg)" -f "r=$($app.repository)" -F "n=$n") | ConvertFrom-Json
-                    @($g.data.repository.pullRequest.closingIssuesReferences.nodes | ForEach-Object { @{ Repo = $_.repository.nameWithOwner; Number = [int] $_.number } }) } `
+            $commitPulls = Get-CommitPulls -AppRepo $appRepo -Shas @($merged.Commits | ForEach-Object sha)
+            $closingRefs = @{}; foreach ($e in $commitPulls.Values) { foreach ($n in $e.Closing.Keys) { $closingRefs[$n] = $e.Closing[$n] } }
+            $repoHeld = try { Get-RepoHeld -AppRepo $appRepo } catch { Say "The Hold items of $appRepo could not be listed ($($_.Exception.Message)): each is read."; $null }
+            $hold = Get-HoldFacts -Commits $merged.Commits -Repo $appRepo -RepoHeld $repoHeld `
+                -GetPulls { param($c) $e = $commitPulls[$c]; if (-not $e) { throw "pull requests of $c not read" }; if ($e.Error) { throw $e.Error }; $e.Pulls }.GetNewClosure() `
+                -GetClosing { param($n) if (-not $closingRefs.ContainsKey([int] $n)) { throw "closing references of #$n not read" }; $closingRefs[[int] $n] }.GetNewClosure() `
                 -GetItem { param($repo, $n)
                     # A failed gh answers its exit code here (not an exception), so a 404 can be told from other failures.
                     $PSNativeCommandUseErrorActionPreference = $false
