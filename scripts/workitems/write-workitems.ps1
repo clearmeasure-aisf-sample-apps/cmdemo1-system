@@ -148,7 +148,7 @@ function Optimize-History([object[]] $Entries) {
 }
 
 function Read-FactoryState([object[]] $Comments) {
-    # The fworker's machine-read state comment ("<!-- factory-state:<worker> v1 -->" and a json block); the newest by
+    # The machine-read factory-state comment ("<!-- factory-state:<worker> v1 -->" and a json block); the newest by
     # its "updated" when an item has more than one. $null when none parses.
     $best = $null
     foreach ($comment in @($Comments)) {
@@ -165,8 +165,8 @@ function Read-FactoryState([object[]] $Comments) {
 }
 
 function Get-FactoryHistory($State) {
-    # The columns the fworker recorded: "flow" (column and time, in order), else "dispatched_at" (when it dispatched
-    # each column) for states written before flow existed; merge.queued_at is Release Queue, merge.done_at Done.
+    # The columns the factory-state comment recorded: "flow" (column and time, in order), else "dispatched_at" (when
+    # it dispatched each column) for states written before flow existed; merge.queued_at is Release Queue, merge.done_at Done.
     $entries = [Collections.Generic.List[object]]::new()
     if ($null -eq $State) { return , @() }
     $flow = @(Get-Value $State 'flow' | Where-Object { $null -ne $_ })
@@ -396,9 +396,9 @@ function Get-Runtime($Issue) {
 }
 
 function Get-FunctionalTestingFailures($State, [object[]] $Comments, [object[]] $History) {
-    # Functional Testing failures that sent the item back: the most of the fworker's count (demotions: FAIL verdicts
-    # that moved it back to Development), its FAIL verdict comments, and moves out of Functional Testing to an
-    # earlier column in the history.
+    # Functional Testing failures that sent the item back: the most of the demotion count (FAIL verdicts that moved
+    # it back to Development), its FAIL verdict comments, and moves out of Functional Testing to an earlier column in
+    # the history.
     $demotions = [int] (Get-Value $State 'demotions')
     $verdicts = @($Comments | Where-Object { ([string] (Get-Value $_ 'body')) -match 'verdict for \*\*Functional Testing\*\*: FAIL' }).Count
     $back = 0
@@ -1032,7 +1032,7 @@ $document = [ordered] @{
             "column: the item's Status on project $Project (node $($script:ProjectNodeId)) when readable, else cm-ai-ops-bot's journal lines only (A → B). A factory-state comment is not a column. A derived Release Queue item whose change runs in prod is Done at that deployment; a closed issue that never reached Release Queue is Done when closed."
             "releaseCandidate: the first release (GitHub deployment 'release', version of its master Build run) whose commit contains the merge commit of the item's last merged pull request."
             "environments.<env>: the first non-reverted pin of $Deployable in that environment whose release contains the merge commit (version, pin time), while the commit running there (delivery.json) still contains it."
-            'ftFailures: the most of the fworker''s demotions, its "Functional Testing: FAIL" verdicts and moves from Functional Testing back to an earlier column; reverts: merged pull requests of the item reverted on the default branch.'
+            'ftFailures: the most of the demotion count, "Functional Testing: FAIL" verdicts and moves from Functional Testing back to an earlier column; reverts: merged pull requests of the item reverted on the default branch.'
         )
     }
     stats       = Get-GroupedStats $sortedItems $now $StatsDays $Weeks

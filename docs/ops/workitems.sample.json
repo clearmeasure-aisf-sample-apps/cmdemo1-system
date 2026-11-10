@@ -27,7 +27,7 @@
       "column: the item's Status on project 679 (node PVT_kwDOD_ESUc4BliGL) when readable, else cm-ai-ops-bot's journal lines only (A → B). A factory-state comment is not a column. A derived Release Queue item whose change runs in prod is Done at that deployment; a closed issue that never reached Release Queue is Done when closed.",
       "releaseCandidate: the first release (GitHub deployment 'release', version of its master Build run) whose commit contains the merge commit of the item's last merged pull request.",
       "environments.<env>: the first non-reverted pin of ui in that environment whose release contains the merge commit (version, pin time), while the commit running there (delivery.json) still contains it.",
-      "ftFailures: the most of the fworker's demotions, its \"Functional Testing: FAIL\" verdicts and moves from Functional Testing back to an earlier column; reverts: merged pull requests of the item reverted on the default branch."
+      "ftFailures: the most of the demotion count, \"Functional Testing: FAIL\" verdicts and moves from Functional Testing back to an earlier column; reverts: merged pull requests of the item reverted on the default branch."
     ]
   },
   "stats": {

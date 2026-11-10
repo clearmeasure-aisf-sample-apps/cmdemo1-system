@@ -122,6 +122,20 @@ if ($system.system.ContainsKey('pipelineSignOffMembers')) {
         Test-Rule 'system.pipelineSignOffMembers with a deployable that has pipelineSignOff' (@($system.deployables | Where-Object { $_ -is [Collections.IDictionary] -and $_['pipelineSignOff'] -eq $true }).Count -gt 0) 'the team exists only while a deployable asks for pipelineSignOff'
     }
 }
+# system.azureExcludeDeployables (#542): names of deployables infra/ omits from Azure while they stay in
+# system.json for Octopus (octopus/ does not read this key). Each name must be a deployable that is not retired.
+if ($system.system.ContainsKey('azureExcludeDeployables')) {
+    $excluded = $system.system.azureExcludeDeployables
+    $deployableNames = @($system.deployables | ForEach-Object { [string] $_.name })
+    $valid = $excluded -is [array] -and $excluded.Count -ge 1 -and $excluded.Count -le 50 -and
+        @($excluded | Where-Object { $_ -isnot [string] -or $deployableNames -cnotcontains $_ }).Count -eq 0 -and
+        @($excluded | Select-Object -Unique).Count -eq $excluded.Count
+    Test-Rule 'system.azureExcludeDeployables' $valid "a list of 1 to 50 deployable names from system.json, each once: $($deployableNames -join ', ')"
+    if ($valid) {
+        $retiredExcluded = @($system.deployables | Where-Object { $excluded -ccontains [string] $_.name -and $_['retired'] -eq $true } | ForEach-Object { [string] $_.name })
+        Test-Rule 'system.azureExcludeDeployables without retired' ($retiredExcluded.Count -eq 0) "retired already omits Azure ($($retiredExcluded -join ', ')); use one or the other"
+    }
+}
 foreach ($deployable in @($system.deployables)) {
     # Optional: the dotnet test filter of the acceptance tests after a deployment (variable AcceptanceTests.Filter),
     # conditions <property><operator><value> (operators = != ~ !~) joined by & or |, parentheses allowed. Without it

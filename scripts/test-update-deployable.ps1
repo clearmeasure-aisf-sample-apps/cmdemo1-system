@@ -43,7 +43,7 @@ Test-Case 'blank identifier is skipped' $blank.Apply $false
 $missing = Get-FeatureFlagClientInject -Deployable 'ui' -ClientIdentifier $null
 Test-Case 'missing identifier is skipped' $missing.Apply $false
 
-foreach ($deployable in @('aisf', 'fworker', 'UI')) {
+foreach ($deployable in @('dashboard', 'scorecard', 'UI')) {
     $skipped = Get-FeatureFlagClientInject -Deployable $deployable -ClientIdentifier $client
     Test-Case "$deployable is skipped" @($skipped.Apply, @($skipped.Arguments).Count) @($false, 0)
 }

@@ -7,19 +7,23 @@
     "repository": "cmdemo1-system",
     "sqlLocation": "centralus",
     "sqlSku": "Basic",
-    "denyExcludedActions": [
-      "Microsoft.App/jobs/start/action",
-      "Microsoft.App/jobs/stop/action",
-      "Microsoft.App/jobs/stop/execution/action"
-    ],
-    "pipelineSignOffMembers": [
-      "cmdemo1-fworker-gateway-agent"
-    ],
     "links": [
       {
         "text": "Scorecard",
         "url": "https://legendary-doodle-8lk2k24.pages.github.io/"
       }
+    ],
+    "pipelineSignOffMembers": [
+      "cmdemo1-fworker-gateway-agent"
+    ],
+    "denyExcludedActions": [
+      "Microsoft.App/jobs/start/action",
+      "Microsoft.App/jobs/stop/action",
+      "Microsoft.App/jobs/stop/execution/action"
+    ],
+    "azureExcludeDeployables": [
+      "aisf",
+      "fworker"
     ]
   },
   "azure": {

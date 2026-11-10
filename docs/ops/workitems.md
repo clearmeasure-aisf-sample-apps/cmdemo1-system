@@ -127,7 +127,7 @@ Every issue of `cmdemo1-workorders`. Kept: every open issue, and a closed one cl
 - a linked pull request by `cm-ai-ops-bot`, `factory-worker-author`, `cursor`, `copilot-swe-agent` (Copilot), or any
   other bot account (a GitHub App, a login ending `[bot]`, or an author of type Bot);
 - a factory label (`factory worker`, `AI Factory`, `agent:*`, `worker:*`, `runtime:*`) or a `factory-state` comment.
-  Both are the record a bot wrote on the issue. Nothing is read from the fworker gateway, its Key Vault, or any other
+  Both are the record a bot wrote on the issue. Nothing is read from a factory gateway, its Key Vault, or any other
   service of it.
 
 `agent` is the specific identity: the worker named in a factory-state comment, else `cm-ai-ops-bot` when it was
