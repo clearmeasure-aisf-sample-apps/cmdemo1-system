@@ -6,7 +6,7 @@ user `cm-ai-ops-bot` across the `cmdemo1-*` repositories on organization project
 | File | For |
 |---|---|
 | [operating-instructions.md](operating-instructions.md) | What the bot does on every wake: scope, board flow, WIP, comments, releases, reporting. Read by the bot each wake; keep it short. |
-| [bootstrap.md](bootstrap.md) | Connecting a new Grok Bot account: secrets (names only), connectors, the two routines and their exact triggers and prompt. |
+| [bootstrap.md](bootstrap.md) | Connecting a new Grok Bot account: secrets (names only), connectors, the three routines and their exact triggers and prompts. |
 
 How to write code in an application repository is not here: it is in that repository's `AGENTS.md` and `CLAUDE.md`,
 which any agent, local or cloud, reads. Change the bot's behavior with a pull request to this folder; the routines'
