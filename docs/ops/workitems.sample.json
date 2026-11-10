@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-09T23:25:41Z",
+  "generatedAt": "2026-11-10T00:13:10Z",
   "scope": {
     "repo": "clearmeasure-aisf-sample-apps/cmdemo1-workorders",
     "project": 679,
@@ -21,10 +21,10 @@
       "weeks": 8
     },
     "rules": [
-      "In scope: an issue assigned (now or before) to cm-ai-ops-bot; or labelled \"factory worker\", \"AI Factory\", agent:*, worker:* or runtime:*; or with a factory-state comment of the fworker; or with a linked pull request by factory-worker-author, cursor or cm-ai-ops-bot.",
+      "Every issue of the repository. worker \"bot\": assigned (now or before) to cm-ai-ops-bot, or a linked pull request by cm-ai-ops-bot, factory-worker-author, cursor, Copilot or another bot account, or a factory label or factory-state comment (the record on the issue). worker \"team\": everyone else. agent is that identity.",
       "Kept: every open item, and closed items closed, merged or deployed in the last 56 days.",
-      "Linked pull request: closing reference; \"Closes/Fixes/Resolves/Refs #N\"; a title ending \"(#N)\"; branch factory-worker/<N>-* or issue-<N>-*; the pull request of the factory state.",
-      "column: the item's Status on project 679 when readable, else derived from the fworker's factory-state (flow or dispatched_at, merge.queued_at = Release Queue, merge.done_at = Done) and the bots' journal lines (A → B); a derived Release Queue item whose change runs in prod is Done at that deployment; a closed issue that never reached Release Queue is Done when closed.",
+      "Linked pull request: closing reference; \"Closes/Fixes/Resolves/Refs #N\"; a title ending \"(#N)\"; branch factory-worker/<N>-* or issue-<N>-*; the pull request named in a factory-state comment.",
+      "column: the item's Status on project 679 (node PVT_kwDOD_ESUc4BliGL) when readable, else cm-ai-ops-bot's journal lines only (A → B). A factory-state comment is not a column. A derived Release Queue item whose change runs in prod is Done at that deployment; a closed issue that never reached Release Queue is Done when closed.",
       "releaseCandidate: the first release (GitHub deployment 'release', version of its master Build run) whose commit contains the merge commit of the item's last merged pull request.",
       "environments.<env>: the first non-reverted pin of ui in that environment whose release contains the merge commit (version, pin time), while the commit running there (delivery.json) still contains it.",
       "ftFailures: the most of the fworker's demotions, its \"Functional Testing: FAIL\" verdicts and moves from Functional Testing back to an earlier column; reverts: merged pull requests of the item reverted on the default branch."
@@ -32,17 +32,17 @@
   },
   "stats": {
     "wipByColumn": {
-      "Todo": 15,
+      "Todo": 25,
       "In Progress": 0,
-      "Technical Design": 2,
+      "Technical Design": 0,
       "Development": 0,
       "Functional Testing": 1,
-      "Release Queue": 11
+      "Release Queue": 3
     },
     "cycleTimeHours": {
-      "median": 0.2,
-      "p85": 3.9,
-      "n": 619
+      "median": 0.0,
+      "p85": 0.0,
+      "n": 1
     },
     "leadTimeHours": {
       "median": 10.0,
@@ -82,12 +82,12 @@
       },
       {
         "weekStart": "2026-11-02",
-        "merged": 141,
+        "merged": 152,
         "deployedProd": 0
       },
       {
         "weekStart": "2026-11-09",
-        "merged": 4,
+        "merged": 15,
         "deployedProd": 0
       }
     ],
@@ -95,44 +95,250 @@
       "ftFailures": 51,
       "reverts": 0,
       "reworkedItems": 40,
-      "testedItems": 678,
-      "rate": 0.059
+      "testedItems": 695,
+      "rate": 0.058
     },
     "cost": {
       "totalUsd": null,
-      "note": "Source unavailable: Cursor's API (api.cursor.com, usage per agent) needs a Cursor API key, which the fworker keeps in its Azure Key Vault and this repository does not store; the fworker gateway's /api/v1/status (token counts, not dollars) needs the gateway's credential; no issue or pull request comment states a cost."
+      "note": "No cost source is connected yet."
+    },
+    "all": {
+      "wipByColumn": {
+        "Todo": 25,
+        "In Progress": 0,
+        "Technical Design": 0,
+        "Development": 0,
+        "Functional Testing": 1,
+        "Release Queue": 3
+      },
+      "cycleTimeHours": {
+        "median": 0.0,
+        "p85": 0.0,
+        "n": 1
+      },
+      "leadTimeHours": {
+        "median": 10.0,
+        "p85": 49.2,
+        "n": 224
+      },
+      "perWeek": [
+        {
+          "weekStart": "2026-09-21",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-09-28",
+          "merged": 1,
+          "deployedProd": 1
+        },
+        {
+          "weekStart": "2026-10-05",
+          "merged": 63,
+          "deployedProd": 56
+        },
+        {
+          "weekStart": "2026-10-12",
+          "merged": 80,
+          "deployedProd": 84
+        },
+        {
+          "weekStart": "2026-10-19",
+          "merged": 163,
+          "deployedProd": 140
+        },
+        {
+          "weekStart": "2026-10-26",
+          "merged": 212,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-02",
+          "merged": 152,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-09",
+          "merged": 15,
+          "deployedProd": 0
+        }
+      ],
+      "rework": {
+        "ftFailures": 51,
+        "reverts": 0,
+        "reworkedItems": 40,
+        "testedItems": 695,
+        "rate": 0.058
+      },
+      "cost": {
+        "totalUsd": null,
+        "note": "No cost source is connected yet."
+      }
+    },
+    "bot": {
+      "wipByColumn": {
+        "Todo": 24,
+        "In Progress": 0,
+        "Technical Design": 0,
+        "Development": 0,
+        "Functional Testing": 1,
+        "Release Queue": 3
+      },
+      "cycleTimeHours": {
+        "median": 0.0,
+        "p85": 0.0,
+        "n": 1
+      },
+      "leadTimeHours": {
+        "median": 10.0,
+        "p85": 49.2,
+        "n": 224
+      },
+      "perWeek": [
+        {
+          "weekStart": "2026-09-21",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-09-28",
+          "merged": 1,
+          "deployedProd": 1
+        },
+        {
+          "weekStart": "2026-10-05",
+          "merged": 63,
+          "deployedProd": 56
+        },
+        {
+          "weekStart": "2026-10-12",
+          "merged": 80,
+          "deployedProd": 84
+        },
+        {
+          "weekStart": "2026-10-19",
+          "merged": 163,
+          "deployedProd": 140
+        },
+        {
+          "weekStart": "2026-10-26",
+          "merged": 212,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-02",
+          "merged": 141,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-09",
+          "merged": 4,
+          "deployedProd": 0
+        }
+      ],
+      "rework": {
+        "ftFailures": 51,
+        "reverts": 0,
+        "reworkedItems": 40,
+        "testedItems": 673,
+        "rate": 0.059
+      },
+      "cost": {
+        "totalUsd": null,
+        "note": "No cost source is connected yet."
+      },
+      "hoursByColumn": {
+        "In Progress": 0.1,
+        "Technical Design": 0.1,
+        "Development": 0.0,
+        "Functional Testing": 0.5,
+        "Release Queue": 1.1,
+        "Done": 2.1
+      },
+      "throughputByAgent": {
+        "cm-ai-ops-bot": 1
+      },
+      "mergeToProdHours": {
+        "median": 4.8,
+        "p85": 41.5,
+        "n": 224
+      }
+    },
+    "team": {
+      "wipByColumn": {
+        "Todo": 1,
+        "In Progress": 0,
+        "Technical Design": 0,
+        "Development": 0,
+        "Functional Testing": 0,
+        "Release Queue": 0
+      },
+      "cycleTimeHours": {
+        "median": null,
+        "p85": null,
+        "n": 0
+      },
+      "leadTimeHours": {
+        "median": null,
+        "p85": null,
+        "n": 0
+      },
+      "perWeek": [
+        {
+          "weekStart": "2026-09-21",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-09-28",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-10-05",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-10-12",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-10-19",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-10-26",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-02",
+          "merged": 11,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-09",
+          "merged": 11,
+          "deployedProd": 0
+        }
+      ],
+      "rework": {
+        "ftFailures": 0,
+        "reverts": 0,
+        "reworkedItems": 0,
+        "testedItems": 22,
+        "rate": 0.0
+      },
+      "cost": {
+        "totalUsd": null,
+        "note": "No cost source is connected yet."
+      }
     }
   },
   "items": [
-    {
-      "number": 1586,
-      "title": "AI ops test: clarify Todo intake in board-columns.md",
-      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1586",
-      "state": "open",
-      "createdAt": "2026-11-09T22:59:52Z",
-      "closedAt": null,
-      "column": "Todo",
-      "columnSource": "derived",
-      "columnHistory": [],
-      "assignee": "cm-ai-ops-bot",
-      "agent": "cm-ai-ops-bot",
-      "runtime": null,
-      "scopeReasons": [
-        "assigned to cm-ai-ops-bot"
-      ],
-      "cursorSessions": [],
-      "prs": [],
-      "docsOnly": null,
-      "releaseCandidate": null,
-      "environments": {
-        "tdd": null,
-        "uat": null,
-        "prod": null
-      },
-      "ftFailures": 0,
-      "reverts": 0,
-      "costUsd": null
-    },
     {
       "number": 1565,
       "title": "AI ops test: unit tests for Employee.HasRole",
@@ -145,25 +351,36 @@
       "columnHistory": [
         {
           "column": "In Progress",
-          "enteredAt": "2026-11-09T22:07:44Z"
+          "enteredAt": "2026-11-09T22:07:44Z",
+          "leftAt": "2026-11-09T22:11:39Z",
+          "hours": 0.1
         },
         {
           "column": "Technical Design",
-          "enteredAt": "2026-11-09T22:11:39Z"
+          "enteredAt": "2026-11-09T22:11:39Z",
+          "leftAt": "2026-11-09T22:23:09Z",
+          "hours": 0.2
         },
         {
           "column": "Development",
-          "enteredAt": "2026-11-09T22:23:09Z"
+          "enteredAt": "2026-11-09T22:23:09Z",
+          "leftAt": "2026-11-09T22:23:09Z",
+          "hours": 0.0
         },
         {
           "column": "Functional Testing",
-          "enteredAt": "2026-11-09T22:23:09Z"
+          "enteredAt": "2026-11-09T22:23:09Z",
+          "leftAt": "2026-11-09T22:53:22Z",
+          "hours": 0.5
         },
         {
           "column": "Release Queue",
-          "enteredAt": "2026-11-09T22:53:22Z"
+          "enteredAt": "2026-11-09T22:53:22Z",
+          "leftAt": null,
+          "hours": 1.4
         }
       ],
+      "worker": "bot",
       "assignee": "cm-ai-ops-bot",
       "agent": "cm-ai-ops-bot",
       "runtime": null,
@@ -182,7 +399,8 @@
           "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1571",
           "state": "merged",
           "mergedAt": "2026-11-09T22:49:41Z",
-          "mergeSha": "dfb1740a82980c041c063d61e2337f4e01b68a52"
+          "mergeSha": "dfb1740a82980c041c063d61e2337f4e01b68a52",
+          "checks": "success"
         }
       ],
       "docsOnly": null,
@@ -191,143 +409,85 @@
         "createdAt": "2026-11-09T23:02:28Z"
       },
       "environments": {
-        "tdd": null,
+        "tdd": {
+          "version": "2.4.2060",
+          "deployedAt": "2026-11-09T23:04:14Z"
+        },
         "uat": null,
         "prod": null
       },
       "ftFailures": 0,
       "reverts": 0,
-      "costUsd": null
+      "costUsd": null,
+      "latestStatusComment": {
+        "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1565#issuecomment-6753645229",
+        "at": "2026-11-09T22:53:22Z",
+        "kind": "status"
+      },
+      "mergeToProdHours": null
     },
     {
-      "number": 1563,
-      "title": "AI ops test: reject blank Team names in the domain",
-      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1563",
+      "number": 1543,
+      "title": "Code quality: refactoring playbook for oversized files (Fowler/DDD/Kerievsky/Clean Code)",
+      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1543",
       "state": "open",
-      "createdAt": "2026-11-09T22:06:21Z",
+      "createdAt": "2026-11-09T14:25:32Z",
       "closedAt": null,
-      "column": "Functional Testing",
+      "column": "Todo",
       "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "Functional Testing",
-          "enteredAt": "2026-11-09T22:23:06Z"
-        }
-      ],
-      "assignee": "cm-ai-ops-bot",
-      "agent": "cm-ai-ops-bot",
+      "columnHistory": [],
+      "worker": "team",
+      "assignee": null,
+      "agent": "jeffreypalermo",
       "runtime": null,
-      "scopeReasons": [
-        "assigned to cm-ai-ops-bot",
-        "pull request by cm-ai-ops-bot"
-      ],
+      "scopeReasons": [],
       "cursorSessions": [
-        "https://cursor.com/agents/bc-02512a67-f90e-59e8-b446-3c0b3763cb4b",
-        "https://cursor.com/agents/bc-4e38b30a-fe79-58d2-b2f4-ce0b0d01f810",
-        "https://cursor.com/agents/bc-530d552b-e43d-5254-9ea1-e3a5727ad252"
+        "https://cursor.com/agents/bc-5fb338c0-9a5b-5c5d-9c51-8ffbdcb80bfa"
       ],
       "prs": [
         {
-          "number": 1570,
-          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1570",
+          "number": 1546,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1546",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1553,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1553",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1554,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1554",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1557,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1557",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1558,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1558",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1559,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1559",
           "state": "open",
           "mergedAt": null,
           "mergeSha": null
         }
       ],
-      "docsOnly": null,
-      "releaseCandidate": null,
-      "environments": {
-        "tdd": null,
-        "uat": null,
-        "prod": null
-      },
-      "ftFailures": 0,
-      "reverts": 0,
-      "costUsd": null
-    },
-    {
-      "number": 1562,
-      "title": "AI ops test: clarify facility request footer note",
-      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1562",
-      "state": "closed",
-      "createdAt": "2026-11-09T22:06:20Z",
-      "closedAt": "2026-11-09T22:54:31Z",
-      "column": "Release Queue",
-      "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "In Progress",
-          "enteredAt": "2026-11-09T22:07:28Z"
-        },
-        {
-          "column": "Functional Testing",
-          "enteredAt": "2026-11-09T22:23:05Z"
-        },
-        {
-          "column": "Release Queue",
-          "enteredAt": "2026-11-09T22:55:31Z"
-        }
-      ],
-      "assignee": "cm-ai-ops-bot",
-      "agent": "cm-ai-ops-bot",
-      "runtime": null,
-      "scopeReasons": [
-        "assigned to cm-ai-ops-bot",
-        "pull request by cm-ai-ops-bot"
-      ],
-      "cursorSessions": [
-        "https://cursor.com/agents/bc-90fff135-c30a-5fcd-830a-c006a1fa1247",
-        "https://cursor.com/agents/bc-20afcdde-34e5-507d-988f-1a693024371b",
-        "https://cursor.com/agents/bc-7aa6ea6e-fb03-5ec0-9533-a068e8dff70b"
-      ],
-      "prs": [
-        {
-          "number": 1567,
-          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1567",
-          "state": "merged",
-          "mergedAt": "2026-11-09T22:54:29Z",
-          "mergeSha": "e4b127f0de680b96854f150a6428310084a99ddd"
-        }
-      ],
-      "docsOnly": null,
-      "releaseCandidate": {
-        "version": "2.4.2062",
-        "createdAt": "2026-11-09T23:02:38Z"
-      },
-      "environments": {
-        "tdd": null,
-        "uat": null,
-        "prod": null
-      },
-      "ftFailures": 0,
-      "reverts": 0,
-      "costUsd": null
-    },
-    {
-      "number": 1515,
-      "title": "Docs: note 369",
-      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1515",
-      "state": "open",
-      "createdAt": "2026-11-06T16:44:23Z",
-      "closedAt": null,
-      "column": "Technical Design",
-      "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "Technical Design",
-          "enteredAt": "2026-11-06T16:44:27Z"
-        }
-      ],
-      "assignee": null,
-      "agent": "factory-worker",
-      "runtime": null,
-      "scopeReasons": [
-        "label factory worker",
-        "fworker state (factory-worker)"
-      ],
-      "cursorSessions": [],
-      "prs": [],
       "docsOnly": null,
       "releaseCandidate": null,
       "environments": {
@@ -348,30 +508,14 @@
       "closedAt": "2026-11-06T16:11:34Z",
       "column": "Done",
       "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "Technical Design",
-          "enteredAt": "2026-11-06T16:05:10Z"
-        },
-        {
-          "column": "Development",
-          "enteredAt": "2026-11-06T16:07:41Z"
-        },
-        {
-          "column": "Functional Testing",
-          "enteredAt": "2026-11-06T16:10:35Z"
-        },
-        {
-          "column": "Done",
-          "enteredAt": "2026-11-06T16:11:32Z"
-        }
-      ],
+      "columnHistory": [],
+      "worker": "bot",
       "assignee": null,
       "agent": "factory-worker",
       "runtime": null,
       "scopeReasons": [
         "label factory worker",
-        "fworker state (factory-worker)",
+        "factory state (factory-worker)",
         "pull request by factory-worker-author"
       ],
       "cursorSessions": [],
@@ -381,7 +525,8 @@
           "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1513",
           "state": "merged",
           "mergedAt": "2026-11-06T16:11:31Z",
-          "mergeSha": "877684c972a60b484fe7cede0733bdbc7fc6f034"
+          "mergeSha": "877684c972a60b484fe7cede0733bdbc7fc6f034",
+          "checks": "success"
         }
       ],
       "docsOnly": true,
@@ -399,134 +544,13 @@
       },
       "ftFailures": 0,
       "reverts": 0,
-      "costUsd": null
-    },
-    {
-      "number": 1326,
-      "title": "add copyright clearmeasure to footer of every page",
-      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1326",
-      "state": "open",
-      "createdAt": "2026-11-03T17:00:05Z",
-      "closedAt": null,
-      "column": "Release Queue",
-      "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "Technical Design",
-          "enteredAt": "2026-11-03T17:06:20Z"
-        },
-        {
-          "column": "Development",
-          "enteredAt": "2026-11-03T17:10:35Z"
-        },
-        {
-          "column": "Functional Testing",
-          "enteredAt": "2026-11-03T17:49:17Z"
-        },
-        {
-          "column": "Release Queue",
-          "enteredAt": "2026-11-03T18:06:50Z"
-        }
-      ],
-      "assignee": null,
-      "agent": "factory-worker",
-      "runtime": "cursor",
-      "scopeReasons": [
-        "label factory worker",
-        "label agent:cursor",
-        "fworker state (factory-worker)",
-        "pull request by factory-worker-author"
-      ],
-      "cursorSessions": [],
-      "prs": [
-        {
-          "number": 1329,
-          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1329",
-          "state": "merged",
-          "mergedAt": "2026-11-03T18:06:46Z",
-          "mergeSha": "355bba9ffe90a287fe14c910f4888bf8a12ce9d3"
-        }
-      ],
-      "docsOnly": false,
-      "releaseCandidate": {
-        "version": "2.4.1764",
-        "createdAt": "2026-11-03T18:19:58Z"
+      "costUsd": null,
+      "latestStatusComment": {
+        "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1512#issuecomment-6689864841",
+        "at": "2026-11-06T16:29:19Z",
+        "kind": "status"
       },
-      "environments": {
-        "tdd": {
-          "version": "2.4.1764",
-          "deployedAt": "2026-11-03T18:23:24Z"
-        },
-        "uat": null,
-        "prod": null
-      },
-      "ftFailures": 0,
-      "reverts": 0,
-      "costUsd": null
-    },
-    {
-      "number": 865,
-      "title": "UI: describe the user select and the help link",
-      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/865",
-      "state": "open",
-      "createdAt": "2026-10-27T02:35:32Z",
-      "closedAt": null,
-      "column": "Release Queue",
-      "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "Technical Design",
-          "enteredAt": "2026-10-27T09:05:29Z"
-        },
-        {
-          "column": "Development",
-          "enteredAt": "2026-10-27T09:09:49Z"
-        },
-        {
-          "column": "Functional Testing",
-          "enteredAt": "2026-10-27T09:38:54Z"
-        },
-        {
-          "column": "Release Queue",
-          "enteredAt": "2026-10-27T10:28:34Z"
-        }
-      ],
-      "assignee": null,
-      "agent": "factory-worker",
-      "runtime": "octopus",
-      "scopeReasons": [
-        "label factory worker",
-        "label runtime:octopus",
-        "label agent:cursor",
-        "fworker state (factory-worker)",
-        "pull request by factory-worker-author"
-      ],
-      "cursorSessions": [],
-      "prs": [
-        {
-          "number": 874,
-          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/874",
-          "state": "merged",
-          "mergedAt": "2026-10-27T10:04:03Z",
-          "mergeSha": "8daaa381b9eddbb8e17d92ce62dd67fe6d7c6138"
-        }
-      ],
-      "docsOnly": false,
-      "releaseCandidate": {
-        "version": "2.4.1288",
-        "createdAt": "2026-10-27T10:25:07Z"
-      },
-      "environments": {
-        "tdd": {
-          "version": "2.4.1288",
-          "deployedAt": "2026-10-27T10:27:11Z"
-        },
-        "uat": null,
-        "prod": null
-      },
-      "ftFailures": 0,
-      "reverts": 0,
-      "costUsd": null
+      "mergeToProdHours": null
     },
     {
       "number": 852,
@@ -537,30 +561,14 @@
       "closedAt": "2026-10-26T14:54:43Z",
       "column": "Done",
       "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "Technical Design",
-          "enteredAt": "2026-10-26T14:36:42Z"
-        },
-        {
-          "column": "Development",
-          "enteredAt": "2026-10-26T14:45:16Z"
-        },
-        {
-          "column": "Functional Testing",
-          "enteredAt": "2026-10-26T14:47:15Z"
-        },
-        {
-          "column": "Done",
-          "enteredAt": "2026-10-26T14:54:44Z"
-        }
-      ],
+      "columnHistory": [],
+      "worker": "bot",
       "assignee": null,
       "agent": "factory-worker",
       "runtime": null,
       "scopeReasons": [
         "label factory worker",
-        "fworker state (factory-worker)",
+        "factory state (factory-worker)",
         "pull request by factory-worker-author"
       ],
       "cursorSessions": [],
@@ -570,7 +578,8 @@
           "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/855",
           "state": "merged",
           "mergedAt": "2026-10-26T14:48:16Z",
-          "mergeSha": "43c6613f7e9de1237b354bf59b000d4b634a8d3a"
+          "mergeSha": "43c6613f7e9de1237b354bf59b000d4b634a8d3a",
+          "checks": "success"
         }
       ],
       "docsOnly": true,
@@ -588,193 +597,24 @@
       },
       "ftFailures": 1,
       "reverts": 0,
-      "costUsd": null
-    },
-    {
-      "number": 746,
-      "title": "Docs: note 3",
-      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/746",
-      "state": "closed",
-      "createdAt": "2026-10-25T10:45:10Z",
-      "closedAt": "2026-10-25T10:55:20Z",
-      "column": "Done",
-      "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "Technical Design",
-          "enteredAt": "2026-10-25T10:46:45Z"
-        },
-        {
-          "column": "Development",
-          "enteredAt": "2026-10-25T10:49:30Z"
-        },
-        {
-          "column": "Functional Testing",
-          "enteredAt": "2026-10-25T10:51:49Z"
-        },
-        {
-          "column": "Done",
-          "enteredAt": "2026-10-25T10:55:21Z"
-        }
-      ],
-      "assignee": null,
-      "agent": "factory-worker",
-      "runtime": null,
-      "scopeReasons": [
-        "label factory worker",
-        "fworker state (factory-worker)",
-        "pull request by factory-worker-author"
-      ],
-      "cursorSessions": [],
-      "prs": [
-        {
-          "number": 747,
-          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/747",
-          "state": "merged",
-          "mergedAt": "2026-10-25T10:53:00Z",
-          "mergeSha": "172447b5bf520070fac629da0a3b0d4dda0c521f"
-        }
-      ],
-      "docsOnly": true,
-      "releaseCandidate": {
-        "version": "2.4.1120",
-        "createdAt": "2026-10-25T11:11:21Z"
+      "costUsd": null,
+      "latestStatusComment": {
+        "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/852#issuecomment-6608859204",
+        "at": "2026-11-03T16:03:14Z",
+        "kind": "status"
       },
-      "environments": {
-        "tdd": {
-          "version": "2.4.1120",
-          "deployedAt": "2026-10-25T11:13:08Z"
-        },
-        "uat": {
-          "version": "2.4.1120",
-          "deployedAt": "2026-10-25T11:36:20Z"
-        },
-        "prod": {
-          "version": "2.4.1120",
-          "deployedAt": "2026-10-25T11:58:00Z"
-        }
-      },
-      "ftFailures": 0,
-      "reverts": 0,
-      "costUsd": null
-    },
-    {
-      "number": 503,
-      "title": "Docs: glossary entry for Factory worker (Cursor probe)",
-      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/503",
-      "state": "closed",
-      "createdAt": "2026-10-21T19:04:10Z",
-      "closedAt": "2026-10-21T19:33:10Z",
-      "column": "Done",
-      "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "Technical Design",
-          "enteredAt": "2026-10-21T19:19:58Z"
-        },
-        {
-          "column": "Development",
-          "enteredAt": "2026-10-21T19:23:27Z"
-        },
-        {
-          "column": "Functional Testing",
-          "enteredAt": "2026-10-21T19:30:24Z"
-        },
-        {
-          "column": "Done",
-          "enteredAt": "2026-10-21T19:33:11Z"
-        }
-      ],
-      "assignee": null,
-      "agent": "factory-worker",
-      "runtime": "cursor-cloud",
-      "scopeReasons": [
-        "label factory worker",
-        "label runtime:cursor-cloud",
-        "fworker state (factory-worker)",
-        "pull request by factory-worker-author"
-      ],
-      "cursorSessions": [
-        "https://cursor.com/agents/bc-713badac-aced-4846-b5f5-c849535aa5aa"
-      ],
-      "prs": [
-        {
-          "number": 505,
-          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/505",
-          "state": "merged",
-          "mergedAt": "2026-10-21T19:31:21Z",
-          "mergeSha": "7d9d73d4f78d3226883a6859c0478de1b2bb0ee8"
-        }
-      ],
-      "docsOnly": true,
-      "releaseCandidate": {
-        "version": "2.4.842",
-        "createdAt": "2026-10-23T19:09:30Z"
-      },
-      "environments": {
-        "tdd": {
-          "version": "2.4.842",
-          "deployedAt": "2026-10-23T19:12:36Z"
-        },
-        "uat": {
-          "version": "2.4.842",
-          "deployedAt": "2026-10-23T19:41:59Z"
-        },
-        "prod": {
-          "version": "2.4.842",
-          "deployedAt": "2026-10-23T20:20:10Z"
-        }
-      },
-      "ftFailures": 0,
-      "reverts": 0,
-      "costUsd": null
-    },
-    {
-      "number": 185,
-      "title": "Docs: add a status note to the deploy workflow consolidation analysis",
-      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/185",
-      "state": "closed",
-      "createdAt": "2026-10-12T01:09:37Z",
-      "closedAt": "2026-10-14T03:11:43Z",
-      "column": "Done",
-      "columnSource": "derived",
-      "columnHistory": [
-        {
-          "column": "Technical Design",
-          "enteredAt": "2026-10-12T01:16:47Z"
-        },
-        {
-          "column": "Development",
-          "enteredAt": "2026-10-12T01:24:15Z"
-        },
-        {
-          "column": "Done",
-          "enteredAt": "2026-10-14T03:11:43Z"
-        }
-      ],
-      "assignee": null,
-      "agent": "factory-worker",
-      "runtime": "cloud-4",
-      "scopeReasons": [
-        "label factory worker",
-        "label worker:cloud-4",
-        "fworker state (factory-worker)"
-      ],
-      "cursorSessions": [],
-      "prs": [],
-      "docsOnly": null,
-      "releaseCandidate": null,
-      "environments": {
-        "tdd": null,
-        "uat": null,
-        "prod": null
-      },
-      "ftFailures": 0,
-      "reverts": 0,
-      "costUsd": null
+      "mergeToProdHours": null
     }
   ],
   "releases": [
+    {
+      "version": "2.4.2064",
+      "sha": "7cdfa090d046e012da5f945cc3220e62b2899309",
+      "createdAt": "2026-11-09T23:29:31Z",
+      "items": [
+        1564
+      ]
+    },
     {
       "version": "2.4.2062",
       "sha": "e4b127f0de680b96854f150a6428310084a99ddd",
@@ -788,30 +628,13 @@
       "sha": "dfb1740a82980c041c063d61e2337f4e01b68a52",
       "createdAt": "2026-11-09T23:02:28Z",
       "items": [
+        1555,
         1560,
         1565
       ]
-    },
-    {
-      "version": "2.4.2024",
-      "sha": "0a14163f6a55962983e1f9858807fbe6dc3ae045",
-      "createdAt": "2026-11-09T16:58:14Z",
-      "items": []
-    },
-    {
-      "version": "2.4.2021",
-      "sha": "721ec4191882dadb5c290d70c6556a0e08c3a2e6",
-      "createdAt": "2026-11-09T16:36:24Z",
-      "items": []
-    },
-    {
-      "version": "2.4.2013",
-      "sha": "22103d140e81e75e1ba16fe6804c3eaf59683d6a",
-      "createdAt": "2026-11-09T15:42:18Z",
-      "items": []
     }
   ],
   "missing": [
-    "project 679: not readable with this token (Could not resolve to a ProjectV2 with the number 679.); columns are derived from the fworker's state and the bots' journal comments"
+    "project PVT_kwDOD_ESUc4BliGL (project 679): not readable with GH_TOKEN (Resource not accessible by integration); columns are derived from cm-ai-ops-bot journal comments. The workflow tries GH_PROJECT_TOKEN, an Actions secret of clearmeasure-aisf-sample-apps/cmdemo1-system: a token with read access to organization project 679 (node PVT_kwDOD_ESUc4BliGL). No other secret is needed, and none was added, then the cmdemo1-system App with Organization projects: read, then this workflow's own token."
   ]
 }

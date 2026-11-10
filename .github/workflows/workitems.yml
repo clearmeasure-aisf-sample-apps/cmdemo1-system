@@ -1,5 +1,5 @@
-# Work items for the dashboard: scripts/workitems/write-workitems.ps1 reads the issues of the business repository
-# (cmdemo1-workorders) that the system's bots handle (cm-ai-ops-bot, the fworker factory), and writes workitems.json:
+# Work items for the dashboard: scripts/workitems/write-workitems.ps1 reads every issue of the business repository
+# (cmdemo1-workorders), tags each bot or team, and writes workitems.json:
 # each item's column on the board (project 679) and when it entered each, its agent and Cursor sessions, its pull
 # requests, the release that first carries its change and the environments that run it; and the stats of the flow
 # (WIP, cycle and lead time, merged and deployed per week, rework, cost). docs/ops/workitems.md is the file's contract.
@@ -9,11 +9,12 @@
 # person started, so the environments follow each deployment once delivery.json says what runs where; its hourly
 # runs start this one too, which skips at once. On repository_dispatch "workitems", for an event of another
 # repository (a board move, a merge: docs/ops/workitems.md says what would send it), and on demand.
-# Credentials: the system's own GitHub App (system.json github.app; key SYSTEM_APP_PRIVATE_KEY in environment
-# "capabilities") for a token with Organization projects: read only, which reads project 679. An App that may not
-# read the organization's projects gets no token; the run goes on with this workflow's own token, which reads the
-# public repository but not the private project, and the columns are derived from the bots' comments (the file
-# says so in "missing" and scope.columnSource). This workflow's token pushes the branch. No new secret.
+# Credentials, for project 679 (node PVT_kwDOD_ESUc4BliGL), in this order, and no new secret: the Actions secret
+# GH_PROJECT_TOKEN when this repository has one; else the system's own GitHub App (system.json github.app; key
+# SYSTEM_APP_PRIVATE_KEY in environment "capabilities") for a token with Organization projects: read only. An App
+# that may not read the organization's projects gets no token. Either way a token that cannot read the project does
+# not fail the run: columns are derived from cm-ai-ops-bot's journal comments, and "missing" names the source that
+# failed and the secret that would read the board. This workflow's token pushes the branch.
 name: workitems
 
 on:
@@ -74,14 +75,25 @@ jobs:
             if git cat-file -e FETCH_HEAD:delivery.json 2>/dev/null; then git show FETCH_HEAD:delivery.json > "$TARGET"; fi
           fi
 
+      # GH_PROJECT_TOKEN first, when the repository has it; else the App; else this workflow's token, which reads the
+      # public repository and not the private project. The secret's value is never printed.
+      - name: Choose the token that reads the board
+        id: board
+        env:
+          PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PROJECT_TOKEN" ]; then echo "source=GH_PROJECT_TOKEN" >> "$GITHUB_OUTPUT"
+          elif [ -n "$APP_TOKEN" ]; then echo "source=the cmdemo1-system App" >> "$GITHUB_OUTPUT"
+          else echo "source=this workflow's token" >> "$GITHUB_OUTPUT"; fi
+
       - name: Write workitems.json
         shell: pwsh
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
-          APP_TOKEN: ${{ steps.app.outcome }}
-        run: |
-          if ($env:APP_TOKEN -ne 'success') { Write-Host "No token of the system's App with Organization projects: read (step outcome: $env:APP_TOKEN): reading with this workflow's token." }
-          ./scripts/workitems/write-workitems.ps1 -Path "${{ runner.temp }}/workitems.json" -DeliveryPath "${{ runner.temp }}/delivery.json"
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN || steps.app.outputs.token || github.token }}
+          BOARD_TOKEN_SOURCE: ${{ steps.board.outputs.source }}
+        run: ./scripts/workitems/write-workitems.ps1 -Path "${{ runner.temp }}/workitems.json" -DeliveryPath "${{ runner.temp }}/delivery.json"
 
       # One commit without a parent: the other files of the branch as published, and this workitems.json, as
       # github-actions[bot] with the token the checkout step kept. Nothing is pushed when the file says what the

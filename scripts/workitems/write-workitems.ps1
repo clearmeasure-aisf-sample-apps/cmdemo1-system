@@ -3,23 +3,23 @@
 
 <#
 .SYNOPSIS
-    Writes workitems.json: the work items the system's bots handle on the business repository, where each one stands
-    on the board, which release carries its change and which environments run it. It changes nothing anywhere.
+    Writes workitems.json: every issue of the business repository, tagged bot or team, where each one stands on the
+    board, which release carries its change and which environments run it. It changes nothing anywhere.
 
 .DESCRIPTION
     The workflow "workitems" runs it and publishes the file on branch "status", next to delivery.json, where the
     dashboard reads it from the browser (https://raw.githubusercontent.com/<org>/<repository>/status/workitems.json).
     docs/ops/workitems.md is the contract of the file and says how each field is found; in short:
 
-      scope      an issue of the deployable's repository (-Deployable, ui: cmdemo1-workorders) is in scope when the
-                 system's bots handle it: assigned (now or before) to cm-ai-ops-bot; a label of the fworker factory
-                 ("factory worker", "AI Factory", agent:*, worker:*, runtime:*); a factory-state comment of the fworker;
-                 or a linked pull request by factory-worker-author, cursor or cm-ai-ops-bot. Kept: every open one, and
-                 the closed ones closed, merged or deployed in the last -Days days.
-      column     the Status of the item on the organization's project -Project (679) when this token may read the
-                 project; otherwise derived (scope.columnSource "derived"): the fworker's factory-state comment
-                 (flow, or dispatched_at; merge.queued_at is Release Queue, merge.done_at Done), and the journal lines
-                 of the bots ("Todo → In Progress", "A → B → C", "X → Y (via Z)").
+      scope      every issue of the deployable's repository (-Deployable, ui: cmdemo1-workorders). Kept: every open
+                 one, and the closed ones closed, merged or deployed in the last -Days days. worker is "bot" when an
+                 automated identity did the work (assigned to cm-ai-ops-bot; a linked pull request by cm-ai-ops-bot,
+                 factory-worker-author, cursor, Copilot or another bot account; or the factory's label or state
+                 comment, which is a record on the issue), and "team" otherwise. agent is that identity.
+      column     the Status of the item on the organization's project -Project (679, node PVT_kwDOD_ESUc4BliGL) when
+                 this token may read the project; otherwise derived (scope.columnSource "derived") from cm-ai-ops-bot's
+                 journal lines only ("Todo → In Progress", "A → B → C", "X → Y (via Z)"). A factory-state comment is
+                 never a column source.
       prs        linked pull requests: closing references, "Refs/Closes/Fixes/Resolves #N", a title ending "(#N)",
                  branches factory-worker/<N>-* and issue-<N>-*, and the pull request of the factory state.
       release    releaseCandidate: the first release (by time) whose commit contains the merge commit of the item's
@@ -34,10 +34,13 @@
     Containment is git ancestry in a partial clone of the repository (-Clone; made with --filter=tree:0 when not
     given): the same answer as GitHub's compare API, without one call per commit and release.
 
-    Stats: WIP per column (open work, Done left out); cycle time (first column after Todo to Done) and lead time
-    (issue created to prod) of the items that finished in the last -StatsDays days, median and p85 in hours; merged
-    and deployed-to-prod items per week (Monday, UTC) for -Weeks weeks; rework (Functional Testing failures that sent
-    an item back to Development, and reverted pull requests); cost (null: no source this run may read states it).
+    Stats, three times (stats.all, stats.bot, stats.team), and the same keys of stats.all repeated at the top of
+    stats so a reader of the first contract sees every item: WIP per column (Done left out); cycle time (first column
+    after Todo to Done) and lead time (created to prod) over the last -StatsDays days, median and p85; merged and
+    deployed-to-prod per week (Monday, UTC) for -Weeks weeks; rework; cost (null: no cost source is connected).
+    stats.bot also has hoursByColumn (median hours in each column), throughputByAgent (items reaching Done in the
+    window, by agent) and mergeToProdHours. A bot item also carries the hours it spent in each column, its pull
+    requests' check conclusion, its latest status or blocker comment, and its merge-to-prod hours.
 
     A source that cannot be read fails nothing that does not need it: the file names it in "missing".
 
@@ -79,13 +82,14 @@ $ErrorActionPreference = 'Stop'
 
 # The board's columns in their order (cmdemo1-workorders docs/board-columns.md).
 $script:Columns = @('Todo', 'In Progress', 'Technical Design', 'Development', 'Functional Testing', 'Release Queue', 'Done')
-# The system's bots: who is assigned work, which labels the fworker factory puts on its items, who writes their pull
-# requests, and whose comments are journals (the column moves they write).
+# Who counts as automated work, and whose comments are a column journal when the project cannot be read. A factory
+# label or state comment is read from the issue (it is the record a bot left there); nothing calls a gateway.
 $script:BotAssignees = @('cm-ai-ops-bot')
 $script:BotLabelPattern = '^(factory worker|AI Factory)$|^(agent|worker|runtime):'
-$script:BotAuthors = @('factory-worker-author', 'cursor', 'cm-ai-ops-bot')
-$script:JournalAuthors = @('cm-ai-ops-bot', 'factory-worker-author', 'cursor')
-$script:CostNote = "Source unavailable: Cursor's API (api.cursor.com, usage per agent) needs a Cursor API key, which the fworker keeps in its Azure Key Vault and this repository does not store; the fworker gateway's /api/v1/status (token counts, not dollars) needs the gateway's credential; no issue or pull request comment states a cost."
+$script:BotAuthors = @('cm-ai-ops-bot', 'factory-worker-author', 'cursor', 'copilot-swe-agent', 'copilot')
+$script:JournalAuthors = @('cm-ai-ops-bot')
+$script:ProjectNodeId = 'PVT_kwDOD_ESUc4BliGL'
+$script:CostNote = 'No cost source is connected yet.'
 
 $script:ColumnPattern = ($script:Columns | ForEach-Object { [regex]::Escape($_) }) -join '|'
 
@@ -288,8 +292,17 @@ function Get-RevertedPullRequests([object[]] $PullRequests, [string[]] $CommitSu
     return , @($reverted)
 }
 
-function Get-ScopeReasons($Issue, [object[]] $PullRequests, $State) {
-    # Why the system's bots handle this issue; none: out of scope.
+function Test-BotIdentity([string] $Login, [string] $TypeName = '') {
+    # An automated account: a known bot, any GitHub App (app/<name> or <name>[bot]), or an author GraphQL types as Bot.
+    if ($TypeName -eq 'Bot') { return $true }
+    if ($Login -match '\[bot\]$' -or $Login -match '^app/') { return $true }
+    $name = ConvertTo-Login $Login
+    return [bool] ($name -and $script:BotAuthors -contains $name)
+}
+
+function Get-BotEvidence($Issue, [object[]] $PullRequests, $State) {
+    # Why the work was done by an automated identity; none means a person's item. A factory label or state comment is
+    # the record on the issue, not a call to anything.
     $reasons = [Collections.Generic.List[string]]::new()
     $assigned = @(Get-Nodes (Get-Value $Issue 'assignees') | ForEach-Object { ConvertTo-Login ([string] (Get-Value $_ 'login')) })
     $assigned += @(Get-Nodes (Get-Value $Issue 'timelineItems') | Where-Object { (Get-Value $_ '__typename') -eq 'AssignedEvent' } | ForEach-Object { ConvertTo-Login ([string] (Get-Value $_ 'assignee', 'login')) })
@@ -298,24 +311,78 @@ function Get-ScopeReasons($Issue, [object[]] $PullRequests, $State) {
         $name = [string] (Get-Value $label 'name')
         if ($name -match $script:BotLabelPattern) { $reasons.Add("label $name") }
     }
-    if ($null -ne $State) { $reasons.Add("fworker state ($($State['_worker']))") }
+    if ($null -ne $State) { $reasons.Add("factory state ($($State['_worker']))") }
     foreach ($pr in @($PullRequests)) {
-        $author = ConvertTo-Login ([string] (Get-Value $pr 'author', 'login'))
-        if ($script:BotAuthors -contains $author) { $reasons.Add("pull request by $author") }
+        $login = [string] (Get-Value $pr 'author', 'login')
+        if (Test-BotIdentity $login ([string] (Get-Value $pr 'author', '__typename'))) { $reasons.Add("pull request by $(ConvertTo-Login $login)") }
     }
     return , @($reasons | Select-Object -Unique)
 }
 
 function Get-Agent($Issue, $State, [object[]] $PullRequests, [string[]] $Reasons) {
-    # Who worked the item: the fworker (its worker's name) when it keeps a state, else the assigned bot, else the bot
-    # that wrote its pull request.
-    if ($null -ne $State) { return [string] $State['_worker'] }
+    # The specific identity: the factory worker named in its state, else the assigned bot, else the bot that wrote a
+    # pull request; for a person's item, its assignee, else the pull request's author, else the issue's author.
+    if ($null -ne $State -and $State['_worker']) { return [string] $State['_worker'] }
     foreach ($bot in $script:BotAssignees) { if ($Reasons -contains "assigned to $bot") { return $bot } }
     foreach ($pr in @($PullRequests)) {
-        $author = ConvertTo-Login ([string] (Get-Value $pr 'author', 'login'))
-        if ($script:BotAuthors -contains $author) { return $author }
+        $login = [string] (Get-Value $pr 'author', 'login')
+        if (Test-BotIdentity $login ([string] (Get-Value $pr 'author', '__typename'))) { return (ConvertTo-Login $login) }
     }
+    if (@($Reasons | Where-Object { $_ -like 'label *' }).Count -gt 0) { return 'factory-worker' }
+    $assignee = @(Get-Nodes (Get-Value $Issue 'assignees') | ForEach-Object { ConvertTo-Login ([string] (Get-Value $_ 'login')) }) | Select-Object -First 1
+    if ($assignee) { return $assignee }
+    $first = @($PullRequests) | Select-Object -First 1
+    $author = ConvertTo-Login ([string] (Get-Value $first 'author', 'login'))
+    if ($author) { return $author }
+    $opened = ConvertTo-Login ([string] (Get-Value $Issue 'author', 'login'))
+    if ($opened) { return $opened }
     return $null
+}
+
+function Get-ChecksConclusion($PullRequest) {
+    # The rollup of the pull request's latest commit: success, failure, pending, error, expected; $null when unknown.
+    $commit = @(Get-Nodes (Get-Value $PullRequest 'commits')) | Select-Object -First 1
+    $state = [string] (Get-Value $commit 'commit', 'statusCheckRollup', 'state')
+    if (-not $state) { return $null }
+    return $state.ToLowerInvariant()
+}
+
+function Add-ColumnSpan([object[]] $History, [datetime] $Now) {
+    # enteredAt, leftAt (the next column's enteredAt; null while it is the current column) and the hours spent there
+    # (up to now, for the current column).
+    $visits = @($History)
+    $spanned = [Collections.Generic.List[object]]::new()
+    for ($i = 0; $i -lt $visits.Count; $i++) {
+        $left = if ($i + 1 -lt $visits.Count) { $visits[$i + 1].enteredAt } else { $null }
+        $end = if ($null -ne $left) { $left } else { $Now }
+        $hours = if ($null -ne $end -and $null -ne $visits[$i].enteredAt -and $end -ge $visits[$i].enteredAt) {
+            [Math]::Round(($end - $visits[$i].enteredAt).TotalHours, 1, [MidpointRounding]::AwayFromZero)
+        } else { $null }
+        $spanned.Add([ordered] @{ column = $visits[$i].column; enteredAt = $visits[$i].enteredAt; leftAt = $left; hours = $hours })
+    }
+    return , $spanned.ToArray()
+}
+
+function Get-LatestStatusComment([object[]] $Comments) {
+    # The newest comment that reports status or names a blocker. A blocker says so; a status comment is one of the
+    # bots' journals or verdicts. People chatting are neither.
+    $best = $null
+    foreach ($comment in @($Comments)) {
+        $body = [string] (Get-Value $comment 'body')
+        $author = ConvertTo-Login ([string] (Get-Value $comment 'author', 'login'))
+        $kind = $null
+        if ($body -match '(?i)(^|\b)blocker\b') { $kind = 'blocker' }
+        elseif ($script:JournalAuthors -contains $author -or $author -eq 'factory-worker-author' -or $author -eq 'cursor') {
+            if ($body -match 'Journal|→|->|factory-journal|validation verdict|factory-worker:') { $kind = 'status' }
+        }
+        if (-not $kind) { continue }
+        $at = ConvertTo-Moment (Get-Value $comment 'createdAt')
+        if ($null -eq $best -or ($null -ne $at -and $at -gt $best.at)) {
+            $best = [ordered] @{ url = [string] (Get-Value $comment 'url'); at = $at; kind = $kind }
+        }
+    }
+    if ($null -ne $best -and -not $best.url) { $best.url = $null }
+    return $best
 }
 
 function Get-Runtime($Issue) {
@@ -494,6 +561,50 @@ function Get-WorkItemStats([object[]] $Items, [datetime] $Now, [int] $StatsDays,
     }
 }
 
+function Get-BotFlow($Items, [datetime] $Now, [int] $StatsDays) {
+    # What only the bot items carry: median hours in each column, how many reached Done per agent in the window,
+    # and merge-to-prod hours.
+    $since = $Now.AddDays(-$StatsDays)
+    $hours = @{}
+    foreach ($column in $script:Columns) { $hours[$column] = [Collections.Generic.List[double]]::new() }
+    $done = @{}
+    $toProd = [Collections.Generic.List[double]]::new()
+    foreach ($item in @($Items)) {
+        foreach ($visit in @($item.columnHistory)) {
+            if ($null -eq $visit.hours -or -not $hours.ContainsKey([string] $visit.column)) { continue }
+            $hours[$visit.column].Add([double] $visit.hours)
+        }
+        $reached = @($item.columnHistory | Where-Object { $_.column -eq 'Done' }) | Select-Object -First 1
+        if ($null -ne $reached -and $reached.enteredAt -ge $since) {
+            $agent = if ($item.agent) { [string] $item.agent } else { 'unknown' }
+            if (-not $done.ContainsKey($agent)) { $done[$agent] = 0 }
+            $done[$agent]++
+        }
+        $prod = $item.environments['prod']
+        if ($null -ne $item.mergeToProdHours -and $null -ne $prod -and $null -ne $prod.deployedAt -and $prod.deployedAt -ge $since) { $toProd.Add([double] $item.mergeToProdHours) }
+    }
+    $byColumn = [ordered] @{}
+    foreach ($column in $script:Columns) { if ($hours[$column].Count -gt 0) { $byColumn[$column] = Get-Percentile $hours[$column].ToArray() 0.5 } }
+    $byAgent = [ordered] @{}
+    foreach ($agent in @($done.Keys | Sort-Object)) { $byAgent[$agent] = $done[$agent] }
+    return [ordered] @{ hoursByColumn = $byColumn; throughputByAgent = $byAgent; mergeToProdHours = Get-Summary $toProd.ToArray() }
+}
+
+function Get-GroupedStats([object[]] $Items, [datetime] $Now, [int] $StatsDays, [int] $Weeks) {
+    # stats.all, stats.bot and stats.team, with the keys of stats.all also at the top (the first contract).
+    $all = Get-WorkItemStats @($Items) $Now $StatsDays $Weeks
+    $botItems = @($Items | Where-Object { $_.worker -eq 'bot' })
+    $bot = Get-WorkItemStats $botItems $Now $StatsDays $Weeks
+    foreach ($entry in (Get-BotFlow $botItems $Now $StatsDays).GetEnumerator()) { $bot[$entry.Key] = $entry.Value }
+    $team = Get-WorkItemStats @($Items | Where-Object { $_.worker -eq 'team' }) $Now $StatsDays $Weeks
+    $stats = [ordered] @{}
+    foreach ($key in @($all.Keys)) { $stats[$key] = $all[$key] }
+    $stats['all'] = $all
+    $stats['bot'] = $bot
+    $stats['team'] = $team
+    return $stats
+}
+
 function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
     # One work item, its moments as [datetime] (ConvertTo-WorkItemJson formats them). $Context: ProjectNumber,
     # ProjectReadable, Environments (names, in order), FirstRelease (commit to release), FirstPin (environment to:
@@ -501,18 +612,20 @@ function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
     # Reverted (pull request numbers), RepositoryUrl.
     $comments = @(Get-Nodes (Get-Value $Issue 'comments'))
     $state = Read-FactoryState $comments
-    $reasons = Get-ScopeReasons $Issue $PullRequests $state
-    if ($reasons.Count -eq 0) { return $null }
+    $reasons = Get-BotEvidence $Issue $PullRequests $state
+    $worker = if ($reasons.Count -gt 0) { 'bot' } else { 'team' }
 
     $prs = [Collections.Generic.List[object]]::new()
     foreach ($pr in @($PullRequests | Sort-Object { [int] (Get-Value $_ 'number') })) {
-        $prs.Add([ordered] @{
-                number   = [int] (Get-Value $pr 'number')
-                url      = [string] (Get-Value $pr 'url')
-                state    = ([string] (Get-Value $pr 'state')).ToLowerInvariant()
-                mergedAt = ConvertTo-Moment (Get-Value $pr 'mergedAt')
-                mergeSha = if ((Get-Value $pr 'state') -eq 'MERGED') { [string] (Get-Value $pr 'mergeCommit', 'oid') } else { $null }
-            })
+        $one = [ordered] @{
+            number   = [int] (Get-Value $pr 'number')
+            url      = [string] (Get-Value $pr 'url')
+            state    = ([string] (Get-Value $pr 'state')).ToLowerInvariant()
+            mergedAt = ConvertTo-Moment (Get-Value $pr 'mergedAt')
+            mergeSha = if ((Get-Value $pr 'state') -eq 'MERGED') { [string] (Get-Value $pr 'mergeCommit', 'oid') } else { $null }
+        }
+        if ($worker -eq 'bot') { $one.checks = Get-ChecksConclusion $pr }
+        $prs.Add($one)
     }
     $statePr = Get-Value $state 'merge', 'pr'
     if ($null -eq $statePr) { $statePr = Get-Value $state 'pr', 'number' }
@@ -555,9 +668,8 @@ function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
         $column = $status
     }
     else {
-        $factory = Get-FactoryHistory $state
-        $journaled = Get-JournalHistory $comments
-        $history = Optimize-History ($factory + $journaled)
+        # The project's Status is the column. Without it, only cm-ai-ops-bot's journal; a factory-state comment is not one.
+        $history = Get-JournalHistory $comments
         $column = if ($history.Count -gt 0) { $history[-1].column } elseif ($issueState -eq 'closed') { 'Done' } else { 'Todo' }
         $prod = $environments['prod']
         $derived = [Collections.Generic.List[object]]::new()
@@ -574,6 +686,13 @@ function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
         }
         $history = Optimize-History $derived.ToArray()
     }
+    $asOf = if ($Context -is [Collections.IDictionary] -and $Context.Contains('Now') -and $Context['Now']) { ConvertTo-Moment $Context['Now'] } else { [datetime]::UtcNow }
+    if ($worker -eq 'bot') { $history = Add-ColumnSpan $history $asOf }
+    $prodAt = $environments['prod']
+    $mergeToProd = $null
+    if ($worker -eq 'bot' -and $null -ne $lastMerged -and $null -ne $lastMerged.mergedAt -and $null -ne $prodAt -and $null -ne $prodAt.deployedAt) {
+        $mergeToProd = [Math]::Round(($prodAt.deployedAt - $lastMerged.mergedAt).TotalHours, 1, [MidpointRounding]::AwayFromZero)
+    }
 
     $assignees = @(Get-Nodes (Get-Value $Issue 'assignees') | ForEach-Object { ConvertTo-Login ([string] (Get-Value $_ 'login')) })
     $assignee = @($assignees | Where-Object { $script:BotAssignees -contains $_ }) + @($assignees) | Select-Object -First 1
@@ -585,7 +704,7 @@ function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
     $docsOnly = Get-Value $state 'merge', 'docs_only'
     if ($null -eq $docsOnly) { $docsOnly = Get-Value $state 'design', 'docs_only' }
 
-    return [ordered] @{
+    $item = [ordered] @{
         number         = [int] (Get-Value $Issue 'number')
         title          = [string] (Get-Value $Issue 'title')
         url            = [string] (Get-Value $Issue 'url')
@@ -595,6 +714,7 @@ function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
         column         = $column
         columnSource   = if ($status) { 'project' } else { 'derived' }
         columnHistory  = @($history)
+        worker         = $worker
         assignee       = $assignee
         agent          = Get-Agent $Issue $state $PullRequests $reasons
         runtime        = Get-Runtime $Issue
@@ -609,6 +729,11 @@ function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
         reverts        = @($prs | Where-Object { $_.state -eq 'merged' -and $Context.Reverted -contains $_.number }).Count
         costUsd        = $null
     }
+    if ($worker -eq 'bot') {
+        $item.latestStatusComment = Get-LatestStatusComment $comments
+        $item.mergeToProdHours = $mergeToProd
+    }
+    return $item
 }
 
 function Test-InWindow($Item, [datetime] $Since) {
@@ -689,7 +814,7 @@ author { login }
 labels(first: 50) { nodes { name } }
 assignees(first: 10) { nodes { login } }
 projectItems(first: 10) { nodes { project { number } fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } }
-comments(first: 100) { nodes { author { login } createdAt body } }
+comments(first: 100) { nodes { author { login } createdAt url body } }
 timelineItems(first: 100, itemTypes: [ASSIGNED_EVENT, ADDED_TO_PROJECT_V2_EVENT, PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
   nodes {
     __typename
@@ -701,8 +826,9 @@ timelineItems(first: 100, itemTypes: [ASSIGNED_EVENT, ADDED_TO_PROJECT_V2_EVENT,
 '@
 $pullFields = @'
 number title url state createdAt updatedAt mergedAt body headRefName
-author { login }
+author { login __typename }
 mergeCommit { oid }
+commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 closingIssuesReferences(first: 10) { nodes { number } }
 comments(first: 100) { nodes { body } }
 '@
@@ -736,13 +862,24 @@ function Get-Rest([string] $Endpoint, [string] $Jq) {
 }
 
 function Test-ProjectReadable([string] $Owner, [int] $Number) {
-    # @{ Readable; Title; Reason }: the project answers to this token only with organization Projects read.
-    $text = (& gh api graphql -f "query=query { organization(login: `"$Owner`") { projectV2(number: $Number) { title } } }" 2>$null) -join "`n"
+    # @{ Readable; Title; Reason }. The node id is project 679; its number is checked so a different project is not
+    # read by mistake. It answers only to a token with organization Projects read.
+    $id = $script:ProjectNodeId
+    $text = (& gh api graphql -f "query=query { node(id: `"$id`") { ... on ProjectV2 { number title } } }" 2>$null) -join "`n"
     try { $answer = $text | ConvertFrom-Json -AsHashtable -Depth 20 } catch { $answer = $null }
-    $title = Get-Value $answer 'data', 'organization', 'projectV2', 'title'
-    if ($title) { return @{ Readable = $true; Title = [string] $title; Reason = $null } }
+    $project = Get-Value $answer 'data', 'node'
+    $title = [string] (Get-Value $project 'title')
+    if ($title -and [int] (Get-Value $project 'number') -eq $Number) { return @{ Readable = $true; Title = $title; Reason = $null } }
     $said = (@(Get-Value $answer 'errors') | Where-Object { $_ } | ForEach-Object { Get-Value $_ 'message' }) -join '; '
+    if ($title) { $said = "node $id is project $([int] (Get-Value $project 'number')) ($title), not project $Number" }
     return @{ Readable = $false; Title = $null; Reason = if ($said) { $said } else { 'no answer' } }
+}
+
+function Get-ProjectGap($Access) {
+    # Which token was tried (the workflow sets BOARD_TOKEN_SOURCE) and the secret that would read the board.
+    $source = if ($env:BOARD_TOKEN_SOURCE) { [string] $env:BOARD_TOKEN_SOURCE } else { 'GH_TOKEN' }
+    $secret = 'GH_PROJECT_TOKEN, an Actions secret of clearmeasure-aisf-sample-apps/cmdemo1-system: a token with read access to organization project 679 (node PVT_kwDOD_ESUc4BliGL). No other secret is needed, and none was added'
+    return "project $($script:ProjectNodeId) (project 679): not readable with $source ($($Access.Reason)); columns are derived from cm-ai-ops-bot journal comments. The workflow tries $secret, then the cmdemo1-system App with Organization projects: read, then this workflow's own token."
 }
 
 $now = [datetime]::UtcNow
@@ -761,8 +898,8 @@ $missing = [Collections.Generic.List[string]]::new()
 $projectAccess = Test-ProjectReadable $owner $Project
 if ($projectAccess.Readable) { Write-Host "Project $Project ($($projectAccess.Title)) is readable: columns come from its Status." }
 else {
-    Write-Host "Project $Project is not readable with this token ($($projectAccess.Reason)): columns are derived from the bots' comments."
-    $missing.Add("project ${Project}: not readable with this token ($($projectAccess.Reason)); columns are derived from the fworker's state and the bots' journal comments")
+    Write-Host "Project $Project is not readable ($($projectAccess.Reason)): columns come from cm-ai-ops-bot's journal."
+    $missing.Add((Get-ProjectGap $projectAccess))
 }
 
 if (-not $Clone) {
@@ -863,7 +1000,9 @@ foreach ($issue in $issues) {
     if ($null -ne $item -and (Test-InWindow $item $since)) { $items.Add($item) }
 }
 $sortedItems = @($items | Sort-Object { $_.number } -Descending)
-Write-Host "$($sortedItems.Count) work items handled by the bots."
+$botCount = @($sortedItems | Where-Object { $_.worker -eq 'bot' }).Count
+$teamCount = @($sortedItems | Where-Object { $_.worker -eq 'team' }).Count
+Write-Host "$($sortedItems.Count) work items: $botCount bot, $teamCount team."
 
 $releaseItems = @{}
 foreach ($item in $sortedItems) {
@@ -887,16 +1026,16 @@ $document = [ordered] @{
         columns      = $script:Columns
         window       = [ordered] @{ days = $Days; statsDays = $StatsDays; weeks = $Weeks }
         rules        = @(
-            'In scope: an issue assigned (now or before) to cm-ai-ops-bot; or labelled "factory worker", "AI Factory", agent:*, worker:* or runtime:*; or with a factory-state comment of the fworker; or with a linked pull request by factory-worker-author, cursor or cm-ai-ops-bot.'
+            'Every issue of the repository. worker "bot": assigned (now or before) to cm-ai-ops-bot, or a linked pull request by cm-ai-ops-bot, factory-worker-author, cursor, Copilot or another bot account, or a factory label or factory-state comment (the record on the issue). worker "team": everyone else. agent is that identity.'
             "Kept: every open item, and closed items closed, merged or deployed in the last $Days days."
-            'Linked pull request: closing reference; "Closes/Fixes/Resolves/Refs #N"; a title ending "(#N)"; branch factory-worker/<N>-* or issue-<N>-*; the pull request of the factory state.'
-            "column: the item's Status on project $Project when readable, else derived from the fworker's factory-state (flow or dispatched_at, merge.queued_at = Release Queue, merge.done_at = Done) and the bots' journal lines (A → B); a derived Release Queue item whose change runs in prod is Done at that deployment; a closed issue that never reached Release Queue is Done when closed."
+            'Linked pull request: closing reference; "Closes/Fixes/Resolves/Refs #N"; a title ending "(#N)"; branch factory-worker/<N>-* or issue-<N>-*; the pull request named in a factory-state comment.'
+            "column: the item's Status on project $Project (node $($script:ProjectNodeId)) when readable, else cm-ai-ops-bot's journal lines only (A → B). A factory-state comment is not a column. A derived Release Queue item whose change runs in prod is Done at that deployment; a closed issue that never reached Release Queue is Done when closed."
             "releaseCandidate: the first release (GitHub deployment 'release', version of its master Build run) whose commit contains the merge commit of the item's last merged pull request."
             "environments.<env>: the first non-reverted pin of $Deployable in that environment whose release contains the merge commit (version, pin time), while the commit running there (delivery.json) still contains it."
             'ftFailures: the most of the fworker''s demotions, its "Functional Testing: FAIL" verdicts and moves from Functional Testing back to an earlier column; reverts: merged pull requests of the item reverted on the default branch.'
         )
     }
-    stats       = Get-WorkItemStats $sortedItems $now $StatsDays $Weeks
+    stats       = Get-GroupedStats $sortedItems $now $StatsDays $Weeks
     items       = @($sortedItems | ForEach-Object { ConvertTo-PublishedItem $_ })
     releases    = $publishedReleases
     missing     = $missing.ToArray()

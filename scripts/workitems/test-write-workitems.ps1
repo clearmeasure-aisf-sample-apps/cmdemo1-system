@@ -58,7 +58,8 @@ Test-Case 'journal arrows: chains, (via X), a skipped move, not people, not PASS
 Test-Case 'journal arrows: a move back from the current column counts' (Columns (Get-JournalHistory @(
             (New-Comment 'cm-ai-ops-bot' '2026-11-01T01:00:00Z' 'Development → Functional Testing'),
             (New-Comment 'cm-ai-ops-bot' '2026-11-01T02:00:00Z' 'FAIL: Functional Testing → Development')))) @('Functional Testing@2026-11-01T01:00:00Z', 'Development@2026-11-01T02:00:00Z')
-Test-Case 'ASCII arrow counts too' (Columns (Get-JournalHistory @((New-Comment 'cursor' '2026-11-01T00:00:00Z' 'Development -> Functional Testing')))) @('Functional Testing@2026-11-01T00:00:00Z')
+Test-Case 'ASCII arrow counts too' (Columns (Get-JournalHistory @((New-Comment 'cm-ai-ops-bot' '2026-11-01T00:00:00Z' 'Development -> Functional Testing')))) @('Functional Testing@2026-11-01T00:00:00Z')
+Test-Case 'a journal by anyone but cm-ai-ops-bot is not a column' (Columns (Get-JournalHistory @((New-Comment 'cursor' '2026-11-01T00:00:00Z' 'Development -> Functional Testing')))) @()
 Test-Case 'a factory-state comment is no journal' (Columns (Get-JournalHistory @((New-StateComment @{ note = 'Todo → Done' })))) @()
 Test-Case 'Optimize-History drops a column entered again right after itself' (Columns (Optimize-History @(
             [ordered] @{ column = 'Development'; enteredAt = (ConvertTo-Moment '2026-11-01T02:00:00Z') },
@@ -95,13 +96,14 @@ Test-Case 'reverted: merged revert PR by body and by title; an unmerged revert a
 
 # Scope and agent
 $botIssue = @{ number = 1565; assignees = @{ nodes = @() }; labels = @{ nodes = @(@{ name = 'enhancement' }) }; timelineItems = @{ nodes = @(@{ __typename = 'AssignedEvent'; assignee = @{ login = 'cm-ai-ops-bot' } }) } }
-Test-Case 'in scope: assigned before, though not now' (Get-ScopeReasons $botIssue @() $null) @('assigned to cm-ai-ops-bot')
+Test-Case 'bot: assigned before, though not now' (Get-BotEvidence $botIssue @() $null) @('assigned to cm-ai-ops-bot')
 $labelled = @{ assignees = @{ nodes = @() }; labels = @{ nodes = @(@{ name = 'factory worker' }, @{ name = 'worker:cloud-4' }, @{ name = 'Auto Merge' }, @{ name = 'AI Factory' }) }; timelineItems = @{ nodes = @() } }
-Test-Case 'in scope: factory labels' (Get-ScopeReasons $labelled @() $null) @('label factory worker', 'label worker:cloud-4', 'label AI Factory')
+Test-Case 'bot: factory labels, the record on the issue' (Get-BotEvidence $labelled @() $null) @('label factory worker', 'label worker:cloud-4', 'label AI Factory')
 $plain = @{ assignees = @{ nodes = @(@{ login = 'jeffreypalermo' }) }; labels = @{ nodes = @(@{ name = 'enhancement' }) }; timelineItems = @{ nodes = @() } }
-Test-Case 'out of scope: a person''s issue' (Get-ScopeReasons $plain @(@{ author = @{ login = 'jeffreypalermo' } }) $null) @()
-Test-Case 'in scope: a pull request by the factory (gh form of the login)' (Get-ScopeReasons $plain @(@{ author = @{ login = 'app/factory-worker-author' } }) $null) @('pull request by factory-worker-author')
-Test-Case 'in scope: an fworker state' (Get-ScopeReasons $plain @() @{ _worker = 'factory-worker' }) @('fworker state (factory-worker)')
+Test-Case 'team: a person''s issue has no bot evidence' (Get-BotEvidence $plain @(@{ author = @{ login = 'jeffreypalermo' } }) $null) @()
+Test-Case 'bot: a pull request by the factory (gh form of the login)' (Get-BotEvidence $plain @(@{ author = @{ login = 'app/factory-worker-author' } }) $null) @('pull request by factory-worker-author')
+Test-Case 'bot: Copilot, and an author GraphQL types as Bot' (Get-BotEvidence $plain @(@{ author = @{ login = 'copilot-swe-agent' } }, @{ author = @{ login = 'some-app'; __typename = 'Bot' } }) $null) @('pull request by copilot-swe-agent', 'pull request by some-app')
+Test-Case 'bot: a factory-state comment' (Get-BotEvidence $plain @() @{ _worker = 'factory-worker' }) @('factory state (factory-worker)')
 Test-Case 'agent: the fworker worker when it keeps a state' (Get-Agent $plain @{ _worker = 'factory-worker' } @() @('assigned to cm-ai-ops-bot')) 'factory-worker'
 Test-Case 'agent: the assigned bot' (Get-Agent $botIssue $null @() @('assigned to cm-ai-ops-bot')) 'cm-ai-ops-bot'
 Test-Case 'agent: the bot of the pull request' (Get-Agent $plain $null @(@{ author = @{ login = 'cursor' } }) @('pull request by cursor')) 'cursor'
@@ -210,7 +212,8 @@ $prs = @(@{ number = 78; url = 'https://github.com/o/r/pull/78'; state = 'MERGED
 $item = Build-WorkItem $issue $prs $parentsContext
 Test-Case 'item: column from the journal; closed is not Done before prod' @($item.column, $item.agent, $item.assignee) @('Release Queue', 'cm-ai-ops-bot', 'cm-ai-ops-bot')
 Test-Case 'item: release candidate and environments (uat runs an older commit: not reached)' (ConvertTo-Published @($item.releaseCandidate, $item.environments)) (ConvertTo-Published @([ordered] @{ version = '2.4.3'; createdAt = '2026-11-02T00:00:00Z' }, [ordered] @{ tdd = [ordered] @{ version = '2.4.3'; deployedAt = '2026-11-02T01:00:00Z' }; uat = $null; prod = $null }))
-Test-Case 'item: pull request and session' (ConvertTo-Published @($item.prs[0], $item.cursorSessions)) (ConvertTo-Published @([ordered] @{ number = 78; url = 'https://github.com/o/r/pull/78'; state = 'merged'; mergedAt = '2026-11-01T04:58:00Z'; mergeSha = 'm2' }, @('https://cursor.com/agents/bc-9')))
+Test-Case 'item: pull request, its checks, and session' (ConvertTo-Published @($item.prs[0], $item.cursorSessions)) (ConvertTo-Published @([ordered] @{ number = 78; url = 'https://github.com/o/r/pull/78'; state = 'merged'; mergedAt = '2026-11-01T04:58:00Z'; mergeSha = 'm2'; checks = $null }, @('https://cursor.com/agents/bc-9')))
+Test-Case 'bot item: hours in each column, and the latest status comment' (ConvertTo-Published @($item.worker, $item.columnHistory[0].hours, $item.columnHistory[-1].leftAt, $item.latestStatusComment.kind)) @('bot', 4.0, $null, 'status')
 $parentsContext.Running.prod = @{ Version = '2.4.4'; Commits = [Collections.Generic.HashSet[string]]::new([string[]] @('m2')) }
 $parentsContext.FirstPin.prod = @{ m2 = [ordered] @{ version = '2.4.4'; at = (ConvertTo-Moment '2026-11-05T00:00:00Z') } }
 $inProd = Build-WorkItem $issue $prs $parentsContext
@@ -220,7 +223,8 @@ $abandoned.comments = @{ nodes = @((New-Comment 'cm-ai-ops-bot' '2026-11-01T01:0
 Test-Case 'item: closed before Release Queue is Done when closed' ((Build-WorkItem $abandoned @() $parentsContext).column) 'Done'
 $person = @{} + $issue
 $person.assignees = @{ nodes = @() }
-Test-Case 'item: out of scope gives no item' (Build-WorkItem $person @() $parentsContext) $null
+$personItem = Build-WorkItem $person @() $parentsContext
+Test-Case 'item: a person''s issue is kept, as team, without the bot detail' @($personItem.worker, ($personItem.columnHistory[0].Keys -contains 'hours'), $personItem.Contains('latestStatusComment')) @('team', $false, $false)
 $parentsContext.ProjectReadable = $true
 $onBoard = @{} + $issue
 $onBoard.projectItems = @{ nodes = @(@{ project = @{ number = 679 }; fieldValueByName = @{ name = 'Functional Testing' } }) }
@@ -233,6 +237,34 @@ Test-Case 'window: open kept, old closed dropped, recently deployed kept' @(
     (Test-InWindow ([ordered] @{ state = 'closed'; closedAt = $now.AddDays(-90); mergedAt = $now.AddDays(-90); environments = @{ prod = $null } }) $now.AddDays(-56))
     (Test-InWindow ([ordered] @{ state = 'closed'; closedAt = $now.AddDays(-90); mergedAt = $now.AddDays(-90); environments = @{ prod = @{ deployedAt = $now.AddDays(-1) } } }) $now.AddDays(-56))
 ) @($true, $false, $true)
+
+$span = Add-ColumnSpan @(
+    [ordered] @{ column = 'Development'; enteredAt = (ConvertTo-Moment '2026-11-01T00:00:00Z') }
+    [ordered] @{ column = 'Done'; enteredAt = (ConvertTo-Moment '2026-11-01T01:30:00Z') }
+) (ConvertTo-Moment '2026-11-01T02:00:00Z')
+Test-Case 'column span: leftAt is the next entry, the current column is open, hours to one decimal' (ConvertTo-Published @($span | ForEach-Object { "$($_.column) $(Format-Moment $_.leftAt) $($_.hours)" })) @('Development 2026-11-01T01:30:00Z 1.5', 'Done  0.5')
+
+Test-Case 'checks: the rollup of the latest commit, lower case' (Get-ChecksConclusion @{ commits = @{ nodes = @(@{ commit = @{ statusCheckRollup = @{ state = 'SUCCESS' } } }) } }) 'success'
+Test-Case 'checks: none when the rollup was not read' (Get-ChecksConclusion @{}) $null
+
+$noted = @(
+    (New-Comment 'cm-ai-ops-bot' '2026-11-01T01:00:00Z' 'Journal: Todo → In Progress')
+    (New-Comment 'cm-ai-ops-bot' '2026-11-01T03:00:00Z' 'Blocker (board only): the project token is refused.')
+)
+$noted[0].url = 'https://github.com/o/r/issues/1#issuecomment-1'
+$noted[1].url = 'https://github.com/o/r/issues/1#issuecomment-2'
+Test-Case 'latest status comment: the newer blocker wins' (ConvertTo-Published (Get-LatestStatusComment $noted)) (ConvertTo-Published ([ordered] @{ url = 'https://github.com/o/r/issues/1#issuecomment-2'; at = '2026-11-01T03:00:00Z'; kind = 'blocker' }))
+
+$flowItems = @(
+    ([ordered] @{ worker = 'bot'; agent = 'cm-ai-ops-bot'; column = 'Done'; mergedAt = (ConvertTo-Moment '2026-11-01T11:00:00Z'); ftFailures = 0; reverts = 0; createdAt = (ConvertTo-Moment '2026-11-01T00:00:00Z'); mergeToProdHours = 5.0
+        columnHistory = @([ordered] @{ column = 'In Progress'; enteredAt = (ConvertTo-Moment '2026-11-01T02:00:00Z'); hours = 2.0 }, [ordered] @{ column = 'Done'; enteredAt = (ConvertTo-Moment '2026-11-01T12:00:00Z'); hours = 1.0 })
+        environments = [ordered] @{ prod = [ordered] @{ deployedAt = (ConvertTo-Moment '2026-11-03T00:00:00Z') } } })
+    ([ordered] @{ worker = 'team'; agent = 'jeffreypalermo'; column = 'Todo'; mergedAt = $null; ftFailures = 0; reverts = 0; createdAt = (ConvertTo-Moment '2026-11-01T00:00:00Z'); mergeToProdHours = $null; columnHistory = @(); environments = [ordered] @{ prod = $null } })
+)
+$grouped = Get-GroupedStats $flowItems $now 28 2
+Test-Case 'stats: the top level is stats.all' @($grouped.wipByColumn.Todo, $grouped.all.wipByColumn.Todo, $grouped.team.wipByColumn.Todo, $grouped.bot.wipByColumn.Todo) @(1, 1, 1, 0)
+Test-Case 'stats.bot: hours per column, throughput, merge to prod' (ConvertTo-Published @($grouped.bot.hoursByColumn, $grouped.bot.throughputByAgent, $grouped.bot.mergeToProdHours)) (ConvertTo-Published @([ordered] @{ 'In Progress' = 2.0; Done = 1.0 }, [ordered] @{ 'cm-ai-ops-bot' = 1 }, [ordered] @{ median = 5.0; p85 = 5.0; n = 1 }))
+Test-Case 'cost note says none is connected' $grouped.cost.note 'No cost source is connected yet.'
 
 if ($failures -gt 0) { Write-Host "$failures FAIL"; exit 1 }
 Write-Host 'All cases pass.'
