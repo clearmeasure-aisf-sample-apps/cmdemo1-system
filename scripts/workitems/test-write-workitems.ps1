@@ -104,7 +104,7 @@ Test-Case 'team: a person''s issue has no bot evidence' (Get-BotEvidence $plain 
 Test-Case 'bot: a pull request by the factory (gh form of the login)' (Get-BotEvidence $plain @(@{ author = @{ login = 'app/factory-worker-author' } }) $null) @('pull request by factory-worker-author')
 Test-Case 'bot: Copilot, and an author GraphQL types as Bot' (Get-BotEvidence $plain @(@{ author = @{ login = 'copilot-swe-agent' } }, @{ author = @{ login = 'some-app'; __typename = 'Bot' } }) $null) @('pull request by copilot-swe-agent', 'pull request by some-app')
 Test-Case 'bot: a factory-state comment' (Get-BotEvidence $plain @() @{ _worker = 'factory-worker' }) @('factory state (factory-worker)')
-Test-Case 'agent: the fworker worker when it keeps a state' (Get-Agent $plain @{ _worker = 'factory-worker' } @() @('assigned to cm-ai-ops-bot')) 'factory-worker'
+Test-Case 'agent: the factory-state worker when it keeps a state' (Get-Agent $plain @{ _worker = 'factory-worker' } @() @('assigned to cm-ai-ops-bot')) 'factory-worker'
 Test-Case 'agent: the assigned bot' (Get-Agent $botIssue $null @() @('assigned to cm-ai-ops-bot')) 'cm-ai-ops-bot'
 Test-Case 'agent: the bot of the pull request' (Get-Agent $plain $null @(@{ author = @{ login = 'cursor' } }) @('pull request by cursor')) 'cursor'
 Test-Case 'runtime from labels: runtime before worker' (Get-Runtime @{ labels = @{ nodes = @(@{ name = 'worker:cloud-4' }, @{ name = 'runtime:cursor-cloud' }) } }) 'cursor-cloud'
@@ -135,7 +135,7 @@ Test-Case 'releases: version of the Build run before the deployment; a pinned ve
 
 $pinLines = @(
     "2026-11-09T10:00:00Z`tPin ui 2.4.2000 in tdd (Deployments-1)"
-    "2026-11-09T10:05:00Z`tPin fworker 1.0.5 in tdd (Deployments-2)"
+    "2026-11-09T10:05:00Z`tPin dashboard 1.0.5 in tdd (Deployments-2)"
     "2026-11-09T17:00:00Z`tPin ui 2.4.2021 in tdd (Deployments-3)"
     "2026-11-09T17:04:00Z`tRevert pin of ui 2.4.2021 in tdd (Deployments-3 failed)"
     "2026-11-09T17:10:00Z`tPin ui 2.4.2024 in tdd (Deployments-4)"

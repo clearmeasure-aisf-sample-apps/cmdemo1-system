@@ -7,14 +7,6 @@
     "repository": "cmdemo1-system",
     "sqlLocation": "centralus",
     "sqlSku": "Basic",
-    "denyExcludedActions": [
-      "Microsoft.App/jobs/start/action",
-      "Microsoft.App/jobs/stop/action",
-      "Microsoft.App/jobs/stop/execution/action"
-    ],
-    "pipelineSignOffMembers": [
-      "cmdemo1-fworker-gateway-agent"
-    ],
     "links": [
       {
         "text": "Scorecard",
@@ -128,66 +120,6 @@
       ]
     },
     {
-      "name": "aisf",
-      "repository": "cmdemo1-aisf",
-      "port": 8080,
-      "healthPath": "/health",
-      "buildPath": "/_build",
-      "alwaysOn": true,
-      "alwaysOnEnvironments": [
-        "prod"
-      ],
-      "database": false,
-      "cpu": "0.5",
-      "settings": {
-        "Factory__Dashboard__Access": "SignIn",
-        "AzureAd__TenantId": "40645332-2e20-4bca-882c-b2706f93ce44",
-        "AzureAd__ClientId": "f111fb18-3749-4a5c-abde-19c507ae8338"
-      },
-      "environmentSettings": {
-        "tdd": {
-          "GitHub__UseStub": "true",
-          "Octopus__Enabled": "false"
-        },
-        "uat": {
-          "GitHub__UseStub": "true",
-          "Octopus__Enabled": "false"
-        },
-        "prod": {
-          "GitHubApp__AppId": "5231590",
-          "GitHubApp__InstallationId": "169074569",
-          "Octopus__PollSeconds": "120",
-          "HealthCheckMonitor__TargetApplicationUrl": "https://ca-cmdemo1-prod-ui-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
-          "HealthCheckMonitor__Enabled": "true",
-          "HealthCheckMonitor__ActiveMinutesAfterDashboardUse": "10"
-        }
-      },
-      "urlSetting": "Factory__PublicBaseUrl",
-      "secrets": [
-        {
-          "name": "cursor-api-key",
-          "env": "CursorAgent__ApiKey"
-        },
-        {
-          "name": "github-app-private-key",
-          "env": "GitHubApp__PrivateKey"
-        },
-        {
-          "name": "octopus-api-key",
-          "env": "Octopus__ApiKey"
-        },
-        {
-          "name": "github-webhook-secret",
-          "env": "GitHub__WebhookSecret"
-        },
-        {
-          "name": "callback-signing-secret",
-          "env": "Callbacks__SigningSecret",
-          "generate": true
-        }
-      ]
-    },
-    {
       "name": "dashboard",
       "repository": "cmdemo1-dashboard",
       "hosting": "staticwebapp",
@@ -218,113 +150,6 @@
           "name": "harvest-key",
           "env": "Scorecard__HarvestKey"
         }
-      ]
-    },
-    {
-      "name": "fworker",
-      "repository": "cmdemo1-fworker",
-      "port": 8080,
-      "healthPath": "/health",
-      "pipelineSignOff": true,
-      "environments": [
-        "tdd",
-        "uat",
-        "prod"
-      ],
-      "database": false,
-      "cpu": "1",
-      "environmentCpu": {
-        "tdd": "1.5"
-      },
-      "settings": {
-        "FACTORY_OWNER_MODE": "1",
-        "FACTORY_AUTHOR_APP": "1",
-        "FACTORY_APP_AUTHOR_ID": "5275650",
-        "FACTORY_APP_AUTHOR_INSTALLATION": "170316342",
-        "FACTORY_APP_AUTHOR_SLUG": "factory-worker-author"
-      },
-      "environmentSettings": {
-        "tdd": {
-          "FACTORY_ENVIRONMENT": "tdd",
-          "FACTORY_RUNTIME_ENABLED": "false"
-        },
-        "uat": {
-          "FACTORY_ENVIRONMENT": "uat",
-          "FACTORY_RUNTIME_ENABLED": "false",
-          "FACTORY_RUNTIME_AGENT": "codex",
-          "FACTORY_RUNTIME_JOB_CLAUDE": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner",
-          "FACTORY_RUNTIME_JOB_CODEX": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-uat-fwrunner-codex",
-          "FACTORY_RUNTIME_IDENTITY_CLIENT_ID": "ecd2fa26-3395-4b60-ac3f-d002a97374c3",
-          "FACTORY_RUNTIME_GATEWAY_URL": "http://ca-cmdemo1-uat-fworker-fccv",
-          "FACTORY_RUNTIME_MAX_CONCURRENT": "2",
-          "FACTORY_RUNTIME_MAX_PER_DAY": "30"
-        },
-        "prod": {
-          "FACTORY_ENVIRONMENT": "prod",
-          "FACTORY_RUNTIME_ENABLED": "false",
-          "FACTORY_RUNTIME_AGENT": "codex",
-          "FACTORY_RUNTIME_JOB_CLAUDE": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/jobs/caj-cmdemo1-prod-fwrunner",
-          "FACTORY_RUNTIME_JOB_CODEX": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-prod/providers/Microsoft.App/jobs/caj-cmdemo1-prod-fwrunner-codex",
-          "FACTORY_RUNTIME_IDENTITY_CLIENT_ID": "b21c26a7-326d-4bb2-a0d9-cb710459bec1",
-          "FACTORY_RUNTIME_GATEWAY_URL": "http://ca-cmdemo1-prod-fworker-bhj5",
-          "FACTORY_RUNTIME_MAX_CONCURRENT": "2",
-          "FACTORY_RUNTIME_MAX_PER_DAY": "10"
-        }
-      },
-      "urlSetting": "FACTORY_PUBLIC_URL",
-      "secrets": [
-        {
-          "name": "dev-token",
-          "env": "FACTORY_DEV_TOKEN"
-        },
-        {
-          "name": "webhook-secret",
-          "env": "FACTORY_WEBHOOK_SECRET"
-        },
-        {
-          "name": "token-secret",
-          "env": "FACTORY_TOKEN_SECRET",
-          "generate": true
-        },
-        {
-          "name": "octopus-api-key",
-          "env": "OCTOPUS_API_KEY"
-        },
-        {
-          "name": "github-token",
-          "env": "FACTORY_APP_AUTHOR_KEY"
-        },
-        {
-          "name": "cursor-api-key",
-          "env": "CURSOR_API_KEY"
-        },
-        {
-          "name": "copilot-tasks-token",
-          "env": "COPILOT_TASKS_TOKEN"
-        },
-        {
-          "name": "octopus-runbook-api-key",
-          "env": "OCTOPUS_RUNBOOK_API_KEY"
-        },
-        {
-          "name": "octopus-host-token",
-          "env": "FACTORY_OCTOPUS_HOST_TOKEN"
-        },
-        {
-          "name": "webhook-secret-azure-monitor",
-          "env": "FACTORY_WEBHOOK_SECRET_AZURE_MONITOR",
-          "generate": true
-        }
-      ],
-      "buildPath": "/_build",
-      "dashboardLink": {
-        "text": "Factory",
-        "path": "/dashboard"
-      },
-      "alwaysOn": true,
-      "alwaysOnEnvironments": [
-        "tdd",
-        "prod"
       ]
     }
   ],
