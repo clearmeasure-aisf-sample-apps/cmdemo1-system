@@ -1,0 +1,640 @@
+{
+  "generatedAt": "2026-11-10T00:13:10Z",
+  "scope": {
+    "repo": "clearmeasure-aisf-sample-apps/cmdemo1-workorders",
+    "project": 679,
+    "projectTitle": null,
+    "deployable": "ui",
+    "columnSource": "derived",
+    "columns": [
+      "Todo",
+      "In Progress",
+      "Technical Design",
+      "Development",
+      "Functional Testing",
+      "Release Queue",
+      "Done"
+    ],
+    "window": {
+      "days": 56,
+      "statsDays": 28,
+      "weeks": 8
+    },
+    "rules": [
+      "Every issue of the repository. worker \"bot\": assigned (now or before) to cm-ai-ops-bot, or a linked pull request by cm-ai-ops-bot, factory-worker-author, cursor, Copilot or another bot account, or a factory label or factory-state comment (the record on the issue). worker \"team\": everyone else. agent is that identity.",
+      "Kept: every open item, and closed items closed, merged or deployed in the last 56 days.",
+      "Linked pull request: closing reference; \"Closes/Fixes/Resolves/Refs #N\"; a title ending \"(#N)\"; branch factory-worker/<N>-* or issue-<N>-*; the pull request named in a factory-state comment.",
+      "column: the item's Status on project 679 (node PVT_kwDOD_ESUc4BliGL) when readable, else cm-ai-ops-bot's journal lines only (A → B). A factory-state comment is not a column. A derived Release Queue item whose change runs in prod is Done at that deployment; a closed issue that never reached Release Queue is Done when closed.",
+      "releaseCandidate: the first release (GitHub deployment 'release', version of its master Build run) whose commit contains the merge commit of the item's last merged pull request.",
+      "environments.<env>: the first non-reverted pin of ui in that environment whose release contains the merge commit (version, pin time), while the commit running there (delivery.json) still contains it.",
+      "ftFailures: the most of the fworker's demotions, its \"Functional Testing: FAIL\" verdicts and moves from Functional Testing back to an earlier column; reverts: merged pull requests of the item reverted on the default branch."
+    ]
+  },
+  "stats": {
+    "wipByColumn": {
+      "Todo": 25,
+      "In Progress": 0,
+      "Technical Design": 0,
+      "Development": 0,
+      "Functional Testing": 1,
+      "Release Queue": 3
+    },
+    "cycleTimeHours": {
+      "median": 0.0,
+      "p85": 0.0,
+      "n": 1
+    },
+    "leadTimeHours": {
+      "median": 10.0,
+      "p85": 49.2,
+      "n": 224
+    },
+    "perWeek": [
+      {
+        "weekStart": "2026-09-21",
+        "merged": 0,
+        "deployedProd": 0
+      },
+      {
+        "weekStart": "2026-09-28",
+        "merged": 1,
+        "deployedProd": 1
+      },
+      {
+        "weekStart": "2026-10-05",
+        "merged": 63,
+        "deployedProd": 56
+      },
+      {
+        "weekStart": "2026-10-12",
+        "merged": 80,
+        "deployedProd": 84
+      },
+      {
+        "weekStart": "2026-10-19",
+        "merged": 163,
+        "deployedProd": 140
+      },
+      {
+        "weekStart": "2026-10-26",
+        "merged": 212,
+        "deployedProd": 0
+      },
+      {
+        "weekStart": "2026-11-02",
+        "merged": 152,
+        "deployedProd": 0
+      },
+      {
+        "weekStart": "2026-11-09",
+        "merged": 15,
+        "deployedProd": 0
+      }
+    ],
+    "rework": {
+      "ftFailures": 51,
+      "reverts": 0,
+      "reworkedItems": 40,
+      "testedItems": 695,
+      "rate": 0.058
+    },
+    "cost": {
+      "totalUsd": null,
+      "note": "No cost source is connected yet."
+    },
+    "all": {
+      "wipByColumn": {
+        "Todo": 25,
+        "In Progress": 0,
+        "Technical Design": 0,
+        "Development": 0,
+        "Functional Testing": 1,
+        "Release Queue": 3
+      },
+      "cycleTimeHours": {
+        "median": 0.0,
+        "p85": 0.0,
+        "n": 1
+      },
+      "leadTimeHours": {
+        "median": 10.0,
+        "p85": 49.2,
+        "n": 224
+      },
+      "perWeek": [
+        {
+          "weekStart": "2026-09-21",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-09-28",
+          "merged": 1,
+          "deployedProd": 1
+        },
+        {
+          "weekStart": "2026-10-05",
+          "merged": 63,
+          "deployedProd": 56
+        },
+        {
+          "weekStart": "2026-10-12",
+          "merged": 80,
+          "deployedProd": 84
+        },
+        {
+          "weekStart": "2026-10-19",
+          "merged": 163,
+          "deployedProd": 140
+        },
+        {
+          "weekStart": "2026-10-26",
+          "merged": 212,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-02",
+          "merged": 152,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-09",
+          "merged": 15,
+          "deployedProd": 0
+        }
+      ],
+      "rework": {
+        "ftFailures": 51,
+        "reverts": 0,
+        "reworkedItems": 40,
+        "testedItems": 695,
+        "rate": 0.058
+      },
+      "cost": {
+        "totalUsd": null,
+        "note": "No cost source is connected yet."
+      }
+    },
+    "bot": {
+      "wipByColumn": {
+        "Todo": 24,
+        "In Progress": 0,
+        "Technical Design": 0,
+        "Development": 0,
+        "Functional Testing": 1,
+        "Release Queue": 3
+      },
+      "cycleTimeHours": {
+        "median": 0.0,
+        "p85": 0.0,
+        "n": 1
+      },
+      "leadTimeHours": {
+        "median": 10.0,
+        "p85": 49.2,
+        "n": 224
+      },
+      "perWeek": [
+        {
+          "weekStart": "2026-09-21",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-09-28",
+          "merged": 1,
+          "deployedProd": 1
+        },
+        {
+          "weekStart": "2026-10-05",
+          "merged": 63,
+          "deployedProd": 56
+        },
+        {
+          "weekStart": "2026-10-12",
+          "merged": 80,
+          "deployedProd": 84
+        },
+        {
+          "weekStart": "2026-10-19",
+          "merged": 163,
+          "deployedProd": 140
+        },
+        {
+          "weekStart": "2026-10-26",
+          "merged": 212,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-02",
+          "merged": 141,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-09",
+          "merged": 4,
+          "deployedProd": 0
+        }
+      ],
+      "rework": {
+        "ftFailures": 51,
+        "reverts": 0,
+        "reworkedItems": 40,
+        "testedItems": 673,
+        "rate": 0.059
+      },
+      "cost": {
+        "totalUsd": null,
+        "note": "No cost source is connected yet."
+      },
+      "hoursByColumn": {
+        "In Progress": 0.1,
+        "Technical Design": 0.1,
+        "Development": 0.0,
+        "Functional Testing": 0.5,
+        "Release Queue": 1.1,
+        "Done": 2.1
+      },
+      "throughputByAgent": {
+        "cm-ai-ops-bot": 1
+      },
+      "mergeToProdHours": {
+        "median": 4.8,
+        "p85": 41.5,
+        "n": 224
+      }
+    },
+    "team": {
+      "wipByColumn": {
+        "Todo": 1,
+        "In Progress": 0,
+        "Technical Design": 0,
+        "Development": 0,
+        "Functional Testing": 0,
+        "Release Queue": 0
+      },
+      "cycleTimeHours": {
+        "median": null,
+        "p85": null,
+        "n": 0
+      },
+      "leadTimeHours": {
+        "median": null,
+        "p85": null,
+        "n": 0
+      },
+      "perWeek": [
+        {
+          "weekStart": "2026-09-21",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-09-28",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-10-05",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-10-12",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-10-19",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-10-26",
+          "merged": 0,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-02",
+          "merged": 11,
+          "deployedProd": 0
+        },
+        {
+          "weekStart": "2026-11-09",
+          "merged": 11,
+          "deployedProd": 0
+        }
+      ],
+      "rework": {
+        "ftFailures": 0,
+        "reverts": 0,
+        "reworkedItems": 0,
+        "testedItems": 22,
+        "rate": 0.0
+      },
+      "cost": {
+        "totalUsd": null,
+        "note": "No cost source is connected yet."
+      }
+    }
+  },
+  "items": [
+    {
+      "number": 1565,
+      "title": "AI ops test: unit tests for Employee.HasRole",
+      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1565",
+      "state": "closed",
+      "createdAt": "2026-11-09T22:06:23Z",
+      "closedAt": "2026-11-09T22:49:43Z",
+      "column": "Release Queue",
+      "columnSource": "derived",
+      "columnHistory": [
+        {
+          "column": "In Progress",
+          "enteredAt": "2026-11-09T22:07:44Z",
+          "leftAt": "2026-11-09T22:11:39Z",
+          "hours": 0.1
+        },
+        {
+          "column": "Technical Design",
+          "enteredAt": "2026-11-09T22:11:39Z",
+          "leftAt": "2026-11-09T22:23:09Z",
+          "hours": 0.2
+        },
+        {
+          "column": "Development",
+          "enteredAt": "2026-11-09T22:23:09Z",
+          "leftAt": "2026-11-09T22:23:09Z",
+          "hours": 0.0
+        },
+        {
+          "column": "Functional Testing",
+          "enteredAt": "2026-11-09T22:23:09Z",
+          "leftAt": "2026-11-09T22:53:22Z",
+          "hours": 0.5
+        },
+        {
+          "column": "Release Queue",
+          "enteredAt": "2026-11-09T22:53:22Z",
+          "leftAt": null,
+          "hours": 1.4
+        }
+      ],
+      "worker": "bot",
+      "assignee": "cm-ai-ops-bot",
+      "agent": "cm-ai-ops-bot",
+      "runtime": null,
+      "scopeReasons": [
+        "assigned to cm-ai-ops-bot",
+        "pull request by cm-ai-ops-bot"
+      ],
+      "cursorSessions": [
+        "https://cursor.com/agents/bc-154c759e-4686-5050-b64e-5c71b77937fe",
+        "https://cursor.com/agents/bc-02e5a396-408f-5622-947e-cdeb3d57ef55",
+        "https://cursor.com/agents/bc-f50cd5f6-8418-55cb-93dd-bac95dbe8efb"
+      ],
+      "prs": [
+        {
+          "number": 1571,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1571",
+          "state": "merged",
+          "mergedAt": "2026-11-09T22:49:41Z",
+          "mergeSha": "dfb1740a82980c041c063d61e2337f4e01b68a52",
+          "checks": "success"
+        }
+      ],
+      "docsOnly": null,
+      "releaseCandidate": {
+        "version": "2.4.2060",
+        "createdAt": "2026-11-09T23:02:28Z"
+      },
+      "environments": {
+        "tdd": {
+          "version": "2.4.2060",
+          "deployedAt": "2026-11-09T23:04:14Z"
+        },
+        "uat": null,
+        "prod": null
+      },
+      "ftFailures": 0,
+      "reverts": 0,
+      "costUsd": null,
+      "latestStatusComment": {
+        "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1565#issuecomment-6753645229",
+        "at": "2026-11-09T22:53:22Z",
+        "kind": "status"
+      },
+      "mergeToProdHours": null
+    },
+    {
+      "number": 1543,
+      "title": "Code quality: refactoring playbook for oversized files (Fowler/DDD/Kerievsky/Clean Code)",
+      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1543",
+      "state": "open",
+      "createdAt": "2026-11-09T14:25:32Z",
+      "closedAt": null,
+      "column": "Todo",
+      "columnSource": "derived",
+      "columnHistory": [],
+      "worker": "team",
+      "assignee": null,
+      "agent": "jeffreypalermo",
+      "runtime": null,
+      "scopeReasons": [],
+      "cursorSessions": [
+        "https://cursor.com/agents/bc-5fb338c0-9a5b-5c5d-9c51-8ffbdcb80bfa"
+      ],
+      "prs": [
+        {
+          "number": 1546,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1546",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1553,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1553",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1554,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1554",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1557,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1557",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1558,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1558",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        },
+        {
+          "number": 1559,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1559",
+          "state": "open",
+          "mergedAt": null,
+          "mergeSha": null
+        }
+      ],
+      "docsOnly": null,
+      "releaseCandidate": null,
+      "environments": {
+        "tdd": null,
+        "uat": null,
+        "prod": null
+      },
+      "ftFailures": 0,
+      "reverts": 0,
+      "costUsd": null
+    },
+    {
+      "number": 1512,
+      "title": "Docs: note 367",
+      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1512",
+      "state": "closed",
+      "createdAt": "2026-11-06T16:05:07Z",
+      "closedAt": "2026-11-06T16:11:34Z",
+      "column": "Done",
+      "columnSource": "derived",
+      "columnHistory": [],
+      "worker": "bot",
+      "assignee": null,
+      "agent": "factory-worker",
+      "runtime": null,
+      "scopeReasons": [
+        "label factory worker",
+        "factory state (factory-worker)",
+        "pull request by factory-worker-author"
+      ],
+      "cursorSessions": [],
+      "prs": [
+        {
+          "number": 1513,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/1513",
+          "state": "merged",
+          "mergedAt": "2026-11-06T16:11:31Z",
+          "mergeSha": "877684c972a60b484fe7cede0733bdbc7fc6f034",
+          "checks": "success"
+        }
+      ],
+      "docsOnly": true,
+      "releaseCandidate": {
+        "version": "2.4.1958",
+        "createdAt": "2026-11-07T23:53:05Z"
+      },
+      "environments": {
+        "tdd": {
+          "version": "2.4.1958",
+          "deployedAt": "2026-11-07T23:54:43Z"
+        },
+        "uat": null,
+        "prod": null
+      },
+      "ftFailures": 0,
+      "reverts": 0,
+      "costUsd": null,
+      "latestStatusComment": {
+        "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1512#issuecomment-6689864841",
+        "at": "2026-11-06T16:29:19Z",
+        "kind": "status"
+      },
+      "mergeToProdHours": null
+    },
+    {
+      "number": 852,
+      "title": "Docs: note 55",
+      "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/852",
+      "state": "closed",
+      "createdAt": "2026-10-26T14:18:03Z",
+      "closedAt": "2026-10-26T14:54:43Z",
+      "column": "Done",
+      "columnSource": "derived",
+      "columnHistory": [],
+      "worker": "bot",
+      "assignee": null,
+      "agent": "factory-worker",
+      "runtime": null,
+      "scopeReasons": [
+        "label factory worker",
+        "factory state (factory-worker)",
+        "pull request by factory-worker-author"
+      ],
+      "cursorSessions": [],
+      "prs": [
+        {
+          "number": 855,
+          "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pull/855",
+          "state": "merged",
+          "mergedAt": "2026-10-26T14:48:16Z",
+          "mergeSha": "43c6613f7e9de1237b354bf59b000d4b634a8d3a",
+          "checks": "success"
+        }
+      ],
+      "docsOnly": true,
+      "releaseCandidate": {
+        "version": "2.4.1257",
+        "createdAt": "2026-10-27T03:19:29Z"
+      },
+      "environments": {
+        "tdd": {
+          "version": "2.4.1257",
+          "deployedAt": "2026-10-27T03:21:12Z"
+        },
+        "uat": null,
+        "prod": null
+      },
+      "ftFailures": 1,
+      "reverts": 0,
+      "costUsd": null,
+      "latestStatusComment": {
+        "url": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/852#issuecomment-6608859204",
+        "at": "2026-11-03T16:03:14Z",
+        "kind": "status"
+      },
+      "mergeToProdHours": null
+    }
+  ],
+  "releases": [
+    {
+      "version": "2.4.2064",
+      "sha": "7cdfa090d046e012da5f945cc3220e62b2899309",
+      "createdAt": "2026-11-09T23:29:31Z",
+      "items": [
+        1564
+      ]
+    },
+    {
+      "version": "2.4.2062",
+      "sha": "e4b127f0de680b96854f150a6428310084a99ddd",
+      "createdAt": "2026-11-09T23:02:38Z",
+      "items": [
+        1562
+      ]
+    },
+    {
+      "version": "2.4.2060",
+      "sha": "dfb1740a82980c041c063d61e2337f4e01b68a52",
+      "createdAt": "2026-11-09T23:02:28Z",
+      "items": [
+        1555,
+        1560,
+        1565
+      ]
+    }
+  ],
+  "missing": [
+    "project PVT_kwDOD_ESUc4BliGL (project 679): not readable with GH_TOKEN (Resource not accessible by integration); columns are derived from cm-ai-ops-bot journal comments. The workflow tries GH_PROJECT_TOKEN, an Actions secret of clearmeasure-aisf-sample-apps/cmdemo1-system: a token with read access to organization project 679 (node PVT_kwDOD_ESUc4BliGL). No other secret is needed, and none was added, then the cmdemo1-system App with Organization projects: read, then this workflow's own token."
+  ]
+}
