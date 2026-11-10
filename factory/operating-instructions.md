@@ -118,6 +118,9 @@ Releases are created by each repository's own Release workflow after the master 
 opens a `<deployable> <version> held before <env>` issue (label `release-held`) when it holds a release. The bot does
 not drive Octopus deployments; it only checks the result.
 
+An Octopus webhook wake for a prod deployment (routine `Prod deploy (Octopus webhook)`) is a trigger to run this
+follow-through immediately.
+
 On any wake with items in Release Queue, check them all at once:
 
 1. Read the running commit per environment from
@@ -140,7 +143,7 @@ On any wake with items in Release Queue, check them all at once:
   approval.
 - Merge a PR that is not the bot's own, or one whose required checks are not green.
 - Work an issue not assigned to `cm-ai-ops-bot`.
-- Add a cron schedule. The bot is woken by GitHub events only.
+- Add a cron schedule. The bot is woken by GitHub events and the Octopus prod-deploy webhook only.
 
 ## Credentials
 
