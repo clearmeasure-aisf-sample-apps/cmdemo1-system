@@ -91,11 +91,16 @@ var sqlServerFqdn = '${sqlServerName}${az.environment().suffixes.sqlServerHostna
 // exists in; left out, it exists in every environment. An environment it does not name gets none of its resources.
 // deployables[].retired (decision 0058): a retired deployable exists in no environment, so none of its resources, its
 // identity, its secret references, its dashboard page or its Front Door origin is made; its Octopus project stays.
+// system.azureExcludeDeployables (#542): remove named deployables from Azure only. Octopus Terraform does not read
+// this key, so octopus-apply leaves those projects (and the gateway account) unchanged while the stack deletes their
+// apps/identities. Use this when Azure removal is approved and Octopus project removal is not.
 // A deployable with hosting "own" brings its runtime (principle 007): nothing below creates anything for it, and it
 // is no entry of the output "deployables". Its own project deploys and verifies it.
+// Optional keys via union defaults: reading a key absent from system.json (.?key) is warning BCP053.
+var azureExcludedDeployables = union({ azureExcludeDeployables: [] }, system.system).azureExcludeDeployables
 var hostedDeployables = filter(
   map(system.deployables, d => union({ hosting: 'containerapp', environments: [environmentName] }, d)),
-  d => contains(d.environments, environmentName) && !(d.?retired ?? false)
+  d => contains(d.environments, environmentName) && !(d.?retired ?? false) && !contains(azureExcludedDeployables, d.name)
 )
 // A container deployable may declare more (all optional, modules/containerapps.bicep): a size of its own (cpu, and
 // environmentCpu.<env> for one environment's size, the memory follows from it), one

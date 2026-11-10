@@ -20,6 +20,10 @@
       "Microsoft.App/jobs/start/action",
       "Microsoft.App/jobs/stop/action",
       "Microsoft.App/jobs/stop/execution/action"
+    ],
+    "azureExcludeDeployables": [
+      "aisf",
+      "fworker"
     ]
   },
   "azure": {
@@ -185,8 +189,7 @@
           "env": "Callbacks__SigningSecret",
           "generate": true
         }
-      ],
-      "retired": true
+      ]
     },
     {
       "name": "dashboard",
@@ -226,6 +229,7 @@
       "repository": "cmdemo1-fworker",
       "port": 8080,
       "healthPath": "/health",
+      "pipelineSignOff": true,
       "environments": [
         "tdd",
         "uat",
@@ -325,8 +329,7 @@
       "alwaysOnEnvironments": [
         "tdd",
         "prod"
-      ],
-      "retired": true
+      ]
     }
   ],
   "environments": [
