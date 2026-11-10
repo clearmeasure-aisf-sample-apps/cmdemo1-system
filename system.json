@@ -226,7 +226,6 @@
       "repository": "cmdemo1-fworker",
       "port": 8080,
       "healthPath": "/health",
-      "pipelineSignOff": true,
       "environments": [
         "tdd",
         "uat",
