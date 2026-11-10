@@ -253,8 +253,18 @@ $system = Get-Content -LiteralPath (Join-Path $root 'system.json') -Raw | Conver
 # app it had here until this apply is still there when the apply starts, and its removal is the change, not downtime.
 $retiredDeployables = @($system.deployables | Where-Object { $_['retired'] -eq $true } | ForEach-Object { [string] $_.name })
 $system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
+# system.azureExcludeDeployables (#542): omit from Azure only (infra/main.bicep). Match that filter here so secrets,
+# SQL, and the availability probe do not treat those apps as still required; their removal is the change, not downtime.
+# Octopus projects for those names stay until a later follow-up removes them.
+$azureExcludedDeployables = @()
+if ($system.system.ContainsKey('azureExcludeDeployables')) {
+    $azureExcludedDeployables = @($system.system.azureExcludeDeployables | ForEach-Object { [string] $_ })
+}
 # deployables[].environments: a deployable may exist in some environments only; this one's are the rest of the work.
-$deployablesHere = @($system.deployables | Where-Object { -not $_.ContainsKey('environments') -or @($_.environments) -contains $environmentName })
+$deployablesHere = @($system.deployables | Where-Object {
+        (-not $_.ContainsKey('environments') -or @($_.environments) -contains $environmentName) -and
+        $azureExcludedDeployables -notcontains [string] $_.name
+    })
 # The same rule as infra/main.bicep (hasDatabase): a container deployable uses the database unless it says
 # "database": false. Without one the environment has no SQL server, and there is no administrator password to read or
 # generate.
@@ -407,8 +417,9 @@ function Stop-AvailabilityProbe {
 # app it created, which the application's next deployment creates again, and that is the change, not downtime.
 $ownRuntime = @($system.deployables | Where-Object { $_['hosting'] -eq 'own' } | ForEach-Object { [string] $_.name })
 if ($ownRuntime.Count -gt 0) { Write-Host "Not watched here (they bring their own runtime): $($ownRuntime -join ', ')" }
-# A deployable that system.json no longer places in this environment (deployables[].environments, or retired) is
-# removed by this apply, and its app going away is the change, not downtime: it is not watched either.
+# A deployable that system.json no longer places in this environment (deployables[].environments, retired, or
+# azureExcludeDeployables) is removed by this apply, and its app going away is the change, not downtime: it is not
+# watched either. Without azureExclude here, 1.0.178 failed tdd after the stack deleted aisf/fworker (#542).
 $notPlacedHere = @(@($system.deployables | Where-Object { $deployablesHere.name -notcontains $_.name } | ForEach-Object { [string] $_.name }) + $retiredDeployables)
 if ($notPlacedHere.Count -gt 0) { Write-Host "Not watched here (the apply removes them from $environmentName): $($notPlacedHere -join ', ')" }
 $probe = Start-AvailabilityProbe -Group $resourceGroup -Environment $environmentName -Outputs $outputs -Ignore @($ownRuntime + $notPlacedHere)
