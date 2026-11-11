@@ -65,6 +65,10 @@
     previous environment finished AND the head commit of the application repository's default branch (master) is green:
     every check run and commit status completed success, skipped or neutral. Pending: hold until green; red, or a read that
     failed: hold. Until then the held issue says when it will be promoted.
+    Security-advisory exemption (owner, 2026-11-11): the same pipeline-only case skips that 60-minute wait when every path that
+    triggered flag 3 comes from source PRs that only change package version numbers (project/package files and
+    unused-package-baseline.json) and each such PR has a GHSA-…. id in its title or body; master must still be green, and
+    health/soak and every other flag are unchanged. Diffs or PR lookup that cannot be read: fail closed (no exemption).
 
 .PARAMETER LoadOnly
     Defines the functions and stops (for the tests).
@@ -123,8 +127,15 @@ $DeployableSettings = @{
 }
 # Pipeline-only override (owner's decision, Jeffrey Palermo 2026-10-14): a release whose only flag is a pipeline or infra
 # change is promoted anyway this many minutes after its deployment to the previous environment finished, when master of
-# the application repository is green.
+# the application repository is green. Security-advisory exemption (owner, Jeffrey Palermo 2026-11-11): the same case
+# skips this wait when every flag-3 path is a package-version-only dependency fix with a GHSA id in the source PR title
+# or body (see Test-SecurityAdvisoryExemption); master must still be green.
 $PipelineOverrideMinutes = 60
+# GHSA id in a pull request title or body (GitHub Security Advisory).
+$GhsaIdPattern = 'GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}'
+# Build/project files whose package-version surfaces may qualify for the security-advisory exemption (Dockerfile* does not).
+$SecurityAdvisoryPackageFiles = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props', 'global.json',
+    'nuget.config', '*.csproj', '*.sln', '*.slnx', '*.props', '*.targets')
 # The newest releases looked at for a candidate; the release running in an environment can be older: then it is found
 # through the newest deployments to that environment, at most this many (issue #314; fewer than one success among them
 # leaves the running release unknown: "comparison incomplete").
@@ -154,6 +165,93 @@ function Get-PipelineEvidence {
         if (-not (Test-GlobMatch $p $Application)) { "$p ($outside)"; continue }
         if (Test-GlobMatch ($p.Split('/')[-1]) $Build) { "$p (build or project file)" }
     }
+}
+
+function ConvertFrom-PipelineEvidencePath([string] $Evidence) {
+    # "path (outside src/)" or "path (build or project file)" -> path; anything else unchanged.
+    if ($Evidence -match '^(.*) \((?:outside .*|build or project file)\)$') { return $Matches[1] }
+    $Evidence
+}
+
+function Get-GhsaIds([string] $Text) {
+    # Distinct GHSA-…. ids in title or body (canonical published-advisory signal).
+    [string[]] @([regex]::Matches($Text ?? '', $GhsaIdPattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase) | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
+}
+
+function Test-SecurityAdvisoryPackagePath([string] $Path, [string[]] $PackageFiles = $SecurityAdvisoryPackageFiles) {
+    # Project/package version surfaces, or the dead-code unused-package baseline (any depth).
+    if ($Path -match '(?i)(^|/)unused-package-baseline\.json$') { return $true }
+    Test-GlobMatch ($Path.Split('/')[-1]) $PackageFiles
+}
+
+function Test-PackageVersionOnlyPatch {
+    <# A unified diff (GitHub pull file patch, or git diff) whose changed lines are only package version numbers on a
+       project/package file, or any change to unused-package-baseline.json. $null patch: unreadable (fail closed). #>
+    param([string] $Path, $Patch)
+    if ($null -eq $Patch) { return $false }
+    $Patch = [string] $Patch
+    if ($Path -match '(?i)(^|/)unused-package-baseline\.json$') { return $true }
+    $inComment = $false
+    foreach ($line in @(($Patch ?? '') -split "`r?`n")) {
+        if ($line -match '^(--- |\+\+\+ |@@ )') { continue }
+        if ($line -notmatch '^[\+\-]') { continue }
+        $t = $line.Substring(1)
+        if ($t -match '<!--') { $inComment = $true }
+        if ($inComment) { if ($t -match '-->') { $inComment = $false }; continue }
+        if ($t -match '^\s*$') { continue }
+        if ($t -match '^\s*</?(PackageReference|PackageVersion|ItemGroup)\b') { continue }
+        if ($t -match '^\s*<Version\b') { continue }
+        if ($t -match '^\s*<Project\b' -and $t -match '\bSdk\s*=') { continue }
+        if ($t -match '^\s*<Sdk\b') { continue }
+        if ($Path -match '(?i)(^|/)global\.json$' -and $t -match '^\s*"(sdk|version)"\s*:') { continue }
+        return $false
+    }
+    $true
+}
+
+function Test-SecurityAdvisoryExemption {
+    <# Whether the pipeline/project-file hold may skip its 60-minute wait: every flagged path is a package-version
+       surface (or unused-package-baseline.json) owned by a PR that has a GHSA id in title or body and whose entire
+       file list is package-version-only. PullByPath: path -> @{ Number; Title; Body; Files = @(@{ Filename; Patch });
+       Error }. Missing lookup, Error, or $null Patch: Qualifies is false (fail closed). #>
+    param([string[]] $FlaggedPaths, [hashtable] $PullByPath)
+    $paths = @($FlaggedPaths | Where-Object { $_ } | Select-Object -Unique)
+    if ($paths.Count -eq 0) { return @{ Qualifies = $false; GhsaIds = @(); Paths = @(); Why = 'no flagged path' } }
+    $ids = [Collections.Generic.List[string]]::new()
+    foreach ($p in $paths) {
+        if (-not (Test-SecurityAdvisoryPackagePath $p)) {
+            return @{ Qualifies = $false; GhsaIds = @(); Paths = $paths; Why = "$p is not a package-version surface" }
+        }
+        if (-not $PullByPath -or -not $PullByPath.ContainsKey($p)) {
+            return @{ Qualifies = $false; GhsaIds = @(); Paths = $paths; Why = "pull request of $p not known" }
+        }
+        $pr = $PullByPath[$p]
+        if ($pr['Error']) {
+            return @{ Qualifies = $false; GhsaIds = @(); Paths = $paths; Why = "pull request of $p not read: $($pr.Error)" }
+        }
+        $found = @(Get-GhsaIds "$($pr.Title) $($pr.Body)")
+        if ($found.Count -eq 0) {
+            return @{ Qualifies = $false; GhsaIds = @(); Paths = $paths; Why = "pull request #$($pr.Number) has no GHSA id in title or body" }
+        }
+        foreach ($id in $found) { if ($ids -notcontains $id) { $ids.Add($id) } }
+        $files = @($pr.Files)
+        if ($files.Count -eq 0) {
+            return @{ Qualifies = $false; GhsaIds = @(); Paths = $paths; Why = "files of pull request #$($pr.Number) not read" }
+        }
+        foreach ($f in $files) {
+            $name = [string] $f.Filename
+            if (-not (Test-SecurityAdvisoryPackagePath $name)) {
+                return @{ Qualifies = $false; GhsaIds = @(); Paths = $paths; Why = "#$($pr.Number) changes $name (not a package-version surface)" }
+            }
+            if ($null -eq $f.Patch) {
+                return @{ Qualifies = $false; GhsaIds = @(); Paths = $paths; Why = "diff of $name in #$($pr.Number) not readable" }
+            }
+            if (-not (Test-PackageVersionOnlyPatch -Path $name -Patch ([string] $f.Patch))) {
+                return @{ Qualifies = $false; GhsaIds = @(); Paths = $paths; Why = "#$($pr.Number) changes more than package versions in $name" }
+            }
+        }
+    }
+    @{ Qualifies = $true; GhsaIds = @($ids); Paths = $paths; Why = '' }
 }
 
 function ConvertTo-CheckState {
@@ -248,11 +346,32 @@ function Test-PipelineOnly {
     @($Flags).Count -eq 1 -and $Flags[0].Flag -eq 'Pipeline or infra change' -and [bool] $Facts.PathsKnown
 }
 
+function Read-SecurityAdvisoryOverride {
+    <# Builds SecurityAdvisoryOverride facts from Get-PipelineEvidence lines. GetPullForPath {param($path)} ->
+       @{ Number; Title; Body; Files = @(@{ Filename; Patch }) } or throws / returns Error. Fail closed on any miss. #>
+    param([string[]] $Evidence, [scriptblock] $GetPullForPath)
+    $paths = @($Evidence | ForEach-Object { ConvertFrom-PipelineEvidencePath $_ } | Where-Object { $_ } | Select-Object -Unique)
+    $byPath = @{}
+    foreach ($p in $paths) {
+        try {
+            $pr = & $GetPullForPath $p
+            if (-not $pr) { $byPath[$p] = @{ Number = 0; Title = ''; Body = ''; Files = @(); Error = "pull request of $p not known" } }
+            elseif ($pr['Error']) { $byPath[$p] = $pr }
+            else { $byPath[$p] = $pr }
+        } catch {
+            $byPath[$p] = @{ Number = 0; Title = ''; Body = ''; Files = @(); Error = $_.Exception.Message }
+        }
+    }
+    Test-SecurityAdvisoryExemption -FlaggedPaths $paths -PullByPath $byPath
+}
+
 function Get-PromotionDecision {
     <# Facts: Checks, PathsKnown, PathsReason, Paths, HoldItems, HoldUnknown (reasons), PreviousState, LogFindings, Finished,
-       Now, HealthReads, HealthAddressKnown, and PipelineOverride = @{ Minutes (since the previous deployment finished);
-       MasterState = green|pending|red|unknown; MasterEvidence } (read only when the pipeline flag is the only one).
-       Returns @{ Decision = promote|hold|wait; Reason = no-flag|pipeline-override (promote); Note (hold); Flags; Waiting; Passed }. #>
+       Now, HealthReads, HealthAddressKnown, PipelineOverride = @{ Minutes (since the previous deployment finished);
+       MasterState = green|pending|red|unknown; MasterEvidence } (read only when the pipeline flag is the only one), and
+       SecurityAdvisoryOverride = @{ Qualifies; GhsaIds; Paths; Why } (Test-SecurityAdvisoryExemption; same gate).
+       Returns @{ Decision = promote|hold|wait; Reason = no-flag|pipeline-override|security-advisory-override (promote);
+       Note (hold); Flags; Waiting; Passed }. #>
     param([hashtable] $Facts, [int] $OverrideMinutes = $PipelineOverrideMinutes, [string] $Name = $Deployable, [string] $HealthPath = $Settings.HealthPath)
     $flags = [Collections.Generic.List[object]]::new()
     $waiting = [Collections.Generic.List[string]]::new()
@@ -290,13 +409,21 @@ function Get-PromotionDecision {
     $note = $null
     if (Test-PipelineOnly -Flags @($flags) -Facts $Facts) {
         $o = $Facts['PipelineOverride']
+        $sa = $Facts['SecurityAdvisoryOverride']
         $minutes = if ($o -and $null -ne $o['Minutes']) { [double] $o['Minutes'] } else { -1 }
         $master = if ($o -and $o['MasterState']) { [string] $o['MasterState'] } else { 'unknown' }
         $masterWhy = if ($o -and $o['MasterEvidence']) { ": $(@($o['MasterEvidence']) -join ', ')" } else { '' }
         $at = if ($Facts.Finished) { ([datetime] $Facts.Finished).AddMinutes($OverrideMinutes).ToString('yyyy-MM-dd HH:mm') + ' UTC' } else { "$OverrideMinutes minutes after the deployment to the previous environment finished" }
-        $when = "Pipeline change is the only flag: promoted automatically after $at if master of the application repository is green (owner rule 2026-10-14)."
+        $advisory = [bool] ($sa -and $sa['Qualifies'])
+        $ghsa = if ($advisory) { (@($sa['GhsaIds']) -join ', ') } else { '' }
+        $when = if ($advisory) {
+            "Security-advisory dependency fix ($ghsa) is the only pipeline flag: promoted immediately when master of the application repository is green (owner rule 2026-11-11); otherwise after $at (owner rule 2026-10-14)."
+        } else {
+            "Pipeline change is the only flag: promoted automatically after $at if master of the application repository is green (owner rule 2026-10-14)."
+        }
         if ($master -eq 'red') { $note = "$when Not now: master is red$masterWhy." }
         elseif ($master -ne 'green' -and $master -ne 'pending') { $note = "$when Not now: the state of master could not be read$masterWhy (unknown counts as not green)." }
+        elseif ($advisory -and $master -eq 'green' -and $waiting.Count -eq 0) { $decision = 'promote'; $reason = 'security-advisory-override' }
         elseif ($minutes -lt $OverrideMinutes) { $note = $when }
         elseif ($master -eq 'pending') { $note = "$when Not yet: master is not green yet (pending$masterWhy)." }
         elseif ($waiting.Count -gt 0) { $note = "$when Not yet: waiting for $(@($waiting) -join '; ')." }
@@ -610,6 +737,9 @@ function Format-PromotionReason {
     param([hashtable] $Decision, [string] $Previous, [string] $RunUrl, [switch] $Recovered, [int] $OverrideMinutes = $PipelineOverrideMinutes)
     $how = if ($Recovered) { 'Auto-promoted (recovered)' } else { 'Auto-promoted' }
     $common = "checks green ($(@($Decision.Passed).Count) passed), deployment and health ok in $Previous"
+    if ($Decision.Reason -eq 'security-advisory-override') {
+        return "$how immediately: security-advisory dependency fix skipped the project-file hold (owner rule 2026-11-11), master green, no other flag; $common, no Hold label; run $RunUrl"
+    }
     if ($Decision.Reason -eq 'pipeline-override') {
         return "$how after $OverrideMinutes minutes: pipeline change accepted (owner rule 2026-10-14), master green, no other flag; $common, no Hold label; run $RunUrl"
     }
@@ -812,7 +942,7 @@ function Get-Evaluation {
     $baseAddress = if ($addresses) { [string] $addresses.($Target.Name).$Deployable } else { '' }
     if ($baseAddress) { $baseSha = try { [string] (Invoke-RestMethod "$baseAddress/_build" -TimeoutSec 30).commit } catch { $null } }
     if ($baseSha -notmatch '^[0-9a-f]{40}$') { $baseSha = Get-Commit $RunningRelease }
-    $pathsKnown = $false; $paths = @(); $holdItems = @()
+    $pathsKnown = $false; $paths = @(); $holdItems = @(); $commitPulls = @{}
     $pathsReason = if ($RunningUnknown) { "no base commit: /_build names none and $RunningUnknown" } else { 'no base commit: neither /_build nor the running release names one' }
     if ($baseSha -match '^[0-9a-f]{40}$') {
         try {
@@ -839,9 +969,48 @@ function Get-Evaluation {
     $decision = Get-PromotionDecision -Facts $facts
     if (Test-PipelineOnly -Flags @($decision.Flags) -Facts $facts) {
         # The pipeline-only override: master of the application repository, read only when it can matter.
+        # Security-advisory exemption (owner 2026-11-11): skip the 60-minute wait when every flag-3 path is a
+        # package-version-only GHSA fix; fail closed when diffs or PR lookup are unreadable.
         $m = Read-MasterState
         Say "Master ($($m.Branch) $($m.Sha)): $($m.State)$(if (@($m.Evidence).Count) { ': ' + (@($m.Evidence) -join ', ') })"
         $masterEvidence = if ($m.State -eq 'unknown') { @('read failed') } else { @($m.Evidence | Select-Object -First 5) }
+        $pipelineEvidence = @(Get-PipelineEvidence -Paths @($facts.Paths))
+        $sa = Read-SecurityAdvisoryOverride -Evidence $pipelineEvidence -GetPullForPath {
+            param($path)
+            $PSNativeCommandUseErrorActionPreference = $false
+            $shas = @(& git -C $appClone -c core.quotePath=false log --format=%H "$baseSha..$sha" -- $path 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw "commits of $path not read (git exit $LASTEXITCODE)" }
+            if ($shas.Count -eq 0) { throw "no commit of $path between $baseSha and $sha" }
+            $pull = $null
+            foreach ($c in $shas) {
+                $e = $commitPulls[$c]
+                if (-not $e) { throw "pull requests of $c not read" }
+                if ($e.Error) { throw $e.Error }
+                $prs = @($e.Pulls)
+                if ($prs.Count -eq 0) { throw "no pull request for commit $c of $path" }
+                foreach ($p in $prs) {
+                    if (-not $pull) { $pull = $p }
+                    elseif ([int] $p.number -ne [int] $pull.number) { throw "$path has commits from #$($pull.number) and #$($p.number)" }
+                }
+            }
+            $PSNativeCommandUseErrorActionPreference = $false
+            $raw = (& gh api "repos/$appRepo/pulls/$($pull.number)/files" --paginate 2>$null) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or -not $raw) { throw "files of pull request #$($pull.number) not read (gh exit $LASTEXITCODE)" }
+            $files = @(try { $raw | ConvertFrom-Json -Depth 20 } catch { throw "files of pull request #$($pull.number) not read (JSON)" })
+            @{
+                Number = [int] $pull.number; Title = [string] $pull.title; Body = [string] $pull.body
+                Files  = @($files | ForEach-Object {
+                        $patch = if ($_.PSObject.Properties.Name -contains 'patch') { [string] $_.patch } else { $null }
+                        @{ Filename = [string] $_.filename; Patch = $patch }
+                    })
+            }
+        }.GetNewClosure()
+        if ($sa.Qualifies) {
+            Say "Security-advisory override: $(@($sa.GhsaIds) -join ', ') on $(@($sa.Paths) -join ', ') (skipping the ${PipelineOverrideMinutes}-minute project-file hold)."
+        } elseif ($sa.Why -and $sa.Why -ne 'no flagged path') {
+            Say "Security-advisory override not applied: $($sa.Why)"
+        }
+        $facts['SecurityAdvisoryOverride'] = $sa
         $facts['PipelineOverride'] = @{ Minutes = ($facts.Now - $finished).TotalMinutes; MasterState = $m.State; MasterEvidence = $masterEvidence }
         $decision = Get-PromotionDecision -Facts $facts
     }

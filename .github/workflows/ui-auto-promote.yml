@@ -44,6 +44,10 @@
 # when the release has a deployment there or a newer release replaces it. A person promotes it in Octopus as today.
 # Exception (owner, 2026-10-14): when flag 3 is the only flag, the release is promoted anyway 60 minutes after its deployment
 # to the previous environment finished, if master of the application repository is green (pending, red or unreadable: held).
+# Security-advisory exemption (owner, 2026-11-11): the same pipeline-only case skips that 60-minute wait when every path
+# that triggered flag 3 comes from source PRs that only change package version numbers (project/package files and
+# unused-package-baseline.json) and each such PR has a GHSA-…. id in its title or body; master must still be green;
+# health/soak and every other flag are unchanged. Unreadable diffs or PR lookup: fail closed (no exemption).
 # Credentials: GitHub OIDC to Octopus as the system's service account (environment "octopus"; it must create
 # deployments of cmdemo1-ui and cmdemo1-fworker and answer their Sign-off (system.json pipelineSignOff of each): it is a Space Manager of the space), and this workflow's token
 # for issues and the state branch. The application repository is public. No stored secret.

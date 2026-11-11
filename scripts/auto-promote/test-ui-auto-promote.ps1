@@ -407,6 +407,138 @@ Test-Case 'pipeline only, 600 minutes, master green, a wait open: hold' (Get-Pro
 $d = Get-PromotionDecision -Facts (New-Facts)
 Test-Case 'no flag: promote as today' @($d.Decision, $d.Reason) @('promote', 'no-flag')
 Test-Case 'no flag Sign-off note unchanged' (Format-PromotionReason -Decision $d -Previous 'tdd' -RunUrl 'r1') 'Auto-promoted: no flag. checks green (2 passed), deployment and health ok in tdd, no pipeline change, no Hold label; run r1'
+
+# Security-advisory exemption (owner rule 2026-11-11): skip the 60-minute project-file hold for GHSA package bumps.
+$csprojPath = 'src/ChurchBulletin.AppHost/ChurchBulletin.AppHost.csproj'
+$baselinePath = 'scripts/dead-code/unused-package-baseline.json'
+$versionOnlyCsproj = @"
+--- a/$csprojPath
++++ b/$csprojPath
+@@ -1,4 +1,4 @@
+-<Project Sdk="Aspire.AppHost.Sdk/13.1.2">
++<Project Sdk="Aspire.AppHost.Sdk/13.6.5">
+ 
+   <PropertyGroup>
+     <OutputType>Exe</OutputType>
+@@ -10,7 +10,7 @@
+   <ItemGroup>
+-    <PackageReference Include="Aspire.Hosting.Redis" Version="13.1.2" />
++    <PackageReference Include="Aspire.Hosting.Redis" Version="13.6.5" />
+   </ItemGroup>
+"@
+$baselineOnly = @"
+--- a/$baselinePath
++++ b/$baselinePath
+@@ -1,6 +1,3 @@
+-    {
+-      "package": "Old.Package",
+-      "project": "$csprojPath"
+-    },
+"@
+$noWarnCsproj = @"
+--- a/$csprojPath
++++ b/$csprojPath
+@@ -1,8 +1,9 @@
+-<Project Sdk="Aspire.AppHost.Sdk/13.1.2">
++<Project Sdk="Aspire.AppHost.Sdk/13.6.5">
+   <PropertyGroup>
+     <OutputType>Exe</OutputType>
++    <NoWarn>`$(NoWarn);ASPIRE010</NoWarn>
+   </PropertyGroup>
+"@
+$workflowPatch = @"
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -1,2 +1,3 @@
+ name: build
++env: { X: 1 }
+"@
+function New-AdvisoryPull([string] $Title, [string] $Body, [object[]] $Files, [string] $Error = '') {
+    @{ Number = 1610; Title = $Title; Body = $Body; Files = @($Files); Error = $Error }
+}
+function New-AdvisoryFiles([string] $CsprojPatch = $versionOnlyCsproj, [string] $BaselinePatch = $baselineOnly) {
+    @(@{ Filename = $csprojPath; Patch = $CsprojPatch }, @{ Filename = $baselinePath; Patch = $BaselinePatch })
+}
+Test-Case 'GHSA id is read from title' (Get-GhsaIds 'Bump Aspire (NU1903 GHSA-f7vh-h5g3-7jrh)') @('GHSA-F7VH-H5G3-7JRH')
+Test-Case 'GHSA id is read from body' (Get-GhsaIds 'Fixes GHSA-abcd-efgh-ijkl today') @('GHSA-ABCD-EFGH-IJKL')
+Test-Case 'no GHSA id when absent' @(Get-GhsaIds 'just a bump').Count 0
+Test-Case 'advisory path: csproj qualifies' (Test-SecurityAdvisoryPackagePath $csprojPath) $true
+Test-Case 'advisory path: Directory.Packages.props qualifies' (Test-SecurityAdvisoryPackagePath 'Directory.Packages.props') $true
+Test-Case 'advisory path: unused-package baseline qualifies' (Test-SecurityAdvisoryPackagePath $baselinePath) $true
+Test-Case 'advisory path: Dockerfile does not' (Test-SecurityAdvisoryPackagePath 'Dockerfile') $false
+Test-Case 'advisory path: workflow does not' (Test-SecurityAdvisoryPackagePath '.github/workflows/build.yml') $false
+Test-Case 'version-only csproj patch qualifies' (Test-PackageVersionOnlyPatch -Path $csprojPath -Patch $versionOnlyCsproj) $true
+Test-Case 'NoWarn in csproj does not qualify' (Test-PackageVersionOnlyPatch -Path $csprojPath -Patch $noWarnCsproj) $false
+Test-Case 'null patch fails closed' (Test-PackageVersionOnlyPatch -Path $csprojPath -Patch $null) $false
+Test-Case 'baseline patch qualifies' (Test-PackageVersionOnlyPatch -Path $baselinePath -Patch $baselineOnly) $true
+$qualifyingPull = New-AdvisoryPull 'Bump Aspire to 13.6.5 (NU1903 GHSA-f7vh-h5g3-7jrh)' 'Closes #1609' (New-AdvisoryFiles)
+$qualifyingByPath = @{ $csprojPath = $qualifyingPull; $baselinePath = $qualifyingPull }
+$ex = Test-SecurityAdvisoryExemption -FlaggedPaths @($csprojPath, $baselinePath) -PullByPath $qualifyingByPath
+Test-Case 'exemption: qualifying package bump + baseline + GHSA' @($ex.Qualifies, $ex.GhsaIds) @($true, @('GHSA-F7VH-H5G3-7JRH'))
+$ex = Test-SecurityAdvisoryExemption -FlaggedPaths @($csprojPath, $baselinePath) -PullByPath @{
+    $csprojPath = (New-AdvisoryPull 'Bump without advisory id' '' (New-AdvisoryFiles)); $baselinePath = (New-AdvisoryPull 'Bump without advisory id' '' (New-AdvisoryFiles))
+}
+Test-Case 'exemption: no GHSA id does not qualify' $ex.Qualifies $false
+$mixedPull = New-AdvisoryPull 'GHSA-f7vh-h5g3-7jrh and a workflow' '' (@(New-AdvisoryFiles) + @{ Filename = '.github/workflows/build.yml'; Patch = $workflowPatch })
+$ex = Test-SecurityAdvisoryExemption -FlaggedPaths @($csprojPath) -PullByPath @{ $csprojPath = $mixedPull }
+Test-Case 'exemption: workflow in the same PR does not qualify' $ex.Qualifies $false
+$ex = Test-SecurityAdvisoryExemption -FlaggedPaths @($csprojPath) -PullByPath @{
+    $csprojPath = (New-AdvisoryPull 'GHSA-f7vh-h5g3-7jrh' '' @(@{ Filename = $csprojPath; Patch = $noWarnCsproj }))
+}
+Test-Case 'exemption: more than version numbers does not qualify' $ex.Qualifies $false
+$ex = Test-SecurityAdvisoryExemption -FlaggedPaths @('Dockerfile') -PullByPath @{
+    'Dockerfile' = (New-AdvisoryPull 'GHSA-f7vh-h5g3-7jrh' '' @(@{ Filename = 'Dockerfile'; Patch = $workflowPatch }))
+}
+Test-Case 'exemption: Dockerfile flagged path does not qualify' $ex.Qualifies $false
+$ex = Test-SecurityAdvisoryExemption -FlaggedPaths @($csprojPath) -PullByPath @{
+    $csprojPath = (New-AdvisoryPull 'GHSA-f7vh-h5g3-7jrh' '' @(@{ Filename = $csprojPath; Patch = $null }))
+}
+Test-Case 'exemption: unreadable diff fails closed' $ex.Qualifies $false
+$ex = Test-SecurityAdvisoryExemption -FlaggedPaths @($csprojPath) -PullByPath @{}
+Test-Case 'exemption: missing PR lookup fails closed' $ex.Qualifies $false
+$ex = Test-SecurityAdvisoryExemption -FlaggedPaths @($csprojPath) -PullByPath @{
+    $csprojPath = @{ Number = 1; Title = 'GHSA-f7vh-h5g3-7jrh'; Body = ''; Files = @(); Error = 'labels not read whole' }
+}
+Test-Case 'exemption: incomplete PR lookup fails closed' $ex.Qualifies $false
+
+function New-AdvisoryPipe([double] $Minutes, [string] $Master, [hashtable] $More = @{}) {
+    $f = New-Pipe $Minutes $Master (@{
+            Paths = @($csprojPath, $baselinePath)
+            SecurityAdvisoryOverride = @{ Qualifies = $true; GhsaIds = @('GHSA-F7VH-H5G3-7JRH'); Paths = @($csprojPath, $baselinePath); Why = '' }
+        })
+    foreach ($k in $More.Keys) { $f[$k] = $More[$k] }
+    $f
+}
+$d = Get-PromotionDecision -Facts (New-AdvisoryPipe 5 'green')
+Test-Case 'advisory: qualifying under 60 minutes, master green: promote immediately' @($d.Decision, $d.Reason) @('promote', 'security-advisory-override')
+Test-Case 'advisory Sign-off note names the rule' ((Format-PromotionReason -Decision $d -Previous 'uat' -RunUrl 'r1') -like 'Auto-promoted immediately: security-advisory dependency fix skipped the project-file hold (owner rule 2026-11-11), master green, no other flag;*run r1') $true
+$d = Get-PromotionDecision -Facts (New-AdvisoryPipe 60 'pending')
+Test-Case 'advisory: qualifying, master pending: hold' @($d.Decision, ($d.Note -like '*Security-advisory dependency fix*pending*')) @('hold', $true)
+$d = Get-PromotionDecision -Facts (New-AdvisoryPipe 5 'red')
+Test-Case 'advisory: qualifying, master red: hold' @($d.Decision, ($d.Note -like '*master is red*')) @('hold', $true)
+$d = Get-PromotionDecision -Facts (New-AdvisoryPipe 5 'unknown')
+Test-Case 'advisory: qualifying, master unknown: hold' @($d.Decision, ($d.Note -like '*could not be read*')) @('hold', $true)
+$d = Get-PromotionDecision -Facts (New-AdvisoryPipe 5 'green' @{ HoldUnknown = @('#4 not read') })
+Test-Case 'advisory: qualifying, a wait open: hold' $d.Decision 'hold'
+$d = Get-PromotionDecision -Facts (New-AdvisoryPipe 5 'green' @{ PathsKnown = $false })
+Test-Case 'advisory: incomplete comparison is not exempt' $d.Decision 'hold'
+$d = Get-PromotionDecision -Facts (New-AdvisoryPipe 5 'green' @{ Checks = @(@{ Name = 'CRAP'; State = 'failure'; Url = 'x' }) })
+Test-Case 'advisory: other flags are not exempt' $d.Decision 'hold'
+$d = Get-PromotionDecision -Facts (New-Pipe 5 'green' @{
+        Paths = @($csprojPath, $baselinePath)
+        SecurityAdvisoryOverride = @{ Qualifies = $false; GhsaIds = @(); Paths = @($csprojPath); Why = 'no GHSA id' }
+    })
+Test-Case 'advisory: non-qualifying still held under 60 minutes' @($d.Decision, $d.Reason) @('hold', $null)
+$d = Get-PromotionDecision -Facts (New-Pipe 5 'green' @{ Paths = @('.github/workflows/build.yml') })
+Test-Case 'advisory: workflow-only change still held under 60 minutes' $d.Decision 'hold'
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'green' @{
+        Paths = @($csprojPath)
+        SecurityAdvisoryOverride = @{ Qualifies = $false; GhsaIds = @(); Paths = @($csprojPath); Why = 'no GHSA id' }
+    })
+Test-Case 'advisory: non-qualifying at 60 minutes still uses pipeline-override' @($d.Decision, $d.Reason) @('promote', 'pipeline-override')
+Test-Case 'evidence path strips the outside reason' (ConvertFrom-PipelineEvidencePath 'scripts/dead-code/unused-package-baseline.json (outside src/)') $baselinePath
+Test-Case 'evidence path strips the build-file reason' (ConvertFrom-PipelineEvidencePath "$csprojPath (build or project file)") $csprojPath
+
 Test-Case 'master: all passed is green' (Get-MasterState @(@{ Name = 'a'; State = 'success'; Url = '' }, @{ Name = 'b'; State = 'skipped'; Url = '' })).State 'green'
 Test-Case 'master: one pending is pending' (Get-MasterState @(@{ Name = 'a'; State = 'success'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' })).State 'pending'
 Test-Case 'master: one failed is red' (Get-MasterState @(@{ Name = 'a'; State = 'failure'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' })).State 'red'
