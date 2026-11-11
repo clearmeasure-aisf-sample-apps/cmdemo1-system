@@ -3,16 +3,16 @@
 
 <#
 .SYNOPSIS
-    Promotes the newest release of a deployable ($Deployable: ui, dashboard, system, fworker, or another in
+    Promotes the newest release of a deployable ($Deployable: ui, dashboard, system, or another in
     $DeployableSettings) to the next environment when nothing flags it, and holds it (one GitHub issue) when something
     does. One environment step per run.
 
 .DESCRIPTION
     Owner's decision (Jeffrey Palermo, 2026-10-14): "release candidates automatically deployed to production if there
-    is nothing to flag them. don't let them stop in release queue". Deployables in $DeployableSettings (ui; fworker by
-    the owner's decision of 2026-10-15; dashboard and system by 2026-11-10, issue #560). A deployable that is not in
-    $DeployableSettings keeps a person's sign-off (the script stops). AISF is excluded. Run by workflow ui-auto-promote,
-    once per deployable in $PromoteOrder, one after the other. Below, "ui" stands for the deployable.
+    is nothing to flag them. don't let them stop in release queue". Deployables in $DeployableSettings (ui; dashboard
+    and system by 2026-11-10, issue #560). A deployable that is not in $DeployableSettings keeps a person's sign-off
+    (the script stops). AISF and fworker (deprecated) are excluded. Run by workflow ui-auto-promote, once per
+    deployable in $PromoteOrder, one after the other. Below, "ui" stands for the deployable.
 
     Candidate (Select-Candidate): releases newest first by version (Major.Minor.Patch; an unparsable version below every
     parsable one; Assembled only between equal or unparsable versions: releases can be assembled out of order); the first whose latest deployment to the previous
@@ -34,11 +34,13 @@
       2 deployment  Flag: the deployment to the previous environment is not Success; its task log is unreadable (under 20
                  lines or without its "Task ID:" header); the log has a line at Error, Warning or Fatal level or a step
                  SuccessWithWarning (the kit's test-deployment-logs.ps1 rule, plus Fatal, which a real failed ui task
-                 logs); or a health read (HealthPath of the deployable: ui /_healthcheck/detailed, fworker /ready) since it finished was not Healthy (an answered status other
-                 than Healthy counts at once; an unreachable or timed-out read is tried up to 3 more times, 20 to 30 s
-                 apart, in the same run, and is recorded Unreachable, which flags, only when all four fail). Health rule: no read since the deployment finished is not Healthy, at least two reads
-                 are Healthy and at least 5 minutes apart, and the later one is at least 10 minutes after the deployment
-                 finished. Else wait. A ui address that is not known: wait ("health address unknown").
+                 logs); or a health read (HealthPath of the deployable: ui /_healthcheck/detailed, dashboard /, system
+                 none) since it finished was not Healthy (an answered status other than Healthy counts at once; an
+                 unreachable or timed-out read is tried up to 3 more times, 20 to 30 s apart, in the same run, and is
+                 recorded Unreachable, which flags, only when all four fail). Health rule: no read since the deployment
+                 finished is not Healthy, at least two reads are Healthy and at least 5 minutes apart, and the later one
+                 is at least 10 minutes after the deployment finished. Else wait. A ui address that is not known: wait
+                 ("health address unknown").
       3 pipeline  Compared with the commit running in the next environment (/_build "commit", else the commit in the notes of
                  the release running there), a changed path (a renamed file counts both names) outside the deployable's
                  ApplicationPaths (ui: src/), or a build or project file anywhere (BuildFiles list), unless it is documentation (DocumentationPaths list:
@@ -52,11 +54,9 @@
                  ignored). The pull requests of the commits are read in batched GraphQL queries (Get-CommitPulls) and the
                  application repository's Hold items in one listing (Get-RepoHeld), so a large comparison costs a few
                  calls. Wait: any read of that chain failed or was cut (more than 5 pull requests on one commit, more than
-                 300 items of other repositories). A #N that the application
-                 repository answers 404 for is no item there, so nothing to hold (fworker pull requests name work items of
-                 cmdemo1-workorders as bare #N; such an item's Hold label is not looked up). This relies on the application
-                 repository being readable (it is public; the comparison read it). A 404 from another repository still
-                 waits (it may be one not readable).
+                 300 items of other repositories). A #N that the application repository answers 404 for is no item there,
+                 so nothing to hold. This relies on the application repository being readable (it is public; the
+                 comparison read it). A 404 from another repository still waits (it may be one not readable).
 
     Flagged: the deployment is NOT created, so no Sign-off waits in the environment and holds it for every other
     deployable. One issue "<deployable> <version> held before <env>" (label release-held, no assignee) lists each flag with its
@@ -108,7 +108,7 @@ $BuildFiles = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.P
 #                     answer or a timeout is retried like an unreachable read (static sites: dashboard).
 #                     none: no HTTP health read (system infra apply: the Verify environment step already ran in the
 #                     previous deployment; Success and a clean task log are the gate).
-#   BuildPath         where the running app names its commit (ui/fworker /_build "commit"; dashboard /build-facts.json
+#   BuildPath         where the running app names its commit (ui /_build "commit"; dashboard /build-facts.json
 #                     "commit"). Empty: only the running release's notes name the base commit (system).
 $DeployableSettings = @{
     # The work-order app (cmdemo1-workorders). Owner's decision 2026-10-14.
@@ -140,20 +140,10 @@ $DeployableSettings = @{
         HealthRead       = 'none'
         BuildPath        = ''
     }
-    # The factory worker gateway (cmdemo1-fworker). Owner's decision 2026-10-15: same rules as ui. Application: the
-    # gateway, the plugin it serves to workers, the tests, and the instance configuration the gateway reads. Pipeline: the
-    # rest (.github/, Dockerfile, .dockerignore, run-*.sh, tools/, config/deploy.overrides.json, config/apply-overrides.ps1).
-    # Kept for existing promotion; AISF and a new fworker are not added (#560).
-    fworker   = @{
-        ApplicationPaths = @('gateway/**', 'plugin/**', 'tests/**', 'config/instance.json')
-        UnflaggedFolders = @()
-        HealthPath       = '/ready'
-        HealthRead       = 'ready'
-        BuildPath        = '/_build'
-    }
+    # AISF and fworker (deprecated) are excluded (#560): do not add them.
 }
 # Order the workflow runs when deployable=all (one after the other; never two promotions to one environment at once).
-$PromoteOrder = @('ui', 'dashboard', 'system', 'fworker')
+$PromoteOrder = @('ui', 'dashboard', 'system')
 # Pipeline-only override (owner's decision, Jeffrey Palermo 2026-10-14): a release whose only flag is a pipeline or infra
 # change is promoted anyway this many minutes after its deployment to the previous environment finished, when master of
 # the application repository is green.
@@ -676,7 +666,7 @@ function Get-HeldTitleParts {
     if ($Title -cmatch ('^' + [regex]::Escape($Name) + ' (\S+) held before (\S+)$')) { @{ Version = $Matches[1]; Environment = $Matches[2] } }
 }
 function Get-StateKey([string] $DeploymentId, [string] $Name = $Deployable) {
-    # Health reads are kept per deployable and deployment ("fworker/Deployments-12"); Read-StateReads also finds ui's
+    # Health reads are kept per deployable and deployment ("dashboard/Deployments-12"); Read-StateReads also finds ui's
     # reads stored before the key named the deployable (bare "Deployments-12").
     "$Name/$DeploymentId"
 }

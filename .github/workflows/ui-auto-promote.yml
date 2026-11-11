@@ -4,14 +4,14 @@
 # cmdemo1-fworker's config/deploy.overrides.json (false: its delivery train only observes uat and prod); its Octopus team
 # (octopus/own-fworker-ui-promoter.tf) creates ui deployments in tdd only. Started by the schedule, by hand
 # (workflow_dispatch), or by another system (repository_dispatch, type ui-auto-promote, e.g. cm-ai-ops-bot); inputs
-# deployable (all, ui, dashboard, system, fworker) and dry_run, in client_payload for repository_dispatch.
+# deployable (all, ui, dashboard, system) and dry_run, in client_payload for repository_dispatch.
 # Automatic promotion of releases of every active cmdemo1 Octopus deployable in Spaces-355 that this workflow covers
-# (ui, dashboard, system; fworker kept from 2026-10-15), by the owner's decisions of 2026-10-14 (Jeffrey Palermo) and
-# 2026-11-10 (#560): "release candidates automatically deployed to production if there is nothing to flag them. don't
-# let them stop in release queue". AISF is excluded; retired scorecard and repos without an Octopus project
-# (scorecard-site, video) are not added. Each run promotes in order ui, dashboard, system, fworker, one after the other
-# in this one job (never two promotions to one environment at once). The per-deployable settings (application paths,
-# health path, build path) are a table at the top of the script.
+# (ui, dashboard, system), by the owner's decisions of 2026-10-14 (Jeffrey Palermo) and 2026-11-10 (#560): "release
+# candidates automatically deployed to production if there is nothing to flag them. don't let them stop in release
+# queue". AISF and fworker (deprecated) are excluded; retired scorecard and repos without an Octopus project
+# (scorecard-site, video) are not added. Each run promotes in order ui, dashboard, system, one after the other in this
+# one job (never two promotions to one environment at once). The per-deployable settings (application paths, health
+# path, build path) are a table at the top of the script.
 # scripts/auto-promote/ui-auto-promote.ps1 -Deployable <name> finds the newest release that succeeded in the previous environment (tdd before uat, uat before prod) and has no
 # deployment yet to the next, one environment step per run, never while a deployment of it to uat or prod is queued,
 # running or waiting. It promotes it, and answers its Sign-off as the system's service account with a reason that names
@@ -21,20 +21,19 @@
 #      (pending: the run waits and flags nothing yet).
 #   2. Deployment or health failed: the deployment to the previous environment did not succeed, its task log has an
 #      Error or Warning line or a step SuccessWithWarning (the rule of the kit's test-deployment-logs.ps1), or
-#      its health (ui /_healthcheck/detailed overallStatus; fworker /ready: 200; dashboard / httpOk; system: no HTTP
-#      health, Verify already ran) was not Healthy in a read taken since it finished (an answered non-Healthy status counts at
-#      once; an unreachable or timed-out read is retried up to 3 times, 20 to 30 s apart, in the same run, and flags as
+#      its health (ui /_healthcheck/detailed overallStatus; dashboard / httpOk; system: no HTTP health, Verify already
+#      ran) was not Healthy in a read taken since it finished (an answered non-Healthy status counts at once; an
+#      unreachable or timed-out read is retried up to 3 times, 20 to 30 s apart, in the same run, and flags as
 #      Unreachable only when all four attempts fail), or the task log is unreadable. Health rule, exactly: no read since the deployment finished is not
 #      Healthy, at least two reads are Healthy and at least 5 minutes apart, and the later one is at least 10 minutes
 #      after the deployment finished; otherwise the run waits (an address that is not known: wait, "health address
 #      unknown"). Each run adds one read (two, 5 minutes apart, when the first one comes late), kept in branch
 #      auto-promote (one commit, force-pushed, no history; ui-auto-promote.json: reads per deployment, two days).
-#   3. Pipeline or infra change: compared with the commit running in the next environment (BuildPath: ui/fworker /_build
-#      "commit"; dashboard /build-facts.json "commit"; system: release notes only), a
-#      changed path outside the deployable's application paths (ui/dashboard: src/; system: environments/, infra/,
-#      octopus/, scripts/, …; fworker: gateway/, plugin/, tests/,
-#      config/instance.json) or a build/project file inside them (Directory.Build.*, global.json, nuget.config, *.csproj,
-#      *.sln, *.props, *.targets, Dockerfile*). Never a flag: for ui src/Database/ (migrations; owner, 2026-10-14) and .github/private-build/ (the kit's script; owner, 2026-10-14); for all
+#   3. Pipeline or infra change: compared with the commit running in the next environment (BuildPath: ui /_build
+#      "commit"; dashboard /build-facts.json "commit"; system: release notes only), a changed path outside the
+#      deployable's application paths (ui/dashboard: src/; system: environments/, infra/, octopus/, scripts/, …) or a
+#      build/project file inside them (Directory.Build.*, global.json, nuget.config, *.csproj, *.sln, *.props,
+#      *.targets, Dockerfile*). Never a flag: for ui src/Database/ (migrations; owner, 2026-10-14) and .github/private-build/ (the kit's script; owner, 2026-10-14); for all
 #      documentation (docs/**, arch/**, *.md anywhere: proposed, one list in the script for the owner to edit). The
 #      comparison is read from a clone of the application repository (no commit or file cap, unlike GitHub's compare);
 #      one that is incomplete (no base commit, a read failed) flags.
@@ -60,9 +59,9 @@ on:
   workflow_dispatch:
     inputs:
       deployable:
-        description: "Which deployable to evaluate (all: ui, dashboard, system, then fworker)"
+        description: "Which deployable to evaluate (all: ui, dashboard, then system)"
         type: choice
-        options: [all, ui, dashboard, system, fworker]
+        options: [all, ui, dashboard, system]
         default: all
       dry_run:
         description: "Decide and print, change nothing"
@@ -95,8 +94,8 @@ jobs:
     steps:
       - name: Check the request
         run: |
-          case "$DEPLOYABLE" in all|ui|dashboard|system|fworker) echo "Deployable: $DEPLOYABLE; dry run: $DRY_RUN; event: ${{ github.event_name }}" ;;
-            *) echo "::error::deployable '$DEPLOYABLE' is not all, ui, dashboard, system or fworker"; exit 1 ;; esac
+          case "$DEPLOYABLE" in all|ui|dashboard|system) echo "Deployable: $DEPLOYABLE; dry run: $DRY_RUN; event: ${{ github.event_name }}" ;;
+            *) echo "::error::deployable '$DEPLOYABLE' is not all, ui, dashboard or system"; exit 1 ;; esac
 
       - uses: actions/checkout@v6.0.1
         with:
@@ -152,15 +151,6 @@ jobs:
         run: |
           $run = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable system -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run -DryRun:($env:DRY_RUN -eq 'true')
-
-      - name: Promote or hold fworker
-        if: ${{ !cancelled() && steps.rules.outcome == 'success' && steps.login.outcome == 'success' && steps.fetch.outcome == 'success' && (env.DEPLOYABLE == 'all' || env.DEPLOYABLE == 'fworker') }}
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $run = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          ./scripts/auto-promote/ui-auto-promote.ps1 -Deployable fworker -StatePath "$env:RUNNER_TEMP/ui-auto-promote.json" -RunUrl $run -DryRun:($env:DRY_RUN -eq 'true')
 
       - name: Keep the health reads for the next job
         if: ${{ always() }}
