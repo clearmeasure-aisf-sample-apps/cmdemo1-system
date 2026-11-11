@@ -28,8 +28,10 @@ Spend as little as possible before you know there is work. In order:
             | {n: .content.number, repo: .content.repository, status, title}]'
    ```
    An assigned open issue that is missing from the board: add it to project 679 in **Todo**.
-3. Act only on: a new item in Todo with WIP room, the item or pull request the event names, and Merged / TDD / UAT
-   items (step "Deployments"). If nothing needs action, end. Do not re-read files, re-post status or explore a
+3. Act only on: a new item in Todo with WIP room, the item or pull request the event names, Merged / TDD / UAT
+   items (step "Deployments"), and any **Review** item whose PR has all required checks green but no verdict comment
+   yet: run its Review in this session (one `gh pr checks` call per Review item; CI events don't always wake you).
+   When a merge in this session frees WIP room, pick up the oldest queued Todo item before ending. If nothing needs action, end. Do not re-read files, re-post status or explore a
    repository to confirm that nothing changed.
 
 ## Board flow and WIP
@@ -104,6 +106,8 @@ duplicate journals, or a comment within a minute of another one on the same item
   or container registry timeout, while build and unit tests pass): do not push empty or retrigger commits, because they
   rerun every job. Wait about 10 minutes, then `gh run rerun <run-id> --failed` so only the failed jobs run again. If
   the same infrastructure step fails 3 times, post a Blocker comment naming the outage and stop retrying.
+  If the rerun is refused (`Resource not accessible`), or the run is stuck `queued` with no jobs after GitHub
+  reports Actions operational again, push one empty commit instead. Don't raise a Blocker for that alone.
 - When the PR opens: move to Review (`In Progress → Review`) in the same comment as the PR link, or as soon as the
   open is known.
 - Waiting on checks: if they finish in a few minutes, wait in the session. If not, create a PR-scoped routine on that
