@@ -412,34 +412,24 @@ Test-Case 'master: one pending is pending' (Get-MasterState @(@{ Name = 'a'; Sta
 Test-Case 'master: one failed is red' (Get-MasterState @(@{ Name = 'a'; State = 'failure'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' })).State 'red'
 Test-Case 'master: no check is not green' (Get-MasterState @()).State 'pending'
 
-# --- Per-deployable settings (owner's decision 2026-10-15: fworker under the same rules as ui) ---
-Test-Case 'settings: ui and fworker are promoted' @($DeployableSettings.Keys | Sort-Object) @('fworker', 'ui')
+# --- Per-deployable settings (ui; dashboard and system 2026-11-10 #560; fworker and aisf excluded) ---
+Test-Case 'settings: covered deployables' @($DeployableSettings.Keys | Sort-Object) @('dashboard', 'system', 'ui')
+Test-Case 'settings: promote order' $PromoteOrder @('ui', 'dashboard', 'system')
 foreach ($n in $DeployableSettings.Keys) {
     $s = $DeployableSettings[$n]
-    Test-Case "settings: $n has every key" @(@('ApplicationPaths', 'UnflaggedFolders', 'HealthPath', 'HealthRead') | Where-Object { -not $s.ContainsKey($_) }) @()
-    Test-Case "settings: $n HealthRead is known" ($s.HealthRead -in 'overallStatus', 'ready') $true
+    Test-Case "settings: $n has every key" @(@('ApplicationPaths', 'UnflaggedFolders', 'HealthPath', 'HealthRead', 'BuildPath') | Where-Object { -not $s.ContainsKey($_) }) @()
+    Test-Case "settings: $n HealthRead is known" ($s.HealthRead -in 'overallStatus', 'ready', 'httpOk', 'none') $true
 }
-Test-Case 'settings: loaded for ui by default' @($Deployable, $Settings.HealthPath) @('ui', '/_healthcheck/detailed')
-
-# Flag 3 for the fworker repository layout
-$fw = $DeployableSettings.fworker
-function FwPipe([string[]] $Paths) { @(Get-PipelineEvidence -Paths $Paths -Application $fw.ApplicationPaths -Unflagged $fw.UnflaggedFolders) }
-$fwOutside = '(outside gateway/, plugin/, tests/, config/instance.json)'
-Test-Case 'fworker: gateway code does not flag' (FwPipe @('gateway/Program.cs', 'gateway/Plant.PassMerge.cs')) @()
-Test-Case 'fworker: plugin scripts, skills and agents do not flag' (FwPipe @('plugin/scripts/lib/Core.ps1', 'plugin/scripts/models.default.json', 'plugin/skills/factory-operator/SKILL.md', 'plugin/agents/factory-reviewer.md', 'plugin/launcher/fworker-loop.sh', 'plugin/.claude-plugin/plugin.json')) @()
-Test-Case 'fworker: tests do not flag' (FwPipe @('tests/scenarios/qc.ps1', 'tests/FakeGitHub/Program.cs', 'tests/smoke.ps1')) @()
-Test-Case 'fworker: the instance configuration does not flag' (FwPipe @('config/instance.json')) @()
-Test-Case 'fworker: documentation does not flag' (FwPipe @('README.md', 'docs/design/plant-manager.md', 'docs/deploy/activate-prod.sh')) @()
-Test-Case 'fworker: the gateway project file flags' (FwPipe @('gateway/Gateway.csproj')) @('gateway/Gateway.csproj (build or project file)')
-Test-Case 'fworker: a project file in the plugin flags' (FwPipe @('plugin/tools/shot/Shot.csproj')) @('plugin/tools/shot/Shot.csproj (build or project file)')
-Test-Case 'fworker: Dockerfile flags with the application paths named' (FwPipe @('Dockerfile')) @("Dockerfile $fwOutside")
-Test-Case 'fworker: workflows, .dockerignore, run scripts and tools flag' (FwPipe @('.github/workflows/release.yml', '.dockerignore', 'run-gateway.sh', 'tools/github-app-setup/serve.ps1')).Count 4
-Test-Case 'fworker: deploy overrides flag' (FwPipe @('config/deploy.overrides.json', 'config/apply-overrides.ps1')) @("config/deploy.overrides.json $fwOutside", "config/apply-overrides.ps1 $fwOutside")
-Test-Case 'fworker: a src/ path is not its application' (FwPipe @('src/Core/A.cs')) @("src/Core/A.cs $fwOutside")
-Test-Case 'fworker: ui exemptions do not apply' (FwPipe @('.github/private-build/x.ps1')) @(".github/private-build/x.ps1 $fwOutside")
+Test-Case 'settings: loaded for ui by default' @($Deployable, $Settings.HealthPath, $Settings.BuildPath) @('ui', '/_healthcheck/detailed', '/_build')
+Test-Case 'settings: aisf is not promoted' ($DeployableSettings.ContainsKey('aisf')) $false
+Test-Case 'settings: fworker is not promoted' ($DeployableSettings.ContainsKey('fworker')) $false
+Test-Case 'settings: scorecard is not promoted' ($DeployableSettings.ContainsKey('scorecard')) $false
+Test-Case 'settings: promote order excludes fworker' ($PromoteOrder -contains 'fworker') $false
+Test-Case 'settings: promote order excludes aisf' ($PromoteOrder -contains 'aisf') $false
 Test-Case 'ui unchanged: a gateway path is outside src/' (Get-PipelineEvidence -Paths @('gateway/Program.cs')) @('gateway/Program.cs (outside src/)')
+Test-Case 'ui unchanged: the health flag names /_healthcheck/detailed' (Get-PromotionDecision -Facts (New-Facts @{ HealthReads = @(@{ At = $t0.AddMinutes(2); Status = 'Degraded' }) })).Flags[0].Evidence[0] 'health: /_healthcheck/detailed was not Healthy: Degraded at 2026-10-14 04:02:00Z'
 
-# /ready of fworker
+# /ready helper (HealthRead ready; kept for Invoke-HealthRead NotReady retry semantics)
 Test-Case 'ready: 200 ok is Healthy' (ConvertTo-ReadyStatus 200 'ok') 'Healthy'
 Test-Case 'ready: 503 with ready false is NotReady' (ConvertTo-ReadyStatus 503 '{"ready":false,"waitingFor":"revocations","attempts":0}') 'NotReady'
 Test-Case 'ready: 503 without the JSON answer is not answered (retried)' (ConvertTo-ReadyStatus 503 '<html>Service Unavailable</html>') ''
@@ -457,37 +447,62 @@ Test-Case 'ready: NotReady mixed with no answer is Unreachable' @($r.Status, $r.
 $pauses.Value = 0; $f = New-Reader @((ConvertTo-ReadyStatus 502 ''), 'throw', (ConvertTo-ReadyStatus 200 'ok'))
 $r = Invoke-HealthRead -Reader $f.Reader -Pause $noPause
 Test-Case 'ready: unreachable twice then 200 is Healthy after 3 attempts' @($r.Status, $r.Attempts, $pauses.Value) @('Healthy', 3, 2)
-$d = Get-PromotionDecision -Facts (New-Facts @{ HealthReads = @(@{ At = $t0.AddMinutes(2); Status = 'NotReady' }, @{ At = $t0.AddMinutes(11); Status = 'Healthy' }) }) -Name 'fworker' -HealthPath '/ready'
-Test-Case 'fworker: a NotReady read flags, naming /ready' @($d.Decision, $d.Flags[0].Evidence[0]) @('hold', 'health: /ready was not Healthy: NotReady at 2026-10-14 04:02:00Z')
-Test-Case 'fworker: unknown address names fworker' (Get-PromotionDecision -Facts (New-Facts @{ HealthAddressKnown = $false }) -Name 'fworker').Waiting @('health address unknown: the address of fworker in the previous environment could not be read')
-Test-Case 'ui unchanged: the health flag names /_healthcheck/detailed' (Get-PromotionDecision -Facts (New-Facts @{ HealthReads = @(@{ At = $t0.AddMinutes(2); Status = 'Degraded' }) })).Flags[0].Evidence[0] 'health: /_healthcheck/detailed was not Healthy: Degraded at 2026-10-14 04:02:00Z'
 
-# Held issue titles and evidence
+# Held issue titles and evidence (names are isolated per deployable)
 Test-Case 'held title of ui unchanged' (Get-HeldTitle '2.4.470' 'prod') 'ui 2.4.470 held before prod'
-Test-Case 'held title of fworker' (Get-HeldTitle '1.0.232' 'uat' 'fworker') 'fworker 1.0.232 held before uat'
-Test-Case 'held title parts of fworker' @((Get-HeldTitleParts 'fworker 1.0.232 held before uat' 'fworker').Values | Sort-Object) @('1.0.232', 'uat')
-Test-Case 'ui does not read an fworker issue' (Get-HeldTitleParts 'fworker 1.0.232 held before uat' 'ui') $null
-Test-Case 'fworker does not read a ui issue' (Get-HeldTitleParts 'ui 2.4.470 held before prod' 'fworker') $null
+Test-Case 'held title of dashboard' (Get-HeldTitle '1.0.27' 'uat' 'dashboard') 'dashboard 1.0.27 held before uat'
+Test-Case 'held title parts of dashboard' @((Get-HeldTitleParts 'dashboard 1.0.27 held before uat' 'dashboard').Values | Sort-Object) @('1.0.27', 'uat')
+Test-Case 'ui does not read a dashboard issue' (Get-HeldTitleParts 'dashboard 1.0.27 held before uat' 'ui') $null
+Test-Case 'dashboard does not read a ui issue' (Get-HeldTitleParts 'ui 2.4.470 held before prod' 'dashboard') $null
 Test-Case 'ui does not read an app2-ui issue' (Get-HeldTitleParts 'app2-ui 1.2.3 held before uat' 'ui') $null
-Test-Case 'held evidence names fworker' ((Format-HeldEvidence -Version '1.0.232' -Sha 'c1' -Target 'uat' -Flags @() -Name 'fworker') -like 'fworker 1.0.232 (commit c1) is not promoted to uat automatically.*') $true
+Test-Case 'held evidence names dashboard' ((Format-HeldEvidence -Version '1.0.27' -Sha 'c1' -Target 'uat' -Flags @() -Name 'dashboard') -like 'dashboard 1.0.27 (commit c1) is not promoted to uat automatically.*') $true
 Test-Case 'held evidence of ui unchanged' ((Format-HeldEvidence -Version '2.4.1' -Sha 'c1' -Target 'uat' -Flags @()) -like 'ui 2.4.1 (commit c1) is not promoted to uat automatically.*') $true
-Test-Case 'busy reason names fworker' (Get-BusyReason @(@{ Kind = 'deployment'; ProjectId = 'P-fw'; EnvironmentId = 'E-uat' }) 'E-prod' 'E-tdd' 'P-fw' 'fworker') 'a fworker deployment is not finished in another environment'
+Test-Case 'busy reason names dashboard' (Get-BusyReason @(@{ Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat' }) 'E-prod' 'E-tdd' 'P-dash' 'dashboard') 'a dashboard deployment is not finished in another environment'
 
 # State keys per deployable
-Test-Case 'state key names the deployable' @((Get-StateKey 'Deployments-9' 'fworker'), (Get-StateKey 'Deployments-9')) @('fworker/Deployments-9', 'ui/Deployments-9')
-$st = @{ 'Deployments-1' = @(@{ at = 'a'; status = 'Healthy' }); 'fworker/Deployments-2' = @(@{ at = 'b'; status = 'NotReady' }); 'ui/Deployments-2' = @(@{ at = 'c'; status = 'Healthy' }) }
+Test-Case 'state key names the deployable' @((Get-StateKey 'Deployments-9' 'dashboard'), (Get-StateKey 'Deployments-9')) @('dashboard/Deployments-9', 'ui/Deployments-9')
+$st = @{ 'Deployments-1' = @(@{ at = 'a'; status = 'Healthy' }); 'dashboard/Deployments-2' = @(@{ at = 'b'; status = 'Unhealthy' }); 'ui/Deployments-2' = @(@{ at = 'c'; status = 'Healthy' }) }
 Test-Case 'state: ui still finds its reads stored under the bare key' @(Read-StateReads $st 'Deployments-1' | ForEach-Object { $_.at }) @('a')
-Test-Case 'state: fworker does not read a bare key' @(Read-StateReads $st 'Deployments-1' 'fworker').Count 0
-Test-Case 'state: the same deployment id of two deployables does not collide' @(@(Read-StateReads $st 'Deployments-2' 'fworker')[0].at, @(Read-StateReads $st 'Deployments-2' 'ui')[0].at) @('b', 'c')
+Test-Case 'state: dashboard does not read a bare key' @(Read-StateReads $st 'Deployments-1' 'dashboard').Count 0
+Test-Case 'state: the same deployment id of two deployables does not collide' @(@(Read-StateReads $st 'Deployments-2' 'dashboard')[0].at, @(Read-StateReads $st 'Deployments-2' 'ui')[0].at) @('b', 'c')
 
-# Loaded for fworker: the defaults follow -Deployable.
-. (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable fworker
-Test-Case 'loaded for fworker: settings' @($Settings.HealthPath, $Settings.HealthRead) @('/ready', 'ready')
-Test-Case 'loaded for fworker: pipeline rules by default' (Get-PipelineEvidence -Paths @('gateway/A.cs', 'Dockerfile')) @("Dockerfile $fwOutside")
-Test-Case 'loaded for fworker: held title by default' (Get-HeldTitle '1.0.1' 'prod') 'fworker 1.0.1 held before prod'
-Test-Case 'loaded for fworker: health flag names /ready' (Get-PromotionDecision -Facts (New-Facts @{ HealthReads = @(@{ At = $t0.AddMinutes(2); Status = 'NotReady' }) })).Flags[0].Evidence[0] 'health: /ready was not Healthy: NotReady at 2026-10-14 04:02:00Z'
-$threw = try { . (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable aisf; $false } catch { $_.Exception.Message -like 'deployable aisf is not promoted automatically*' }
-Test-Case 'a deployable without settings stops the script' $threw $true
+# --- dashboard (static web app) and system (#560) ---
+# Before excluded-deployable LoadOnly (it assigns $Settings = $null then throws): keep $Settings loaded.
+$dash = $DeployableSettings.dashboard
+function DashPipe([string[]] $Paths) { @(Get-PipelineEvidence -Paths $Paths -Application $dash.ApplicationPaths -Unflagged $dash.UnflaggedFolders) }
+Test-Case 'dashboard: settings' @($dash.HealthPath, $dash.HealthRead, $dash.BuildPath) @('/', 'httpOk', '/build-facts.json')
+Test-Case 'dashboard: application code does not flag' (DashPipe @('src/Dashboard/App.razor', 'src/Dashboard.Tests/A.cs')) @()
+Test-Case 'dashboard: workflow and project file flag' (DashPipe @('.github/workflows/build.yml', 'src/Dashboard/Dashboard.csproj')).Count 2
+Test-Case 'httpOk: 200 is Healthy' (ConvertTo-HttpOkStatus 200) 'Healthy'
+Test-Case 'httpOk: 204 is Healthy' (ConvertTo-HttpOkStatus 204) 'Healthy'
+Test-Case 'httpOk: 404 is Unhealthy' (ConvertTo-HttpOkStatus 404) 'Unhealthy'
+Test-Case 'httpOk: 0 is not answered' (ConvertTo-HttpOkStatus 0) ''
+$pauses.Value = 0; $f = New-Reader @((ConvertTo-HttpOkStatus 0), 'Healthy')
+$r = Invoke-HealthRead -Reader $f.Reader -Pause $noPause
+Test-Case 'httpOk: unanswered then Healthy' @($r.Status, $f.Calls.Value, $pauses.Value) @('Healthy', 2, 1)
+$d = Get-PromotionDecision -Facts (New-Facts @{ HealthReads = @(@{ At = $t0.AddMinutes(2); Status = 'Unhealthy' }) }) -Name 'dashboard' -HealthPath '/'
+Test-Case 'dashboard: Unhealthy flags naming /' @($d.Decision, $d.Flags[0].Evidence[0]) @('hold', 'health: / was not Healthy: Unhealthy at 2026-10-14 04:02:00Z')
+
+$sys = $DeployableSettings.system
+function SysPipe([string[]] $Paths) { @(Get-PipelineEvidence -Paths $Paths -Application $sys.ApplicationPaths -Unflagged $sys.UnflaggedFolders) }
+Test-Case 'system: settings' @($sys.HealthRead, $sys.BuildPath, $sys.HealthPath) @('none', '', '')
+Test-Case 'system: GitOps paths do not flag' (SysPipe @('infra/main.bicep', 'octopus/projects.tf', 'environments/tdd/versions.json', 'scripts/write-delivery.ps1', 'system.json', 'factory/operating-instructions.md')) @()
+Test-Case 'system: a workflow change flags' (SysPipe @('.github/workflows/delivery.yml')) @('.github/workflows/delivery.yml (outside environments/, infra/, octopus/, scripts/, bootstrap/, factory/, space-scorecard/, system.json, .gitignore)')
+Test-Case 'system: held title' (Get-HeldTitle '1.0.180' 'prod' 'system') 'system 1.0.180 held before prod'
+. (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable dashboard
+Test-Case 'loaded for dashboard: settings' @($Settings.HealthPath, $Settings.HealthRead, $Settings.BuildPath) @('/', 'httpOk', '/build-facts.json')
+Test-Case 'loaded for dashboard: held title by default' (Get-HeldTitle '1.0.27' 'uat') 'dashboard 1.0.27 held before uat'
+. (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable system
+Test-Case 'loaded for system: settings' @($Settings.HealthRead, $Settings.BuildPath) @('none', '')
+Test-Case 'loaded for system: held title by default' (Get-HeldTitle '1.0.1' 'uat') 'system 1.0.1 held before uat'
+Test-Case 'loaded for system: pipeline by default' @(Get-PipelineEvidence -Paths @('infra/main.bicep', '.github/workflows/x.yml')).Count 1
+Test-Case 'system: no HTTP health required: promote' (Get-PromotionDecision -Facts (New-Facts @{ HealthRequired = $false; HealthAddressKnown = $false; HealthReads = @(); Paths = @('infra/main.bicep') })).Decision 'promote'
+Test-Case 'system: health skip still flags a failed deployment' (Get-PromotionDecision -Facts (New-Facts @{ HealthRequired = $false; PreviousState = 'Failed'; Paths = @() })).Decision 'hold'
+
+$threwAisf = try { . (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable aisf; $false } catch { $_.Exception.Message -like 'deployable aisf is not promoted automatically*' }
+Test-Case 'aisf is not promoted: LoadOnly stops the script' $threwAisf $true
+$threwFworker = try { . (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable fworker; $false } catch { $_.Exception.Message -like 'deployable fworker is not promoted automatically*' }
+Test-Case 'fworker is not promoted: LoadOnly stops the script' $threwFworker $true
 
 if ($failures -gt 0) { Write-Host "$failures case(s) failed."; exit 1 }
 Write-Host 'All cases passed.'
