@@ -412,14 +412,17 @@ Test-Case 'master: one pending is pending' (Get-MasterState @(@{ Name = 'a'; Sta
 Test-Case 'master: one failed is red' (Get-MasterState @(@{ Name = 'a'; State = 'failure'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' })).State 'red'
 Test-Case 'master: no check is not green' (Get-MasterState @()).State 'pending'
 
-# --- Per-deployable settings (owner's decision 2026-10-15: fworker under the same rules as ui) ---
-Test-Case 'settings: ui and fworker are promoted' @($DeployableSettings.Keys | Sort-Object) @('fworker', 'ui')
+# --- Per-deployable settings (ui; fworker 2026-10-15; dashboard and system 2026-11-10 #560) ---
+Test-Case 'settings: covered deployables' @($DeployableSettings.Keys | Sort-Object) @('dashboard', 'fworker', 'system', 'ui')
+Test-Case 'settings: promote order' $PromoteOrder @('ui', 'dashboard', 'system', 'fworker')
 foreach ($n in $DeployableSettings.Keys) {
     $s = $DeployableSettings[$n]
-    Test-Case "settings: $n has every key" @(@('ApplicationPaths', 'UnflaggedFolders', 'HealthPath', 'HealthRead') | Where-Object { -not $s.ContainsKey($_) }) @()
-    Test-Case "settings: $n HealthRead is known" ($s.HealthRead -in 'overallStatus', 'ready') $true
+    Test-Case "settings: $n has every key" @(@('ApplicationPaths', 'UnflaggedFolders', 'HealthPath', 'HealthRead', 'BuildPath') | Where-Object { -not $s.ContainsKey($_) }) @()
+    Test-Case "settings: $n HealthRead is known" ($s.HealthRead -in 'overallStatus', 'ready', 'httpOk', 'none') $true
 }
-Test-Case 'settings: loaded for ui by default' @($Deployable, $Settings.HealthPath) @('ui', '/_healthcheck/detailed')
+Test-Case 'settings: loaded for ui by default' @($Deployable, $Settings.HealthPath, $Settings.BuildPath) @('ui', '/_healthcheck/detailed', '/_build')
+Test-Case 'settings: aisf is not promoted' ($DeployableSettings.ContainsKey('aisf')) $false
+Test-Case 'settings: scorecard is not promoted' ($DeployableSettings.ContainsKey('scorecard')) $false
 
 # Flag 3 for the fworker repository layout
 $fw = $DeployableSettings.fworker
@@ -482,10 +485,45 @@ Test-Case 'state: the same deployment id of two deployables does not collide' @(
 
 # Loaded for fworker: the defaults follow -Deployable.
 . (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable fworker
-Test-Case 'loaded for fworker: settings' @($Settings.HealthPath, $Settings.HealthRead) @('/ready', 'ready')
+Test-Case 'loaded for fworker: settings' @($Settings.HealthPath, $Settings.HealthRead, $Settings.BuildPath) @('/ready', 'ready', '/_build')
 Test-Case 'loaded for fworker: pipeline rules by default' (Get-PipelineEvidence -Paths @('gateway/A.cs', 'Dockerfile')) @("Dockerfile $fwOutside")
 Test-Case 'loaded for fworker: held title by default' (Get-HeldTitle '1.0.1' 'prod') 'fworker 1.0.1 held before prod'
 Test-Case 'loaded for fworker: health flag names /ready' (Get-PromotionDecision -Facts (New-Facts @{ HealthReads = @(@{ At = $t0.AddMinutes(2); Status = 'NotReady' }) })).Flags[0].Evidence[0] 'health: /ready was not Healthy: NotReady at 2026-10-14 04:02:00Z'
+
+# --- dashboard (static web app) and system (#560) ---
+# Before the aisf LoadOnly (it assigns $Settings = $null then throws): keep $Settings loaded.
+$dash = $DeployableSettings.dashboard
+function DashPipe([string[]] $Paths) { @(Get-PipelineEvidence -Paths $Paths -Application $dash.ApplicationPaths -Unflagged $dash.UnflaggedFolders) }
+Test-Case 'dashboard: settings' @($dash.HealthPath, $dash.HealthRead, $dash.BuildPath) @('/', 'httpOk', '/build-facts.json')
+Test-Case 'dashboard: application code does not flag' (DashPipe @('src/Dashboard/App.razor', 'src/Dashboard.Tests/A.cs')) @()
+Test-Case 'dashboard: workflow and project file flag' (DashPipe @('.github/workflows/build.yml', 'src/Dashboard/Dashboard.csproj')).Count 2
+Test-Case 'dashboard: held title' (Get-HeldTitle '1.0.27' 'uat' 'dashboard') 'dashboard 1.0.27 held before uat'
+Test-Case 'httpOk: 200 is Healthy' (ConvertTo-HttpOkStatus 200) 'Healthy'
+Test-Case 'httpOk: 204 is Healthy' (ConvertTo-HttpOkStatus 204) 'Healthy'
+Test-Case 'httpOk: 404 is Unhealthy' (ConvertTo-HttpOkStatus 404) 'Unhealthy'
+Test-Case 'httpOk: 0 is not answered' (ConvertTo-HttpOkStatus 0) ''
+$pauses.Value = 0; $f = New-Reader @((ConvertTo-HttpOkStatus 0), 'Healthy')
+$r = Invoke-HealthRead -Reader $f.Reader -Pause $noPause
+Test-Case 'httpOk: unanswered then Healthy' @($r.Status, $f.Calls.Value, $pauses.Value) @('Healthy', 2, 1)
+$d = Get-PromotionDecision -Facts (New-Facts @{ HealthReads = @(@{ At = $t0.AddMinutes(2); Status = 'Unhealthy' }) }) -Name 'dashboard' -HealthPath '/'
+Test-Case 'dashboard: Unhealthy flags naming /' @($d.Decision, $d.Flags[0].Evidence[0]) @('hold', 'health: / was not Healthy: Unhealthy at 2026-10-14 04:02:00Z')
+
+$sys = $DeployableSettings.system
+function SysPipe([string[]] $Paths) { @(Get-PipelineEvidence -Paths $Paths -Application $sys.ApplicationPaths -Unflagged $sys.UnflaggedFolders) }
+Test-Case 'system: settings' @($sys.HealthRead, $sys.BuildPath, $sys.HealthPath) @('none', '', '')
+Test-Case 'system: GitOps paths do not flag' (SysPipe @('infra/main.bicep', 'octopus/projects.tf', 'environments/tdd/versions.json', 'scripts/write-delivery.ps1', 'system.json', 'factory/operating-instructions.md')) @()
+Test-Case 'system: a workflow change flags' (SysPipe @('.github/workflows/delivery.yml')) @('.github/workflows/delivery.yml (outside environments/, infra/, octopus/, scripts/, bootstrap/, factory/, space-scorecard/, system.json, .gitignore)')
+Test-Case 'system: held title' (Get-HeldTitle '1.0.180' 'prod' 'system') 'system 1.0.180 held before prod'
+. (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable dashboard
+Test-Case 'loaded for dashboard: settings' @($Settings.HealthPath, $Settings.HealthRead, $Settings.BuildPath) @('/', 'httpOk', '/build-facts.json')
+Test-Case 'loaded for dashboard: held title by default' (Get-HeldTitle '1.0.27' 'uat') 'dashboard 1.0.27 held before uat'
+. (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable system
+Test-Case 'loaded for system: settings' @($Settings.HealthRead, $Settings.BuildPath) @('none', '')
+Test-Case 'loaded for system: held title by default' (Get-HeldTitle '1.0.1' 'uat') 'system 1.0.1 held before uat'
+Test-Case 'loaded for system: pipeline by default' @(Get-PipelineEvidence -Paths @('infra/main.bicep', '.github/workflows/x.yml')).Count 1
+Test-Case 'system: no HTTP health required: promote' (Get-PromotionDecision -Facts (New-Facts @{ HealthRequired = $false; HealthAddressKnown = $false; HealthReads = @(); Paths = @('infra/main.bicep') })).Decision 'promote'
+Test-Case 'system: health skip still flags a failed deployment' (Get-PromotionDecision -Facts (New-Facts @{ HealthRequired = $false; PreviousState = 'Failed'; Paths = @() })).Decision 'hold'
+
 $threw = try { . (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable aisf; $false } catch { $_.Exception.Message -like 'deployable aisf is not promoted automatically*' }
 Test-Case 'a deployable without settings stops the script' $threw $true
 

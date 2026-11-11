@@ -120,8 +120,9 @@ duplicate journals, or a comment within a minute of another one on the same item
 
 ## Deployments (Merged → TDD → UAT → Done)
 
-Releases are created by each repository's own Release workflow after the master Build. For `cmdemo1-ui`
-(`cmdemo1-workorders`) the `ui-auto-promote` workflow in `cmdemo1-system` promotes tdd → uat → prod on its own and
+Releases are created by each repository's own Release workflow after the master Build. The `ui-auto-promote`
+workflow in `cmdemo1-system` promotes tdd → uat → prod on its own for every covered Octopus deployable (`ui`,
+`dashboard`, `system`, and existing `fworker`; not AISF, not retired scorecard, not scorecard-site or video) and
 opens a `<deployable> <version> held before <env>` issue (label `release-held`) when it holds a release. The bot does
 not drive Octopus deployments; it only checks the result and moves columns.
 

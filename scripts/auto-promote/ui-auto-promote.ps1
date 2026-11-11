@@ -3,14 +3,16 @@
 
 <#
 .SYNOPSIS
-    Promotes the newest release of a deployable ($Deployable: ui, or another one in $DeployableSettings) to the next
-    environment when nothing flags it, and holds it (one GitHub issue) when something does. One environment step per run.
+    Promotes the newest release of a deployable ($Deployable: ui, dashboard, system, fworker, or another in
+    $DeployableSettings) to the next environment when nothing flags it, and holds it (one GitHub issue) when something
+    does. One environment step per run.
 
 .DESCRIPTION
     Owner's decision (Jeffrey Palermo, 2026-10-14): "release candidates automatically deployed to production if there
-    is nothing to flag them. don't let them stop in release queue". For deployable ui; fworker under the same rules by the
-    owner's decision of 2026-10-15. A deployable that is not in $DeployableSettings keeps a person's sign-off (the script
-    stops). Run by workflow ui-auto-promote, once per deployable, one after the other. Below, "ui" stands for the deployable.
+    is nothing to flag them. don't let them stop in release queue". Deployables in $DeployableSettings (ui; fworker by
+    the owner's decision of 2026-10-15; dashboard and system by 2026-11-10, issue #560). A deployable that is not in
+    $DeployableSettings keeps a person's sign-off (the script stops). AISF is excluded. Run by workflow ui-auto-promote,
+    once per deployable in $PromoteOrder, one after the other. Below, "ui" stands for the deployable.
 
     Candidate (Select-Candidate): releases newest first by version (Major.Minor.Patch; an unparsable version below every
     parsable one; Assembled only between equal or unparsable versions: releases can be assembled out of order); the first whose latest deployment to the previous
@@ -97,30 +99,61 @@ $BuildFiles = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.P
 #   ApplicationPaths  globs of the application repository: a change inside them is not a pipeline change, except a build
 #                     or project file (BuildFiles). Every path outside them flags, unless documentation or UnflaggedFolders.
 #   UnflaggedFolders  never a flag (prefixes of the repository path).
-#   HealthPath        read in the previous environment since the deployment finished.
+#   HealthPath        read in the previous environment since the deployment finished (unused when HealthRead is none).
 #   HealthRead        overallStatus: the JSON overallStatus of the answer is the status (Healthy or not, answered at once).
 #                     ready: 200 is Healthy; 503 with a JSON "ready" answer is NotReady, retried like an unreachable read
 #                     (the gateway answers it while it starts) and recorded only when every attempt answered it; anything
 #                     else (another status code, no answer, a timeout) is retried like an unreachable read.
+#                     httpOk: an HTTP 2xx from HealthPath is Healthy; an answered other status is Unhealthy at once; no
+#                     answer or a timeout is retried like an unreachable read (static sites: dashboard).
+#                     none: no HTTP health read (system infra apply: the Verify environment step already ran in the
+#                     previous deployment; Success and a clean task log are the gate).
+#   BuildPath         where the running app names its commit (ui/fworker /_build "commit"; dashboard /build-facts.json
+#                     "commit"). Empty: only the running release's notes name the base commit (system).
 $DeployableSettings = @{
     # The work-order app (cmdemo1-workorders). Owner's decision 2026-10-14.
-    ui      = @{
+    ui        = @{
         ApplicationPaths = @('src/**')
         # src/Database/: migrations; .github/private-build/: the kit's own script, synced by the kit (owner, 2026-10-14).
         UnflaggedFolders = @('src/Database/', '.github/private-build/')
         HealthPath       = '/_healthcheck/detailed'
         HealthRead       = 'overallStatus'
+        BuildPath        = '/_build'
+    }
+    # The health dashboard (cmdemo1-dashboard), Static Web Apps. Owner's decision 2026-11-10 (#560): same promotion
+    # rules as ui. Application: the Blazor site under src/. Pipeline: the rest (.github/, scripts/, project files).
+    dashboard = @{
+        ApplicationPaths = @('src/**')
+        UnflaggedFolders = @()
+        HealthPath       = '/'
+        HealthRead       = 'httpOk'
+        BuildPath        = '/build-facts.json'
+    }
+    # The system repository itself (cmdemo1-system project): environments, infra, Octopus. Owner's decision 2026-11-10
+    # (#560). Application: the GitOps tree a system release applies. Pipeline: workflow and build files under .github/
+    # and at the root. No HTTP health: Verify environment already ran when the previous deployment succeeded.
+    system    = @{
+        ApplicationPaths = @('environments/**', 'infra/**', 'octopus/**', 'scripts/**', 'bootstrap/**', 'factory/**',
+            'space-scorecard/**', 'system.json', '.gitignore')
+        UnflaggedFolders = @()
+        HealthPath       = ''
+        HealthRead       = 'none'
+        BuildPath        = ''
     }
     # The factory worker gateway (cmdemo1-fworker). Owner's decision 2026-10-15: same rules as ui. Application: the
     # gateway, the plugin it serves to workers, the tests, and the instance configuration the gateway reads. Pipeline: the
     # rest (.github/, Dockerfile, .dockerignore, run-*.sh, tools/, config/deploy.overrides.json, config/apply-overrides.ps1).
-    fworker = @{
+    # Kept for existing promotion; AISF and a new fworker are not added (#560).
+    fworker   = @{
         ApplicationPaths = @('gateway/**', 'plugin/**', 'tests/**', 'config/instance.json')
         UnflaggedFolders = @()
         HealthPath       = '/ready'
         HealthRead       = 'ready'
+        BuildPath        = '/_build'
     }
 }
+# Order the workflow runs when deployable=all (one after the other; never two promotions to one environment at once).
+$PromoteOrder = @('ui', 'dashboard', 'system', 'fworker')
 # Pipeline-only override (owner's decision, Jeffrey Palermo 2026-10-14): a release whose only flag is a pipeline or infra
 # change is promoted anyway this many minutes after its deployment to the previous environment finished, when master of
 # the application repository is green.
@@ -231,6 +264,15 @@ function ConvertTo-ReadyStatus {
     ''
 }
 
+function ConvertTo-HttpOkStatus {
+    # HealthRead httpOk (static site): 2xx is Healthy; any other answered status is Unhealthy at once; 0 / no answer is
+    # '' (Invoke-HealthRead tries again).
+    param([int] $StatusCode)
+    if ($StatusCode -ge 200 -and $StatusCode -lt 300) { return 'Healthy' }
+    if ($StatusCode -gt 0) { return 'Unhealthy' }
+    ''
+}
+
 function Get-LogFindings {
     # The task's raw log: findings, or "task log unreadable" when it is empty, short or lacks the task's own header.
     param([string] $Raw, [string] $TaskId, [string[]] $WarnedSteps = @())
@@ -265,7 +307,8 @@ function Get-PromotionDecision {
     $d = [Collections.Generic.List[string]]::new()
     if ($Facts.PreviousState -ne 'Success') { $d.Add("the deployment to the previous environment ended $($Facts.PreviousState)") }
     foreach ($l in @($Facts.LogFindings)) { if ($l) { $d.Add("log: $l") } }
-    if ($d.Count -eq 0) {
+    $healthRequired = -not ($Facts.ContainsKey('HealthRequired') -and -not [bool] $Facts.HealthRequired)
+    if ($d.Count -eq 0 -and $healthRequired) {
         if (-not $Facts.HealthAddressKnown) { $waiting.Add("health address unknown: the address of $Name in the previous environment could not be read") }
         else {
             $h = Get-HealthVerdict -Finished $Facts.Finished -Now $Facts.Now -Reads @($Facts.HealthReads)
@@ -664,7 +707,11 @@ $octopus = ([string] $system.octopus.url).TrimEnd('/')
 $space = [string] $system.octopus.spaceId
 $ownRepo = "$($system.system.githubOrg)/$($system.system.repository)"
 $app = (@($system.deployables | Where-Object { $_.name -eq $Deployable }) | Select-Object -First 1)
-$appRepo = "$($system.system.githubOrg)/$($app.repository)"
+# system is the system repository's own Octopus project (write-delivery.ps1 treats it the same way); every other
+# name is a deployables[] entry.
+if ($Deployable -eq 'system') { $appRepo = $ownRepo }
+elseif (-not $app) { throw "deployable $Deployable is not in system.json deployables" }
+else { $appRepo = "$($system.system.githubOrg)/$($app.repository)" }
 $appClone = Join-Path ($env:RUNNER_TEMP ? $env:RUNNER_TEMP : [IO.Path]::GetTempPath()) "ui-auto-promote-$Deployable-$PID"
 if (-not $env:OCTOPUS_ACCESS_TOKEN -and -not $env:OCTOPUS_API_KEY) { throw 'no Octopus credential: OCTOPUS_ACCESS_TOKEN (OctopusDeploy/login) or OCTOPUS_API_KEY' }
 
@@ -782,6 +829,7 @@ function Get-Evaluation {
     $stored = @(Read-StateReads $state ([string] $prevDeployment.Id))
     $reads = @($stored | ForEach-Object { @{ At = Get-Utc $_.at; Status = [string] $_.status } })
     $prevAddress = if ($addresses) { [string] $addresses.($Previous.Name).$Deployable } else { '' }
+    $healthRequired = [string] $Settings.HealthRead -ne 'none'
     $addressKnown = [bool] $prevAddress
     function Read-Health {
         $uri = "$prevAddress$($Settings.HealthPath)"
@@ -789,13 +837,14 @@ function Get-Evaluation {
             'overallStatus' { { (Invoke-RestMethod -Uri $uri -TimeoutSec 30 -SkipHttpErrorCheck).overallStatus }.GetNewClosure() }
             # The function travels as a value: a closure does not see the script's own functions.
             'ready' { $toReady = ${function:ConvertTo-ReadyStatus}; { $w = Invoke-WebRequest -Uri $uri -TimeoutSec 30 -SkipHttpErrorCheck; & $toReady -StatusCode ([int] $w.StatusCode) -Body ([string] $w.Content) }.GetNewClosure() }
-            default { throw "HealthRead $($Settings.HealthRead) of $Deployable is not known (overallStatus or ready)" }
+            'httpOk' { $toHttp = ${function:ConvertTo-HttpOkStatus}; { $w = Invoke-WebRequest -Uri $uri -TimeoutSec 30 -SkipHttpErrorCheck; & $toHttp -StatusCode ([int] $w.StatusCode) }.GetNewClosure() }
+            default { throw "HealthRead $($Settings.HealthRead) of $Deployable is not known (overallStatus, ready, httpOk or none)" }
         }
         $r = Invoke-HealthRead -Reader $reader
         if ($r.Attempts -gt 1) { Say "Health read: $($r.Status) after $($r.Attempts) attempts." }
         @{ At = [datetime]::UtcNow; Status = $r.Status }
     }
-    if ($addressKnown -and $prevTask.State -eq 'Success') {
+    if ($healthRequired -and $addressKnown -and $prevTask.State -eq 'Success') {
         $reads += Read-Health
         $now = [datetime]::UtcNow
         if ((Get-HealthVerdict -Finished $finished -Now $now -Reads $reads) -eq 'wait' -and $now -ge $finished.AddMinutes(10) -and @($reads | Where-Object { $_.At -ge $finished }).Count -lt 2) {
@@ -810,7 +859,8 @@ function Get-Evaluation {
     # 3 and 4. Changes since the commit running in the target
     $baseSha = $null
     $baseAddress = if ($addresses) { [string] $addresses.($Target.Name).$Deployable } else { '' }
-    if ($baseAddress) { $baseSha = try { [string] (Invoke-RestMethod "$baseAddress/_build" -TimeoutSec 30).commit } catch { $null } }
+    $buildPath = [string] $Settings.BuildPath
+    if ($baseAddress -and $buildPath) { $baseSha = try { [string] (Invoke-RestMethod "$baseAddress$buildPath" -TimeoutSec 30).commit } catch { $null } }
     if ($baseSha -notmatch '^[0-9a-f]{40}$') { $baseSha = Get-Commit $RunningRelease }
     $pathsKnown = $false; $paths = @(); $holdItems = @()
     $pathsReason = if ($RunningUnknown) { "no base commit: /_build names none and $RunningUnknown" } else { 'no base commit: neither /_build nor the running release names one' }
@@ -835,7 +885,8 @@ function Get-Evaluation {
         } catch { $pathsKnown = $false; $pathsReason = "comparison failed: $($_.Exception.Message)" }
     }
     $facts += @{ Checks = $checks; PathsKnown = $pathsKnown; PathsReason = $pathsReason; Paths = $paths; HoldItems = $holdItems; PreviousState = $prevTask.State
-        LogFindings = $findings; Finished = $finished; Now = [datetime]::UtcNow; HealthReads = $reads; HealthAddressKnown = $addressKnown }
+        LogFindings = $findings; Finished = $finished; Now = [datetime]::UtcNow; HealthReads = $reads; HealthAddressKnown = $addressKnown
+        HealthRequired = $healthRequired }
     $decision = Get-PromotionDecision -Facts $facts
     if (Test-PipelineOnly -Flags @($decision.Flags) -Facts $facts) {
         # The pipeline-only override: master of the application repository, read only when it can matter.

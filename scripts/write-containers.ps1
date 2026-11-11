@@ -27,7 +27,8 @@
     delivery.json on branch "status", where the dashboard's deployment reads what it cannot read itself
     (https://raw.githubusercontent.com/<org>/<repository>/status/containers.json).
 
-    environments.<env>.<deployable>   the address https://<fqdn> the environment's stack reports for the app
+    environments.<env>.<deployable>   the address https://<fqdn> the environment's stack reports for a container app
+                                      or a static web app (hosting staticwebapp); ui-auto-promote reads these
     resources.<key>[]                 {type, name, environment, environments, location, id, group, address,
                                       managedEnvironment, health} of every resource of the group
                                       azure.resourceGroups.<key> names; environment is its environment tag ('' without
@@ -64,12 +65,14 @@ function Write-Pass { param([string] $Message) Write-Host "PASS $Message" }
 function Write-Skip { param([string] $Message) Write-Host "SKIP $Message" }
 
 function Get-ContainerAddress {
-    # The container apps of one stack's output "deployables" (an array of { name, hosting, url }), as name -> address.
-    # Only an app with an https address counts.
+    # The apps of one stack's output "deployables" (an array of { name, hosting, url }), as name -> address: container
+    # apps (default) and static web apps (hosting staticwebapp: the health dashboard). Only an https address counts.
+    # ui-auto-promote reads environments.<env>.<deployable> for health and build checks (#560).
     param([AllowNull()] $Deployable)
     $found = [ordered] @{}
     foreach ($entry in @($Deployable | Where-Object { $_ -is [Collections.IDictionary] })) {
-        if ([string] $entry['hosting'] -ne 'containerapp') { continue }
+        $hosting = if ([string] $entry['hosting']) { [string] $entry['hosting'] } else { 'containerapp' }
+        if ($hosting -notin 'containerapp', 'staticwebapp') { continue }
         $address = ([string] $entry['url']).TrimEnd('/')
         if ($entry['name'] -and $address -match '^https://[^/\s]+$') { $found[[string] $entry['name']] = $address }
     }
@@ -184,7 +187,7 @@ foreach ($environment in @($system.environments)) {
         $apps = Get-ContainerAddress -Deployable @($parsed)
         $environments[$name] = $apps
         $read++
-        Write-Host "  $name`: $($apps.Count) container app(s)"
+        Write-Host "  $name`: $($apps.Count) app address(es)"
     }
     elseif ($before[$name] -is [Collections.IDictionary]) {
         $environments[$name] = $before[$name]
@@ -261,7 +264,7 @@ foreach ($listed in $resources.Values) {
     $resourceTotal += @($listed).Count
     $healthTotal += @($listed | Where-Object { $_ -is [Collections.IDictionary] -and $_['health'] -is [Collections.IDictionary] -and $_['health']['source'] -eq 'resourceHealth' }).Count
 }
-Write-Pass "${target}: $total container app(s) in $($environments.Count) environment(s) of $slug, $resourceTotal resource(s) in $($resources.Count) group(s), $healthTotal of them with Resource Health"
+Write-Pass "${target}: $total app address(es) in $($environments.Count) environment(s) of $slug, $resourceTotal resource(s) in $($resources.Count) group(s), $healthTotal of them with Resource Health"
 # Said as an exit code: a workflow step ends with the exit code of the last program the script ran (the stack reads
 # above may have been refused, and that is handled).
 exit 0
