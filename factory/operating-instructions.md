@@ -100,6 +100,10 @@ duplicate journals, or a comment within a minute of another one on the same item
 - Required checks must be green before the Review verdict: `Build result` and `secret-scan` in `cmdemo1-workorders`,
   `env-checks` in `cmdemo1-system`; elsewhere every check on the PR. Fix a red check in the same PR (send the failing
   log to the same cloud agent); never disable, skip or re-baseline a gate to get green.
+- Infrastructure failures (the failing step never reached the code, e.g. apt/DNS, runner provisioning, a package
+  or container registry timeout, while build and unit tests pass): do not push empty or retrigger commits, because they
+  rerun every job. Wait about 10 minutes, then `gh run rerun <run-id> --failed` so only the failed jobs run again. If
+  the same infrastructure step fails 3 times, post a Blocker comment naming the outage and stop retrying.
 - When the PR opens: move to Review (`In Progress → Review`) in the same comment as the PR link, or as soon as the
   open is known.
 - Waiting on checks: if they finish in a few minutes, wait in the session. If not, create a PR-scoped routine on that
