@@ -9,10 +9,10 @@
     "columns": [
       "Todo",
       "In Progress",
-      "Technical Design",
-      "Development",
-      "Functional Testing",
-      "Release Queue",
+      "Review",
+      "Merged",
+      "TDD",
+      "UAT",
       "Done"
     ],
     "window": {
@@ -24,20 +24,20 @@
       "Every issue of the repository. worker \"bot\": assigned (now or before) to cm-ai-ops-bot, or a linked pull request by cm-ai-ops-bot, factory-worker-author, cursor, Copilot or another bot account, or a factory label or factory-state comment (the record on the issue). worker \"team\": everyone else. agent is that identity.",
       "Kept: every open item, and closed items closed, merged or deployed in the last 56 days.",
       "Linked pull request: closing reference; \"Closes/Fixes/Resolves/Refs #N\"; a title ending \"(#N)\"; branch factory-worker/<N>-* or issue-<N>-*; the pull request named in a factory-state comment.",
-      "column: the item's Status on project 679 (node PVT_kwDOD_ESUc4BliGL) when readable, else cm-ai-ops-bot's journal lines only (A → B). A factory-state comment is not a column. A derived Release Queue item whose change runs in prod is Done at that deployment; a closed issue that never reached Release Queue is Done when closed.",
+      "column: the item's Status on project 679 (node PVT_kwDOD_ESUc4BliGL) when readable, else cm-ai-ops-bot's journal lines only (A \u2192 B). A factory-state comment is not a column. Derived advances: PR opened \u2192 Review; merged \u2192 Merged (docs-only \u2192 Done); tdd/uat/prod deploy \u2192 TDD/UAT/Done. A closed issue that never reached Merged is Done when closed.",
       "releaseCandidate: the first release (GitHub deployment 'release', version of its master Build run) whose commit contains the merge commit of the item's last merged pull request.",
       "environments.<env>: the first non-reverted pin of ui in that environment whose release contains the merge commit (version, pin time), while the commit running there (delivery.json) still contains it.",
-      "ftFailures: the most of the demotion count, \"Functional Testing: FAIL\" verdicts and moves from Functional Testing back to an earlier column; reverts: merged pull requests of the item reverted on the default branch."
+      "ftFailures: the most of the demotion count, \"Review: FAIL\" verdicts and moves from Review back to an earlier column; reverts: merged pull requests of the item reverted on the default branch."
     ]
   },
   "stats": {
     "wipByColumn": {
       "Todo": 25,
       "In Progress": 0,
-      "Technical Design": 0,
-      "Development": 0,
-      "Functional Testing": 1,
-      "Release Queue": 3
+      "Review": 1,
+      "Merged": 3,
+      "TDD": 0,
+      "UAT": 0
     },
     "cycleTimeHours": {
       "median": 0.0,
@@ -106,10 +106,10 @@
       "wipByColumn": {
         "Todo": 25,
         "In Progress": 0,
-        "Technical Design": 0,
-        "Development": 0,
-        "Functional Testing": 1,
-        "Release Queue": 3
+        "Review": 1,
+        "Merged": 3,
+        "TDD": 0,
+        "UAT": 0
       },
       "cycleTimeHours": {
         "median": 0.0,
@@ -179,10 +179,10 @@
       "wipByColumn": {
         "Todo": 24,
         "In Progress": 0,
-        "Technical Design": 0,
-        "Development": 0,
-        "Functional Testing": 1,
-        "Release Queue": 3
+        "Review": 1,
+        "Merged": 3,
+        "TDD": 0,
+        "UAT": 0
       },
       "cycleTimeHours": {
         "median": 0.0,
@@ -248,11 +248,9 @@
         "note": "No cost source is connected yet."
       },
       "hoursByColumn": {
-        "In Progress": 0.1,
-        "Technical Design": 0.1,
-        "Development": 0.0,
-        "Functional Testing": 0.5,
-        "Release Queue": 1.1,
+        "In Progress": 0.2,
+        "Review": 0.5,
+        "Merged": 1.1,
         "Done": 2.1
       },
       "throughputByAgent": {
@@ -268,10 +266,10 @@
       "wipByColumn": {
         "Todo": 1,
         "In Progress": 0,
-        "Technical Design": 0,
-        "Development": 0,
-        "Functional Testing": 0,
-        "Release Queue": 0
+        "Review": 0,
+        "Merged": 0,
+        "TDD": 0,
+        "UAT": 0
       },
       "cycleTimeHours": {
         "median": null,
@@ -346,36 +344,30 @@
       "state": "closed",
       "createdAt": "2026-11-09T22:06:23Z",
       "closedAt": "2026-11-09T22:49:43Z",
-      "column": "Release Queue",
+      "column": "TDD",
       "columnSource": "derived",
       "columnHistory": [
         {
           "column": "In Progress",
           "enteredAt": "2026-11-09T22:07:44Z",
-          "leftAt": "2026-11-09T22:11:39Z",
-          "hours": 0.1
-        },
-        {
-          "column": "Technical Design",
-          "enteredAt": "2026-11-09T22:11:39Z",
           "leftAt": "2026-11-09T22:23:09Z",
-          "hours": 0.2
+          "hours": 0.3
         },
         {
-          "column": "Development",
-          "enteredAt": "2026-11-09T22:23:09Z",
-          "leftAt": "2026-11-09T22:23:09Z",
-          "hours": 0.0
-        },
-        {
-          "column": "Functional Testing",
+          "column": "Review",
           "enteredAt": "2026-11-09T22:23:09Z",
           "leftAt": "2026-11-09T22:53:22Z",
           "hours": 0.5
         },
         {
-          "column": "Release Queue",
+          "column": "Merged",
           "enteredAt": "2026-11-09T22:53:22Z",
+          "leftAt": "2026-11-09T23:04:14Z",
+          "hours": 1.4
+        },
+        {
+          "column": "TDD",
+          "enteredAt": "2026-11-09T23:04:14Z",
           "leftAt": null,
           "hours": 1.4
         }

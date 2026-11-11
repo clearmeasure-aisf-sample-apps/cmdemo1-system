@@ -81,7 +81,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # The board's columns in their order (cmdemo1-workorders docs/board-columns.md).
-$script:Columns = @('Todo', 'In Progress', 'Technical Design', 'Development', 'Functional Testing', 'Release Queue', 'Done')
+$script:Columns = @('Todo', 'In Progress', 'Review', 'Merged', 'TDD', 'UAT', 'Done')
+# Post-merge columns before Done: a deploy advances through these; a derived feed fills them in from environments.
+$script:PreDoneColumns = @('Merged', 'TDD', 'UAT')
 # Who counts as automated work, and whose comments are a column journal when the project cannot be read. A factory
 # label or state comment is read from the issue (it is the record a bot left there); nothing calls a gateway.
 $script:BotAssignees = @('cm-ai-ops-bot')
@@ -166,7 +168,7 @@ function Read-FactoryState([object[]] $Comments) {
 
 function Get-FactoryHistory($State) {
     # The columns the factory-state comment recorded: "flow" (column and time, in order), else "dispatched_at" (when
-    # it dispatched each column) for states written before flow existed; merge.queued_at is Release Queue, merge.done_at Done.
+    # it dispatched each column) for states written before flow existed; merge.queued_at is Merged, merge.done_at Done.
     $entries = [Collections.Generic.List[object]]::new()
     if ($null -eq $State) { return , @() }
     $flow = @(Get-Value $State 'flow' | Where-Object { $null -ne $_ })
@@ -177,7 +179,7 @@ function Get-FactoryHistory($State) {
         $dispatched = Get-Value $State 'dispatched_at'
         if ($dispatched -is [Collections.IDictionary]) { foreach ($column in $dispatched.Keys) { Add-HistoryEntry $entries ([string] $column) $dispatched[$column] } }
     }
-    Add-HistoryEntry $entries 'Release Queue' (Get-Value $State 'merge', 'queued_at')
+    Add-HistoryEntry $entries 'Merged' (Get-Value $State 'merge', 'queued_at')
     Add-HistoryEntry $entries 'Done' (Get-Value $State 'merge', 'done_at')
     return Optimize-History $entries.ToArray()
 }
@@ -396,17 +398,60 @@ function Get-Runtime($Issue) {
 }
 
 function Get-FunctionalTestingFailures($State, [object[]] $Comments, [object[]] $History) {
-    # Functional Testing failures that sent the item back: the most of the demotion count (FAIL verdicts that moved
-    # it back to Development), its FAIL verdict comments, and moves out of Functional Testing to an earlier column in
-    # the history.
+    # Review failures that sent the item back: the most of the demotion count (FAIL verdicts that moved it back to
+    # In Progress), its FAIL verdict comments, and moves out of Review to an earlier column in the history.
+    # Field name ftFailures is kept for the feed contract the dashboard already reads.
     $demotions = [int] (Get-Value $State 'demotions')
-    $verdicts = @($Comments | Where-Object { ([string] (Get-Value $_ 'body')) -match 'verdict for \*\*Functional Testing\*\*: FAIL' }).Count
+    $verdicts = @($Comments | Where-Object { ([string] (Get-Value $_ 'body')) -match 'verdict for \*\*Review\*\*: FAIL' }).Count
     $back = 0
-    $earlier = @('Todo', 'In Progress', 'Technical Design', 'Development')
+    $earlier = @('Todo', 'In Progress')
     for ($i = 1; $i -lt @($History).Count; $i++) {
-        if ($History[$i - 1].column -eq 'Functional Testing' -and $earlier -contains $History[$i].column) { $back++ }
+        if ($History[$i - 1].column -eq 'Review' -and $earlier -contains $History[$i].column) { $back++ }
     }
     return [Math]::Max($demotions, [Math]::Max($verdicts, $back))
+}
+
+function Add-DerivedColumnAdvance([Collections.Generic.List[object]] $Entries, [string] $Column, $At) {
+    # Append a column the derived feed infers (PR open/merge or an environment deploy) when journals lag.
+    Add-HistoryEntry $Entries $Column $At
+    return $Column
+}
+
+function Resolve-DerivedColumn([string] $Column, [object[]] $History, $LastMerged, $OpenPullRequest, [bool] $DocsOnly, $Environments, [string] $IssueState, $ClosedAt) {
+    # Board automation the feed mirrors when the project is not readable:
+    #   PR opened → Review; merged → Merged (docs-only → Done); tdd/uat/prod deploy → TDD/UAT/Done.
+    # Closed before Merged is Done when closed (display only; the board has no closed→Done workflow).
+    $derived = [Collections.Generic.List[object]]::new()
+    foreach ($entry in @($History)) { $derived.Add($entry) }
+    $column = $Column
+    $mergedAt = if ($null -ne $LastMerged) { $LastMerged.mergedAt } else { $null }
+    $tdd = if ($null -ne $Environments) { $Environments['tdd'] } else { $null }
+    $uat = if ($null -ne $Environments) { $Environments['uat'] } else { $null }
+    $prod = if ($null -ne $Environments) { $Environments['prod'] } else { $null }
+
+    if ($null -ne $OpenPullRequest -and $column -eq 'In Progress') {
+        $openedAt = ConvertTo-Moment (Get-Value $OpenPullRequest 'createdAt')
+        if ($null -eq $openedAt -and $null -ne $mergedAt) { $openedAt = $mergedAt }
+        if ($null -ne $openedAt) { $column = Add-DerivedColumnAdvance $derived 'Review' $openedAt }
+    }
+    if ($null -ne $mergedAt -and $column -eq 'Review') {
+        if ($DocsOnly) { $column = Add-DerivedColumnAdvance $derived 'Done' $mergedAt }
+        else { $column = Add-DerivedColumnAdvance $derived 'Merged' $mergedAt }
+    }
+    if ($null -ne $tdd -and $null -ne $tdd.deployedAt -and $column -eq 'Merged') {
+        $column = Add-DerivedColumnAdvance $derived 'TDD' $tdd.deployedAt
+    }
+    if ($null -ne $uat -and $null -ne $uat.deployedAt -and $column -in @('Merged', 'TDD')) {
+        $column = Add-DerivedColumnAdvance $derived 'UAT' $uat.deployedAt
+    }
+    if ($null -ne $prod -and $null -ne $prod.deployedAt -and $column -in $script:PreDoneColumns) {
+        $column = Add-DerivedColumnAdvance $derived 'Done' $prod.deployedAt
+    }
+    elseif ($IssueState -eq 'closed' -and $column -notin ($script:PreDoneColumns + @('Done'))) {
+        # Closed without reaching Merged: off the board for the feed (not a board workflow).
+        $column = Add-DerivedColumnAdvance $derived 'Done' $ClosedAt
+    }
+    return @{ column = $column; history = (Optimize-History $derived.ToArray()) }
 }
 
 function Get-RunVersion($Run) {
@@ -541,7 +586,7 @@ function Get-WorkItemStats([object[]] $Items, [datetime] $Now, [int] $StatsDays,
         $perWeek.Add([ordered] @{ weekStart = $start.ToString('yyyy-MM-dd', [cultureinfo]::InvariantCulture); merged = $merged; deployedProd = $deployed })
     }
 
-    $tested = @($Items | Where-Object { $_.ftFailures -gt 0 -or $null -ne $_.mergedAt -or @($_.columnHistory | Where-Object { $_.column -in 'Functional Testing', 'Release Queue' }).Count -gt 0 })
+    $tested = @($Items | Where-Object { $_.ftFailures -gt 0 -or $null -ne $_.mergedAt -or @($_.columnHistory | Where-Object { $_.column -in @('Review', 'Merged', 'TDD', 'UAT') }).Count -gt 0 })
     $reworked = @($tested | Where-Object { $_.ftFailures -gt 0 -or $_.reverts -gt 0 }).Count
     $failures = 0; $reverts = 0
     foreach ($item in @($Items)) { $failures += $item.ftFailures; $reverts += $item.reverts }
@@ -659,6 +704,10 @@ function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
         $release = [ordered] @{ version = $r.version; createdAt = $r.createdAt }
     }
 
+    $docsOnly = Get-Value $state 'merge', 'docs_only'
+    if ($null -eq $docsOnly) { $docsOnly = Get-Value $state 'design', 'docs_only' }
+    $docsOnlyFlag = if ($null -ne $docsOnly) { [bool] $docsOnly } else { $false }
+
     $status = if ($Context.ProjectReadable) { Get-ProjectStatus $Issue $Context.ProjectNumber } else { $null }
     $timeline = @(Get-Nodes (Get-Value $Issue 'timelineItems'))
     $history = if ($Context.ProjectReadable) { Get-ProjectHistory $timeline $Context.ProjectNumber $status } else { @() }
@@ -671,20 +720,10 @@ function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
         # The project's Status is the column. Without it, only cm-ai-ops-bot's journal; a factory-state comment is not one.
         $history = Get-JournalHistory $comments
         $column = if ($history.Count -gt 0) { $history[-1].column } elseif ($issueState -eq 'closed') { 'Done' } else { 'Todo' }
-        $prod = $environments['prod']
-        $derived = [Collections.Generic.List[object]]::new()
-        foreach ($entry in $history) { $derived.Add($entry) }
-        if ($column -eq 'Release Queue' -and $null -ne $prod -and $null -ne $prod.deployedAt) {
-            # The factory moves a Release Queue item to Done when its release succeeds in prod.
-            Add-HistoryEntry $derived 'Done' $prod.deployedAt
-            $column = 'Done'
-        }
-        elseif ($issueState -eq 'closed' -and $column -notin 'Release Queue', 'Done') {
-            # Closed without reaching Release Queue: off the board.
-            Add-HistoryEntry $derived 'Done' $closedAt
-            $column = 'Done'
-        }
-        $history = Optimize-History $derived.ToArray()
+        $openedPr = @($PullRequests | Sort-Object -Stable { ConvertTo-Moment (Get-Value $_ 'createdAt') }) | Select-Object -First 1
+        $resolved = Resolve-DerivedColumn $column $history $lastMerged $openedPr $docsOnlyFlag $environments $issueState $closedAt
+        $column = $resolved.column
+        $history = $resolved.history
     }
     $asOf = if ($Context -is [Collections.IDictionary] -and $Context.Contains('Now') -and $Context['Now']) { ConvertTo-Moment $Context['Now'] } else { [datetime]::UtcNow }
     if ($worker -eq 'bot') { $history = Add-ColumnSpan $history $asOf }
@@ -701,8 +740,6 @@ function Build-WorkItem($Issue, [object[]] $PullRequests, $Context) {
         $texts += [string] (Get-Value $pr 'body')
         $texts += @(Get-Nodes (Get-Value $pr 'comments') | ForEach-Object { [string] (Get-Value $_ 'body') })
     }
-    $docsOnly = Get-Value $state 'merge', 'docs_only'
-    if ($null -eq $docsOnly) { $docsOnly = Get-Value $state 'design', 'docs_only' }
 
     $item = [ordered] @{
         number         = [int] (Get-Value $Issue 'number')
@@ -1029,10 +1066,10 @@ $document = [ordered] @{
             'Every issue of the repository. worker "bot": assigned (now or before) to cm-ai-ops-bot, or a linked pull request by cm-ai-ops-bot, factory-worker-author, cursor, Copilot or another bot account, or a factory label or factory-state comment (the record on the issue). worker "team": everyone else. agent is that identity.'
             "Kept: every open item, and closed items closed, merged or deployed in the last $Days days."
             'Linked pull request: closing reference; "Closes/Fixes/Resolves/Refs #N"; a title ending "(#N)"; branch factory-worker/<N>-* or issue-<N>-*; the pull request named in a factory-state comment.'
-            "column: the item's Status on project $Project (node $($script:ProjectNodeId)) when readable, else cm-ai-ops-bot's journal lines only (A → B). A factory-state comment is not a column. A derived Release Queue item whose change runs in prod is Done at that deployment; a closed issue that never reached Release Queue is Done when closed."
+            "column: the item's Status on project $Project (node $($script:ProjectNodeId)) when readable, else cm-ai-ops-bot's journal lines only (A → B). A factory-state comment is not a column. Derived advances: PR opened → Review; merged → Merged (docs-only → Done); tdd/uat/prod deploy → TDD/UAT/Done. A closed issue that never reached Merged is Done when closed."
             "releaseCandidate: the first release (GitHub deployment 'release', version of its master Build run) whose commit contains the merge commit of the item's last merged pull request."
             "environments.<env>: the first non-reverted pin of $Deployable in that environment whose release contains the merge commit (version, pin time), while the commit running there (delivery.json) still contains it."
-            'ftFailures: the most of the demotion count, "Functional Testing: FAIL" verdicts and moves from Functional Testing back to an earlier column; reverts: merged pull requests of the item reverted on the default branch.'
+            'ftFailures: the most of the demotion count, "Review: FAIL" verdicts and moves from Review back to an earlier column; reverts: merged pull requests of the item reverted on the default branch.'
         )
     }
     stats       = Get-GroupedStats $sortedItems $now $StatsDays $Weeks
