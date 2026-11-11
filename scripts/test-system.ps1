@@ -485,3 +485,7 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 Write-Host 'All system checks passed.'
+
+# ConvertTo-Topology container-app deployables (#556): env-checks already runs this file; keep the proof here so
+# workflows/ need not change. A failure calls exit and ends this process too.
+& (Join-Path $PSScriptRoot 'test-deploy-staticwebapp.ps1')

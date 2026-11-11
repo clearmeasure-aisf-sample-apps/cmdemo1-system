@@ -24,8 +24,11 @@
          healthPath of system.json. It has no links: the system does not know the application's resources. Without
          a record in an environment the deployable is left out of that environment, and the log says so. A record
          that breaks the rules stops the step: it would break the dashboard's page.
-       Container-app deployables are left out: their address is not a convention (the platform generates it, and a
-       placement changes it), so the dashboard does not show them.
+       - hosting "containerapp" (the default): one node ca-<slug>-<env>-<deployable> at the address the environment's
+         stack reported (-PageAddress), with healthPath /_healthcheck and healthDetailPath /_healthcheck/detailed
+         (or what system.json names). Without an address in that environment the deployable is left out there.
+         system.azureExcludeDeployables (#542) are never listed: Azure no longer has them, so the Health view must
+         not show them either.
        The topology also says where the dashboard finds what the deployments pinned. Every address is a convention
        over system.json and none is a secret:
          system.repository      https://github.com/<system.githubOrg>/<system.repository>, the system repository
@@ -244,6 +247,11 @@ function ConvertTo-Topology {
     # deployable's healthPath of system.json, or left out, and the dashboard then asks its own default), and
     # everything else is what system.json says of every deployable (projectUrl, telemetryPath, trafficPaths,
     # buildPath, healthDetailPath). It has no links: the system does not know the application's resources.
+    # A container-app deployable (hosting "containerapp" or left out) has one node at the address -PageAddress gives
+    # for it in that environment: ca-<slug>-<env>-<deployable>, healthPath /_healthcheck and healthDetailPath
+    # /_healthcheck/detailed unless system.json names others. Without an address it is left out of that environment.
+    # system.azureExcludeDeployables (#542) are omitted everywhere: they are not in Azure, so the Health view has no
+    # tile for them.
     # A deployable that names a page of its own for the dashboard (deployables[].dashboardLink: text and path) gives
     # each environment it exists in an entry of "pages": the words, the deployable, and the path under the address the
     # deployable has in that environment (-PageAddress, by environment and deployable: the address the environment's
@@ -277,6 +285,7 @@ function ConvertTo-Topology {
         "$subscription/resourceGroups/$([string] $frontDoor.resourceGroup)/providers/Microsoft.Cdn/profiles/$([string] $frontDoor.profile)"
     }
     else { '' }
+    $azureExcluded = @(if ($System.system['azureExcludeDeployables']) { $System.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
     $environments = @(foreach ($environment in @($System.environments)) {
             $environmentName = [string] $environment.name
             $versionsPath = "main/environments/$environmentName/versions.json"
@@ -297,6 +306,7 @@ function ConvertTo-Topology {
             }
             if ($group) { $environmentLinks.resourceGroup = Get-PortalAddress -ResourceId $group -TenantId $tenantId }
             $recorded = if ($NodeRecord[$environmentName] -is [Collections.IDictionary]) { $NodeRecord[$environmentName] } else { @{} }
+            $addresses = if ($PageAddress[$environmentName] -is [Collections.IDictionary]) { $PageAddress[$environmentName] } else { @{} }
             $deployables = @(foreach ($app in @($System.deployables)) {
                     if ($app['hosting'] -eq 'own') {
                         # What the application reported when it was last verified here; without a record it is left
@@ -322,7 +332,69 @@ function ConvertTo-Topology {
                         $entry
                         continue
                     }
-                    if ($app['hosting'] -ne 'appservice') { continue }
+                    $hosting = if ($app['hosting']) { [string] $app.hosting } else { 'containerapp' }
+                    if ($hosting -eq 'containerapp') {
+                        # Only the apps this environment still declares in Azure: azureExcludeDeployables and an
+                        # environments list that leaves this one out are omitted, and so is an app whose address the
+                        # stack (or containers.json) has not given (-PageAddress).
+                        if ($azureExcluded -ccontains [string] $app.name) { continue }
+                        if ($app['environments'] -and @($app.environments) -notcontains $environmentName) { continue }
+                        $address = ([string] $addresses[[string] $app.name]).TrimEnd('/')
+                        if ($address -notmatch '^https://[^/\s]+$') { continue }
+                        $nodeName = "ca-$slug-$environmentName-$($app.name)"
+                        $region = $location
+                        $hostName = ([uri] $address).Host
+                        $azureAppName = ($hostName -split '\.', 2)[0]
+                        if ($hostName -match '^[^.]+\.(?<environment>[^.]+)\.(?<region>[^.]+)\.azurecontainerapps\.io$') {
+                            $region = [string] $Matches.region
+                        }
+                        $role = "$slug-$($app.name)"
+                        $nodeLinks = [ordered] @{}
+                        if ($group -and $azureAppName) {
+                            # The Azure name may carry a placement suffix; the topology node keeps the convention name
+                            # ca-<slug>-<env>-<deployable> so the Health view matches every environment.
+                            $nodeLinks.portal = Get-PortalAddress -ResourceId "$group/providers/Microsoft.App/containerApps/$azureAppName" -TenantId $tenantId
+                        }
+                        if ($insights) {
+                            $nodeLinks.liveMetrics = Get-PortalAddress -ResourceId $insights -Blade 'quickPulse' -TenantId $tenantId
+                            $nodeLinks.performance = Get-PortalAddress -ResourceId $insights -Blade 'performance' -TenantId $tenantId
+                            $nodeLinks.failures = Get-PortalAddress -ResourceId $insights -Blade 'failures' -TenantId $tenantId
+                            $nodeLinks.dependencies = Get-LogsAddress -ResourceId $insights -TenantId $tenantId -Query (@(
+                                    'dependencies'
+                                    "| where cloud_RoleName == `"$role`""
+                                    '| summarize calls = count(), failed = countif(success == false), avgMs = round(avg(duration), 1), p95Ms = round(percentile(duration, 95), 1) by type, target, name'
+                                    '| order by calls desc'
+                                ) -join "`n")
+                        }
+                        $node = [ordered] @{ name = $nodeName; region = $region; role = 'primary'; url = $address }
+                        if ($nodeLinks.Count -gt 0) { $node.links = $nodeLinks }
+                        $deployableLinks = [ordered] @{}
+                        if ($insights) {
+                            $deployableLinks.logs = Get-LogsAddress -ResourceId $insights -TenantId $tenantId -Query (@(
+                                    'requests'
+                                    "| where cloud_RoleName == `"$role`""
+                                    '| summarize requests = count(), failed = countif(success == false), p95Ms = round(percentile(duration, 95), 1) by bin(timestamp, 5m), cloud_RoleInstance'
+                                    '| order by timestamp desc'
+                                ) -join "`n")
+                        }
+                        $healthPath = if ($app['healthPath']) { [string] $app.healthPath } else { '/_healthcheck' }
+                        [ordered] @{
+                            name             = [string] $app.name
+                            projectUrl       = if ($projects) { "$projects/$slug-$($app.name)" } else { $null }
+                            frontDoor        = $null
+                            healthPath       = $healthPath
+                            alivePath        = $healthPath
+                            versionPath      = '/_version'
+                            telemetryPath    = if ($app['telemetryPath']) { [string] $app.telemetryPath } else { $null }
+                            trafficPaths     = if ($app['trafficPaths']) { , @($app.trafficPaths | ForEach-Object { [string] $_ }) } else { $null }
+                            buildPath        = if ($app['buildPath']) { [string] $app.buildPath } else { $null }
+                            healthDetailPath = if ($app['healthDetailPath']) { [string] $app.healthDetailPath } else { '/_healthcheck/detailed' }
+                            links            = $deployableLinks
+                            nodes            = @($node)
+                        }
+                        continue
+                    }
+                    if ($hosting -ne 'appservice') { continue }
                     $primary = "app-$slug-$environmentName-$($app.name)"
                     $nodes = @([ordered] @{ name = $primary; region = $location; role = 'primary'; url = "https://$primary.azurewebsites.net" })
                     if ($standbyLocation) {
@@ -381,10 +453,10 @@ function ConvertTo-Topology {
                         nodes       = $nodes
                     }
                 })
-            $addresses = if ($PageAddress[$environmentName] -is [Collections.IDictionary]) { $PageAddress[$environmentName] } else { @{} }
             $pages = @(foreach ($app in @($System.deployables)) {
                     $link = $app['dashboardLink']
                     if ($link -isnot [Collections.IDictionary] -or -not $link['text'] -or -not $link['path']) { continue }
+                    if ($azureExcluded -ccontains [string] $app.name) { continue }
                     if ($app['environments'] -and @($app.environments) -notcontains $environmentName) { continue }
                     $address = ([string] $addresses[[string] $app.name]).TrimEnd('/')
                     if ($address -notmatch '^https?://') { continue }
@@ -867,9 +939,12 @@ function ConvertTo-RuntimeDiagram {
 
     # The container apps the system creates, in the Container Apps environment the platform made for them: named as the
     # platform names it in the apps' addresses, <app>.<environment>.<region>.azurecontainerapps.io.
+    # system.azureExcludeDeployables (#542) stay out: Azure no longer has them, so a stale address must not draw them.
+    $azureExcludedRuntime = @(if ($System.system['azureExcludeDeployables']) { $System.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
     $containerAddresses = if ($ContainerApp[$Environment] -is [System.Collections.IDictionary]) { $ContainerApp[$Environment] } else { @{} }
     $containers = @($System.deployables | Where-Object {
             (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
+            ($azureExcludedRuntime -cnotcontains [string] $_.name) -and
             (-not $_['environments'] -or @($_['environments']) -contains $Environment) -and
             ([string] $containerAddresses[[string] $_.name]) -match '^https://[^/]+'
         } | ForEach-Object {
@@ -1176,7 +1251,7 @@ function ConvertTo-RuntimeDiagram {
         if ($listedApp) { $container.Id = $listedApp.Id }
     }
     # A declared app whose stack gave no address, found in the list by the name the infrastructure gives it.
-    $declaredHere = @($System.deployables | Where-Object { (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and (-not $_['environments'] -or @($_['environments']) -contains $Environment) } | ForEach-Object { [string] $_.name })
+    $declaredHere = @($System.deployables | Where-Object { (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and ($azureExcludedRuntime -cnotcontains [string] $_.name) -and (-not $_['environments'] -or @($_['environments']) -contains $Environment) } | ForEach-Object { [string] $_.name })
     $unplacedApps = [Collections.Generic.List[object]]::new()
     $undeclared = 0
     # A container app that is the node of an application with its own runtime is that node, not a box of its own
@@ -2040,7 +2115,11 @@ function Get-PublishedStatus {
     }
     return $script:status
 }
-$containerApps = @($system.deployables | Where-Object { -not $_['hosting'] -or $_['hosting'] -eq 'containerapp' })
+$azureExcludedDeployables = @(if ($system.system['azureExcludeDeployables']) { $system.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
+$containerApps = @($system.deployables | Where-Object {
+        (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
+        ($azureExcludedDeployables -cnotcontains [string] $_.name)
+    })
 if ($containerApps.Count -gt 0) {
     foreach ($environment in @($system.environments)) {
         $pageEnvironment = [string] $environment.name
