@@ -28,8 +28,8 @@ function New-StateComment([hashtable] $State, [string] $Worker = 'factory-worker
 
 # Factory state
 $flowState = @{ schema = 1; item = 1512; updated = '2026-11-06T16:29:19.617Z'
-    flow = @(@{ c = 'Technical Design'; at = '2026-11-06T16:05:10.949Z' }, @{ c = 'Development'; at = '2026-11-06T16:07:41.850Z' }, @{ c = 'Functional Testing'; at = '2026-11-06T16:10:35.428Z' })
-    dispatched_at = @{ 'Technical Design' = '2026-11-06T16:05:49Z' }
+    flow = @(@{ c = 'In Progress'; at = '2026-11-06T16:05:10.949Z' }, @{ c = 'Review'; at = '2026-11-06T16:07:41.850Z' }, @{ c = 'Merged'; at = '2026-11-06T16:10:35.428Z' })
+    dispatched_at = @{ 'In Progress' = '2026-11-06T16:05:49Z' }
     pr = @{ number = 1513 }; merge = @{ sha = '877684c9'; pr = 1513; merged_at = '2026-11-06T16:11:32.815Z'; done_at = '2026-11-06T16:11:32.815Z'; docs_only = $true }
 }
 $state = Read-FactoryState @((New-Comment 'someone' '2026-11-06T16:00:00Z' 'hello'), (New-StateComment $flowState))
@@ -40,43 +40,44 @@ $newer = @{ item = 7; updated = '2026-11-02T00:00:00Z'; flow = @(); demotions = 
 Test-Case 'two state comments: the newer one' (Read-FactoryState @((New-StateComment $newer), (New-StateComment $older)))['demotions'] 2
 Test-Case 'a state comment whose json does not parse is passed over' (Read-FactoryState @((New-Comment 'factory-worker-author' 'x' "<!-- factory-state:w v1 -->`n``````json`n{ not json`n```````n"))) $null
 
-Test-Case 'flow gives the columns, done_at gives Done' (Columns (Get-FactoryHistory $state)) @('Technical Design@2026-11-06T16:05:10Z', 'Development@2026-11-06T16:07:41Z', 'Functional Testing@2026-11-06T16:10:35Z', 'Done@2026-11-06T16:11:32Z')
-$dispatched = @{ dispatched_at = @{ 'Functional Testing' = '2026-10-26T14:47:15Z'; 'Technical Design' = '2026-10-26T14:36:42Z'; Development = '2026-10-26T14:45:16Z' }; merge = @{ queued_at = '2026-10-26T15:00:00Z' } }
-Test-Case 'without flow: dispatched_at in time order, queued_at is Release Queue' (Columns (Get-FactoryHistory $dispatched)) @('Technical Design@2026-10-26T14:36:42Z', 'Development@2026-10-26T14:45:16Z', 'Functional Testing@2026-10-26T14:47:15Z', 'Release Queue@2026-10-26T15:00:00Z')
-Test-Case 'an unknown column is left out' (Columns (Get-FactoryHistory @{ flow = @(@{ c = 'Parked'; at = '2026-10-01T00:00:00Z' }, @{ c = 'Development'; at = '2026-10-01T01:00:00Z' }) })) @('Development@2026-10-01T01:00:00Z')
+Test-Case 'flow gives the columns, done_at gives Done' (Columns (Get-FactoryHistory $state)) @('In Progress@2026-11-06T16:05:10Z', 'Review@2026-11-06T16:07:41Z', 'Merged@2026-11-06T16:10:35Z', 'Done@2026-11-06T16:11:32Z')
+$dispatched = @{ dispatched_at = @{ Review = '2026-10-26T14:47:15Z'; 'In Progress' = '2026-10-26T14:36:42Z' }; merge = @{ queued_at = '2026-10-26T15:00:00Z' } }
+Test-Case 'without flow: dispatched_at in time order, queued_at is Merged' (Columns (Get-FactoryHistory $dispatched)) @('In Progress@2026-10-26T14:36:42Z', 'Review@2026-10-26T14:47:15Z', 'Merged@2026-10-26T15:00:00Z')
+Test-Case 'an unknown column is left out' (Columns (Get-FactoryHistory @{ flow = @(@{ c = 'Parked'; at = '2026-10-01T00:00:00Z' }, @{ c = 'Review'; at = '2026-10-01T01:00:00Z' }) })) @('Review@2026-10-01T01:00:00Z')
+Test-Case 'absent board names are left out of factory flow' (Columns (Get-FactoryHistory @{ flow = @(@{ c = 'Technical Design'; at = '2026-10-01T00:00:00Z' }, @{ c = 'Development'; at = '2026-10-01T00:30:00Z' }, @{ c = 'Functional Testing'; at = '2026-10-01T01:00:00Z' }, @{ c = 'Release Queue'; at = '2026-10-01T02:00:00Z' }, @{ c = 'Merged'; at = '2026-10-01T03:00:00Z' }) })) @('Merged@2026-10-01T03:00:00Z')
 Test-Case 'no state: no history' (Columns (Get-FactoryHistory $null)) @()
 
 # Journal lines
 $journal = @(
     (New-Comment 'cm-ai-ops-bot' '2026-11-09T22:07:44Z' 'Journal: launched a [Cursor agent](https://cursor.com/agents/bc-1) on branch x. Moving this item Todo → In Progress; will report the PR here.')
-    (New-Comment 'cm-ai-ops-bot' '2026-11-09T22:23:09Z' 'Journal: checks green. Intended column: Technical Design → Functional Testing (via Development). PASS → squash-merge; FAIL → back to Development.')
-    (New-Comment 'jeffreypalermo' '2026-11-09T22:30:00Z' 'Please move it Functional Testing → Done')
-    (New-Comment 'cm-ai-ops-bot' '2026-11-09T22:55:31Z' "1. Todo → In Progress → Technical Design → Development: resumed.`n3. Functional Testing → Release Queue: merged.")
+    (New-Comment 'cm-ai-ops-bot' '2026-11-09T22:23:09Z' 'Journal: checks green. Intended column: In Progress → Review. PASS → squash-merge; FAIL → back to In Progress.')
+    (New-Comment 'jeffreypalermo' '2026-11-09T22:30:00Z' 'Please move it Review → Done')
+    (New-Comment 'cm-ai-ops-bot' '2026-11-09T22:55:31Z' "1. Todo → In Progress: resumed.`n3. Review → Merged: merged.")
 )
 Test-Case 'journal arrows: chains, (via X), a skipped move, not people, not PASS/FAIL arrows, not a recap' (Columns (Get-JournalHistory $journal)) @(
-    'In Progress@2026-11-09T22:07:44Z', 'Development@2026-11-09T22:23:09Z', 'Functional Testing@2026-11-09T22:23:09Z', 'Release Queue@2026-11-09T22:55:31Z')
+    'In Progress@2026-11-09T22:07:44Z', 'Review@2026-11-09T22:23:09Z', 'Merged@2026-11-09T22:55:31Z')
 Test-Case 'journal arrows: a move back from the current column counts' (Columns (Get-JournalHistory @(
-            (New-Comment 'cm-ai-ops-bot' '2026-11-01T01:00:00Z' 'Development → Functional Testing'),
-            (New-Comment 'cm-ai-ops-bot' '2026-11-01T02:00:00Z' 'FAIL: Functional Testing → Development')))) @('Functional Testing@2026-11-01T01:00:00Z', 'Development@2026-11-01T02:00:00Z')
-Test-Case 'ASCII arrow counts too' (Columns (Get-JournalHistory @((New-Comment 'cm-ai-ops-bot' '2026-11-01T00:00:00Z' 'Development -> Functional Testing')))) @('Functional Testing@2026-11-01T00:00:00Z')
-Test-Case 'a journal by anyone but cm-ai-ops-bot is not a column' (Columns (Get-JournalHistory @((New-Comment 'cursor' '2026-11-01T00:00:00Z' 'Development -> Functional Testing')))) @()
+            (New-Comment 'cm-ai-ops-bot' '2026-11-01T01:00:00Z' 'In Progress → Review'),
+            (New-Comment 'cm-ai-ops-bot' '2026-11-01T02:00:00Z' 'FAIL: Review → In Progress')))) @('Review@2026-11-01T01:00:00Z', 'In Progress@2026-11-01T02:00:00Z')
+Test-Case 'ASCII arrow counts too' (Columns (Get-JournalHistory @((New-Comment 'cm-ai-ops-bot' '2026-11-01T00:00:00Z' 'In Progress -> Review')))) @('Review@2026-11-01T00:00:00Z')
+Test-Case 'a journal by anyone but cm-ai-ops-bot is not a column' (Columns (Get-JournalHistory @((New-Comment 'cursor' '2026-11-01T00:00:00Z' 'In Progress -> Review')))) @()
 Test-Case 'a factory-state comment is no journal' (Columns (Get-JournalHistory @((New-StateComment @{ note = 'Todo → Done' })))) @()
 Test-Case 'Optimize-History drops a column entered again right after itself' (Columns (Optimize-History @(
-            [ordered] @{ column = 'Development'; enteredAt = (ConvertTo-Moment '2026-11-01T02:00:00Z') },
-            [ordered] @{ column = 'Development'; enteredAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') },
-            [ordered] @{ column = 'Todo'; enteredAt = (ConvertTo-Moment '2026-11-01T01:00:00Z') }, @()))) @('Todo@2026-11-01T01:00:00Z', 'Development@2026-11-01T02:00:00Z')
+            [ordered] @{ column = 'Review'; enteredAt = (ConvertTo-Moment '2026-11-01T02:00:00Z') },
+            [ordered] @{ column = 'Review'; enteredAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') },
+            [ordered] @{ column = 'Todo'; enteredAt = (ConvertTo-Moment '2026-11-01T01:00:00Z') }, @()))) @('Todo@2026-11-01T01:00:00Z', 'Review@2026-11-01T02:00:00Z')
 
 # Project history (with project access)
 $timeline = @(
     @{ __typename = 'AddedToProjectV2Event'; createdAt = '2026-11-01T00:00:00Z'; project = @{ number = 679 } }
     @{ __typename = 'ProjectV2ItemStatusChangedEvent'; createdAt = '2026-11-01T01:00:00Z'; previousStatus = 'Todo'; status = 'In Progress'; project = @{ number = 679 } }
     @{ __typename = 'ProjectV2ItemStatusChangedEvent'; createdAt = '2026-11-01T01:30:00Z'; previousStatus = 'x'; status = 'Done'; project = @{ number = 1 } }
-    @{ __typename = 'ProjectV2ItemStatusChangedEvent'; createdAt = '2026-11-01T02:00:00Z'; previousStatus = 'In Progress'; status = 'Technical Design'; project = @{ number = 679 } }
+    @{ __typename = 'ProjectV2ItemStatusChangedEvent'; createdAt = '2026-11-01T02:00:00Z'; previousStatus = 'In Progress'; status = 'Review'; project = @{ number = 679 } }
 )
-Test-Case 'project: added time for the first column, then each change; other projects ignored' (Columns (Get-ProjectHistory $timeline 679 'Technical Design')) @('Todo@2026-11-01T00:00:00Z', 'In Progress@2026-11-01T01:00:00Z', 'Technical Design@2026-11-01T02:00:00Z')
+Test-Case 'project: added time for the first column, then each change; other projects ignored' (Columns (Get-ProjectHistory $timeline 679 'Review')) @('Todo@2026-11-01T00:00:00Z', 'In Progress@2026-11-01T01:00:00Z', 'Review@2026-11-01T02:00:00Z')
 Test-Case 'project: added and never moved is in its Status since then' (Columns (Get-ProjectHistory @($timeline[0]) 679 'Todo')) @('Todo@2026-11-01T00:00:00Z')
-$issueOnBoard = @{ projectItems = @{ nodes = @(@{ project = @{ number = 5 }; fieldValueByName = @{ name = 'Done' } }, @{ project = @{ number = 679 }; fieldValueByName = @{ name = 'Development' } }) } }
-Test-Case 'project status of the board, not of another project' (Get-ProjectStatus $issueOnBoard 679) 'Development'
+$issueOnBoard = @{ projectItems = @{ nodes = @(@{ project = @{ number = 5 }; fieldValueByName = @{ name = 'Done' } }, @{ project = @{ number = 679 }; fieldValueByName = @{ name = 'Review' } }) } }
+Test-Case 'project status of the board, not of another project' (Get-ProjectStatus $issueOnBoard 679) 'Review'
 
 # Cursor sessions
 Test-Case 'cursor sessions: both forms, once each, in order' (Get-CursorSessions @('see https://cursor.com/agents/bc-154c759e-4686 and https://cursor.com/agents?id=bc-02e5', 'again [x](https://cursor.com/agents/bc-154c759e-4686).', $null)) @('https://cursor.com/agents/bc-154c759e-4686', 'https://cursor.com/agents/bc-02e5')
@@ -111,15 +112,34 @@ Test-Case 'runtime from labels: runtime before worker' (Get-Runtime @{ labels = 
 
 # Rework
 $ftHistory = Optimize-History @(
-    [ordered] @{ column = 'Development'; enteredAt = (ConvertTo-Moment '2026-11-01T01:00:00Z') }
-    [ordered] @{ column = 'Functional Testing'; enteredAt = (ConvertTo-Moment '2026-11-01T02:00:00Z') }
-    [ordered] @{ column = 'Development'; enteredAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') }
-    [ordered] @{ column = 'Functional Testing'; enteredAt = (ConvertTo-Moment '2026-11-01T04:00:00Z') })
-Test-Case 'FT failures: moves back in the history' (Get-FunctionalTestingFailures $null @() $ftHistory) 1
-Test-Case 'FT failures: the most of demotions, FAIL verdicts and moves back' (Get-FunctionalTestingFailures @{ demotions = 1 } @(
-        (New-Comment 'factory-worker-author' 'x' '🤖 factory-worker: validation verdict for **Functional Testing**: FAIL - layout'),
-        (New-Comment 'factory-worker-author' 'y' '🤖 factory-worker: validation verdict for **Functional Testing**: FAIL - again'),
-        (New-Comment 'factory-worker-author' 'z' '🤖 factory-worker: validation verdict for **Functional Testing**: PASS')) @()) 2
+    [ordered] @{ column = 'In Progress'; enteredAt = (ConvertTo-Moment '2026-11-01T01:00:00Z') }
+    [ordered] @{ column = 'Review'; enteredAt = (ConvertTo-Moment '2026-11-01T02:00:00Z') }
+    [ordered] @{ column = 'In Progress'; enteredAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') }
+    [ordered] @{ column = 'Review'; enteredAt = (ConvertTo-Moment '2026-11-01T04:00:00Z') })
+Test-Case 'Review failures: moves back in the history' (Get-FunctionalTestingFailures $null @() $ftHistory) 1
+Test-Case 'Review failures: the most of demotions, FAIL verdicts and moves back' (Get-FunctionalTestingFailures @{ demotions = 1 } @(
+        (New-Comment 'factory-worker-author' 'x' '🤖 factory-worker: validation verdict for **Review**: FAIL - layout'),
+        (New-Comment 'factory-worker-author' 'y' '🤖 factory-worker: validation verdict for **Review**: FAIL - again'),
+        (New-Comment 'factory-worker-author' 'z' '🤖 factory-worker: validation verdict for **Review**: PASS')) @()) 2
+
+# Column mapping: PR opened → Review; merged → Merged; docs-only → Done; tdd/uat/prod → TDD/UAT/Done
+$emptyEnv = [ordered] @{ tdd = $null; uat = $null; prod = $null }
+$prOpened = Resolve-DerivedColumn 'In Progress' @([ordered] @{ column = 'In Progress'; enteredAt = (ConvertTo-Moment '2026-11-01T01:00:00Z') }) $null @{ createdAt = '2026-11-01T02:00:00Z' } $false $emptyEnv 'open' $null
+Test-Case 'mapping: PR opened → Review' @($prOpened.column, (Columns $prOpened.history)) @('Review', @('In Progress@2026-11-01T01:00:00Z', 'Review@2026-11-01T02:00:00Z'))
+$merged = Resolve-DerivedColumn 'Review' @([ordered] @{ column = 'Review'; enteredAt = (ConvertTo-Moment '2026-11-01T02:00:00Z') }) ([ordered] @{ mergedAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') }) $null $false $emptyEnv 'closed' $null
+Test-Case 'mapping: merged → Merged' @($merged.column, (Columns $merged.history)) @('Merged', @('Review@2026-11-01T02:00:00Z', 'Merged@2026-11-01T03:00:00Z'))
+$docsDone = Resolve-DerivedColumn 'Review' @([ordered] @{ column = 'Review'; enteredAt = (ConvertTo-Moment '2026-11-01T02:00:00Z') }) ([ordered] @{ mergedAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') }) $null $true $emptyEnv 'closed' $null
+Test-Case 'mapping: docs-only merged → Done' @($docsDone.column, (Columns $docsDone.history)) @('Done', @('Review@2026-11-01T02:00:00Z', 'Done@2026-11-01T03:00:00Z'))
+$tddEnv = [ordered] @{ tdd = [ordered] @{ version = '2.4.1'; deployedAt = (ConvertTo-Moment '2026-11-01T04:00:00Z') }; uat = $null; prod = $null }
+$toTdd = Resolve-DerivedColumn 'Merged' @([ordered] @{ column = 'Merged'; enteredAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') }) ([ordered] @{ mergedAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') }) $null $false $tddEnv 'closed' $null
+Test-Case 'mapping: tdd deploy → TDD' @($toTdd.column, (Columns $toTdd.history)) @('TDD', @('Merged@2026-11-01T03:00:00Z', 'TDD@2026-11-01T04:00:00Z'))
+$uatEnv = [ordered] @{ tdd = [ordered] @{ version = '2.4.1'; deployedAt = (ConvertTo-Moment '2026-11-01T04:00:00Z') }; uat = [ordered] @{ version = '2.4.1'; deployedAt = (ConvertTo-Moment '2026-11-01T05:00:00Z') }; prod = $null }
+$toUat = Resolve-DerivedColumn 'TDD' @([ordered] @{ column = 'TDD'; enteredAt = (ConvertTo-Moment '2026-11-01T04:00:00Z') }) ([ordered] @{ mergedAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') }) $null $false $uatEnv 'closed' $null
+Test-Case 'mapping: uat deploy → UAT' @($toUat.column, (Columns $toUat.history)) @('UAT', @('TDD@2026-11-01T04:00:00Z', 'UAT@2026-11-01T05:00:00Z'))
+$prodEnv = [ordered] @{ tdd = [ordered] @{ version = '2.4.1'; deployedAt = (ConvertTo-Moment '2026-11-01T04:00:00Z') }; uat = [ordered] @{ version = '2.4.1'; deployedAt = (ConvertTo-Moment '2026-11-01T05:00:00Z') }; prod = [ordered] @{ version = '2.4.1'; deployedAt = (ConvertTo-Moment '2026-11-01T06:00:00Z') } }
+$toDone = Resolve-DerivedColumn 'UAT' @([ordered] @{ column = 'UAT'; enteredAt = (ConvertTo-Moment '2026-11-01T05:00:00Z') }) ([ordered] @{ mergedAt = (ConvertTo-Moment '2026-11-01T03:00:00Z') }) $null $false $prodEnv 'closed' $null
+Test-Case 'mapping: prod deploy → Done' @($toDone.column, (Columns $toDone.history)) @('Done', @('UAT@2026-11-01T05:00:00Z', 'Done@2026-11-01T06:00:00Z'))
+Test-Case 'columns list is the seven board columns in order' $script:Columns @('Todo', 'In Progress', 'Review', 'Merged', 'TDD', 'UAT', 'Done')
 
 # Releases and pins
 $runs = @(
@@ -187,12 +207,12 @@ function New-Item([int] $Number, [string] $Column, $History, $MergedAt, $ProdAt,
 }
 $items = @(
     (New-Item 1 'Done' $cycleHistory '2026-11-01T11:00:00Z' '2026-11-03T00:00:00Z')
-    (New-Item 2 'Development' @() $null $null 1)
-    (New-Item 3 'Release Queue' @() '2026-11-05T00:00:00Z' $null 0 1)
+    (New-Item 2 'Review' @() $null $null 1)
+    (New-Item 3 'Merged' @() '2026-11-05T00:00:00Z' $null 0 1)
     (New-Item 4 'Todo' @() $null $null)
 )
 $stats = Get-WorkItemStats $items $now 28 2
-Test-Case 'stats: WIP per column, Done left out' $stats.wipByColumn ([ordered] @{ Todo = 1; 'In Progress' = 0; 'Technical Design' = 0; Development = 1; 'Functional Testing' = 0; 'Release Queue' = 1 })
+Test-Case 'stats: WIP per column, Done left out' $stats.wipByColumn ([ordered] @{ Todo = 1; 'In Progress' = 0; Review = 1; Merged = 1; TDD = 0; UAT = 0 })
 Test-Case 'stats: cycle and lead time' @($stats.cycleTimeHours, $stats.leadTimeHours) @([ordered] @{ median = 10.0; p85 = 10.0; n = 1 }, [ordered] @{ median = 48.0; p85 = 48.0; n = 1 })
 Test-Case 'stats: per week, the current one last' $stats.perWeek @([ordered] @{ weekStart = '2026-11-02'; merged = 1; deployedProd = 1 }, [ordered] @{ weekStart = '2026-11-09'; merged = 0; deployedProd = 0 })
 Test-Case 'stats: rework over the tested items' $stats.rework ([ordered] @{ ftFailures = 1; reverts = 1; reworkedItems = 2; testedItems = 3; rate = 0.667 })
@@ -207,29 +227,29 @@ $parentsContext = @{
 }
 $issue = @{ number = 77; title = 'T'; url = 'https://github.com/o/r/issues/77'; state = 'CLOSED'; createdAt = '2026-11-01T00:00:00Z'; closedAt = '2026-11-01T05:00:00Z'; body = ''
     assignees = @{ nodes = @(@{ login = 'cm-ai-ops-bot' }) }; labels = @{ nodes = @() }; timelineItems = @{ nodes = @() }; projectItems = @{ nodes = @() }
-    comments = @{ nodes = @((New-Comment 'cm-ai-ops-bot' '2026-11-01T01:00:00Z' 'Todo → In Progress [agent](https://cursor.com/agents/bc-9)'), (New-Comment 'cm-ai-ops-bot' '2026-11-01T04:59:00Z' 'Functional Testing → Release Queue: merged')) } }
-$prs = @(@{ number = 78; url = 'https://github.com/o/r/pull/78'; state = 'MERGED'; mergedAt = '2026-11-01T04:58:00Z'; mergeCommit = @{ oid = 'm2' }; author = @{ login = 'cm-ai-ops-bot' }; body = ''; comments = @{ nodes = @() } })
+    comments = @{ nodes = @((New-Comment 'cm-ai-ops-bot' '2026-11-01T01:00:00Z' 'Todo → In Progress [agent](https://cursor.com/agents/bc-9)'), (New-Comment 'cm-ai-ops-bot' '2026-11-01T04:59:00Z' 'Review → Merged: merged')) } }
+$prs = @(@{ number = 78; url = 'https://github.com/o/r/pull/78'; state = 'MERGED'; createdAt = '2026-11-01T02:00:00Z'; mergedAt = '2026-11-01T04:58:00Z'; mergeCommit = @{ oid = 'm2' }; author = @{ login = 'cm-ai-ops-bot' }; body = ''; comments = @{ nodes = @() } })
 $item = Build-WorkItem $issue $prs $parentsContext
-Test-Case 'item: column from the journal; closed is not Done before prod' @($item.column, $item.agent, $item.assignee) @('Release Queue', 'cm-ai-ops-bot', 'cm-ai-ops-bot')
+Test-Case 'item: column from the journal; closed is not Done before prod' @($item.column, $item.agent, $item.assignee) @('TDD', 'cm-ai-ops-bot', 'cm-ai-ops-bot')
 Test-Case 'item: release candidate and environments (uat runs an older commit: not reached)' (ConvertTo-Published @($item.releaseCandidate, $item.environments)) (ConvertTo-Published @([ordered] @{ version = '2.4.3'; createdAt = '2026-11-02T00:00:00Z' }, [ordered] @{ tdd = [ordered] @{ version = '2.4.3'; deployedAt = '2026-11-02T01:00:00Z' }; uat = $null; prod = $null }))
 Test-Case 'item: pull request, its checks, and session' (ConvertTo-Published @($item.prs[0], $item.cursorSessions)) (ConvertTo-Published @([ordered] @{ number = 78; url = 'https://github.com/o/r/pull/78'; state = 'merged'; mergedAt = '2026-11-01T04:58:00Z'; mergeSha = 'm2'; checks = $null }, @('https://cursor.com/agents/bc-9')))
 Test-Case 'bot item: hours in each column, and the latest status comment' (ConvertTo-Published @($item.worker, $item.columnHistory[0].hours, $item.columnHistory[-1].leftAt, $item.latestStatusComment.kind)) @('bot', 4.0, $null, 'status')
 $parentsContext.Running.prod = @{ Version = '2.4.4'; Commits = [Collections.Generic.HashSet[string]]::new([string[]] @('m2')) }
 $parentsContext.FirstPin.prod = @{ m2 = [ordered] @{ version = '2.4.4'; at = (ConvertTo-Moment '2026-11-05T00:00:00Z') } }
 $inProd = Build-WorkItem $issue $prs $parentsContext
-Test-Case 'item: a derived Release Queue item running in prod is Done at that deployment' @($inProd.column, (Format-Moment $inProd.columnHistory[-1].enteredAt)) @('Done', '2026-11-05T00:00:00Z')
+Test-Case 'item: a derived Merged/TDD/UAT item running in prod is Done at that deployment' @($inProd.column, (Format-Moment $inProd.columnHistory[-1].enteredAt)) @('Done', '2026-11-05T00:00:00Z')
 $abandoned = @{} + $issue
 $abandoned.comments = @{ nodes = @((New-Comment 'cm-ai-ops-bot' '2026-11-01T01:00:00Z' 'Todo → In Progress')) }
-Test-Case 'item: closed before Release Queue is Done when closed' ((Build-WorkItem $abandoned @() $parentsContext).column) 'Done'
+Test-Case 'item: closed before Merged is Done when closed' ((Build-WorkItem $abandoned @() $parentsContext).column) 'Done'
 $person = @{} + $issue
 $person.assignees = @{ nodes = @() }
 $personItem = Build-WorkItem $person @() $parentsContext
 Test-Case 'item: a person''s issue is kept, as team, without the bot detail' @($personItem.worker, ($personItem.columnHistory[0].Keys -contains 'hours'), $personItem.Contains('latestStatusComment')) @('team', $false, $false)
 $parentsContext.ProjectReadable = $true
 $onBoard = @{} + $issue
-$onBoard.projectItems = @{ nodes = @(@{ project = @{ number = 679 }; fieldValueByName = @{ name = 'Functional Testing' } }) }
+$onBoard.projectItems = @{ nodes = @(@{ project = @{ number = 679 }; fieldValueByName = @{ name = 'Review' } }) }
 $boardItem = Build-WorkItem $onBoard $prs $parentsContext
-Test-Case 'item: the project Status wins when readable' @($boardItem.column, $boardItem.columnSource) @('Functional Testing', 'project')
+Test-Case 'item: the project Status wins when readable' @($boardItem.column, $boardItem.columnSource) @('Review', 'project')
 Test-Case 'item: not on the board, derived though the project is readable' ((Build-WorkItem $issue $prs $parentsContext).columnSource) 'derived'
 
 Test-Case 'window: open kept, old closed dropped, recently deployed kept' @(
@@ -239,10 +259,10 @@ Test-Case 'window: open kept, old closed dropped, recently deployed kept' @(
 ) @($true, $false, $true)
 
 $span = Add-ColumnSpan @(
-    [ordered] @{ column = 'Development'; enteredAt = (ConvertTo-Moment '2026-11-01T00:00:00Z') }
+    [ordered] @{ column = 'Review'; enteredAt = (ConvertTo-Moment '2026-11-01T00:00:00Z') }
     [ordered] @{ column = 'Done'; enteredAt = (ConvertTo-Moment '2026-11-01T01:30:00Z') }
 ) (ConvertTo-Moment '2026-11-01T02:00:00Z')
-Test-Case 'column span: leftAt is the next entry, the current column is open, hours to one decimal' (ConvertTo-Published @($span | ForEach-Object { "$($_.column) $(Format-Moment $_.leftAt) $($_.hours)" })) @('Development 2026-11-01T01:30:00Z 1.5', 'Done  0.5')
+Test-Case 'column span: leftAt is the next entry, the current column is open, hours to one decimal' (ConvertTo-Published @($span | ForEach-Object { "$($_.column) $(Format-Moment $_.leftAt) $($_.hours)" })) @('Review 2026-11-01T01:30:00Z 1.5', 'Done  0.5')
 
 Test-Case 'checks: the rollup of the latest commit, lower case' (Get-ChecksConclusion @{ commits = @{ nodes = @(@{ commit = @{ statusCheckRollup = @{ state = 'SUCCESS' } } }) } }) 'success'
 Test-Case 'checks: none when the rollup was not read' (Get-ChecksConclusion @{}) $null

@@ -35,7 +35,7 @@ Times are UTC, `yyyy-MM-ddTHH:mm:ssZ`. Durations are hours, one decimal. `null` 
     "projectTitle": "Clear Measure work orders demo 1",   // null when the project is not readable
     "deployable": "ui",
     "columnSource": "project",                            // "project" | "derived"
-    "columns": ["Todo", "In Progress", "Technical Design", "Development", "Functional Testing", "Release Queue", "Done"],
+    "columns": ["Todo", "In Progress", "Review", "Merged", "TDD", "UAT", "Done"],
     "window": { "days": 56, "statsDays": 28, "weeks": 8 },
     "rules": ["..."]
   },
@@ -49,7 +49,7 @@ Times are UTC, `yyyy-MM-ddTHH:mm:ssZ`. Durations are hours, one decimal. `null` 
     "all": { "wipByColumn": {}, "cycleTimeHours": {}, "leadTimeHours": {}, "perWeek": [], "rework": {}, "cost": {} },
     "bot": {
       "wipByColumn": {}, "cycleTimeHours": {}, "leadTimeHours": {}, "perWeek": [], "rework": {}, "cost": {},
-      "hoursByColumn": { "Development": 0.4, "Functional Testing": 0.1 },
+      "hoursByColumn": { "In Progress": 0.4, "Review": 0.1 },
       "throughputByAgent": { "cm-ai-ops-bot": 4, "factory-worker": 120 },
       "mergeToProdHours": { "median": 1.2, "p85": 6.0, "n": 40 }
     },
@@ -63,7 +63,7 @@ Times are UTC, `yyyy-MM-ddTHH:mm:ssZ`. Durations are hours, one decimal. `null` 
       "state": "closed",                                  // "open" | "closed"
       "createdAt": "2026-11-09T22:06:23Z",
       "closedAt": "2026-11-09T22:49:43Z",
-      "column": "Release Queue",
+      "column": "Merged",
       "columnSource": "derived",                          // "project" | "derived", per item
       "columnHistory": [ { "column": "In Progress", "enteredAt": "2026-11-09T22:07:44Z", "leftAt": "2026-11-09T22:11:39Z", "hours": 0.1 } ],
       "worker": "bot",                                    // "bot" | "team"
@@ -147,8 +147,8 @@ moves were journaled, which is why their `n` is small until the project can be r
 `cm-ai-ops-bot`'s comments: `Todo → In Progress`,
 `A → B → C`, `X → Y (via Z)` (also `->`), at the comment's time. A move counts when it leaves the column the item is
 in or goes past it, so a comment that restates earlier moves does not count twice. A factory-state comment is not a
-column source. A derived Release Queue item whose change runs in prod is Done at that deployment, and a closed issue
-that never reached Release Queue is Done when it was closed.
+column source. Derived advances fill gaps when journals lag: PR opened → Review; merged → Merged (docs-only → Done);
+tdd/uat/prod deploy → TDD/UAT/Done. A closed issue that never reached Merged is Done when it was closed.
 
 ### Bot detail
 
@@ -178,9 +178,9 @@ numbers.
 - `leadTimeHours`: created to the prod deployment, for items deployed to prod in the last 28 days.
 - `perWeek`: per week (Monday 00:00 UTC), the current one last. `merged` is items whose first pull request merged that
   week; `deployedProd` is items that reached prod that week.
-- `rework.rate` is reworked items divided by tested items, from 0 to 1. A reworked item had a Functional Testing
-  failure (the most of the `demotions` recorded on the issue, its "Functional Testing: FAIL" verdicts, and moves from
-  Functional Testing back to an earlier column) or a merged pull request reverted on `master`.
+- `rework.rate` is reworked items divided by tested items, from 0 to 1. A reworked item had a Review failure (the most
+  of the `demotions` recorded on the issue, its "Review: FAIL" verdicts, and moves from Review back to an earlier
+  column) or a merged pull request reverted on `master`.
 - `cost.totalUsd` and every item's `costUsd` are null. No cost source is connected yet.
 - `stats.bot.hoursByColumn`: the median of the hours bot items spent in each column, including the current column up
   to the run.
