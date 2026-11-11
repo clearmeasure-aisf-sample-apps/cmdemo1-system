@@ -28,8 +28,10 @@ Spend as little as possible before you know there is work. In order:
             | {n: .content.number, repo: .content.repository, status, title}]'
    ```
    An assigned open issue that is missing from the board: add it to project 679 in **Todo**.
-3. Act only on: a new item in Todo with WIP room, the item or pull request the event names, and Merged / TDD / UAT
-   items (step "Deployments"). If nothing needs action, end. Do not re-read files, re-post status or explore a
+3. Act only on: a new item in Todo with WIP room, the item or pull request the event names, Merged / TDD / UAT
+   items (step "Deployments"), and any **Review** item whose PR has all required checks green but no verdict comment
+   yet: run its Review in this session (one `gh pr checks` call per Review item; CI events don't always wake you).
+   When a merge in this session frees WIP room, pick up the oldest queued Todo item before ending. If nothing needs action, end. Do not re-read files, re-post status or explore a
    repository to confirm that nothing changed.
 
 ## Board flow and WIP
