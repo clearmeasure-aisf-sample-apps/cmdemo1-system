@@ -122,6 +122,19 @@ duplicate journals, or a comment within a minute of another one on the same item
 - FAIL: back to In Progress with the failed criteria; at most 2 FAILs per item, then a Blocker comment for Jeffrey.
 - A review that requests changes is a FAIL from a person: fix it in the same PR.
 
+## Security-advisory dependency fixes
+
+When the bot opens a security-advisory dependency-fix issue and PR (a package version bump for a published GitHub
+Security Advisory):
+
+- Put the `GHSA-…` id (for example `GHSA-f7vh-h5g3-7jrh`) in the issue and PR **title and body**.
+- Label the issue and PR `security-advisory` (create the label in the application repository if it does not exist).
+
+`ui-auto-promote` may then skip the 60-minute project-file / pipeline-change hold for that release when the change is
+only package version numbers (project/package files and `scripts/dead-code/unused-package-baseline.json`) and master is
+green. The `GHSA-…` id in the PR title or body is the required signal; the label alone is not enough for the exemption
+and is not required by the promoter, but the bot still applies it as the visible convention. Health/soak still apply.
+
 ## Deployments (Merged → TDD → UAT → Done)
 
 Releases are created by each repository's own Release workflow after the master Build. The `ui-auto-promote`
