@@ -169,14 +169,57 @@ Test-Case 'permission denied: not in any team wording is refused' (Test-OctopusP
 Test-Case 'permission denied: a 503 is not refused' (Test-OctopusPermissionDenied (New-DeniedError 'Response status code does not indicate success: 503 (Service Unavailable).')) $false
 Test-Case 'permission denied: a network error is not refused' (Test-OctopusPermissionDenied (New-DeniedError 'Unable to connect to the remote server')) $false
 
-$signed = Invoke-SignOffOctopusCalls -TakeResponsibility { } -Submit { }
+# Real Sign-off path (#589): Invoke-SignOffOctopusCalls calls script-scope Invoke-Octopus (not an injected
+# scriptblock). A GetNewClosure wrapper around those calls would hide the function when Actions runs the
+# script with &, so this stub must live at script scope for the harness to catch that class of bug.
+$script:signOffOctopusCalls = [System.Collections.Generic.List[hashtable]]::new()
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    $script:signOffOctopusCalls.Add(@{ Path = $Path; Method = $Method; Body = $Body })
+}
+$script:signOffOctopusCalls.Clear()
+$signed = Invoke-SignOffOctopusCalls -Space 'Spaces-1' -InterruptionId 'Interruptions-9' -Reason 'promote' -NeedTakeResponsibility $true
 Test-Case 'sign-off calls: success returns signed' $signed 'signed'
-$refusedTake = Invoke-SignOffOctopusCalls -TakeResponsibility { throw (New-DeniedError 'You must be in a team that has permissions') } -Submit { throw 'submit should not run' }
+Test-Case 'sign-off calls: script-scope Invoke-Octopus takes responsibility then submits' @(
+    $script:signOffOctopusCalls.Count
+    $script:signOffOctopusCalls[0].Method
+    $script:signOffOctopusCalls[0].Path
+    $script:signOffOctopusCalls[1].Method
+    $script:signOffOctopusCalls[1].Path
+    $script:signOffOctopusCalls[1].Body.Notes
+    $script:signOffOctopusCalls[1].Body.Result
+) @(2, 'Put', '/api/Spaces-1/interruptions/Interruptions-9/responsible', 'Post', '/api/Spaces-1/interruptions/Interruptions-9/submit', 'promote', 'Proceed')
+
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    if ($Path -like '*/responsible') { throw (New-DeniedError 'You must be in a team that has permissions') }
+    throw 'submit should not run'
+}
+$refusedTake = Invoke-SignOffOctopusCalls -Space 'Spaces-1' -InterruptionId 'Interruptions-9' -Reason 'promote' -NeedTakeResponsibility $true
 Test-Case 'sign-off calls: permission denied on take-responsibility returns refused' $refusedTake 'refused'
-$refusedSubmit = Invoke-SignOffOctopusCalls -TakeResponsibility $null -Submit { throw (New-DeniedError 'Response status code does not indicate success: 403 (Forbidden).') }
+
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    throw (New-DeniedError 'Response status code does not indicate success: 403 (Forbidden).')
+}
+$refusedSubmit = Invoke-SignOffOctopusCalls -Space 'Spaces-1' -InterruptionId 'Interruptions-9' -Reason 'promote' -NeedTakeResponsibility $false
 Test-Case 'sign-off calls: permission denied on submit returns refused' $refusedSubmit 'refused'
-$otherErr = try { Invoke-SignOffOctopusCalls -TakeResponsibility $null -Submit { throw (New-DeniedError 'Response status code does not indicate success: 500 (Internal Server Error).') }; 'no throw' } catch { $_.Exception.Message }
+
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    throw (New-DeniedError 'Response status code does not indicate success: 500 (Internal Server Error).')
+}
+$otherErr = try { Invoke-SignOffOctopusCalls -Space 'Spaces-1' -InterruptionId 'Interruptions-9' -Reason 'promote' -NeedTakeResponsibility $false; 'no throw' } catch { $_.Exception.Message }
 Test-Case 'sign-off calls: any other error still throws' $otherErr 'Response status code does not indicate success: 500 (Internal Server Error).'
+
+# Already-held responsibility: only submit is called (script-scope Invoke-Octopus, not a parameter).
+$script:signOffOctopusCalls = [System.Collections.Generic.List[hashtable]]::new()
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    $script:signOffOctopusCalls.Add(@{ Path = $Path; Method = $Method; Body = $Body })
+}
+$signedNoTake = Invoke-SignOffOctopusCalls -Space 'Spaces-1' -InterruptionId 'Interruptions-9' -Reason 'recover' -NeedTakeResponsibility $false
+Test-Case 'sign-off calls: when responsibility is held only submit runs' @(
+    $signedNoTake
+    $script:signOffOctopusCalls.Count
+    $script:signOffOctopusCalls[0].Method
+    $script:signOffOctopusCalls[0].Path
+) @('signed', 1, 'Post', '/api/Spaces-1/interruptions/Interruptions-9/submit')
 
 $refusedEv = New-SignOffRefusedEvaluation -Sha 'abc' -ProjectName 'cmdemo1-dashboard' -ReleaseVersion '1.0.31' -EnvironmentName 'uat' -Detail 'HTTP 403'
 Test-Case 'refused Sign-off hold names the flag' $refusedEv.Decision.Flags[0].Flag $SignOffPermissionDeniedFlag

@@ -591,10 +591,20 @@ function Test-OctopusPermissionDenied {
 
 function Invoke-SignOffOctopusCalls {
     # Take responsibility (optional) then submit. Returns 'signed' or 'refused'; rethrows every other error.
-    param([scriptblock] $TakeResponsibility, [scriptblock] $Submit)
+    # Calls Invoke-Octopus directly (script scope): do not wrap those calls in GetNewClosure scriptblocks —
+    # a closure binds to a dynamic module that cannot see script-scope functions when the workflow runs the
+    # script with & (GitHub Actions' pwsh shell), which is why every ui-auto-promote run failed in #589.
+    param(
+        [Parameter(Mandatory)] [string] $Space,
+        [Parameter(Mandatory)] [string] $InterruptionId,
+        [Parameter(Mandatory)] [string] $Reason,
+        [bool] $NeedTakeResponsibility
+    )
     try {
-        if ($null -ne $TakeResponsibility) { & $TakeResponsibility }
-        & $Submit
+        if ($NeedTakeResponsibility) {
+            Invoke-Octopus "/api/$Space/interruptions/$InterruptionId/responsible" 'Put' | Out-Null
+        }
+        Invoke-Octopus "/api/$Space/interruptions/$InterruptionId/submit" 'Post' @{ Notes = $Reason; Result = 'Proceed' } | Out-Null
         'signed'
     } catch {
         if (Test-OctopusPermissionDenied $_) { 'refused' } else { throw }
@@ -1104,11 +1114,7 @@ function Submit-SignOff {
             'answer' {
                 $interruptId = $a.Interruption.Id
                 $needTake = -not $a.Interruption.HasResponsibility
-                $take = if ($needTake) {
-                    { Invoke-Octopus "/api/$space/interruptions/$interruptId/responsible" 'Put' | Out-Null }.GetNewClosure()
-                } else { $null }
-                $submit = { Invoke-Octopus "/api/$space/interruptions/$interruptId/submit" 'Post' @{ Notes = $Reason; Result = 'Proceed' } | Out-Null }.GetNewClosure()
-                $outcome = Invoke-SignOffOctopusCalls -TakeResponsibility $take -Submit $submit
+                $outcome = Invoke-SignOffOctopusCalls -Space $space -InterruptionId $interruptId -Reason $Reason -NeedTakeResponsibility $needTake
                 if ($outcome -eq 'refused') {
                     Say "WARNING: Octopus refused Sign-off permission for project $ProjectName release $ReleaseVersion in $EnvironmentName (interruption $interruptId)."
                     return 'refused'
