@@ -969,7 +969,13 @@ $checks = [ordered] @{
             # Each container app of the environment has what the hourly health reports found for it (health.containerApps,
             # read from the reports' logs), once the system's last deployment there, which makes and removes the apps,
             # is 90 minutes old. An environment whose health the file does not have (no runbook, or not read) has none.
-            $apps = @($system.deployables | Where-Object { (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and (-not $_['environments'] -or @($_['environments']) -contains $e) } | ForEach-Object { [string] $_.name })
+            # Match write-delivery.ps1 Select-DeliveryDeployable (#577): azureExcludeDeployables and retired are absent.
+            $azureExcluded = @(if ($system.system['azureExcludeDeployables']) { $system.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
+            $apps = @($system.deployables | Where-Object {
+                    $_['retired'] -ne $true -and $azureExcluded -cnotcontains [string] $_.name -and
+                    (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
+                    (-not $_['environments'] -or @($_['environments']) -contains $e)
+                } | ForEach-Object { [string] $_.name })
             $health = $entry['health']
             if ($systemSettled -and $apps.Count -gt 0 -and $health -is [System.Collections.IDictionary]) {
                 $facts = @($health['containerApps'] | Where-Object { $_ -is [System.Collections.IDictionary] })
