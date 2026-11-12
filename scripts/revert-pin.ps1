@@ -8,10 +8,10 @@
 .DESCRIPTION
     Step "Revert pin" of the Octopus project <slug>-<deployable>, which runs only when an earlier step failed;
     octopus/projects.tf inlines this file. "Pin version" commits the new version first (desired state first) and
-    records what it replaced (output variables Pinned and PreviousVersion). When Migrate, Update or Verify then fails,
-    this step restores the previous version, so main keeps describing what runs and the next apply of the stack does
-    not roll out a version that never deployed. It changes nothing when the pin did not commit, or when versions.json
-    no longer pins this release (a later deployment already moved it).
+    records what it replaced (output variables Pinned and PreviousVersion). When Migrate, Update, Verify or the
+    Acceptance tests then fail, this step restores the previous version, so main does not keep a version whose
+    deployment failed and the next apply of the stack does not roll that version out. It changes nothing when the pin
+    did not commit, or when versions.json no longer pins this release (a later deployment already moved it).
 #>
 # No param block: octopus/projects.tf joins scripts/github-token.ps1 and this file into one script, this one second.
 
