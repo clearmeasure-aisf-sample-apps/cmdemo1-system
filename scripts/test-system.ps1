@@ -489,3 +489,6 @@ Write-Host 'All system checks passed.'
 # ConvertTo-Topology container-app deployables (#556): env-checks already runs this file; keep the proof here so
 # workflows/ need not change. A failure calls exit and ends this process too.
 & (Join-Path $PSScriptRoot 'test-deploy-staticwebapp.ps1')
+
+# Select-DeliveryDeployable omits azureExcludeDeployables and retired (#577): same reason as above.
+& (Join-Path $PSScriptRoot 'test-write-delivery.ps1')
