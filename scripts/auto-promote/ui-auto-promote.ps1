@@ -807,6 +807,19 @@ function Read-StateReads([hashtable] $State, [string] $DeploymentId, [string] $N
     @()
 }
 
+function Get-Commit($release) {
+    # Release notes name the commit as "Build <run> of <sha>, committed <time>" (an app) or
+    # "Commit <sha>: <message>" (cmdemo1-system, .github/workflows/system.yml). Only the app form matched before
+    # (#574): system 1.0.183 stayed in tdd and never reached uat, so azureExcludeDeployables never deleted the
+    # uat aisf/fworker apps and fwrunner jobs. Same extraction as scripts/write-delivery.ps1 Get-Commit.
+    if (-not $release) { return $null }
+    $notes = [string] $release.ReleaseNotes
+    if ($notes -match '(?i)(?:^|\b)(?:commit|of)\s+([0-9a-f]{40})\b') { return $Matches[1] }
+    $any = [regex]::Match($notes, '\b[0-9a-f]{40}\b').Value
+    if ($any) { return $any }
+    $null
+}
+
 if ($LoadOnly) { return }
 
 # --- Running ------------------------------------------------------------------------------------------------------
@@ -888,8 +901,6 @@ function Get-RunningOutsideList($target) {
         -GetRelease { param($releaseId) Invoke-Octopus "/api/$space/releases/$releaseId" } `
         -GetTaskState { param($d) Get-TaskState $d }
 }
-function Get-Commit($release) { if ($release -and "$($release.ReleaseNotes)" -match 'of ([0-9a-f]{40})') { $Matches[1] } }
-
 $heldIssues = @(& gh issue list -R $ownRepo --label release-held --state open --json number,title,body --limit 50 | ConvertFrom-Json)
 $addresses = try { (Invoke-RestMethod "https://raw.githubusercontent.com/$ownRepo/status/containers.json").environments } catch { $null }
 $state = Read-State $StatePath

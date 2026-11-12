@@ -544,6 +544,14 @@ Test-Case 'master: one pending is pending' (Get-MasterState @(@{ Name = 'a'; Sta
 Test-Case 'master: one failed is red' (Get-MasterState @(@{ Name = 'a'; State = 'failure'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' })).State 'red'
 Test-Case 'master: no check is not green' (Get-MasterState @()).State 'pending'
 
+# Release notes commit (#574): apps say "Build … of <sha>", system says "Commit <sha>: …" (system.yml).
+$sha40 = '875cf235b557b570b11ade1ce9f02ac381a92469'
+Test-Case 'commit: app Build … of <sha>' (Get-Commit @{ ReleaseNotes = "Build https://github.com/o/r/actions/runs/1 of $sha40, committed 2026-11-11T20:00:00Z" }) $sha40
+Test-Case 'commit: system Commit <sha>: …' (Get-Commit @{ ReleaseNotes = "Commit ${sha40}: Skip the project-file hold (#565)" }) $sha40
+Test-Case 'commit: bare 40-char sha still found' (Get-Commit @{ ReleaseNotes = "packaged $sha40 only" }) $sha40
+Test-Case 'commit: empty notes' (Get-Commit @{ ReleaseNotes = '' }) $null
+Test-Case 'commit: null release' (Get-Commit $null) $null
+
 # --- Per-deployable settings (ui; dashboard and system 2026-11-10 #560; fworker and aisf excluded) ---
 Test-Case 'settings: covered deployables' @($DeployableSettings.Keys | Sort-Object) @('dashboard', 'system', 'ui')
 Test-Case 'settings: promote order' $PromoteOrder @('ui', 'dashboard', 'system')
