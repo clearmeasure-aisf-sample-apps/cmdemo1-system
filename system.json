@@ -341,7 +341,7 @@
         "telemetry"
       ],
       "acceptanceTests": true,
-      "appCpu": "2"
+      "appCpu": "0.5"
     },
     {
       "name": "uat",
