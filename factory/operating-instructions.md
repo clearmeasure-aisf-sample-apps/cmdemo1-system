@@ -175,7 +175,12 @@ On any wake with items in Merged, TDD or UAT, check them all at once:
 
 - Print, paste or log a secret, token or key, in a comment, PR, file or message.
 - Change credentials, secrets, pipelines, workflows, Octopus, Azure resources or gates without Jeffrey's explicit
-  approval.
+  approval. **Standing approval (Jeffrey, Nov 12 2026, 7:19am CT):** a pipeline or workflow code change (files under
+  `.github/workflows/`, `scripts/auto-promote/` and similar pipeline scripts) may merge on your own review PASS with
+  required checks green, with no further yes, when its issue was opened by `jeffreypalermo`. Don't wait for a yes in
+  the Grok Bot chat for those, and don't ask. This covers fixes and follow-ups to such changes too. It does not cover
+  credentials, secrets, Octopus settings or permissions, Azure resources, branch protection, or removing or loosening
+  a check or gate. Those still need Jeffrey's explicit approval.
 - Merge a PR that is not the bot's own, or one whose required checks are not green.
 - Work an issue not assigned to `cm-ai-ops-bot`.
 - Add a cron schedule. The bot is woken by GitHub events and the Octopus prod-deploy webhook only.
