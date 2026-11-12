@@ -14,7 +14,10 @@ not here.
 
 ## Step 1 on every wake: decide cheaply, end early
 
-Spend as little as possible before you know there is work. In order:
+Spend as little as possible before you know there is work. Keep GitHub GraphQL under the shared 5,000
+points/hour limit: one wake must stay under 50 GraphQL points. Prefer REST. Never run
+`gh project item-list` with fields, bodies or large limits (and do not use `item-list` for the board read
+below). In order:
 
 1. Read the event that woke you. End immediately, with no comment and no report, when it is:
    - an `issue-assigned` event whose assignee is not `cm-ai-ops-bot`;
@@ -24,19 +27,52 @@ Spend as little as possible before you know there is work. In order:
    Otherwise, when it is an `issue-assigned` wake whose assigner is `github-actions[bot]` on an issue already in
    **Review** or **In Progress**, treat it as a CI-finished nudge from workflow `factory-wake` (env-checks completed
    on the bot PR that closes that issue): run that item's Review (green checks) or fix (red checks) in this session,
-   then apply the existing "any Review item with green checks" and "pick up the oldest Todo when WIP frees" rules.
-   Do not post a pickup comment again.
-2. Otherwise list the bot's items in one call:
+   then apply the existing "any Review item with green checks" and "pick up the oldest Todo when WIP frees" rules
+   when the board read below is allowed. Do not post a pickup comment again.
+2. Read the issue or pull request the event names through **REST only**
+   (`gh api repos/<owner>/<repo>/issues/<n>`, `…/pulls/<n>`, then REST for comments, checks and runs). Do not use
+   GraphQL for that content.
+3. Before any board-wide read, check GraphQL `X-RateLimit-Remaining` with a cheap real call (do **not** use
+   `gh api rate_limit`; it under-reports):
    ```
-   gh project item-list 679 --owner clearmeasure-aisf-sample-apps --format json -L 1000 \
-     --jq '[.items[] | select((.assignees // []) | index("cm-ai-ops-bot")) | select(.status != "Done")
-            | {n: .content.number, repo: .content.repository, status, title}]'
+   gh api graphql -f query='query{viewer{login}}' -i
    ```
-   An assigned open issue that is missing from the board: add it to project 679 in **Todo**.
-3. Act only on: a new item in Todo with WIP room, the item or pull request the event names, Merged / TDD / UAT
+   When Remaining is below **1,000**: work only the woken item through REST; skip the board query; do not pick up a
+   new Todo from the board on that wake.
+4. Otherwise list the bot's non-Done board items with **one slim GraphQL query** that returns only item id, content
+   number / repository / state, and the Status single-select value (no titles, bodies, labels or other fields). Use
+   `query: "assignee:cm-ai-ops-bot -status:Done"` so Done items are skipped at the API. Page with `after` only while
+   `hasNextPage` is true:
+   ```
+   gh api graphql -f query='
+   query($id: ID!, $q: String, $cursor: String) {
+     node(id: $id) {
+       ... on ProjectV2 {
+         items(first: 100, after: $cursor, query: $q) {
+           nodes {
+             id
+             fieldValueByName(name: "Status") {
+               ... on ProjectV2ItemFieldSingleSelectValue { name }
+             }
+             content {
+               ... on Issue { number state repository { nameWithOwner } }
+               ... on PullRequest { number state repository { nameWithOwner } }
+             }
+           }
+           pageInfo { hasNextPage endCursor }
+         }
+       }
+     }
+   }' -f id='PVT_kwDOD_ESUc4BliGL' -f q='assignee:cm-ai-ops-bot -status:Done'
+   ```
+   (Omit `-f cursor=…` on the first page; pass `-f cursor=<endCursor>` on later pages.) WIP is the count of those
+   items whose Status is **In Progress** or **Review**. The next Todo is the oldest **Todo** in that list. An
+   assigned open issue that is missing from the board: add it to project 679 in **Todo**.
+5. Act only on: a new item in Todo with WIP room, the item or pull request the event names, Merged / TDD / UAT
    items (step "Deployments"), and any **Review** item whose PR has all required checks green but no verdict comment
    yet: run its Review in this session (one `gh pr checks` call per Review item; CI events don't always wake you).
-   When a merge in this session frees WIP room, pick up the oldest queued Todo item before ending. If nothing needs action, end. Do not re-read files, re-post status or explore a
+   When a merge in this session frees WIP room, pick up the oldest queued Todo item before ending (skipped when
+   step 3 withheld the board read). If nothing needs action, end. Do not re-read files, re-post status or explore a
    repository to confirm that nothing changed.
 
 ## Board flow and WIP
