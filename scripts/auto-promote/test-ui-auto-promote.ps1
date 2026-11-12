@@ -158,6 +158,52 @@ Test-Case 'ui in tdd does not block' ([bool] (Get-BusyReason @(@{ Kind = 'deploy
 Test-Case 'another project elsewhere does not block' ([bool] (Get-BusyReason @($busyA) 'E-uat' 'E-tdd' 'P-ui')) $false
 Test-Case 'nothing active does not block' ([bool] (Get-BusyReason @() 'E-uat' 'E-tdd' 'P-ui')) $false
 
+# Refused Sign-off is a hold, not a workflow failure (#569)
+function New-DeniedError([string] $Message) {
+    [System.Management.Automation.ErrorRecord]::new([Exception]::new($Message), 'OctopusDenied', 'NotSpecified', $null)
+}
+Test-Case 'permission denied: HTTP 403 message is refused' (Test-OctopusPermissionDenied (New-DeniedError 'Response status code does not indicate success: 403 (Forbidden).')) $true
+Test-Case 'permission denied: HTTP 401 message is refused' (Test-OctopusPermissionDenied (New-DeniedError 'Response status code does not indicate success: 401 (Unauthorized).')) $true
+Test-Case 'permission denied: Octopus team wording is refused' (Test-OctopusPermissionDenied (New-DeniedError 'You must be in a team that has permissions to take this interruption.')) $true
+Test-Case 'permission denied: not in any team wording is refused' (Test-OctopusPermissionDenied (New-DeniedError 'The current user is not in any team with permissions to perform this action.')) $true
+Test-Case 'permission denied: a 503 is not refused' (Test-OctopusPermissionDenied (New-DeniedError 'Response status code does not indicate success: 503 (Service Unavailable).')) $false
+Test-Case 'permission denied: a network error is not refused' (Test-OctopusPermissionDenied (New-DeniedError 'Unable to connect to the remote server')) $false
+
+$signed = Invoke-SignOffOctopusCalls -TakeResponsibility { } -Submit { }
+Test-Case 'sign-off calls: success returns signed' $signed 'signed'
+$refusedTake = Invoke-SignOffOctopusCalls -TakeResponsibility { throw (New-DeniedError 'You must be in a team that has permissions') } -Submit { throw 'submit should not run' }
+Test-Case 'sign-off calls: permission denied on take-responsibility returns refused' $refusedTake 'refused'
+$refusedSubmit = Invoke-SignOffOctopusCalls -TakeResponsibility $null -Submit { throw (New-DeniedError 'Response status code does not indicate success: 403 (Forbidden).') }
+Test-Case 'sign-off calls: permission denied on submit returns refused' $refusedSubmit 'refused'
+$otherErr = try { Invoke-SignOffOctopusCalls -TakeResponsibility $null -Submit { throw (New-DeniedError 'Response status code does not indicate success: 500 (Internal Server Error).') }; 'no throw' } catch { $_.Exception.Message }
+Test-Case 'sign-off calls: any other error still throws' $otherErr 'Response status code does not indicate success: 500 (Internal Server Error).'
+
+$refusedEv = New-SignOffRefusedEvaluation -Sha 'abc' -ProjectName 'cmdemo1-dashboard' -ReleaseVersion '1.0.31' -EnvironmentName 'uat' -Detail 'HTTP 403'
+Test-Case 'refused Sign-off hold names the flag' $refusedEv.Decision.Flags[0].Flag $SignOffPermissionDeniedFlag
+Test-Case 'refused Sign-off hold evidence names project release environment' @(
+    ($refusedEv.Decision.Flags[0].Evidence[0] -like '*cmdemo1-dashboard*'),
+    ($refusedEv.Decision.Flags[0].Evidence[0] -like '*1.0.31*'),
+    ($refusedEv.Decision.Flags[0].Evidence[0] -like '*uat*'),
+    (Test-SignOffRefusedHoldBody (Format-HeldEvidence -Version '1.0.31' -Sha 'abc' -Target 'uat' -Flags $refusedEv.Decision.Flags -Name 'dashboard'))
+) @($true, $true, $true, $true)
+$heldBody = Format-HeldEvidence -Version '1.0.31' -Sha 'abc' -Target 'uat' -Flags $refusedEv.Decision.Flags -DeploymentNote 'waits at Sign-off' -Name 'dashboard'
+Test-Case 'refused Sign-off does not throw: hold is recorded as release-held evidence' @(
+    ($heldBody -like '*Sign-off permission denied*'),
+    ($heldBody -like '*dashboard 1.0.31*'),
+    ($heldBody -like '*uat*')
+) @($true, $true, $true)
+
+$refusedBusy = @{ Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'; SignOffRefused = $true }
+Test-Case 'refused Sign-off does not block another project to that environment' ([bool] (Get-BusyReason @($refusedBusy) 'E-uat' 'E-tdd' 'P-ui')) $false
+Test-Case 'a running deployment to the target still blocks' ([bool] (Get-BusyReason @(@{ Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'; SignOffRefused = $false }) 'E-uat' 'E-tdd' 'P-ui')) $true
+Test-Case 'a runbook in the target still blocks beside a refused Sign-off' ([bool] (Get-BusyReason @($refusedBusy, @{ Kind = 'runbook'; ProjectId = 'P-other'; EnvironmentId = 'E-uat'; SignOffRefused = $false }) 'E-uat' 'E-tdd' 'P-ui')) $true
+
+$markItems = @(@{ Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'; Deployment = @{ ReleaseId = 'R-31' }; SignOffRefused = $false })
+$markHolds = @(@{ number = 12; title = 'dashboard 1.0.31 held before uat'; body = $heldBody })
+Set-SignOffRefusedOnBusyItems -Items $markItems -HeldIssues $markHolds -ProjectIdByDeployableName @{ dashboard = 'P-dash' } -EnvironmentIdByName @{ uat = 'E-uat' } -GetReleaseVersion { param($b) '1.0.31' }
+Test-Case 'open refused hold marks the busy deployment SignOffRefused' $markItems[0].SignOffRefused $true
+Test-Case 'marked refused hold no longer blocks ui to uat' ([bool] (Get-BusyReason $markItems 'E-uat' 'E-tdd' 'P-ui')) $false
+
 # Candidate selection
 $envs3 = @(@{ Id = 'E1'; Name = 'tdd' }, @{ Id = 'E2'; Name = 'uat' }, @{ Id = 'E3'; Name = 'prod' })
 function New-Rel($id, $ver, $hour) { @{ Id = $id; Version = $ver; Assembled = "2026-10-14T0${hour}:00:00+00:00" } }

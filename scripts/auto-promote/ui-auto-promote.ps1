@@ -22,9 +22,13 @@
     the newest deployments to that environment (issue #314). A newer release that ended otherwise in the previous environment is skipped and the run log says so.
     Nothing is promoted while any deployment or runbook run (any project) to the target environment, or any ui
     deployment to a later-than-first environment, is queued, running, cancelling or waiting at an interruption; a call that
-    fails or a listing that is incomplete also stops the run (fail closed).
+    fails or a listing that is incomplete also stops the run (fail closed). A deployment waiting only because Octopus
+    refused this account permission to take its Sign-off (issue #569) is recorded as a hold and does not count as busy
+    for other deployables.
     Recovery: a deployment this workflow created (its Comments start with "Promoted by workflow ui-auto-promote") that waits at
     its Sign-off is evaluated again; no flag: its Sign-off is answered; a flag: it stays waiting and the held issue says so.
+    Permission denied on take-responsibility or submit (HTTP 401/403, or Octopus "not in any team with permissions"): hold,
+    warn, continue — do not fail the workflow.
 
     The four flags (Get-PromotionDecision), and what makes the run wait (nothing promoted, nothing flagged):
       1 checks   Flag: a check run of the release's commit in the application repository that ended failure, cancelled,
@@ -466,11 +470,106 @@ function Get-PromotionDecision {
 }
 
 function Get-BusyReason {
-    # Items: @{ Kind = deployment|runbook; ProjectId; EnvironmentId } of every task that is not finished.
+    # Items: @{ Kind = deployment|runbook; ProjectId; EnvironmentId; SignOffRefused? } of every task that is not finished.
+    # SignOffRefused: a deployment parked only because Octopus refused this account the Sign-off (#569) does not block.
     param([object[]] $Items, [string] $TargetEnvironmentId, [string] $FirstEnvironmentId, [string] $ProjectId, [string] $Name = $Deployable)
     foreach ($i in @($Items)) {
+        if (Test-BusyItemSignOffRefused $i) { continue }
         if ($i.EnvironmentId -eq $TargetEnvironmentId) { return "a $($i.Kind) of project $($i.ProjectId) to the target environment is not finished" }
         if ($i.Kind -eq 'deployment' -and $i.ProjectId -eq $ProjectId -and $i.EnvironmentId -ne $FirstEnvironmentId) { return "a $Name deployment is not finished in another environment" }
+    }
+}
+
+function Test-BusyItemSignOffRefused($Item) {
+    # True when the busy item is a deployment parked only on a refused Sign-off (Get-BusyReason skips it).
+    if ($null -eq $Item) { return $false }
+    if ($Item -is [hashtable]) { return [bool] $Item['SignOffRefused'] }
+    if ($Item.PSObject.Properties['SignOffRefused']) { return [bool] $Item.SignOffRefused }
+    $false
+}
+
+function Test-OctopusPermissionDenied {
+    # True for HTTP 401/403 or Octopus wording that the account is not in a team that may take the interruption.
+    param($ErrorRecord)
+    $ex = $null; $msg = ''
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        $ex = $ErrorRecord.Exception
+        $parts = [Collections.Generic.List[string]]::new()
+        if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) { $parts.Add([string] $ErrorRecord.ErrorDetails.Message) }
+        if ($ex) { $parts.Add([string] $ex.Message) }
+        $msg = $parts -join ' '
+    } else {
+        $msg = [string] $ErrorRecord
+    }
+    $status = 0
+    if ($ex -and $ex.PSObject.Properties['Response'] -and $null -ne $ex.Response -and $ex.Response.PSObject.Properties['StatusCode']) {
+        $status = [int] $ex.Response.StatusCode
+    } elseif ($msg -match 'Response status code does not indicate success:\s*(401|403)\b') {
+        $status = [int] $Matches[1]
+    }
+    if ($status -eq 401 -or $status -eq 403) { return $true }
+    if ($msg -match 'You must be in a team that has permissions|not in any team with permissions') { return $true }
+    $false
+}
+
+function Invoke-SignOffOctopusCalls {
+    # Take responsibility (optional) then submit. Returns 'signed' or 'refused'; rethrows every other error.
+    param([scriptblock] $TakeResponsibility, [scriptblock] $Submit)
+    try {
+        if ($null -ne $TakeResponsibility) { & $TakeResponsibility }
+        & $Submit
+        'signed'
+    } catch {
+        if (Test-OctopusPermissionDenied $_) { 'refused' } else { throw }
+    }
+}
+
+# Flag text of a release-held issue opened when Octopus refused Sign-off permission (#569). Kept stable so later runs
+# can spot it in the issue body and so Get-BusyReason can ignore that parked deployment.
+$SignOffPermissionDeniedFlag = 'Sign-off permission denied'
+
+function New-SignOffRefusedEvaluation {
+    # Evaluation shape for Set-HeldIssue when Octopus refused take-responsibility or submit on a Sign-off.
+    param([string] $Sha, [string] $ProjectName, [string] $ReleaseVersion, [string] $EnvironmentName, [string] $Detail = '')
+    $evidence = [Collections.Generic.List[string]]::new()
+    $evidence.Add("Octopus refused the auto-promote account permission to take the Sign-off for $ProjectName $ReleaseVersion in $EnvironmentName.")
+    if ($Detail) { $evidence.Add($Detail) }
+    @{
+        Sha      = $(if ($Sha) { $Sha } else { 'unknown' })
+        Decision = @{
+            Decision = 'hold'
+            Reason   = $null
+            Note     = ''
+            Flags    = @(@{ Flag = $SignOffPermissionDeniedFlag; Evidence = @($evidence) })
+            Waiting  = @()
+            Passed   = @()
+        }
+    }
+}
+
+function Test-SignOffRefusedHoldBody([string] $Body) {
+    # True when a release-held issue body was written for a refused Sign-off (#569).
+    "$Body" -match [regex]::Escape($SignOffPermissionDeniedFlag)
+}
+
+function Set-SignOffRefusedOnBusyItems {
+    # Marks busy deployments that match an open refused-Sign-off hold so Get-BusyReason does not block other projects.
+    param([object[]] $Items, [object[]] $HeldIssues, [hashtable] $ProjectIdByDeployableName, [hashtable] $EnvironmentIdByName, [scriptblock] $GetReleaseVersion)
+    foreach ($hi in @($HeldIssues)) {
+        if (-not (Test-SignOffRefusedHoldBody ([string] $hi.body))) { continue }
+        if ("$($hi.title)" -notmatch '^(\S+) (\S+) held before (\S+)$') { continue }
+        $depName = $Matches[1]; $ver = $Matches[2]; $envName = $Matches[3]
+        if (-not $ProjectIdByDeployableName.ContainsKey($depName)) { continue }
+        if (-not $EnvironmentIdByName.ContainsKey($envName)) { continue }
+        $heldProjectId = $ProjectIdByDeployableName[$depName]
+        $heldEnvironmentId = $EnvironmentIdByName[$envName]
+        foreach ($b in @($Items)) {
+            if ($null -eq $b -or $b.Kind -ne 'deployment' -or $b.ProjectId -ne $heldProjectId -or $b.EnvironmentId -ne $heldEnvironmentId) { continue }
+            $v = & $GetReleaseVersion $b
+            if ($v -eq $ver) {
+                if ($b -is [hashtable]) { $b['SignOffRefused'] = $true } else { $b | Add-Member -NotePropertyName SignOffRefused -NotePropertyValue $true -Force }
+            }
+        }
     }
 }
 
@@ -866,28 +965,48 @@ function Get-OctopusAll([string] $Path) {
 function Invoke-Gh([string[]] $Arguments) { (& gh api @Arguments) | ConvertFrom-Json -Depth 30 }
 
 function Submit-SignOff {
-    param([string] $TaskId, [string] $Reason, [int] $WaitSeconds = 900)
+    # Answers a pending Sign-off. Returns signed|yielded|answered|none|refused. Refused (permission denied on
+    # take-responsibility or submit) does not throw: the caller records a hold (#569). Every other error rethrows.
+    param(
+        [string] $TaskId,
+        [string] $Reason,
+        [int] $WaitSeconds = 900,
+        [string] $ProjectName = '',
+        [string] $ReleaseVersion = '',
+        [string] $EnvironmentName = ''
+    )
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
     do {
         $list = Invoke-Octopus "/api/$space/interruptions?regarding=$TaskId"
         $a = Get-SignOffAction -Interruptions @($list.Items) -TaskId $TaskId
         switch ($a.Action) {
-            'yield' { Say "A person holds the Sign-off ($($a.Interruption.Id)): theirs."; return }
-            'answered' { Say 'Sign-off already answered.'; return }
+            'yield' { Say "A person holds the Sign-off ($($a.Interruption.Id)): theirs."; return 'yielded' }
+            'answered' { Say 'Sign-off already answered.'; return 'answered' }
             'answer' {
-                if (-not $a.Interruption.HasResponsibility) { Invoke-Octopus "/api/$space/interruptions/$($a.Interruption.Id)/responsible" 'Put' | Out-Null }
-                Invoke-Octopus "/api/$space/interruptions/$($a.Interruption.Id)/submit" 'Post' @{ Notes = $Reason; Result = 'Proceed' } | Out-Null
-                Say "Signed off ($($a.Interruption.Id))."; return
+                $interruptId = $a.Interruption.Id
+                $needTake = -not $a.Interruption.HasResponsibility
+                $take = if ($needTake) {
+                    { Invoke-Octopus "/api/$space/interruptions/$interruptId/responsible" 'Put' | Out-Null }.GetNewClosure()
+                } else { $null }
+                $submit = { Invoke-Octopus "/api/$space/interruptions/$interruptId/submit" 'Post' @{ Notes = $Reason; Result = 'Proceed' } | Out-Null }.GetNewClosure()
+                $outcome = Invoke-SignOffOctopusCalls -TakeResponsibility $take -Submit $submit
+                if ($outcome -eq 'refused') {
+                    Say "WARNING: Octopus refused Sign-off permission for project $ProjectName release $ReleaseVersion in $EnvironmentName (interruption $interruptId)."
+                    return 'refused'
+                }
+                Say "Signed off ($interruptId)."; return 'signed'
             }
         }
         Start-Sleep -Seconds 10
     } while ((Get-Date) -lt $deadline)
     Say 'No Sign-off appeared.'
+    'none'
 }
 
 # Environments, project, releases.
 $envs = @(Invoke-Octopus "/api/$space/environments/all" | Sort-Object SortOrder)
-$project = (@(Invoke-Octopus "/api/$space/projects/all" | Where-Object { $_.Name -eq "$slug-$Deployable" }) | Select-Object -First 1)
+$allProjects = @(Invoke-Octopus "/api/$space/projects/all")
+$project = (@($allProjects | Where-Object { $_.Name -eq "$slug-$Deployable" }) | Select-Object -First 1)
 if (-not $project) { throw "project $slug-$Deployable not found" }
 $first = $envs[0]
 $releases = @((Invoke-Octopus "/api/$space/projects/$($project.Id)/releases?take=$ReleaseWindow").Items)
@@ -902,6 +1021,9 @@ function Get-RunningOutsideList($target) {
         -GetTaskState { param($d) Get-TaskState $d }
 }
 $heldIssues = @(& gh issue list -R $ownRepo --label release-held --state open --json number,title,body --limit 50 | ConvertFrom-Json)
+# Every run lists open holds (including refused Sign-offs) so they stay visible until cleared (#569).
+Say "Open holds: $(if ($heldIssues.Count -eq 0) { 'none' } else { $heldIssues.Count })"
+foreach ($hi in $heldIssues) { Say "  hold #$($hi.number): $($hi.title)" }
 $addresses = try { (Invoke-RestMethod "https://raw.githubusercontent.com/$ownRepo/status/containers.json").environments } catch { $null }
 $state = Read-State $StatePath
 function Save-State {
@@ -1111,10 +1233,26 @@ try {
     $busyItems = @(); $activeTaskIds = @()
     foreach ($t in @($active | Sort-Object Id -Unique)) {
         $activeTaskIds += $t.Id
-        if ($t.Name -eq 'Deploy') { $d = Invoke-Octopus "/api/$space/deployments/$($t.Arguments.DeploymentId)"; $busyItems += @{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id } }
-        elseif ($t.Name -eq 'RunbookRun') { $d = Invoke-Octopus "/api/$space/runbookRuns/$($t.Arguments.RunbookRunId)"; $busyItems += @{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id } }
+        if ($t.Name -eq 'Deploy') { $d = Invoke-Octopus "/api/$space/deployments/$($t.Arguments.DeploymentId)"; $busyItems += @{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id; SignOffRefused = $false } }
+        elseif ($t.Name -eq 'RunbookRun') { $d = Invoke-Octopus "/api/$space/runbookRuns/$($t.Arguments.RunbookRunId)"; $busyItems += @{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id; SignOffRefused = $false } }
     }
 } catch { Say "Waiting: Octopus tasks could not be read whole ($($_.Exception.Message))"; return }
+
+# Deployments parked only on a refused Sign-off hold do not block other deployables (#569).
+$projectIdByDeployable = @{}
+foreach ($p in $allProjects) {
+    if ($p.Name -like "$slug-*") { $projectIdByDeployable[$p.Name.Substring($slug.Length + 1)] = $p.Id }
+}
+$environmentIdByName = @{}; foreach ($e in $envs) { $environmentIdByName[$e.Name] = $e.Id }
+$releaseVersionCache = @{}
+Set-SignOffRefusedOnBusyItems -Items $busyItems -HeldIssues $heldIssues -ProjectIdByDeployableName $projectIdByDeployable -EnvironmentIdByName $environmentIdByName -GetReleaseVersion {
+    param($b)
+    $rid = $b.Deployment.ReleaseId
+    if (-not $releaseVersionCache.ContainsKey($rid)) {
+        $releaseVersionCache[$rid] = (Invoke-Octopus "/api/$space/releases/$rid").Version
+    }
+    $releaseVersionCache[$rid]
+}.GetNewClosure()
 
 # 2. Recovery: a deployment this workflow created that waits at its Sign-off.
 foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.ProjectId -eq $project.Id -and $_.EnvironmentId -ne $first.Id -and "$($_.Deployment.Comments)".StartsWith($PromotionMarker) })) {
@@ -1134,7 +1272,11 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
         continue
     }
     if ($DryRun) { Say 'Dry run: would answer the Sign-off.'; continue }
-    Submit-SignOff -TaskId $b.TaskId -Reason (Format-PromotionReason -Decision $ev.Decision -Previous $previous.Name -RunUrl $RunUrl -Recovered) -WaitSeconds 0
+    $signOff = Submit-SignOff -TaskId $b.TaskId -Reason (Format-PromotionReason -Decision $ev.Decision -Previous $previous.Name -RunUrl $RunUrl -Recovered) -WaitSeconds 0 -ProjectName $project.Name -ReleaseVersion $rel.Version -EnvironmentName $target.Name
+    if ($signOff -eq 'refused') {
+        $b.SignOffRefused = $true
+        Set-HeldIssue -Release $rel -Target $target -Evaluation (New-SignOffRefusedEvaluation -Sha (Get-Commit $rel) -ProjectName $project.Name -ReleaseVersion $rel.Version -EnvironmentName $target.Name) -DeploymentNote "The deployment $($b.Deployment.Id) waits at its Sign-off: the auto-promote account was refused permission to take it."
+    }
 }
 
 # 3. Candidate.
@@ -1161,4 +1303,7 @@ Say $reason
 if ($DryRun) { return }
 $created = Invoke-Octopus "/api/$space/deployments" 'Post' @{ ReleaseId = $release.Id; EnvironmentId = $target.Id; Comments = "${PromotionMarker}: $RunUrl" }
 Say "Deployment $($created.Id) to $($target.Name) (task $($created.TaskId))"
-Submit-SignOff -TaskId $created.TaskId -Reason $reason
+$signOff = Submit-SignOff -TaskId $created.TaskId -Reason $reason -ProjectName $project.Name -ReleaseVersion $release.Version -EnvironmentName $target.Name
+if ($signOff -eq 'refused') {
+    Set-HeldIssue -Release $release -Target $target -Evaluation (New-SignOffRefusedEvaluation -Sha (Get-Commit $release) -ProjectName $project.Name -ReleaseVersion $release.Version -EnvironmentName $target.Name) -DeploymentNote "The deployment $($created.Id) waits at its Sign-off: the auto-promote account was refused permission to take it."
+}
