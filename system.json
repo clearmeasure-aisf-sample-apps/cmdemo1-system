@@ -16,6 +16,7 @@
     "pipelineSignOffMembers": [
       "cmdemo1-fworker-gateway-agent"
     ],
+    "pipelineSignOff": true,
     "denyExcludedActions": [
       "Microsoft.App/jobs/start/action",
       "Microsoft.App/jobs/stop/action",

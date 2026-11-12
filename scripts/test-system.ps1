@@ -27,6 +27,8 @@
       deployable with an acceptance-test package.
     - octopus.approvers, where present, lists each person who may sign off once, by Octopus username or email address,
       without the system's service account; octopus.operator, where present, is a username.
+    - system.pipelineSignOff, where present, is true or false. True lets the service account answer the system
+      project's Sign-off (decision 0048). The service account is still not an entry of octopus.approvers.
     - github.app, where present (the system's own GitHub App), holds its id, slug, clientId and installationId, and
       nothing else: never a key.
     - A container deployable's own keys, where present, have the shape infra/ and octopus/ read: environments (the
@@ -102,15 +104,18 @@ foreach ($name in $deployableNames) {
 Test-Rule 'deployable names unique' (@($deployableNames | Select-Object -Unique).Count -eq $deployableNames.Count)
 
 # deployables[].pipelineSignOff (decision 0048): true lets the system's service account <slug>-github answer that
-# deployable's Sign-off too, as the only member of the team "<slug> pipeline sign-off" (octopus/approvers.tf); a
+# deployable's Sign-off too, as a member of the team "<slug> pipeline sign-off" (octopus/approvers.tf); a
 # workflow of this repository then promotes it with a reason naming its run. Every other deployable keeps a person's
-# or the operator's sign-off.
+# or the operator's sign-off. system.pipelineSignOff is the same switch for the system project, which is not a deployable.
 foreach ($deployable in @($system.deployables | Where-Object { $_ -is [Collections.IDictionary] -and $_.ContainsKey('pipelineSignOff') })) {
     Test-Rule "deployable $($deployable.name) pipelineSignOff" ($deployable.pipelineSignOff -is [bool]) 'true or false: whether the service account may answer the Sign-off of this deployable (decision 0048)'
 }
+if ($system.system.ContainsKey('pipelineSignOff')) {
+    Test-Rule 'system.pipelineSignOff' ($system.system.pipelineSignOff -is [bool]) 'true or false: whether the service account may answer the Sign-off of the system project (decision 0048)'
+}
 # system.pipelineSignOffMembers (decision 0057): Octopus usernames of further service accounts that join the team
-# "<slug> pipeline sign-off" (octopus/approvers.tf), while a deployable has pipelineSignOff. A person signs off through
-# octopus.approvers; the system's own <slug>-github is a member already.
+# "<slug> pipeline sign-off" (octopus/approvers.tf), while the system project or a deployable has pipelineSignOff. A
+# person signs off through octopus.approvers; the system's own <slug>-github is a member already.
 if ($system.system.ContainsKey('pipelineSignOffMembers')) {
     $members = $system.system.pipelineSignOffMembers
     $valid = $members -is [array] -and $members.Count -ge 1 -and $members.Count -le 10 -and @($members | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' }).Count -eq 0
@@ -119,7 +124,8 @@ if ($system.system.ContainsKey('pipelineSignOffMembers')) {
         $names = @($members | ForEach-Object { $_.ToLowerInvariant() })
         Test-Rule 'system.pipelineSignOffMembers each once, without the system''s own account' (@($names | Select-Object -Unique).Count -eq $names.Count -and $names -notcontains "$slug-github") "an account appears twice, or is $slug-github, which is a member of the team already"
         Test-Rule 'system.pipelineSignOffMembers not among octopus.approvers' (@($names | Where-Object { @($system.octopus['approvers']) -contains $_ }).Count -eq 0) 'an account of the pipeline team is not also an approver of every project'
-        Test-Rule 'system.pipelineSignOffMembers with a deployable that has pipelineSignOff' (@($system.deployables | Where-Object { $_ -is [Collections.IDictionary] -and $_['pipelineSignOff'] -eq $true }).Count -gt 0) 'the team exists only while a deployable asks for pipelineSignOff'
+        $pipelineAsked = (@($system.deployables | Where-Object { $_ -is [Collections.IDictionary] -and $_['pipelineSignOff'] -eq $true }).Count -gt 0) -or ($system.system['pipelineSignOff'] -eq $true)
+        Test-Rule 'system.pipelineSignOffMembers with pipelineSignOff' $pipelineAsked 'the team exists only while the system project or a deployable asks for pipelineSignOff'
     }
 }
 # system.azureExcludeDeployables (#542): names of deployables infra/ omits from Azure while they stay in
