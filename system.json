@@ -196,7 +196,8 @@
       "repository": "cmdemo1-dashboard",
       "hosting": "staticwebapp",
       "healthPath": "/",
-      "buildPath": "/build-facts.json"
+      "buildPath": "/build-facts.json",
+      "pipelineSignOff": true
     },
     {
       "name": "scorecard",
