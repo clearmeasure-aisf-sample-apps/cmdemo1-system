@@ -33,10 +33,14 @@ Each listener (one per repository) has these events, no `userAllowlist`:
 - `review-changes-requested`: a person asks for changes on a bot PR.
 - `pr-merged`: starts or advances release follow-through (any author's merge is a cheap moment to check Merged / TDD / UAT).
 
-Not subscribed, on purpose: `ci-passed` / `ci-failed` on the default branch (they fired on every master run, hundreds a
-day, almost always with nothing to do), `pr-opened` (the bot opens its own PRs), `review-approved` (no approval is
-required). CI on a bot PR is followed by a PR-scoped routine the bot creates for that PR (`ci-passed`, `ci-failed`,
-`review-changes-requested`, `pr-merged`, `pr-closed`), which deletes itself when the PR merges or closes.
+Not subscribed, on purpose: `ci-passed` / `ci-failed` on the whole repository (they fired on every master run, hundreds
+a day, almost always with nothing to do), `pr-opened` (the bot opens its own PRs), `review-approved` (no approval is
+required). Instead, each application repository that has PR CI runs workflow `factory-wake` when that CI finishes
+(`workflow_run` on the check that gates merges — `env-checks` here). It acts only for open `cm-ai-ops-bot` pull
+requests (not the default branch), and re-assigns the linked issue so the existing `issue-assigned` listener wakes the
+bot to Review (green) or fix (red). That keeps the wake filtered to bot PRs and needs no new routine or secret. A
+PR-scoped routine the bot creates for a slow PR (`ci-passed`, `ci-failed`, `review-changes-requested`, `pr-merged`,
+`pr-closed`) remains a fine extra backstop and still deletes itself when the PR merges or closes.
 
 **Routine 1: `Factory bot: workorders, system, dashboard, scorecard-site`**
 

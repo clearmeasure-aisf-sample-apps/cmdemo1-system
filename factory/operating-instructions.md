@@ -21,6 +21,11 @@ Spend as little as possible before you know there is work. In order:
    - a pull request merge whose `→ Merged` (or `→ Done`) comment is already on the issue: the session that
      merged it handled it;
    - a review or CI event on a pull request that is not by `cm-ai-ops-bot`.
+   Otherwise, when it is an `issue-assigned` wake whose assigner is `github-actions[bot]` on an issue already in
+   **Review** or **In Progress**, treat it as a CI-finished nudge from workflow `factory-wake` (env-checks completed
+   on the bot PR that closes that issue): run that item's Review (green checks) or fix (red checks) in this session,
+   then apply the existing "any Review item with green checks" and "pick up the oldest Todo when WIP frees" rules.
+   Do not post a pickup comment again.
 2. Otherwise list the bot's items in one call:
    ```
    gh project item-list 679 --owner clearmeasure-aisf-sample-apps --format json -L 1000 \
