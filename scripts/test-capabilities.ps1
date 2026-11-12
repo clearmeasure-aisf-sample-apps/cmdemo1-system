@@ -538,10 +538,16 @@ $checks = [ordered] @{
             Assert-That ($s.Name -eq 'Sign-off' -and $s.Actions[0].ActionType -eq 'Octopus.Manual') "$project does not start with Sign-off"
             $responsible = $s.Actions[0].Properties.PSObject.Properties['Octopus.Action.Manual.ResponsibleTeamIds']
             $responsibleIds = if ($responsible) { [string] $responsible.Value } else { '' }
-            # A deployable with pipelineSignOff (decision 0048) has a second responsible team, "<slug> pipeline
-            # sign-off"; any other Sign-off has the approvers alone.
+            # pipelineSignOff (decision 0048) adds a second responsible team, "<slug> pipeline sign-off":
+            # system.pipelineSignOff for the system project, deployables[].pipelineSignOff for a deployable.
+            # Any other Sign-off has the approvers alone.
             $ids = @($responsibleIds -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            $pipeline = $project -ne $systemProject -and @($system.deployables | Where-Object { "$slug-$($_.name)" -eq $project -and $_['pipelineSignOff'] -eq $true }).Count -gt 0
+            $pipeline = if ($project -eq $systemProject) {
+                $system.system['pipelineSignOff'] -eq $true
+            }
+            else {
+                @($system.deployables | Where-Object { "$slug-$($_.name)" -eq $project -and $_['pipelineSignOff'] -eq $true }).Count -gt 0
+            }
             $pipelineTeam = if ($pipeline) { @((Invoke-Octopus "/api/$space/teams?partialName=$([uri]::EscapeDataString("$slug pipeline sign-off"))&take=100").Items | Where-Object { $_.Name -eq "$slug pipeline sign-off" -and $_.SpaceId -eq $space }) | Select-Object -First 1 }
             $want = @($team.Id) + @(if ($pipelineTeam) { $pipelineTeam.Id })
             Assert-That (-not $pipeline -or $null -ne $pipelineTeam) "$project has pipelineSignOff, and the space has no team '$slug pipeline sign-off'"
