@@ -996,6 +996,48 @@ function Get-Commit($release) {
     $null
 }
 
+function Get-ActiveBusyItems {
+    # Active and Cancelling Octopus tasks as busy items. Calls script-scope Get-OctopusAll / Invoke-Octopus and
+    # reads $space: do not wrap callers in GetNewClosure (#589) or those names are not found.
+    $active = @(Get-OctopusAll "/api/$space/tasks?active=true") + @(Get-OctopusAll "/api/$space/tasks?states=Cancelling")
+    $items = [Collections.Generic.List[object]]::new()
+    $ids = [Collections.Generic.List[string]]::new()
+    foreach ($t in @($active | Sort-Object Id -Unique)) {
+        $ids.Add([string] $t.Id)
+        if ($t.Name -eq 'Deploy') {
+            $d = Invoke-Octopus "/api/$space/deployments/$($t.Arguments.DeploymentId)"
+            $items.Add(@{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id; SignOffRefused = $false })
+        } elseif ($t.Name -eq 'RunbookRun') {
+            $d = Invoke-Octopus "/api/$space/runbookRuns/$($t.Arguments.RunbookRunId)"
+            $items.Add(@{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id; SignOffRefused = $false })
+        }
+    }
+    @{ Items = @($items); ActiveTaskIds = @($ids) }
+}
+
+function Get-BusyReleaseVersion {
+    # Release version for a busy deployment item; uses script-scope $releaseVersionCache / Invoke-Octopus / $space.
+    param($b)
+    $rid = $b.Deployment.ReleaseId
+    if (-not $releaseVersionCache.ContainsKey($rid)) {
+        $releaseVersionCache[$rid] = (Invoke-Octopus "/api/$space/releases/$rid").Version
+    }
+    $releaseVersionCache[$rid]
+}
+
+function Set-BusyItemsSignOffRefused([object[]] $Items) {
+    # Marks refused-Sign-off holds on busy items. Named so wait-retry does not need GetNewClosure (#583 / #589).
+    Set-SignOffRefusedOnBusyItems -Items $Items -HeldIssues $heldIssues -ProjectIdByDeployableName $projectIdByDeployable `
+        -EnvironmentIdByName $environmentIdByName -GetReleaseVersion ${function:Get-BusyReleaseVersion}
+}
+
+function Get-ActiveBusyItemsMarked {
+    # Re-list active tasks and re-apply refused-Sign-off marks (runbook wait-retry path).
+    $listed = Get-ActiveBusyItems
+    Set-BusyItemsSignOffRefused -Items $listed.Items
+    $listed
+}
+
 if ($LoadOnly) { return }
 
 # --- Running ------------------------------------------------------------------------------------------------------
@@ -1306,13 +1348,9 @@ function Close-HeldIssues {
 
 # 1. What is not finished: any project, deployments and runbook runs. A failed call or an incomplete listing stops the run.
 try {
-    $active = @(Get-OctopusAll "/api/$space/tasks?active=true") + @(Get-OctopusAll "/api/$space/tasks?states=Cancelling")
-    $busyItems = @(); $activeTaskIds = @()
-    foreach ($t in @($active | Sort-Object Id -Unique)) {
-        $activeTaskIds += $t.Id
-        if ($t.Name -eq 'Deploy') { $d = Invoke-Octopus "/api/$space/deployments/$($t.Arguments.DeploymentId)"; $busyItems += @{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id; SignOffRefused = $false } }
-        elseif ($t.Name -eq 'RunbookRun') { $d = Invoke-Octopus "/api/$space/runbookRuns/$($t.Arguments.RunbookRunId)"; $busyItems += @{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id; SignOffRefused = $false } }
-    }
+    $listed = Get-ActiveBusyItems
+    $busyItems = @($listed.Items)
+    $activeTaskIds = @($listed.ActiveTaskIds)
 } catch { Say "Waiting: Octopus tasks could not be read whole ($($_.Exception.Message))"; return }
 
 # Deployments parked only on a refused Sign-off hold do not block other deployables (#569).
@@ -1322,14 +1360,7 @@ foreach ($p in $allProjects) {
 }
 $environmentIdByName = @{}; foreach ($e in $envs) { $environmentIdByName[$e.Name] = $e.Id }
 $releaseVersionCache = @{}
-Set-SignOffRefusedOnBusyItems -Items $busyItems -HeldIssues $heldIssues -ProjectIdByDeployableName $projectIdByDeployable -EnvironmentIdByName $environmentIdByName -GetReleaseVersion {
-    param($b)
-    $rid = $b.Deployment.ReleaseId
-    if (-not $releaseVersionCache.ContainsKey($rid)) {
-        $releaseVersionCache[$rid] = (Invoke-Octopus "/api/$space/releases/$rid").Version
-    }
-    $releaseVersionCache[$rid]
-}.GetNewClosure()
+Set-BusyItemsSignOffRefused -Items $busyItems
 
 # 2. Recovery: a deployment this workflow created that waits at its Sign-off.
 foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.ProjectId -eq $project.Id -and $_.EnvironmentId -ne $first.Id -and "$($_.Deployment.Comments)".StartsWith($PromotionMarker) })) {
@@ -1364,31 +1395,11 @@ $release = $candidate.Release; $target = $candidate.Target; $previous = $candida
 Close-HeldIssues $candidate $activeTaskIds
 $busy = Get-BusyReason -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id
 # A short-lived runbook in the target (Hourly health report) is waited out in this run (#583); a deployment still blocks at once.
+# GetBusyItems is a plain scriptblock (no GetNewClosure): Get-ActiveBusyItemsMarked must resolve script-scope Octopus helpers (#589).
 if ($busy -and (Test-BusyOnlyRunbookToTarget -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id)) {
     $wait = Wait-BusyRunbookClear -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id `
         -EnvironmentName $target.Name -Pause $RunbookBusyPause -WriteLog { param([string] $Message) Say $Message } `
-        -GetBusyItems {
-            $active = @(Get-OctopusAll "/api/$space/tasks?active=true") + @(Get-OctopusAll "/api/$space/tasks?states=Cancelling")
-            $items = @()
-            foreach ($t in @($active | Sort-Object Id -Unique)) {
-                if ($t.Name -eq 'Deploy') {
-                    $d = Invoke-Octopus "/api/$space/deployments/$($t.Arguments.DeploymentId)"
-                    $items += @{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id; SignOffRefused = $false }
-                } elseif ($t.Name -eq 'RunbookRun') {
-                    $d = Invoke-Octopus "/api/$space/runbookRuns/$($t.Arguments.RunbookRunId)"
-                    $items += @{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id; SignOffRefused = $false }
-                }
-            }
-            Set-SignOffRefusedOnBusyItems -Items $items -HeldIssues $heldIssues -ProjectIdByDeployableName $projectIdByDeployable -EnvironmentIdByName $environmentIdByName -GetReleaseVersion {
-                param($b)
-                $rid = $b.Deployment.ReleaseId
-                if (-not $releaseVersionCache.ContainsKey($rid)) {
-                    $releaseVersionCache[$rid] = (Invoke-Octopus "/api/$space/releases/$rid").Version
-                }
-                $releaseVersionCache[$rid]
-            }.GetNewClosure()
-            $items
-        }.GetNewClosure()
+        -GetBusyItems { @((Get-ActiveBusyItemsMarked).Items) }
     if ($wait.Failed) { return }
     $busyItems = @($wait.Items)
     $busy = $wait.Busy

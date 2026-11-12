@@ -255,6 +255,52 @@ Test-Case 'running deployment blocks at once: Busy names deployment' $waitDeploy
 Test-Case 'running deployment blocks at once: no pause' $runbookWaitState.PauseCount 0
 Test-Case 'running deployment blocks at once: no re-list' $runbookWaitState.RelistCalled $false
 
+# Real re-list path: script-scope Octopus helpers (not passed in). A GetNewClosure on GetBusyItems would hide them (#589).
+$space = 'Spaces-test'
+$heldIssues = @()
+$projectIdByDeployable = @{}
+$environmentIdByName = @{ uat = 'E-uat' }
+$releaseVersionCache = @{}
+$script:octopusRelistPhase = 0
+function Get-OctopusAll([string] $Path) {
+    if ($Path -notlike '*/tasks?*') { throw "unexpected Get-OctopusAll $Path" }
+    if ($Path -like '*states=Cancelling*') { return @() }
+    $script:octopusRelistPhase++
+    if ($script:octopusRelistPhase -eq 1) {
+        return @(@{
+                Id        = 'ServerTasks-rb'
+                Name      = 'RunbookRun'
+                Arguments = @{ RunbookRunId = 'RunbookRuns-1' }
+            })
+    }
+    @()
+}
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    if ($Path -eq '/api/Spaces-test/runbookRuns/RunbookRuns-1') {
+        return @{ ProjectId = 'Projects-982'; EnvironmentId = 'E-uat' }
+    }
+    throw "unexpected Invoke-Octopus $Path"
+}
+$listedOnce = Get-ActiveBusyItems
+Test-Case 'Get-ActiveBusyItems: kind project task from script-scope Octopus' @(
+    $listedOnce.Items[0].Kind, $listedOnce.Items[0].ProjectId, $listedOnce.Items[0].TaskId, $listedOnce.ActiveTaskIds[0]
+) @('runbook', 'Projects-982', 'ServerTasks-rb', 'ServerTasks-rb')
+
+$script:octopusRelistPhase = 0
+$runbookWaitState.PauseCount = 0; $runbookWaitState.Logs.Clear()
+$waitScriptScopeThrew = $false
+$waitScriptScope = $null
+try {
+    # Same shape as the main flow: plain scriptblock calling Get-ActiveBusyItemsMarked (no GetNewClosure).
+    $waitScriptScope = Wait-BusyRunbookClear -Items @(@{ Kind = 'runbook'; ProjectId = 'Projects-982'; EnvironmentId = 'E-uat'; TaskId = 'ServerTasks-rb' }) `
+        -TargetEnvironmentId 'E-uat' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-ui' -EnvironmentName 'uat' `
+        -GetBusyItems { @((Get-ActiveBusyItemsMarked).Items) } -Pause $noopPause -RetrySeconds 1 -RetryLimit 3 -WriteLog $captureLog
+} catch { $waitScriptScopeThrew = $true; $waitScriptScope = @{ Cleared = $false; Busy = $_.Exception.Message } }
+Test-Case 'runbook re-list via script-scope helpers: does not throw' $waitScriptScopeThrew $false
+Test-Case 'runbook re-list via script-scope helpers: Cleared after Octopus empty' $waitScriptScope.Cleared $true
+Test-Case 'runbook re-list via script-scope helpers: no Busy' ([bool] $waitScriptScope.Busy) $false
+Test-Case 'runbook re-list via script-scope helpers: paused twice (still busy then clear)' $runbookWaitState.PauseCount 2
+
 # Candidate selection
 $envs3 = @(@{ Id = 'E1'; Name = 'tdd' }, @{ Id = 'E2'; Name = 'uat' }, @{ Id = 'E3'; Name = 'prod' })
 function New-Rel($id, $ver, $hour) { @{ Id = $id; Version = $ver; Assembled = "2026-10-14T0${hour}:00:00+00:00" } }
