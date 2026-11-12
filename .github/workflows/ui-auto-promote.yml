@@ -41,8 +41,9 @@
 #      Hold. A read of that chain that fails or is cut makes the run wait.
 # Health reads of every deployable share one state file (keys "<deployable>/<deployment id>").
 # A deployment this workflow created that waits at its Sign-off (its Comments say so) is evaluated again by a later run: no
-# flag, it is answered; a flag, it stays waiting and the issue says so. Any unfinished deployment or runbook run to the
-# target environment, of any project, stops the run; so does a task listing that fails or is incomplete.
+# flag, it is answered; a flag, it stays waiting and the issue says so. Any unfinished deployment to the target environment,
+# of any project, stops the run at once; a short-lived runbook there is waited out for about two to three minutes in the
+# same run before giving up (#583). A task listing that fails or is incomplete also stops the run.
 # A flagged release is not deployed: no Sign-off waits in the environment and holds it for the other deployables. One
 # issue "<deployable> <version> held before <env>" (label release-held, no assignee) lists each flag with its evidence; it closes
 # when the release has a deployment there or a newer release replaces it. A person promotes it in Octopus as today.

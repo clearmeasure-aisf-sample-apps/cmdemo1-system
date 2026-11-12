@@ -204,6 +204,103 @@ Set-SignOffRefusedOnBusyItems -Items $markItems -HeldIssues $markHolds -ProjectI
 Test-Case 'open refused hold marks the busy deployment SignOffRefused' $markItems[0].SignOffRefused $true
 Test-Case 'marked refused hold no longer blocks ui to uat' ([bool] (Get-BusyReason $markItems 'E-uat' 'E-tdd' 'P-ui')) $false
 
+# Runbook wait-and-retry when the only busy reason is a short-lived runbook in the target (#583)
+Test-Case 'only a runbook to the target is waitable' (Test-BusyOnlyRunbookToTarget @(@{ Kind = 'runbook'; ProjectId = 'P-sys'; EnvironmentId = 'E-uat'; TaskId = 'T-rb' }) 'E-uat' 'E-tdd' 'P-ui') $true
+Test-Case 'a deployment to the target is not waitable' (Test-BusyOnlyRunbookToTarget @(@{ Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat' }) 'E-uat' 'E-tdd' 'P-ui') $false
+Test-Case 'ui in another environment is not waitable' (Test-BusyOnlyRunbookToTarget @(@{ Kind = 'deployment'; ProjectId = 'P-ui'; EnvironmentId = 'E-uat' }) 'E-prod' 'E-tdd' 'P-ui') $false
+Test-Case 'refused Sign-off beside a runbook stays waitable' (Test-BusyOnlyRunbookToTarget @($refusedBusy, @{ Kind = 'runbook'; ProjectId = 'P-sys'; EnvironmentId = 'E-uat'; TaskId = 'T-rb' }) 'E-uat' 'E-tdd' 'P-ui') $true
+Test-Case 'nothing active is not waitable' (Test-BusyOnlyRunbookToTarget @() 'E-uat' 'E-tdd' 'P-ui') $false
+
+$runbookWaitState = @{ PauseCount = 0; RelistCalled = $false; Logs = [Collections.Generic.List[string]]::new() }
+$noopPause = { param([int] $Seconds) $runbookWaitState.PauseCount++ }.GetNewClosure()
+$captureLog = { param([string] $Message) $runbookWaitState.Logs.Add($Message) }.GetNewClosure()
+
+$runbookWaitState.PauseCount = 0; $runbookWaitState.Logs.Clear()
+$runbookThenClear = [Collections.Queue]::new()
+$runbookThenClear.Enqueue(@())
+$waitClear = Wait-BusyRunbookClear -Items @(@{ Kind = 'runbook'; ProjectId = 'Projects-982'; EnvironmentId = 'E-uat'; TaskId = 'ServerTasks-1' }) `
+    -TargetEnvironmentId 'E-uat' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-ui' -EnvironmentName 'uat' `
+    -GetBusyItems { $runbookThenClear.Dequeue() }.GetNewClosure() -Pause $noopPause -RetrySeconds 1 -RetryLimit 3 -WriteLog $captureLog
+Test-Case 'runbook wait then clear: Cleared' $waitClear.Cleared $true
+Test-Case 'runbook wait then clear: no Busy' ([bool] $waitClear.Busy) $false
+Test-Case 'runbook wait then clear: paused once' $runbookWaitState.PauseCount 1
+Test-Case 'runbook wait then clear: log names project environment task' @(
+    ($runbookWaitState.Logs[0] -like '*Projects-982*'),
+    ($runbookWaitState.Logs[0] -like '*uat*'),
+    ($runbookWaitState.Logs[0] -like '*ServerTasks-1*')
+) @($true, $true, $true)
+
+$runbookWaitState.PauseCount = 0; $runbookWaitState.Logs.Clear()
+$stillRunning = @(@{ Kind = 'runbook'; ProjectId = 'Projects-982'; EnvironmentId = 'E-uat'; TaskId = 'ServerTasks-2' })
+$waitExhaustedThrew = $false
+$waitExhausted = $null
+try {
+    $waitExhausted = Wait-BusyRunbookClear -Items $stillRunning -TargetEnvironmentId 'E-uat' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-ui' -EnvironmentName 'uat' `
+        -GetBusyItems { $stillRunning }.GetNewClosure() -Pause $noopPause -RetrySeconds 1 -RetryLimit 3 -WriteLog $captureLog
+} catch { $waitExhaustedThrew = $true }
+Test-Case 'runbook still busy after budget: does not throw' $waitExhaustedThrew $false
+Test-Case 'runbook still busy after budget: Exhausted' $waitExhausted.Exhausted $true
+Test-Case 'runbook still busy after budget: Busy kept' $waitExhausted.Busy 'a runbook of project Projects-982 to the target environment is not finished'
+Test-Case 'runbook still busy after budget: paused RetryLimit times' $runbookWaitState.PauseCount 3
+
+$runbookWaitState.PauseCount = 0; $runbookWaitState.Logs.Clear(); $runbookWaitState.RelistCalled = $false
+$waitDeploy = Wait-BusyRunbookClear -Items @(@{ Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'; TaskId = 'ServerTasks-3' }) `
+    -TargetEnvironmentId 'E-uat' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-ui' -EnvironmentName 'uat' `
+    -GetBusyItems { $runbookWaitState.RelistCalled = $true; @() }.GetNewClosure() `
+    -Pause { param([int] $Seconds) $runbookWaitState.PauseCount++; throw 'pause must not run for a deployment' }.GetNewClosure() `
+    -RetrySeconds 1 -RetryLimit 3 -WriteLog $captureLog
+Test-Case 'running deployment blocks at once: not Cleared' $waitDeploy.Cleared $false
+Test-Case 'running deployment blocks at once: not Exhausted' $waitDeploy.Exhausted $false
+Test-Case 'running deployment blocks at once: Busy names deployment' $waitDeploy.Busy 'a deployment of project P-dash to the target environment is not finished'
+Test-Case 'running deployment blocks at once: no pause' $runbookWaitState.PauseCount 0
+Test-Case 'running deployment blocks at once: no re-list' $runbookWaitState.RelistCalled $false
+
+# Real re-list path: script-scope Octopus helpers (not passed in). A GetNewClosure on GetBusyItems would hide them (#589).
+$space = 'Spaces-test'
+$heldIssues = @()
+$projectIdByDeployable = @{}
+$environmentIdByName = @{ uat = 'E-uat' }
+$releaseVersionCache = @{}
+$script:octopusRelistPhase = 0
+function Get-OctopusAll([string] $Path) {
+    if ($Path -notlike '*/tasks?*') { throw "unexpected Get-OctopusAll $Path" }
+    if ($Path -like '*states=Cancelling*') { return @() }
+    $script:octopusRelistPhase++
+    if ($script:octopusRelistPhase -eq 1) {
+        return @(@{
+                Id        = 'ServerTasks-rb'
+                Name      = 'RunbookRun'
+                Arguments = @{ RunbookRunId = 'RunbookRuns-1' }
+            })
+    }
+    @()
+}
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    if ($Path -eq '/api/Spaces-test/runbookRuns/RunbookRuns-1') {
+        return @{ ProjectId = 'Projects-982'; EnvironmentId = 'E-uat' }
+    }
+    throw "unexpected Invoke-Octopus $Path"
+}
+$listedOnce = Get-ActiveBusyItems
+Test-Case 'Get-ActiveBusyItems: kind project task from script-scope Octopus' @(
+    $listedOnce.Items[0].Kind, $listedOnce.Items[0].ProjectId, $listedOnce.Items[0].TaskId, $listedOnce.ActiveTaskIds[0]
+) @('runbook', 'Projects-982', 'ServerTasks-rb', 'ServerTasks-rb')
+
+$script:octopusRelistPhase = 0
+$runbookWaitState.PauseCount = 0; $runbookWaitState.Logs.Clear()
+$waitScriptScopeThrew = $false
+$waitScriptScope = $null
+try {
+    # Same shape as the main flow: plain scriptblock calling Get-ActiveBusyItemsMarked (no GetNewClosure).
+    $waitScriptScope = Wait-BusyRunbookClear -Items @(@{ Kind = 'runbook'; ProjectId = 'Projects-982'; EnvironmentId = 'E-uat'; TaskId = 'ServerTasks-rb' }) `
+        -TargetEnvironmentId 'E-uat' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-ui' -EnvironmentName 'uat' `
+        -GetBusyItems { @((Get-ActiveBusyItemsMarked).Items) } -Pause $noopPause -RetrySeconds 1 -RetryLimit 3 -WriteLog $captureLog
+} catch { $waitScriptScopeThrew = $true; $waitScriptScope = @{ Cleared = $false; Busy = $_.Exception.Message } }
+Test-Case 'runbook re-list via script-scope helpers: does not throw' $waitScriptScopeThrew $false
+Test-Case 'runbook re-list via script-scope helpers: Cleared after Octopus empty' $waitScriptScope.Cleared $true
+Test-Case 'runbook re-list via script-scope helpers: no Busy' ([bool] $waitScriptScope.Busy) $false
+Test-Case 'runbook re-list via script-scope helpers: paused twice (still busy then clear)' $runbookWaitState.PauseCount 2
+
 # Candidate selection
 $envs3 = @(@{ Id = 'E1'; Name = 'tdd' }, @{ Id = 'E2'; Name = 'uat' }, @{ Id = 'E3'; Name = 'prod' })
 function New-Rel($id, $ver, $hour) { @{ Id = $id; Version = $ver; Assembled = "2026-10-14T0${hour}:00:00+00:00" } }
