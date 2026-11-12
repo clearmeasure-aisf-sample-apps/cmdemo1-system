@@ -228,6 +228,75 @@ function Get-ResourcesAddress {
     return "https://portal.azure.com/#${directory}blade/HubsExtension/ArgQueryBlade/query/$([Uri]::EscapeDataString($query))"
 }
 
+function Get-ReportedDeployableUrl {
+    # The https address of one deployable in a stack's outputs.deployables.value (or the same shape built from
+    # containers.json): name and url on each entry. Accepts a hashtable or a PSCustomObject so a Select-Object wrap
+    # or a ConvertFrom-Json without -AsHashtable still counts. Empty when the list has no such name or no https url.
+    param(
+        [AllowNull()] [object[]] $Reported = @(),
+        [Parameter(Mandatory)] [string] $Name
+    )
+    foreach ($entry in @($Reported)) {
+        if ($null -eq $entry) { continue }
+        $entryName = $null
+        $entryUrl = $null
+        if ($entry -is [Collections.IDictionary]) {
+            $entryName = [string] $entry['name']
+            $entryUrl = [string] $entry['url']
+        }
+        elseif ($entry.PSObject.Properties['name'] -and $entry.PSObject.Properties['url']) {
+            $entryName = [string] $entry.name
+            $entryUrl = [string] $entry.url
+        }
+        else { continue }
+        $address = $entryUrl.TrimEnd('/')
+        if ($entryName -eq $Name -and $address -match '^https://[^/\s]+$') { return $address }
+    }
+    return $null
+}
+
+function ConvertTo-PageAddressMap {
+    # The public https address of each wanted container-app deployable in one environment: prefer what that
+    # environment's stack reported (-Reported: outputs.deployables.value entries), then fill any still missing from
+    # containers.json on branch status (-Published: environments.<env> name->url). Own-environment stack outputs and
+    # a successful cross-environment read both used to skip the status file when they simply omitted an app (#573),
+    # so ui vanished from topology while containers.json still had it. azureExcludeDeployables are not in -Wanted.
+    # Returns @{ Addresses = @{ name = url }; Missing = @(names still without an address); FilledFromStatus = @(names) }.
+    param(
+        [Parameter(Mandatory)] [string[]] $Wanted,
+        [AllowNull()] [object[]] $Reported = @(),
+        [AllowNull()] [Collections.IDictionary] $Published = $null
+    )
+    $addresses = @{}
+    $missing = [Collections.Generic.List[string]]::new()
+    $filled = [Collections.Generic.List[string]]::new()
+    foreach ($deployableName in @($Wanted)) {
+        $fromStack = Get-ReportedDeployableUrl -Reported $Reported -Name $deployableName
+        if ($fromStack) {
+            $addresses[$deployableName] = $fromStack
+            continue
+        }
+        $fromStatus = $null
+        if ($Published -is [Collections.IDictionary]) {
+            $raw = [string] $Published[$deployableName]
+            if ($raw) {
+                $candidate = $raw.TrimEnd('/')
+                if ($candidate -match '^https://[^/\s]+$') { $fromStatus = $candidate }
+            }
+        }
+        if ($fromStatus) {
+            $addresses[$deployableName] = $fromStatus
+            $filled.Add($deployableName)
+        }
+        else { $missing.Add($deployableName) }
+    }
+    return @{
+        Addresses         = $addresses
+        Missing           = @($missing)
+        FilledFromStatus  = @($filled)
+    }
+}
+
 function ConvertTo-Topology {
     # The dashboard's topology from system.json (parsed, as a hashtable), the host name of each Front Door endpoint
     # by endpoint name (<slug>-<env>-<deployable>), and the recorded nodes of the deployables with hosting "own" by
@@ -251,7 +320,7 @@ function ConvertTo-Topology {
     # for it in that environment: ca-<slug>-<env>-<deployable>, healthPath /_healthcheck and healthDetailPath
     # /_healthcheck/detailed unless system.json names others. Without an address it is left out of that environment.
     # system.azureExcludeDeployables (#542) are omitted everywhere: they are not in Azure, so the Health view has no
-    # tile for them.
+    # tile for them. A retired deployable (deployables[].retired, decision 0058) is omitted the same way.
     # A deployable that names a page of its own for the dashboard (deployables[].dashboardLink: text and path) gives
     # each environment it exists in an entry of "pages": the words, the deployable, and the path under the address the
     # deployable has in that environment (-PageAddress, by environment and deployable: the address the environment's
@@ -308,6 +377,7 @@ function ConvertTo-Topology {
             $recorded = if ($NodeRecord[$environmentName] -is [Collections.IDictionary]) { $NodeRecord[$environmentName] } else { @{} }
             $addresses = if ($PageAddress[$environmentName] -is [Collections.IDictionary]) { $PageAddress[$environmentName] } else { @{} }
             $deployables = @(foreach ($app in @($System.deployables)) {
+                    if ($app['retired'] -eq $true) { continue }
                     if ($app['hosting'] -eq 'own') {
                         # What the application reported when it was last verified here; without a record it is left
                         # out of this environment.
@@ -454,6 +524,7 @@ function ConvertTo-Topology {
                     }
                 })
             $pages = @(foreach ($app in @($System.deployables)) {
+                    if ($app['retired'] -eq $true) { continue }
                     $link = $app['dashboardLink']
                     if ($link -isnot [Collections.IDictionary] -or -not $link['text'] -or -not $link['path']) { continue }
                     if ($azureExcluded -ccontains [string] $app.name) { continue }
@@ -2094,10 +2165,11 @@ foreach ($tier in @($system.environments | ForEach-Object { [string] $_['tier'] 
 
 # The address of each container app of the system, in every environment it exists in: what that environment's stack
 # reports for it (a container app's address is generated by the platform, so no convention names it). Two uses: the
-# link of a deployable that names a page of its own for the dashboard (deployables[].dashboardLink), and the box of
-# every container app in the runtime diagram. This environment's stack is read already; another tier's group may be
-# closed to this tier's deploy identity, and an environment may not have the app yet: a read that gives no address is
-# information, and the dashboard then shows that environment without the link and the box.
+# Health tiles / Code card of each container app in topology.json, the link of a deployable that names a page of its
+# own for the dashboard (deployables[].dashboardLink), and the box of every container app in the runtime diagram.
+# This environment's stack is read already; another tier's group may be closed to this tier's deploy identity, and an
+# environment may not have the app yet. When the stack omits an address (own-environment outputs or a partial read) or
+# cannot be read, ConvertTo-PageAddressMap fills the gap from containers.json on branch status (#573).
 $pageAddresses = @{}
 $status = $null
 $statusRead = $false
@@ -2137,22 +2209,24 @@ if ($containerApps.Count -gt 0) {
             if ($readCode -eq 0 -and ($read -join '').Trim()) { $reported = @(($read -join "`n") | ConvertFrom-Json -AsHashtable) }
             else { $reason = if ($read.Count -gt 0) { ($read[0] -split "`n")[0] } else { "exit code $readCode" } }
         }
-        # A stack this identity may not read: what the workflow delivery published of it (containers.json on branch
-        # status, written as the plan identity, which reads every environment's stack; as old as its last run).
-        if ($reason) {
+        # Prefer the stack; for every wanted name still missing (own outputs that omitted ui, or a refused read), use
+        # containers.json. Replacing the whole list only on refusal left gaps when the stack answered without ui (#573).
+        $published = $null
+        $publishedEnv = $null
+        if (@($wanted | Where-Object { -not (Get-ReportedDeployableUrl -Reported $reported -Name $_) }).Count -gt 0 -or $reason) {
             $published = Get-PublishedStatus
             if ($published -and $published['environments'] -is [Collections.IDictionary] -and $published.environments[$pageEnvironment] -is [Collections.IDictionary]) {
-                $reported = @($published.environments[$pageEnvironment].GetEnumerator() | ForEach-Object { @{ name = [string] $_.Key; url = [string] $_.Value } })
-                Write-Host "The stack of $pageEnvironment could not be read ($reason): its container apps are those of containers.json on branch status, written $($published['generated'])."
-                $reason = ''
+                $publishedEnv = $published.environments[$pageEnvironment]
             }
         }
-        $pageAddresses[$pageEnvironment] = @{}
-        $without = [Collections.Generic.List[string]]::new()
-        foreach ($deployableName in $wanted) {
-            $found = @($reported | Where-Object { $_ -is [Collections.IDictionary] -and $_['name'] -eq $deployableName -and $_['url'] }) | Select-Object -First 1
-            if ($found) { $pageAddresses[$pageEnvironment][$deployableName] = [string] $found.url } else { $without.Add($deployableName) }
+        $mapped = ConvertTo-PageAddressMap -Wanted $wanted -Reported $reported -Published $publishedEnv
+        $pageAddresses[$pageEnvironment] = $mapped.Addresses
+        if ($mapped.FilledFromStatus.Count -gt 0 -and $published) {
+            $how = if ($reason) { "could not be read ($reason)" } else { "reported no address for $($mapped.FilledFromStatus -join ', ')" }
+            Write-Host "The stack of $pageEnvironment ${how}: using containers.json on branch status for $($mapped.FilledFromStatus -join ', '), written $($published['generated'])."
+            $reason = ''
         }
+        $without = @($mapped.Missing)
         if ($without.Count -gt 0 -and $reason) {
             Write-Host "The stack of $pageEnvironment could not be read ($reason): the runtime diagram and the links show no box or link for $($without -join ', ') there."
         }
