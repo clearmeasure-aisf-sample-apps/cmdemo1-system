@@ -71,6 +71,8 @@
     deployable. One issue "<deployable> <version> held before <env>" (label release-held, no assignee) lists each flag with its
     evidence; it is edited only when the evidence changes. It closes when that release has a deployment in the environment
     that no longer waits for this workflow, or a newer release is the candidate or runs there already.
+    A candidate whose release notes name no commit (hand-created in Octopus, issue #621) is the same hold pattern, not a
+    workflow failure: one issue "<deployable> <version> held: release notes name no commit", no promotion, step finishes green.
     Pipeline-only override (owner, 2026-10-14): when flag 3 (a known change, not "comparison incomplete") is the only flag
     and nothing waits, the release is promoted anyway once 60 minutes ($PipelineOverrideMinutes) have passed since its deployment to the
     previous environment finished AND the head commit of the application repository's default branch (master) is green:
@@ -656,6 +658,50 @@ function Test-SignOffRefusedHoldBody([string] $Body) {
     "$Body" -match [regex]::Escape($SignOffPermissionDeniedFlag)
 }
 
+# Flag text when a release's notes name no commit sha (#621). Kept stable so later runs spot the hold body.
+$NoCommitInNotesFlag = 'release notes name no commit'
+
+function New-NoCommitHoldEvaluation {
+    # Evaluation shape for Set-HeldIssue when release notes name no commit: hold, do not throw, do not promote (#621).
+    param([string] $ReleaseVersion, [string] $Name = $Deployable, [string] $TargetName = '')
+    $evidence = [Collections.Generic.List[string]]::new()
+    $evidence.Add("$Name $ReleaseVersion names no commit in its release notes, so auto-promote cannot evaluate checks, comparison, or health.")
+    if ($TargetName) { $evidence.Add("It was the candidate for $TargetName.") }
+    @{
+        Sha      = 'none'
+        Decision = @{
+            Decision = 'hold'
+            Reason   = $null
+            Note     = ''
+            Flags    = @(@{ Flag = $NoCommitInNotesFlag; Evidence = @($evidence) })
+            Waiting  = @()
+            Passed   = @()
+        }
+    }
+}
+
+function Test-NoCommitHoldBody([string] $Body) {
+    # True when a release-held issue body was written because release notes named no commit (#621).
+    "$Body" -match [regex]::Escape($NoCommitInNotesFlag)
+}
+
+function Test-NoCommitHoldFlags([object[]] $Flags) {
+    @($Flags | Where-Object { $_.Flag -eq $NoCommitInNotesFlag }).Count -gt 0
+}
+
+function Get-NoCommitHeldTitle([string] $Version, [string] $Name = $Deployable) {
+    "$Name $Version held: release notes name no commit"
+}
+
+function Get-EvaluationCommitOrHold {
+    # Commit from release notes, or a hold evaluation when none (#621). Never throws for a missing commit.
+    param($Release, [string] $Name = $Deployable, [string] $TargetName = '')
+    $sha = Get-Commit $Release
+    if ($sha) { return @{ Sha = $sha; Hold = $null } }
+    $version = if ($null -eq $Release) { '' } else { [string] $Release.Version }
+    @{ Sha = $null; Hold = (New-NoCommitHoldEvaluation -ReleaseVersion $version -Name $Name -TargetName $TargetName) }
+}
+
 function Set-SignOffRefusedOnBusyItems {
     # Marks busy deployments that match an open refused-Sign-off hold so Get-BusyReason does not block other projects.
     param([object[]] $Items, [object[]] $HeldIssues, [hashtable] $ProjectIdByDeployableName, [hashtable] $EnvironmentIdByName, [scriptblock] $GetReleaseVersion)
@@ -993,6 +1039,11 @@ function Format-HeldEvidence {
 }
 
 function Get-HeldTitle([string] $Version, [string] $Environment, [string] $Name = $Deployable) { "$Name $Version held before $Environment" }
+function Get-HeldIssueTitle {
+    # Title of the release-held issue: no-commit holds use a fixed title without the environment (#621); others name the target.
+    param([string] $Version, [string] $Environment, [object[]] $Flags, [string] $Name = $Deployable)
+    if (Test-NoCommitHoldFlags $Flags) { Get-NoCommitHeldTitle $Version $Name } else { Get-HeldTitle $Version $Environment $Name }
+}
 function Get-HeldTitleParts {
     # Version and Environment of a held issue of this deployable; $null for any other title (another deployable's too).
     param([string] $Title, [string] $Name = $Deployable)
@@ -1251,9 +1302,14 @@ function Read-MasterState {
 
 function Get-Evaluation {
     # RunningUnknown: why the release running in the target could not be determined (it then names no base commit).
+    # No commit in the release notes: hold (issue #621), never throw and never promote.
     param($Release, $Target, $Previous, $RunningRelease, [string] $RunningUnknown = '')
-    $sha = Get-Commit $Release
-    if (-not $sha) { throw "release $($Release.Version) names no commit in its notes" }
+    $commitOrHold = Get-EvaluationCommitOrHold $Release -TargetName ([string] $Target.Name)
+    if ($commitOrHold.Hold) {
+        $h = $commitOrHold.Hold
+        return @{ Behind = $false; Sha = $h.Sha; BaseSha = $null; Decision = $h.Decision }
+    }
+    $sha = $commitOrHold.Sha
     $facts = @{ HoldUnknown = @() }
 
     # 1. Checks
@@ -1381,7 +1437,7 @@ function Get-Evaluation {
 
 function Set-HeldIssue {
     param($Release, $Target, $Evaluation, [string] $DeploymentNote = '')
-    $title = Get-HeldTitle $Release.Version $Target.Name
+    $title = Get-HeldIssueTitle -Version $Release.Version -Environment $Target.Name -Flags @($Evaluation.Decision.Flags)
     $evidence = Format-HeldEvidence -Version $Release.Version -Sha $Evaluation.Sha -Target $Target.Name -Flags $Evaluation.Decision.Flags -DeploymentNote $DeploymentNote -OverrideNote ([string] $Evaluation.Decision.Note)
     $hash = Get-EvidenceHash $evidence
     $body = "$evidence`n`nRun $RunUrl`n<!-- evidence:$hash -->"
