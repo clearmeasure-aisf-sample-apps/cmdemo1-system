@@ -97,7 +97,7 @@ Test-Case 'dedupe: other assignee within window does not count' (Test-BotAssigne
 $verdictAfter = @([ordered] @{ body = "Review → Merged`nmerge abc"; createdAt = $headDate.AddMinutes(5) })
 $verdictBefore = @([ordered] @{ body = 'Review → Done'; createdAt = $headDate.AddMinutes(-5) })
 $progressAfter = @([ordered] @{ body = 'Review → In Progress`nfix checks'; createdAt = $headDate.AddMinutes(1) })
-$otherComment = @([ordered] @{ body = 'Queued: WIP is full (3).'; createdAt = $headDate.AddMinutes(5) })
+$otherComment = @([ordered] @{ body = 'Queued: WIP is full for cmdemo1-system (2).'; createdAt = $headDate.AddMinutes(5) })
 Test-Case 'verdict: Review → Merged after head' (Test-ReviewVerdictAfterHead -Comments $verdictAfter -HeadCommitDate $headDate) $true
 Test-Case 'verdict: Review → Done before head does not count' (Test-ReviewVerdictAfterHead -Comments $verdictBefore -HeadCommitDate $headDate) $false
 Test-Case 'verdict: Review → In Progress after head' (Test-ReviewVerdictAfterHead -Comments $progressAfter -HeadCommitDate $headDate) $true

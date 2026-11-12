@@ -43,9 +43,13 @@ Spend as little as possible before you know there is work. In order:
 
 Todo → In Progress → Review → Merged → TDD → UAT → Done.
 
-- WIP limit 3: items in In Progress and Review, across all repositories. Merged, TDD and UAT do not count. When
-  full, leave new items in Todo; post one `Queued: WIP is full (3).` comment on each queued item once, never again.
-- Oldest assigned Todo item first.
+- WIP limit 2 per repository: items in In Progress and Review whose issue lives in that repository (e.g.
+  cmdemo1-workorders, cmdemo1-system, cmdemo1-dashboard). Merged, TDD and UAT do not count. There is no global
+  WIP cap. Count from the one project query of this wake (group by `repo`; do not query per repo). When a repo is
+  at its limit, leave its new items in Todo and take the next Todo item from a repo with room; post one
+  `Queued: WIP is full for <repo> (2).` comment on each skipped item once, never again (`<repo>` is the short
+  repository name, e.g. `cmdemo1-system`).
+- Oldest assigned Todo item first (skip an item whose repo is at its limit; continue down the list).
 - Move the Status with `gh project item-edit` (project `PVT_kwDOD_ESUc4BliGL`, field `PVTSSF_lADOD_ESUc4BliGLzhkOn7g`;
   option ids: Todo `f75ad846`, In Progress `47fc9ee4`, Review `e19122d0`, Merged `8012c69b`, TDD `eeb01ba5`,
   UAT `ebff1a13`, Done `98236657`).
