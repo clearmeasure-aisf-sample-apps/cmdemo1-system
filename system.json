@@ -20,10 +20,6 @@
       "Microsoft.App/jobs/start/action",
       "Microsoft.App/jobs/stop/action",
       "Microsoft.App/jobs/stop/execution/action"
-    ],
-    "azureExcludeDeployables": [
-      "aisf",
-      "fworker"
     ]
   },
   "azure": {
@@ -133,6 +129,7 @@
     },
     {
       "name": "aisf",
+      "retired": true,
       "repository": "cmdemo1-aisf",
       "port": 8080,
       "healthPath": "/health",
@@ -227,10 +224,10 @@
     },
     {
       "name": "fworker",
+      "retired": true,
       "repository": "cmdemo1-fworker",
       "port": 8080,
       "healthPath": "/health",
-      "pipelineSignOff": true,
       "environments": [
         "tdd",
         "uat",

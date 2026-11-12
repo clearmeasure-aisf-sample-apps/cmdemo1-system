@@ -38,12 +38,18 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
 $env:AZURE_CORE_DISABLE_PROGRESS_BAR = 'true'
+# Names marked retired in system.json. A stack that has not been applied since then may still list their container
+# apps. Those leftovers are not live deployables: checks that walk the stack skip them. ui and dashboard are not here.
+$script:retiredDeployableNames = @()
 
 # pwsh -File passes "CAP-001,CAP-002" as one string.
 $Only = @($Only | ForEach-Object { $_ -split '[,\s]+' } | Where-Object { $_ })
 if (-not $ListChecks) {
     $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
     # A retired deployable (deployables[].retired, decision 0058) is in no environment: nothing below sees it.
+    # The names are kept so a stack that still lists the app (the apply that deletes it has not run) is not treated
+    # as a missing box or an always-on app of a live deployable.
+    $script:retiredDeployableNames = @($system.deployables | Where-Object { $_['retired'] -eq $true } | ForEach-Object { [string] $_.name })
     $system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
     $slug = [string] $system.system.slug
     $org = [string] $system.system.githubOrg
@@ -262,8 +268,10 @@ function Get-App([string] $Environment) {
 }
 function Get-ContainerApp([string] $Environment) {
     # Every container app of the environment, by the names the stack reports, each with the deployable it runs.
+    # A retired deployable is not one of them: its app may still be in a stack applied before the retirement.
     $entries = az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query 'outputs.deployables.value[?containerApp].{name: name, app: containerApp}' --output json | ConvertFrom-Json -AsHashtable
     foreach ($entry in @($entries)) {
+        if ($script:retiredDeployableNames -contains [string] $entry.name) { continue }
         $app = az containerapp show --name $entry.app --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
         $app.deployable = [string] $entry.name
         $app
@@ -817,7 +825,10 @@ $checks = [ordered] @{
                 $manifest = $(if ($manifestAnswer.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($manifestAnswer.Content) } else { [string] $manifestAnswer.Content }) | ConvertFrom-Json -AsHashtable
                 $inStack = @(az stack group show --name "stack-$slug-$drawnEnvironment" --resource-group (Get-Group $drawnEnvironment) --query "outputs.deployables.value[?hosting=='containerapp'].name" --output json | ConvertFrom-Json)
                 $boxed = @($manifest['nodes'] | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['kind'] -eq 'containerapp' } | ForEach-Object { [string] $_['deployable'] })
-                $unboxed = @($inStack | Where-Object { $boxed -notcontains $_ })
+                # Retired deployables are not drawn (decision 0058). A stack applied before the retirement can still
+                # name them; that is not a missing box. A live deployable that the stack has and the diagram does not
+                # still fails.
+                $unboxed = @($inStack | Where-Object { $boxed -notcontains $_ -and $script:retiredDeployableNames -notcontains $_ })
                 Assert-That ($unboxed.Count -eq 0) "the runtime diagram of $drawnEnvironment in $e has no box for the container app(s) $($unboxed -join ', '): deploy the release of $slug-$dashboardName to $e again"
                 # Everything else the system's resource groups hold is on it too, in every group of azure.resourceGroups:
                 # what is tagged with the environment, and what no environment tag places (no tag, or a tag of no
