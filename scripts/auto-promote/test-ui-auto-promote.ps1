@@ -738,6 +738,28 @@ Test-Case 'commit: bare 40-char sha still found' (Get-Commit @{ ReleaseNotes = "
 Test-Case 'commit: empty notes' (Get-Commit @{ ReleaseNotes = '' }) $null
 Test-Case 'commit: null release' (Get-Commit $null) $null
 
+# No commit in release notes is a hold, not a workflow failure (#621)
+$emptyNotesRel = @{ Version = '1.0.35.1'; ReleaseNotes = '' }
+$noCommitResolved = Get-EvaluationCommitOrHold $emptyNotesRel -Name 'dashboard' -TargetName 'uat'
+Test-Case 'no-commit empty notes: hold recorded, no throw' @(
+    [bool] $noCommitResolved.Hold
+    $noCommitResolved.Hold.Decision.Decision
+    $noCommitResolved.Sha
+    $noCommitResolved.Hold.Decision.Flags[0].Flag
+) @($true, 'hold', $null, $NoCommitInNotesFlag)
+Test-Case 'no-commit empty notes: does not promote' ($noCommitResolved.Hold.Decision.Decision -eq 'promote') $false
+Test-Case 'no-commit hold title' (Get-NoCommitHeldTitle '1.0.35.1' 'dashboard') 'dashboard 1.0.35.1 held: release notes name no commit'
+Test-Case 'no-commit held issue title omits environment' (Get-HeldIssueTitle -Version '1.0.35.1' -Environment 'uat' -Flags $noCommitResolved.Hold.Decision.Flags -Name 'dashboard') 'dashboard 1.0.35.1 held: release notes name no commit'
+$noCommitBody = Format-HeldEvidence -Version '1.0.35.1' -Sha $noCommitResolved.Hold.Sha -Target 'uat' -Flags $noCommitResolved.Hold.Decision.Flags -Name 'dashboard'
+Test-Case 'no-commit hold evidence names the flag and release' @(
+    (Test-NoCommitHoldBody $noCommitBody),
+    ($noCommitBody -like '*dashboard 1.0.35.1*'),
+    ($noCommitBody -like '*release notes name no commit*')
+) @($true, $true, $true)
+$withCommitResolved = Get-EvaluationCommitOrHold @{ Version = '1.0.36'; ReleaseNotes = "Commit ${sha40}: fix" } -Name 'dashboard' -TargetName 'uat'
+Test-Case 'no-commit: notes with a sha still evaluate' @([bool] $withCommitResolved.Hold, $withCommitResolved.Sha) @($false, $sha40)
+Test-Case 'held before title unchanged when flags are not no-commit' (Get-HeldIssueTitle -Version '1.0.27' -Environment 'uat' -Flags @() -Name 'dashboard') 'dashboard 1.0.27 held before uat'
+
 # --- Per-deployable settings (ui; dashboard and system 2026-11-10 #560; fworker and aisf excluded) ---
 Test-Case 'settings: covered deployables' @($DeployableSettings.Keys | Sort-Object) @('dashboard', 'system', 'ui')
 Test-Case 'settings: promote order' $PromoteOrder @('ui', 'dashboard', 'system')
