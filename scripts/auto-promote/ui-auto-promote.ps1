@@ -36,7 +36,10 @@
       1 checks   Flag: a check run of the release's commit in the application repository that ended failure, cancelled,
                  timed_out, action_required, startup_failure, stale or without a conclusion, or a commit status failure or
                  error. skipped and neutral pass. Wait: a check run not completed, a status pending, no check yet, or a
-                 listing that could not be read whole.
+                 listing that could not be read whole. The workflow ui-auto-promote's own check runs are left out: a crash
+                 or an unfinished run of this promoter is not a build or test of the release. Every other workflow still
+                 counts, including one whose job happens to be named promote (system, capabilities, env-checks). A check
+                 run whose workflow cannot be read is counted.
       2 deployment  Flag: the deployment to the previous environment is not Success; its task log is unreadable (under 20
                  lines or without its "Task ID:" header); the log has a line at Error, Warning or Fatal level or a step
                  SuccessWithWarning (the kit's test-deployment-logs.ps1 rule, plus Fatal, which a real failed ui task
@@ -303,6 +306,20 @@ function ConvertTo-StatusState([string] $State) { switch ($State) { 'success' { 
 function Test-AgentCheckRun([string] $Name, [string] $AppSlug) {
     # A GitHub Copilot cloud agent session ("Running Copilot cloud agent", event dynamic) is not a build or test of the commit.
     ($AppSlug -match '^copilot-swe-agent') -or ($Name -match '^(Running Copilot cloud agent|copilot)$')
+}
+
+function Get-ActionsRunId([string] $Url) {
+    # The Actions run id in a check-run URL (.../actions/runs/<id>/job/<id>); empty when the URL is not one.
+    if ($Url -match '/actions/runs/(?<id>[0-9]+)(/|$)') { return $Matches['id'] }
+    ''
+}
+
+function Test-PromoterCheckRun {
+    # ui-auto-promote only decides whether to promote. Its own check runs (the promote and publish jobs), red or still
+    # running, are not a build or test of the commit (issue #610: the promoter's crashed runs flagged the release).
+    # Identified by the workflow, never by the job name: a job named promote in another workflow still counts.
+    param([string] $WorkflowName, [string] $WorkflowPath)
+    ($WorkflowName -eq 'ui-auto-promote') -or ($WorkflowPath -eq '.github/workflows/ui-auto-promote.yml')
 }
 
 
@@ -1183,10 +1200,34 @@ function Save-State {
 
 function Get-CommitChecks([string] $Sha) {
     # Check runs (paged) and commit statuses of a commit of the application repository; an incomplete list adds a pending entry.
+    # ui-auto-promote's own runs are not a result of the commit (Test-PromoterCheckRun). The check-run payload has no
+    # workflow name, so each Actions run id is read once. A read that fails is counted, not ignored.
     $checks = [Collections.Generic.List[object]]::new(); $page = 1; $ignored = 0
+    $workflowByRun = @{}
     do {
         $r = Invoke-Gh @("repos/$appRepo/commits/$Sha/check-runs?per_page=100&page=$page")
-        foreach ($c in @($r.check_runs)) { if (Test-AgentCheckRun ([string] $c.name) ([string] $c.app.slug)) { $ignored++; continue }; $checks.Add(@{ Name = $c.name; State = ConvertTo-CheckState $c.status $c.conclusion; Url = $c.html_url }) }
+        foreach ($c in @($r.check_runs)) {
+            if (Test-AgentCheckRun ([string] $c.name) ([string] $c.app.slug)) { $ignored++; continue }
+            $runId = Get-ActionsRunId ([string] $c.html_url)
+            $workflowName = ''
+            $workflowPath = ''
+            if ($runId) {
+                if (-not $workflowByRun.ContainsKey($runId)) {
+                    $workflowByRun[$runId] = @{ Name = ''; Path = '' }
+                    try {
+                        $run = Invoke-Gh @("repos/$appRepo/actions/runs/$runId")
+                        $workflowByRun[$runId] = @{ Name = [string] $run.name; Path = [string] $run.path }
+                    }
+                    catch {
+                        # Fail closed: an unreadable workflow is not treated as the promoter.
+                    }
+                }
+                $workflowName = [string] $workflowByRun[$runId].Name
+                $workflowPath = [string] $workflowByRun[$runId].Path
+            }
+            if (Test-PromoterCheckRun -WorkflowName $workflowName -WorkflowPath $workflowPath) { $ignored++; continue }
+            $checks.Add(@{ Name = $c.name; State = ConvertTo-CheckState $c.status $c.conclusion; Url = $c.html_url })
+        }
         $page++
     } while (@($r.check_runs).Count -eq 100 -and $page -le 10)
     if ($r.total_count -gt ($checks.Count + $ignored)) { $checks.Add(@{ Name = "check list incomplete ($($checks.Count) of $($r.total_count))"; State = 'pending'; Url = '' }) }

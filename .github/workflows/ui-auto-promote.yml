@@ -18,7 +18,8 @@
 # this run, unless something flags it. The flags (every rule is a function, tested by scripts/auto-promote/test-ui-auto-promote.ps1,
 # which this workflow runs first; the owner's lists of documentation paths and build files are at the top of the script):
 #   1. Red build or tests: a failed check run or commit status on the release's commit in the application repository
-#      (pending: the run waits and flags nothing yet).
+#      (pending: the run waits and flags nothing yet). This workflow's own check runs are not a build or test of the
+#      commit, so they are left out; every other workflow still counts.
 #   2. Deployment or health failed: the deployment to the previous environment did not succeed, its task log has an
 #      Error or Warning line or a step SuccessWithWarning (the rule of the kit's test-deployment-logs.ps1), or
 #      its health (ui /_healthcheck/detailed overallStatus; dashboard / httpOk; system: no HTTP health, Verify already
