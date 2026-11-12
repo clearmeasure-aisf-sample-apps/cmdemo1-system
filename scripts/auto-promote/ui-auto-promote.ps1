@@ -22,9 +22,11 @@
     the newest deployments to that environment (issue #314). A newer release that ended otherwise in the previous environment is skipped and the run log says so.
     Nothing is promoted while any deployment or runbook run (any project) to the target environment, or any ui
     deployment to a later-than-first environment, is queued, running, cancelling or waiting at an interruption; a call that
-    fails or a listing that is incomplete also stops the run (fail closed). A deployment waiting only because Octopus
-    refused this account permission to take its Sign-off (issue #569) is recorded as a hold and does not count as busy
-    for other deployables.
+    fails or a listing that is incomplete also stops the run (fail closed). When the only busy reason is a short-lived
+    runbook in the target (e.g. Hourly health report), the same run waits and re-lists active tasks for about two to
+    three minutes before giving up (issue #583); an unfinished deployment in the target still blocks at once. A
+    deployment waiting only because Octopus refused this account permission to take its Sign-off (issue #569) is
+    recorded as a hold and does not count as busy for other deployables.
     Recovery: a deployment this workflow created (its Comments start with "Promoted by workflow ui-auto-promote") that waits at
     its Sign-off is evaluated again; no flag: its Sign-off is answered; a flag: it stays waiting and the held issue says so.
     Permission denied on take-responsibility or submit (HTTP 401/403, or Octopus "not in any team with permissions"): hold,
@@ -169,6 +171,13 @@ $SecurityAdvisoryPackageFiles = @('Directory.Build.props', 'Directory.Build.targ
 $ReleaseWindow = 40
 $RunningLookupDeployments = 100
 $PromotionMarker = 'Promoted by workflow ui-auto-promote'
+# When a short-lived runbook (e.g. Hourly health report) is the only thing busy in the target environment, wait and
+# re-list active Octopus tasks this many times, this many seconds apart, before giving up for this run (#583). Cap is
+# about two to three minutes total; a real deployment in the target still blocks with no wait. $RunbookBusyPause is
+# replaced by the harness so tests do not really sleep.
+$RunbookBusyRetrySeconds = 40
+$RunbookBusyRetryLimit = 4
+$RunbookBusyPause = { param([int] $Seconds) Start-Sleep -Seconds $Seconds }
 
 $Settings = $DeployableSettings[$Deployable]
 if (-not $Settings) { throw "deployable $Deployable is not promoted automatically: no entry in `$DeployableSettings ($(@($DeployableSettings.Keys | Sort-Object) -join ', '))" }
@@ -486,6 +495,74 @@ function Test-BusyItemSignOffRefused($Item) {
     if ($Item -is [hashtable]) { return [bool] $Item['SignOffRefused'] }
     if ($Item.PSObject.Properties['SignOffRefused']) { return [bool] $Item.SignOffRefused }
     $false
+}
+
+function Test-BusyOnlyRunbookToTarget {
+    # True when Get-BusyReason would block solely because of runbook run(s) in the target environment (#583).
+    # A deployment in the target, or this project's deployment in a later-than-first environment, is not "runbook only".
+    param([object[]] $Items, [string] $TargetEnvironmentId, [string] $FirstEnvironmentId, [string] $ProjectId)
+    $hasRunbook = $false
+    foreach ($i in @($Items)) {
+        if (Test-BusyItemSignOffRefused $i) { continue }
+        if ($i.EnvironmentId -eq $TargetEnvironmentId) {
+            if ($i.Kind -eq 'runbook') { $hasRunbook = $true; continue }
+            return $false
+        }
+        if ($i.Kind -eq 'deployment' -and $i.ProjectId -eq $ProjectId -and $i.EnvironmentId -ne $FirstEnvironmentId) {
+            return $false
+        }
+    }
+    $hasRunbook
+}
+
+function Wait-BusyRunbookClear {
+    <# When the only busy reason is runbook(s) to the target, wait and re-list until clear, a non-runbook busy reason
+       appears, the retry budget is spent, or GetBusyItems fails. Pause is injectable so the harness does not sleep.
+       Returns @{ Items; Busy; Cleared; Exhausted; Failed }. #>
+    param(
+        [object[]] $Items,
+        [string] $TargetEnvironmentId,
+        [string] $FirstEnvironmentId,
+        [string] $ProjectId,
+        [string] $EnvironmentName = '',
+        [scriptblock] $GetBusyItems,
+        [scriptblock] $Pause = $RunbookBusyPause,
+        [int] $RetrySeconds = $RunbookBusyRetrySeconds,
+        [int] $RetryLimit = $RunbookBusyRetryLimit,
+        [scriptblock] $WriteLog = { param([string] $Message) Write-Host $Message },
+        [string] $Name = $Deployable
+    )
+    $current = @($Items)
+    $busy = Get-BusyReason -Items $current -TargetEnvironmentId $TargetEnvironmentId -FirstEnvironmentId $FirstEnvironmentId -ProjectId $ProjectId -Name $Name
+    if (-not $busy) {
+        return @{ Items = $current; Busy = $null; Cleared = $true; Exhausted = $false; Failed = $false }
+    }
+    if (-not (Test-BusyOnlyRunbookToTarget -Items $current -TargetEnvironmentId $TargetEnvironmentId -FirstEnvironmentId $FirstEnvironmentId -ProjectId $ProjectId)) {
+        return @{ Items = $current; Busy = $busy; Cleared = $false; Exhausted = $false; Failed = $false }
+    }
+    for ($n = 1; $n -le $RetryLimit; $n++) {
+        $runbooks = @($current | Where-Object { $_.Kind -eq 'runbook' -and $_.EnvironmentId -eq $TargetEnvironmentId })
+        $projects = (@($runbooks | ForEach-Object { $_.ProjectId } | Select-Object -Unique) -join ', ')
+        $taskIds = (@($runbooks | ForEach-Object { $_.TaskId } | Where-Object { $_ } | Select-Object -Unique) -join ', ')
+        $envLabel = if ($EnvironmentName) { $EnvironmentName } else { $TargetEnvironmentId }
+        $taskPart = if ($taskIds) { ", task $taskIds" } else { '' }
+        & $WriteLog "Waiting for a runbook of project $projects in $envLabel$taskPart to finish before promoting ($n/$RetryLimit, ${RetrySeconds}s)."
+        & $Pause $RetrySeconds
+        try {
+            $current = @(& $GetBusyItems)
+        } catch {
+            & $WriteLog "Waiting: Octopus tasks could not be read whole ($($_.Exception.Message))"
+            return @{ Items = $current; Busy = $busy; Cleared = $false; Exhausted = $false; Failed = $true }
+        }
+        $busy = Get-BusyReason -Items $current -TargetEnvironmentId $TargetEnvironmentId -FirstEnvironmentId $FirstEnvironmentId -ProjectId $ProjectId -Name $Name
+        if (-not $busy) {
+            return @{ Items = $current; Busy = $null; Cleared = $true; Exhausted = $false; Failed = $false }
+        }
+        if (-not (Test-BusyOnlyRunbookToTarget -Items $current -TargetEnvironmentId $TargetEnvironmentId -FirstEnvironmentId $FirstEnvironmentId -ProjectId $ProjectId)) {
+            return @{ Items = $current; Busy = $busy; Cleared = $false; Exhausted = $false; Failed = $false }
+        }
+    }
+    @{ Items = $current; Busy = $busy; Cleared = $false; Exhausted = $true; Failed = $false }
 }
 
 function Test-OctopusPermissionDenied {
@@ -1286,6 +1363,36 @@ if (-not $candidate.Release) { Say "No $Deployable release waits for a next envi
 $release = $candidate.Release; $target = $candidate.Target; $previous = $candidate.Previous
 Close-HeldIssues $candidate $activeTaskIds
 $busy = Get-BusyReason -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id
+# A short-lived runbook in the target (Hourly health report) is waited out in this run (#583); a deployment still blocks at once.
+if ($busy -and (Test-BusyOnlyRunbookToTarget -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id)) {
+    $wait = Wait-BusyRunbookClear -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id `
+        -EnvironmentName $target.Name -Pause $RunbookBusyPause -WriteLog { param([string] $Message) Say $Message } `
+        -GetBusyItems {
+            $active = @(Get-OctopusAll "/api/$space/tasks?active=true") + @(Get-OctopusAll "/api/$space/tasks?states=Cancelling")
+            $items = @()
+            foreach ($t in @($active | Sort-Object Id -Unique)) {
+                if ($t.Name -eq 'Deploy') {
+                    $d = Invoke-Octopus "/api/$space/deployments/$($t.Arguments.DeploymentId)"
+                    $items += @{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id; SignOffRefused = $false }
+                } elseif ($t.Name -eq 'RunbookRun') {
+                    $d = Invoke-Octopus "/api/$space/runbookRuns/$($t.Arguments.RunbookRunId)"
+                    $items += @{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id; SignOffRefused = $false }
+                }
+            }
+            Set-SignOffRefusedOnBusyItems -Items $items -HeldIssues $heldIssues -ProjectIdByDeployableName $projectIdByDeployable -EnvironmentIdByName $environmentIdByName -GetReleaseVersion {
+                param($b)
+                $rid = $b.Deployment.ReleaseId
+                if (-not $releaseVersionCache.ContainsKey($rid)) {
+                    $releaseVersionCache[$rid] = (Invoke-Octopus "/api/$space/releases/$rid").Version
+                }
+                $releaseVersionCache[$rid]
+            }.GetNewClosure()
+            $items
+        }.GetNewClosure()
+    if ($wait.Failed) { return }
+    $busyItems = @($wait.Items)
+    $busy = $wait.Busy
+}
 if ($busy) { Say "Nothing to do: $busy."; return }
 Say "Candidate: $Deployable $($release.Version) to $($target.Name) (commit $(Get-Commit $release))"
 
