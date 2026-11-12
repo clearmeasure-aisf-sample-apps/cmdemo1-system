@@ -825,6 +825,30 @@ Test-Case 'loaded for system: pipeline by default' @(Get-PipelineEvidence -Paths
 Test-Case 'system: no HTTP health required: promote' (Get-PromotionDecision -Facts (New-Facts @{ HealthRequired = $false; HealthAddressKnown = $false; HealthReads = @(); Paths = @('infra/main.bicep') })).Decision 'promote'
 Test-Case 'system: health skip still flags a failed deployment' (Get-PromotionDecision -Facts (New-Facts @{ HealthRequired = $false; PreviousState = 'Failed'; Paths = @() })).Decision 'hold'
 
+# containers.json has no system (or other non-container) address: StrictMode must not throw (#598).
+$containersLikeStatus = [pscustomobject] @{
+    tdd  = [pscustomobject] @{ ui = 'https://tdd-ui.example'; dashboard = 'https://tdd-dash.example' }
+    uat  = [pscustomobject] @{ ui = 'https://uat-ui.example'; dashboard = 'https://uat-dash.example'; aisf = 'https://uat-aisf.example'; fworker = 'https://uat-fw.example' }
+    prod = [pscustomobject] @{ ui = 'https://prod-ui.example'; dashboard = 'https://prod-dash.example' }
+}
+Test-Case 'address: missing system key is empty (no throw)' (Get-ContainerAddress $containersLikeStatus 'uat' 'system') ''
+Test-Case 'address: present ui is returned' (Get-ContainerAddress $containersLikeStatus 'uat' 'ui') 'https://uat-ui.example'
+Test-Case 'address: missing environment is empty' (Get-ContainerAddress $containersLikeStatus 'lab' 'ui') ''
+Test-Case 'address: null containers is empty' (Get-ContainerAddress $null 'uat' 'system') ''
+$threwMissingSystem = $false
+try {
+    $null = Get-ContainerAddress $containersLikeStatus 'tdd' 'system'
+    $null = Get-ContainerAddress $containersLikeStatus 'uat' 'system'
+    $null = Get-ContainerAddress $containersLikeStatus 'prod' 'system'
+} catch {
+    $threwMissingSystem = $true
+}
+Test-Case 'address: candidate evaluation path does not throw when deployable is absent' $threwMissingSystem $false
+# Hashtable form (ConvertFrom-Json -AsHashtable) is also safe.
+$asHash = @{ uat = @{ ui = 'https://uat-ui.example' } }
+Test-Case 'address: hashtable missing deployable is empty' (Get-ContainerAddress $asHash 'uat' 'system') ''
+Test-Case 'address: hashtable present deployable' (Get-ContainerAddress $asHash 'uat' 'ui') 'https://uat-ui.example'
+
 $threwAisf = try { . (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable aisf; $false } catch { $_.Exception.Message -like 'deployable aisf is not promoted automatically*' }
 Test-Case 'aisf is not promoted: LoadOnly stops the script' $threwAisf $true
 $threwFworker = try { . (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable fworker; $false } catch { $_.Exception.Message -like 'deployable fworker is not promoted automatically*' }

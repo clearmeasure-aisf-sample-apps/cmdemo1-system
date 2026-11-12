@@ -1048,6 +1048,28 @@ function Get-ActiveBusyItemsMarked {
     $listed
 }
 
+function Get-ContainerAddress($Addresses, [string] $EnvironmentName, [string] $DeployableName) {
+    # Strict-mode-safe lookup in status/containers.json environments. That file lists only container apps (ui,
+    # dashboard, …): system has no address. A missing environment or deployable is '' (address unknown), not a throw.
+    if ($null -eq $Addresses -or -not $EnvironmentName -or -not $DeployableName) { return '' }
+    $envObj = $null
+    if ($Addresses -is [System.Collections.IDictionary]) {
+        if ($Addresses.Contains($EnvironmentName)) { $envObj = $Addresses[$EnvironmentName] }
+    }
+    else {
+        $envProp = $Addresses.PSObject.Properties[$EnvironmentName]
+        if ($null -ne $envProp) { $envObj = $envProp.Value }
+    }
+    if ($null -eq $envObj) { return '' }
+    if ($envObj -is [System.Collections.IDictionary]) {
+        if ($envObj.Contains($DeployableName)) { return [string] $envObj[$DeployableName] }
+        return ''
+    }
+    $depProp = $envObj.PSObject.Properties[$DeployableName]
+    if ($null -eq $depProp -or $null -eq $depProp.Value) { return '' }
+    return [string] $depProp.Value
+}
+
 if ($LoadOnly) { return }
 
 # --- Running ------------------------------------------------------------------------------------------------------
@@ -1206,7 +1228,7 @@ function Get-Evaluation {
     $key = Get-StateKey ([string] $prevDeployment.Id)
     $stored = @(Read-StateReads $state ([string] $prevDeployment.Id))
     $reads = @($stored | ForEach-Object { @{ At = Get-Utc $_.at; Status = [string] $_.status } })
-    $prevAddress = if ($addresses) { [string] $addresses.($Previous.Name).$Deployable } else { '' }
+    $prevAddress = Get-ContainerAddress $addresses ([string] $Previous.Name) $Deployable
     $healthRequired = [string] $Settings.HealthRead -ne 'none'
     $addressKnown = [bool] $prevAddress
     function Read-Health {
@@ -1236,7 +1258,7 @@ function Get-Evaluation {
 
     # 3 and 4. Changes since the commit running in the target
     $baseSha = $null
-    $baseAddress = if ($addresses) { [string] $addresses.($Target.Name).$Deployable } else { '' }
+    $baseAddress = Get-ContainerAddress $addresses ([string] $Target.Name) $Deployable
     $buildPath = [string] $Settings.BuildPath
     if ($baseAddress -and $buildPath) { $baseSha = try { [string] (Invoke-RestMethod "$baseAddress$buildPath" -TimeoutSec 30).commit } catch { $null } }
     if ($baseSha -notmatch '^[0-9a-f]{40}$') { $baseSha = Get-Commit $RunningRelease }
