@@ -23,12 +23,13 @@
       "^Pin \\S+ \\S+ in \\S+ \\(Deployments-\\d+\\)$",
       "^Revert pin of \\S+ \\S+ in \\S+ \\(Deployments-\\d+ failed\\)$",
       "^Template sync: .*$",
-      "^Kit (templates|workflows)\\b.*$"
+      "^Kit (templates|workflows)\\b.*$",
+      "^Record the database schema of \\S+ after .*$"
     ]
   },
   "projects": {
     "cmdemo1-ui": { "repo": "cmdemo1-workorders" },
     "cmdemo1-scorecard": { "environments": "tdd:TDD,uat:UAT,prod:Delivered" }
   },
-  "exclude": ["cmdemo1-scorecard-space"]
+  "exclude": ["cmdemo1-scorecard-space", "cmdemo1-fworker"]
 }
