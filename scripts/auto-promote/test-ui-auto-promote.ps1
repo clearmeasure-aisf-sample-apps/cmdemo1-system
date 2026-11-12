@@ -51,6 +51,40 @@ Test-Case 'real CI check is not ignored' (Test-AgentCheckRun 'Build result' 'git
 $realChecks = @(@(@{ n = 'Running Copilot cloud agent'; a = 'copilot-swe-agent'; s = 'failure' }, @{ n = 'Build result'; a = 'github-actions'; s = 'success' }) | Where-Object { -not (Test-AgentCheckRun $_.n $_.a) } | ForEach-Object { @{ Name = $_.n; State = $_.s; Url = '' } })
 Test-Case 'failed Copilot agent run does not hold the release' (Get-PromotionDecision -Facts (New-Facts @{ Checks = $realChecks })).Decision 'promote'
 
+# ui-auto-promote's own runs are not a build or test (issue #610). The workflow is what identifies them, not the job name.
+Test-Case 'promoter workflow is not a build' (Test-PromoterCheckRun -WorkflowName 'ui-auto-promote' -WorkflowPath '.github/workflows/ui-auto-promote.yml') $true
+Test-Case 'promoter path alone is not a build' (Test-PromoterCheckRun -WorkflowName '' -WorkflowPath '.github/workflows/ui-auto-promote.yml') $true
+Test-Case 'capabilities workflow is a real check' (Test-PromoterCheckRun -WorkflowName 'capabilities' -WorkflowPath '.github/workflows/capabilities.yml') $false
+Test-Case 'system workflow is a real check' (Test-PromoterCheckRun -WorkflowName 'system' -WorkflowPath '.github/workflows/system.yml') $false
+Test-Case 'env-checks workflow is a real check' (Test-PromoterCheckRun -WorkflowName 'env-checks' -WorkflowPath '.github/workflows/env-checks.yml') $false
+Test-Case 'a job named promote in another workflow is a real check' (Test-PromoterCheckRun -WorkflowName 'build' -WorkflowPath '.github/workflows/build.yml') $false
+Test-Case 'actions run id from a check url' (Get-ActionsRunId 'https://github.com/o/r/actions/runs/43240281337/job/131258510940') '43240281337'
+Test-Case 'no actions run id outside an actions url' (Get-ActionsRunId 'https://github.com/o/r/commit/abc') ''
+function Select-ReleaseChecks([object[]] $Runs) {
+    @($Runs | Where-Object { -not (Test-PromoterCheckRun -WorkflowName $_.Workflow -WorkflowPath $_.Path) } | ForEach-Object { @{ Name = $_.Name; State = $_.State; Url = $_.Url } })
+}
+$onlyPromoter = Select-ReleaseChecks @(
+    @{ Name = 'promote'; State = 'failure'; Url = 'https://github.com/o/r/actions/runs/1/job/2'; Workflow = 'ui-auto-promote'; Path = '.github/workflows/ui-auto-promote.yml' }
+    @{ Name = 'publish'; State = 'failure'; Url = 'https://github.com/o/r/actions/runs/1/job/3'; Workflow = 'ui-auto-promote'; Path = '.github/workflows/ui-auto-promote.yml' }
+    @{ Name = 'Build result'; State = 'success'; Url = 'b'; Workflow = 'build'; Path = '.github/workflows/build.yml' }
+)
+Test-Case 'only the promoter workflow red: promote' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @($onlyPromoter) })).Decision 'promote'
+$promoterAndCapabilities = Select-ReleaseChecks @(
+    @{ Name = 'promote'; State = 'failure'; Url = 'p'; Workflow = 'ui-auto-promote'; Path = '.github/workflows/ui-auto-promote.yml' }
+    @{ Name = 'capabilities / capabilities'; State = 'failure'; Url = 'c'; Workflow = 'capabilities'; Path = '.github/workflows/capabilities.yml' }
+)
+Test-Case 'failed promoter run does not hide a failed capabilities check' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @($promoterAndCapabilities) })).Decision 'hold'
+$promoterAndSystem = Select-ReleaseChecks @(
+    @{ Name = 'promote'; State = 'pending'; Url = 'p'; Workflow = 'ui-auto-promote'; Path = '.github/workflows/ui-auto-promote.yml' }
+    @{ Name = 'system-release'; State = 'failure'; Url = 's'; Workflow = 'system'; Path = '.github/workflows/system.yml' }
+)
+Test-Case 'a pending promoter run does not hide a failed system check' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @($promoterAndSystem) })).Decision 'hold'
+$pendingPromoterOnly = Select-ReleaseChecks @(
+    @{ Name = 'promote'; State = 'pending'; Url = 'p'; Workflow = 'ui-auto-promote'; Path = '' }
+    @{ Name = 'Build result'; State = 'success'; Url = 'b'; Workflow = 'build'; Path = '.github/workflows/build.yml' }
+)
+Test-Case 'a pending promoter run does not make the release wait' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @($pendingPromoterOnly) })).Decision 'promote'
+
 # Flag 2
 Test-Case 'previous deployment failed flags' (Flags (New-Facts @{ PreviousState = 'Failed' })) @('Deployment or health failed')
 Test-Case 'log warning flags' (Flags (New-Facts @{ LogFindings = @('04:01 Warning | x') })) @('Deployment or health failed')
