@@ -57,6 +57,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
 
 $script:VerdictPrefixes = @('Review → Merged', 'Review → Done', 'Review → In Progress')
@@ -409,12 +410,17 @@ function Invoke-IssueAssigneeNudge {
         return
     }
     # Remove may 404/422 when the bot is not currently assigned; still add so the assign event fires.
+    # The native-command preference is off for this one call: a missing assignee is not a failure of the nudge.
     try {
+        $PSNativeCommandUseErrorActionPreference = $false
         $null = Invoke-GhApi --method DELETE "repos/$Repository/issues/$Number/assignees" -f "assignees[]=$BotLogin"
         Write-Host "Removed $BotLogin from #${Number}"
     }
     catch {
         Write-Host "Remove $BotLogin from #${Number}: $($_.Exception.Message) (continuing to add)"
+    }
+    finally {
+        $PSNativeCommandUseErrorActionPreference = $true
     }
     $null = Invoke-GhApi --method POST "repos/$Repository/issues/$Number/assignees" -f "assignees[]=$BotLogin"
     Write-Host "Added $BotLogin to #${Number}"

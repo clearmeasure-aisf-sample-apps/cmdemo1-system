@@ -9,6 +9,7 @@
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 . (Join-Path $PSScriptRoot 'factory-wake.ps1') -LoadOnly
 
 $failures = 0
