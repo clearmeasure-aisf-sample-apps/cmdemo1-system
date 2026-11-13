@@ -10,6 +10,18 @@
     /featuretoggles. The project UI may label the same screen Feature Flags. Provider 1.20.0 has no feature-toggle
     resource, so octopus-apply does not create them and does not put a flipped environment back. This script is the create.
 
+    This script speaks the rules targeting model only (see https://octopus.com/docs/feature-flags/upgrading-to-rules
+    and https://octopus.com/docs/api/feature-flags). It does not run the project upgrade. A project that still
+    stores legacy targeting (RolloutPercentage and related fields) is refused on write: upgrade in Octopus first.
+    Ensure never sends RolloutPercentage or other legacy targeting fields to an upgraded project.
+
+    The published rules create/modify body still uses DeploymentEnvironmentId, IsEnabled, and Phases per
+    environment, and DefaultIsEnabled on modify. The planner keeps those wire names out of Copy-EnvironmentConfig,
+    Get-UiFeatureTogglePlan, and Format-UiFeatureTogglePlan (Enabled / DefaultEnabled / Phases instead) and maps
+    at New-FeatureToggleBody. Phases for the repo defaults are an empty list (environment on, no rules = everyone;
+    environment off = switch off). Nested rule/condition shapes are not exercised here and are not verified beyond
+    that empty-Phases case.
+
     Ensure (the default) creates a missing toggle with tdd on, uat off, prod off, and the flag default off. A
     toggle that already exists is left as it was, including a later flip, except an environment that is missing
     from it is added at that default. -ResetDefaults puts the three environments and the flag default back.
@@ -97,6 +109,21 @@ $script:UiFeatureToggleProjectId = 'Projects-981'
 $script:UiFeatureToggleProjectSlug = 'cmdemo1-ui'
 # Captured while this file is the executing script. A function called from the test file still finds system.json.
 $script:UiFeatureToggleScriptRoot = $PSScriptRoot
+# Legacy environment targeting fields. Never copied into a plan and never sent on a rules write.
+# IsEnabled / DefaultIsEnabled stay on the Octopus wire (docs) but are not plan-side property names.
+$script:UiFeatureToggleLegacyEnvironmentFields = @(
+    'RolloutPercentage'
+    'ClientRolloutPercentage'
+    'TenantRolloutPercentage'
+    'IncludedTenants'
+    'ExcludedTenants'
+    'IncludedTenantTags'
+    'ExcludedTenantTags'
+    'MinimumVersion'
+    'Segments'
+    'IsEnabled'
+    'Links'
+)
 
 function Get-UiFeatureToggleDefaults {
     [ordered]@{
@@ -246,7 +273,79 @@ function ConvertTo-OctopusJson($Value) {
     return [System.Text.Json.JsonSerializer]::Serialize($raw, $options)
 }
 
-function Copy-EnvironmentConfig($Existing, [string] $Id, [bool] $IsEnabled) {
+function Get-UiFeatureToggleEnvironmentEnabled($Configured) {
+    if ($null -eq $Configured) { return $false }
+    $value = Get-NoteProperty $Configured 'Enabled'
+    if ($null -eq $value) { $value = Get-NoteProperty $Configured 'IsEnabled' }
+    if ($null -eq $value) { return $false }
+    return ConvertTo-Boolean $value
+}
+
+function Test-UiFeatureToggleLegacyEnvironmentField([string] $PropertyName) {
+    return $PropertyName -in $script:UiFeatureToggleLegacyEnvironmentFields
+}
+
+function Get-UiFeatureToggleTargetingModel($Toggle) {
+    # null (create) and projects with no flags yet use rules. Legacy is detected from stored
+    # RolloutPercentage / related fields, or from Phases that lack a Rules property while legacy fields exist.
+    if ($null -eq $Toggle) { return 'rules' }
+    $hasLegacyField = $false
+    $hasRulesPhase = $false
+    foreach ($configured in (ConvertTo-ObjectList (Get-NoteProperty $Toggle 'Environments'))) {
+        if ($null -eq $configured) { continue }
+        $names = if ($configured -is [System.Collections.IDictionary]) {
+            @($configured.Keys)
+        } else {
+            @($configured.PSObject.Properties.Name)
+        }
+        foreach ($propertyName in $names) {
+            if ($propertyName -eq 'IsEnabled' -or $propertyName -eq 'Links' -or $propertyName -eq 'DeploymentEnvironmentId' -or $propertyName -eq 'Phases' -or $propertyName -eq 'Enabled') { continue }
+            if (Test-UiFeatureToggleLegacyEnvironmentField ([string]$propertyName)) {
+                $hasLegacyField = $true
+            }
+        }
+        foreach ($phase in (ConvertTo-ObjectList (Get-NoteProperty $configured 'Phases'))) {
+            if ($null -eq $phase) { continue }
+            if ($null -ne (Get-NoteProperty $phase 'Rules')) { $hasRulesPhase = $true }
+        }
+    }
+    if ($hasLegacyField -and -not $hasRulesPhase) { return 'legacy' }
+    if ($hasRulesPhase) { return 'rules' }
+    if ($hasLegacyField) { return 'legacy' }
+    return 'rules'
+}
+
+function Assert-UiFeatureToggleRulesWritable($Toggle, [string] $ToggleName) {
+    $model = Get-UiFeatureToggleTargetingModel $Toggle
+    if ($model -eq 'legacy') {
+        throw "Toggle '$ToggleName' on $($script:UiFeatureToggleProjectSlug) still uses legacy feature-flag targeting. Upgrade the project to rules in Octopus before running this script (docs/ops/ui-feature-toggles.md). This script does not run the upgrade and will not write legacy fields."
+    }
+}
+
+function Assert-UiFeatureToggleRulesPayload($Body) {
+    # Guards a rules write: never send legacy targeting fields. IsEnabled / DefaultIsEnabled remain on the
+    # published rules wire (https://octopus.com/docs/api/feature-flags).
+    $json = if ($Body -is [string]) { $Body } else { ConvertTo-OctopusJson $Body }
+    foreach ($legacyName in @(
+            'RolloutPercentage'
+            'ClientRolloutPercentage'
+            'TenantRolloutPercentage'
+            'IncludedTenants'
+            'ExcludedTenants'
+            'IncludedTenantTags'
+            'ExcludedTenantTags'
+            'MinimumVersion'
+            'Segments'
+        )) {
+        if ($json -match [regex]::Escape('"' + $legacyName + '"')) {
+            throw "Rules payload must not contain legacy field '$legacyName'."
+        }
+    }
+}
+
+function Copy-EnvironmentConfig($Existing, [string] $Id, [bool] $Enabled) {
+    # Plan-side environment row: DeploymentEnvironmentId, Enabled, Phases. Does not carry IsEnabled,
+    # RolloutPercentage, DefaultIsEnabled, or other legacy targeting fields.
     $copy = [ordered]@{}
     if ($null -ne $Existing) {
         $names = if ($Existing -is [System.Collections.IDictionary]) {
@@ -255,7 +354,8 @@ function Copy-EnvironmentConfig($Existing, [string] $Id, [bool] $IsEnabled) {
             @($Existing.PSObject.Properties.Name)
         }
         foreach ($propertyName in $names) {
-            if ($propertyName -in @('IsEnabled', 'Links')) { continue }
+            if (Test-UiFeatureToggleLegacyEnvironmentField ([string]$propertyName)) { continue }
+            if ($propertyName -in @('Enabled', 'DeploymentEnvironmentId')) { continue }
             $propertyValue = if ($Existing -is [System.Collections.IDictionary]) { $Existing[$propertyName] } else { $Existing.$propertyName }
             if ($propertyName -eq 'Phases') {
                 $copy[$propertyName] = ConvertTo-PhaseList $propertyValue
@@ -266,7 +366,7 @@ function Copy-EnvironmentConfig($Existing, [string] $Id, [bool] $IsEnabled) {
     }
     if (-not $copy.Contains('Phases') -or $null -eq $copy['Phases']) { $copy['Phases'] = ConvertTo-PhaseList $null }
     $copy['DeploymentEnvironmentId'] = $Id
-    $copy['IsEnabled'] = $IsEnabled
+    $copy['Enabled'] = $Enabled
     return $copy
 }
 
@@ -312,7 +412,7 @@ function Get-UiFeatureTogglePlan {
         $id = [string]$EnvironmentIds[$environmentName]
         $desired = if ($Mode -eq 'Set') { [bool]$EnvironmentEnabled } else { [bool]$defaults[$environmentName] }
         if ($byId.ContainsKey($id)) {
-            if ($force -and (ConvertTo-Boolean $byId[$id].IsEnabled) -ne $desired) {
+            if ($force -and (Get-UiFeatureToggleEnvironmentEnabled $byId[$id]) -ne $desired) {
                 $byId[$id] = Copy-EnvironmentConfig $byId[$id] $id $desired
                 $changed = $true
             }
@@ -325,7 +425,7 @@ function Get-UiFeatureTogglePlan {
 
     $description = [string]$Spec.Description
     $changeDefault = $false
-    $defaultIsEnabled = $false
+    $defaultEnabled = $false
     if ($null -eq $Current) {
         $action = 'create'
         $changeDefault = $true
@@ -337,11 +437,12 @@ function Get-UiFeatureTogglePlan {
             $changed = $true
         }
         $currentDefaultValue = Get-NoteProperty $Current 'DefaultIsEnabled'
+        if ($null -eq $currentDefaultValue) { $currentDefaultValue = Get-NoteProperty $Current 'DefaultEnabled' }
         $currentDefault = if ($null -eq $currentDefaultValue) { $false } else { ConvertTo-Boolean $currentDefaultValue }
-        $defaultIsEnabled = $currentDefault
+        $defaultEnabled = $currentDefault
         if ($Mode -eq 'ResetDefaults' -and $currentDefault) {
             $changeDefault = $true
-            $defaultIsEnabled = $false
+            $defaultEnabled = $false
             $changed = $true
         }
         $action = if ($changed) { 'update' } else { 'none' }
@@ -350,17 +451,17 @@ function Get-UiFeatureTogglePlan {
     $environments = [System.Collections.Generic.List[object]]::new()
     foreach ($id in $orderedIds) {
         $configured = $byId[$id]
-        $environments.Add((Copy-EnvironmentConfig $configured $id (ConvertTo-Boolean (Get-NoteProperty $configured 'IsEnabled'))))
+        $environments.Add((Copy-EnvironmentConfig $configured $id (Get-UiFeatureToggleEnvironmentEnabled $configured)))
     }
 
     [pscustomobject]@{
-        Action           = $action
-        Name             = [string]$Spec.Name
-        RequestedSlug    = [string]$Spec.Slug
-        Description      = $description
-        DefaultIsEnabled = [bool]$defaultIsEnabled
-        ChangeDefault    = [bool]$changeDefault
-        Environments     = $environments
+        Action         = $action
+        Name           = [string]$Spec.Name
+        RequestedSlug  = [string]$Spec.Slug
+        Description    = $description
+        DefaultEnabled = [bool]$defaultEnabled
+        ChangeDefault  = [bool]$changeDefault
+        Environments   = $environments
     }
 }
 
@@ -368,10 +469,10 @@ function Format-UiFeatureTogglePlan($Plan, $IdToName) {
     $parts = foreach ($configured in $Plan.Environments) {
         $id = [string]$configured.DeploymentEnvironmentId
         $label = if ($IdToName.Contains($id)) { [string]$IdToName[$id] } else { $id }
-        $state = if (ConvertTo-Boolean $configured.IsEnabled) { 'on' } else { 'off' }
+        $state = if (Get-UiFeatureToggleEnvironmentEnabled $configured) { 'on' } else { 'off' }
         "$label=$state"
     }
-    $defaultState = if ($Plan.DefaultIsEnabled) { 'on' } else { 'off' }
+    $defaultState = if ($Plan.DefaultEnabled) { 'on' } else { 'off' }
     "$($Plan.Name): $($Plan.Action) default=$defaultState $($parts -join ' ')"
 }
 
@@ -523,19 +624,13 @@ function Get-UiFeatureToggleResource([string] $ProjectBase, $Summary) {
 }
 
 function ConvertTo-FeatureToggleEnvironmentWire($Configured) {
+    # Published rules environment shape: DeploymentEnvironmentId, IsEnabled, Phases (required).
+    # https://octopus.com/docs/api/feature-flags — Phases item schema beyond an empty list is not verified here.
+    $phases = ConvertTo-PhaseList (Get-NoteProperty $Configured 'Phases')
     $wire = [ordered]@{
         DeploymentEnvironmentId = [string](Get-NoteProperty $Configured 'DeploymentEnvironmentId')
-        IsEnabled               = ConvertTo-Boolean (Get-NoteProperty $Configured 'IsEnabled')
-    }
-    $names = if ($Configured -is [System.Collections.IDictionary]) {
-        @($Configured.Keys)
-    } else {
-        @($Configured.PSObject.Properties.Name)
-    }
-    foreach ($propertyName in $names) {
-        if ($propertyName -in @('DeploymentEnvironmentId', 'IsEnabled', 'Links', 'Phases')) { continue }
-        $propertyValue = Get-NoteProperty $Configured $propertyName
-        if ($null -ne $propertyValue) { $wire[$propertyName] = $propertyValue }
+        IsEnabled               = Get-UiFeatureToggleEnvironmentEnabled $Configured
+        Phases                  = $phases
     }
     return $wire
 }
@@ -550,34 +645,43 @@ function New-FeatureToggleEnvironmentWires($Environments) {
 }
 
 function New-FeatureToggleBody($ProjectId, $SpaceId, $Spec, $Plan, $Existing) {
-    # CreateFeatureToggleCommand is Name, ProjectId, SpaceId, and Environments of DeploymentEnvironmentId
-    # plus IsEnabled. Slug and DefaultIsEnabled belong on the resource and on the modify.
+    # Rules create: Name, ProjectId, SpaceId, Environments (DeploymentEnvironmentId, IsEnabled, Phases).
+    # Rules modify also sends DefaultIsEnabled and Slug. Map plan DefaultEnabled → DefaultIsEnabled here only.
     $environments = New-FeatureToggleEnvironmentWires $Plan.Environments
     if ($null -eq $Existing) {
-        return [ordered]@{
+        $create = [ordered]@{
             Name         = [string]$Spec.Name
             ProjectId    = [string]$ProjectId
             SpaceId      = [string]$SpaceId
             Environments = $environments
         }
+        Assert-UiFeatureToggleRulesPayload $create
+        return $create
+    }
+    $defaultEnabled = if ($null -ne (Get-NoteProperty $Plan 'DefaultEnabled')) {
+        [bool]$Plan.DefaultEnabled
+    } else {
+        [bool](Get-NoteProperty $Plan 'DefaultIsEnabled')
     }
     $body = [ordered]@{
         Id               = [string](Get-NoteProperty $Existing 'Id')
         Name             = [string](Get-NoteProperty $Existing 'Name')
         ProjectId        = [string]$ProjectId
         SpaceId          = [string]$SpaceId
-        DefaultIsEnabled = [bool]$Plan.DefaultIsEnabled
+        DefaultIsEnabled = $defaultEnabled
         Environments     = $environments
     }
     $slug = Get-NoteProperty $Existing 'Slug'
     if ($slug) { $body['Slug'] = [string]$slug }
     $description = [string]$Plan.Description
     if (-not [string]::IsNullOrWhiteSpace($description)) { $body['Description'] = $description }
+    Assert-UiFeatureToggleRulesPayload $body
     return $body
 }
 
 function Test-DefaultIsOff($Flag) {
     $value = Get-NoteProperty $Flag 'DefaultIsEnabled'
+    if ($null -eq $value) { $value = Get-NoteProperty $Flag 'DefaultEnabled' }
     return $null -ne $value -and -not (ConvertTo-Boolean $value)
 }
 
@@ -697,6 +801,18 @@ function Invoke-UiFeatureToggleCommand {
             }
             continue
         }
+
+        # Writes speak rules only. Refuse when the stored toggle (or any sibling, on create) is still legacy.
+        if ($null -ne $current) {
+            Assert-UiFeatureToggleRulesWritable $current $spec.Name
+        } else {
+            foreach ($existingToggle in (ConvertTo-ObjectList $toggles)) {
+                if ($null -eq $existingToggle) { continue }
+                $existingResource = Get-UiFeatureToggleResource $base $existingToggle
+                Assert-UiFeatureToggleRulesWritable $existingResource ([string](Get-NoteProperty $existingResource 'Name'))
+            }
+        }
+
         if (-not $PSCmdlet.ShouldProcess($spec.Name, $plan.Action)) {
             Write-Host $line
             continue
@@ -725,10 +841,20 @@ function Invoke-UiFeatureToggleCommand {
             if ($null -eq $created) { throw "Created $($spec.Name) but could not read it back." }
             $current = $created
             if (-not (Test-DefaultIsOff $created)) {
+                $createdEnvironments = if ($null -ne (Get-NoteProperty $created 'Environments')) {
+                    Get-NoteProperty $created 'Environments'
+                } else {
+                    $plan.Environments
+                }
+                $defaultPlanEnvironments = [System.Collections.Generic.List[object]]::new()
+                foreach ($configured in (ConvertTo-ObjectList $createdEnvironments)) {
+                    if ($null -eq $configured) { continue }
+                    $defaultPlanEnvironments.Add((Copy-EnvironmentConfig $configured ([string](Get-NoteProperty $configured 'DeploymentEnvironmentId')) (Get-UiFeatureToggleEnvironmentEnabled $configured)))
+                }
                 $defaultPlan = [pscustomobject]@{
-                    Description      = if ([string]::IsNullOrWhiteSpace([string](Get-NoteProperty $created 'Description'))) { [string]$plan.Description } else { [string](Get-NoteProperty $created 'Description') }
-                    DefaultIsEnabled = $false
-                    Environments     = if ($null -ne (Get-NoteProperty $created 'Environments')) { Get-NoteProperty $created 'Environments' } else { $plan.Environments }
+                    Description    = if ([string]::IsNullOrWhiteSpace([string](Get-NoteProperty $created 'Description'))) { [string]$plan.Description } else { [string](Get-NoteProperty $created 'Description') }
+                    DefaultEnabled = $false
+                    Environments   = $defaultPlanEnvironments
                 }
                 $current = Invoke-Octopus -Method Put -Uri (Get-UiFeatureToggleItemUri $base $created.Id) -Body (ConvertTo-OctopusJson (New-FeatureToggleBody $project.Id $space $spec $defaultPlan $created))
             }
