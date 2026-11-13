@@ -36,16 +36,20 @@ foreach ($spec in @(Get-UiFeatureToggleSpecs)) {
 
 $create = Get-UiFeatureTogglePlan -Spec $building -Current $null -EnvironmentIds $ids -Mode Ensure
 Test-Case 'create action' $create.Action 'create'
-Test-Case 'create default off' @($create.DefaultIsEnabled, $create.ChangeDefault) @($false, $true)
-Test-Case 'create tdd on' (ConvertTo-Boolean ($create.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-1' }).IsEnabled) $true
-Test-Case 'create uat off' (ConvertTo-Boolean ($create.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).IsEnabled) $false
-Test-Case 'create prod off' (ConvertTo-Boolean ($create.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' }).IsEnabled) $false
+Test-Case 'create default off' @($create.DefaultEnabled, $create.ChangeDefault) @($false, $true)
+Test-Case 'create tdd on' (Get-UiFeatureToggleEnvironmentEnabled ($create.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-1' })) $true
+Test-Case 'create uat off' (Get-UiFeatureToggleEnvironmentEnabled ($create.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' })) $false
+Test-Case 'create prod off' (Get-UiFeatureToggleEnvironmentEnabled ($create.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' })) $false
+Test-Case 'create plan has no IsEnabled' (@($create.Environments | Where-Object { $null -ne (Get-NoteProperty $_ 'IsEnabled') }).Count) 0
+Test-Case 'create plan has no DefaultIsEnabled' ($null -eq (Get-NoteProperty $create 'DefaultIsEnabled')) $true
+Test-Case 'create plan has no RolloutPercentage' (@($create.Environments | Where-Object { $null -ne (Get-NoteProperty $_ 'RolloutPercentage') }).Count) 0
 
-$json = ConvertTo-OctopusJson @{ Environments = $create.Environments }
+$json = ConvertTo-OctopusJson @{ Environments = (New-FeatureToggleEnvironmentWires $create.Environments) }
 Test-Case 'json environments array' ($json -match '"Environments":\[') $true
-Test-Case 'json one on' ([regex]::Matches($json, '"IsEnabled":true').Count) 1
-Test-Case 'json two off' ([regex]::Matches($json, '"IsEnabled":false').Count) 2
-Test-Case 'json empty phases' ([regex]::Matches($json, '"Phases":\[\]').Count) 3
+Test-Case 'json rules wire one on' ([regex]::Matches($json, '"IsEnabled":true').Count) 1
+Test-Case 'json rules wire two off' ([regex]::Matches($json, '"IsEnabled":false').Count) 2
+Test-Case 'json rules wire empty phases' ([regex]::Matches($json, '"Phases":\[\]').Count) 3
+Test-Case 'json has no RolloutPercentage' ($json -match 'RolloutPercentage') $false
 Test-Case 'json has no api key' ($json -match 'API-') $false
 $createBody = ConvertTo-OctopusJson (New-FeatureToggleBody 'Projects-981' 'Spaces-355' $building $create $null)
 Test-Case 'create body name' $createBody.Contains('"Name":"BuildingManagement"') $true
@@ -53,9 +57,11 @@ Test-Case 'create body project' $createBody.Contains('"ProjectId":"Projects-981"
 Test-Case 'create body space' $createBody.Contains('"SpaceId":"Spaces-355"') $true
 Test-Case 'create body environments array' $createBody.Contains('"Environments":[') $true
 Test-Case 'create body environment id' $createBody.Contains('"DeploymentEnvironmentId":"Environments-1"') $true
+Test-Case 'create body includes phases' $createBody.Contains('"Phases":[]') $true
 Test-Case 'create body omits slug' $createBody.Contains('"Slug"') $false
 Test-Case 'create body omits default' $createBody.Contains('"DefaultIsEnabled"') $false
-Test-Case 'create body omits phases' $createBody.Contains('"Phases"') $false
+Test-Case 'create body omits RolloutPercentage' $createBody.Contains('"RolloutPercentage"') $false
+Test-Case 'create body omits plan Enabled name' $createBody.Contains('"Enabled"') $false
 
 $current = [pscustomobject]@{
     Name             = 'BuildingManagement'
@@ -63,12 +69,13 @@ $current = [pscustomobject]@{
     Description      = 'operator text'
     DefaultIsEnabled = $false
     Environments     = @(
-        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @() }
-        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-2'; IsEnabled = $true; Phases = @([pscustomobject]@{ Name = 'staff' }); RolloutPercentage = 10 }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @(@{ Name = 'Phase 1'; Rules = @() }) }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-2'; IsEnabled = $true; Phases = @(@{ Name = 'Phase 1'; Rules = @() }) }
         [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-3'; IsEnabled = $false; Phases = @() }
         [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-9'; IsEnabled = $true; Phases = @() }
     )
 }
+Test-Case 'rules model detected' (Get-UiFeatureToggleTargetingModel $current) 'rules'
 $kept = Get-UiFeatureTogglePlan -Spec $building -Current $current -EnvironmentIds $ids -Mode Ensure
 Test-Case 'flip kept' $kept.Action 'none'
 Test-Case 'description kept' $kept.Description 'operator text'
@@ -79,29 +86,29 @@ $missingProd = [pscustomobject]@{
     Description      = 'operator text'
     DefaultIsEnabled = $true
     Environments     = @(
-        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @() }
-        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-2'; IsEnabled = $true; Phases = @() }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @(@{ Rules = @() }) }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-2'; IsEnabled = $true; Phases = @(@{ Rules = @() }) }
     )
 }
 $added = Get-UiFeatureTogglePlan -Spec $building -Current $missingProd -EnvironmentIds $ids -Mode Ensure
 Test-Case 'missing prod is an update' $added.Action 'update'
-Test-Case 'missing prod stays off' (ConvertTo-Boolean ($added.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' }).IsEnabled) $false
-Test-Case 'ensure does not reset uat' (ConvertTo-Boolean ($added.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).IsEnabled) $true
-Test-Case 'ensure does not clear a default that is on' $added.DefaultIsEnabled $true
+Test-Case 'missing prod stays off' (Get-UiFeatureToggleEnvironmentEnabled ($added.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' })) $false
+Test-Case 'ensure does not reset uat' (Get-UiFeatureToggleEnvironmentEnabled ($added.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' })) $true
+Test-Case 'ensure does not clear a default that is on' $added.DefaultEnabled $true
 
 $reset = Get-UiFeatureTogglePlan -Spec $building -Current $current -EnvironmentIds $ids -Mode ResetDefaults
 Test-Case 'reset updates' $reset.Action 'update'
-Test-Case 'reset uat off' (ConvertTo-Boolean ($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).IsEnabled) $false
-Test-Case 'reset keeps the extra environment' (ConvertTo-Boolean ($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-9' }).IsEnabled) $true
+Test-Case 'reset uat off' (Get-UiFeatureToggleEnvironmentEnabled ($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' })) $false
+Test-Case 'reset keeps the extra environment' (Get-UiFeatureToggleEnvironmentEnabled ($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-9' })) $true
 Test-Case 'reset keeps the phase' @(($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).Phases).Count 1
-Test-Case 'reset keeps the phase name' (($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).Phases | Select-Object -First 1).Name 'staff'
+Test-Case 'reset keeps the phase name' (($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).Phases | Select-Object -First 1).Name 'Phase 1'
 $oneList = [System.Collections.Generic.List[object]]::new()
 $oneList.Add(($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }))
-$oneEnvironment = ConvertTo-OctopusJson @{ Environments = $oneList }
+$oneEnvironment = ConvertTo-OctopusJson @{ Environments = (New-FeatureToggleEnvironmentWires $oneList) }
 Test-Case 'one environment stays an array' ($oneEnvironment -match '"Environments":\[') $true
 Test-Case 'one phase stays an array' ($oneEnvironment -match '"Phases":\[\{') $true
-Test-Case 'reset keeps rollout' ($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).RolloutPercentage 10
-Test-Case 'reset leaves a default that is already off' @($reset.DefaultIsEnabled, $reset.ChangeDefault) @($false, $false)
+Test-Case 'reset plan drops RolloutPercentage' ($null -eq (Get-NoteProperty ($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }) 'RolloutPercentage')) $true
+Test-Case 'reset leaves a default that is already off' @($reset.DefaultEnabled, $reset.ChangeDefault) @($false, $false)
 $defaultOn = [pscustomobject]@{
     Name             = 'BuildingManagement'
     Slug             = 'BuildingManagement'
@@ -110,17 +117,61 @@ $defaultOn = [pscustomobject]@{
     Environments     = $current.Environments
 }
 $resetDefault = Get-UiFeatureTogglePlan -Spec $building -Current $defaultOn -EnvironmentIds $ids -Mode ResetDefaults
-Test-Case 'reset turns a default off' @($resetDefault.DefaultIsEnabled, $resetDefault.ChangeDefault) @($false, $true)
+Test-Case 'reset turns a default off' @($resetDefault.DefaultEnabled, $resetDefault.ChangeDefault) @($false, $true)
 $modifyJson = ConvertTo-OctopusJson (New-FeatureToggleBody 'Projects-981' 'Spaces-355' $building $reset $current)
-Test-Case 'modify keeps rollout' $modifyJson.Contains('"RolloutPercentage":10') $true
-Test-Case 'modify omits phases' $modifyJson.Contains('"Phases"') $false
+Test-Case 'modify includes phases' $modifyJson.Contains('"Phases"') $true
+Test-Case 'modify omits RolloutPercentage' $modifyJson.Contains('"RolloutPercentage"') $false
 Test-Case 'modify default off' $modifyJson.Contains('"DefaultIsEnabled":false') $true
+Test-Case 'modify omits plan Enabled name' $modifyJson.Contains('"Enabled":') $false
 
 $set = Get-UiFeatureTogglePlan -Spec $vendor -Current $current -EnvironmentIds $ids -Mode Set -EnvironmentName prod -EnvironmentEnabled $true
-Test-Case 'set prod on' (ConvertTo-Boolean ($set.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' }).IsEnabled) $true
-Test-Case 'set leaves uat' (ConvertTo-Boolean ($set.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).IsEnabled) $true
+Test-Case 'set prod on' (Get-UiFeatureToggleEnvironmentEnabled ($set.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' })) $true
+Test-Case 'set leaves uat' (Get-UiFeatureToggleEnvironmentEnabled ($set.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' })) $true
 $same = Get-UiFeatureTogglePlan -Spec $vendor -Current $current -EnvironmentIds $ids -Mode Set -EnvironmentName prod -EnvironmentEnabled $false
 Test-Case 'set already off is none' $same.Action 'none'
+
+$legacyCurrent = [pscustomobject]@{
+    Name             = 'BuildingManagement'
+    Slug             = 'BuildingManagement'
+    Description      = 'operator text'
+    DefaultIsEnabled = $false
+    Environments     = @(
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @(); RolloutPercentage = 10 }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-2'; IsEnabled = $false; Phases = @() }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-3'; IsEnabled = $false; Phases = @() }
+    )
+}
+Test-Case 'legacy model detected' (Get-UiFeatureToggleTargetingModel $legacyCurrent) 'legacy'
+$legacyRefused = $false
+$legacyMessage = ''
+try { Assert-UiFeatureToggleRulesWritable $legacyCurrent 'BuildingManagement' } catch { $legacyRefused = $true; $legacyMessage = [string]$_.Exception.Message }
+Test-Case 'legacy write refused' $legacyRefused $true
+Test-Case 'legacy refuse names upgrade' ($legacyMessage -match 'legacy' -and $legacyMessage -match 'Upgrade') $true
+$legacyPlan = Get-UiFeatureTogglePlan -Spec $building -Current $legacyCurrent -EnvironmentIds $ids -Mode ResetDefaults
+$legacyBodyRefused = $false
+try {
+    $null = New-FeatureToggleBody 'Projects-981' 'Spaces-355' $building $legacyPlan $legacyCurrent
+} catch { $legacyBodyRefused = $true }
+# Plan strips RolloutPercentage, so body build succeeds; assert the payload has no legacy field.
+$rulesBodyFromLegacyPlan = ConvertTo-OctopusJson (New-FeatureToggleBody 'Projects-981' 'Spaces-355' $building $legacyPlan ([pscustomobject]@{
+            Id               = 'FeatureToggles-1'
+            Name             = 'BuildingManagement'
+            Slug             = 'BuildingManagement'
+            DefaultIsEnabled = $false
+            Environments     = @(
+                [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @(@{ Rules = @() }) }
+            )
+        }))
+Test-Case 'upgraded write omits RolloutPercentage' ($rulesBodyFromLegacyPlan -match 'RolloutPercentage') $false
+Test-Case 'upgraded write keeps IsEnabled wire' ($rulesBodyFromLegacyPlan -match '"IsEnabled"') $true
+Test-Case 'upgraded write keeps Phases wire' ($rulesBodyFromLegacyPlan -match '"Phases"') $true
+$assertPayload = $false
+try { Assert-UiFeatureToggleRulesPayload '{"Environments":[{"RolloutPercentage":10}]}' } catch { $assertPayload = $true }
+Test-Case 'rules payload assert rejects RolloutPercentage' $assertPayload $true
+Test-Case 'legacy body path unused' $legacyBodyRefused $false
+
+$nullModel = Get-UiFeatureToggleTargetingModel $null
+Test-Case 'create model is rules' $nullModel 'rules'
 
 $unknown = $false
 try { Get-UiFeatureTogglePlan -Spec $building -Current $null -EnvironmentIds $ids -Mode Set -EnvironmentName staging -EnvironmentEnabled $true } catch { $unknown = $true }
@@ -133,6 +184,7 @@ Test-Case 'ensure selects both' @(Select-UiFeatureToggleSpecs 'Ensure' '').Count
 $offline = @(Get-OfflineEnsurePlans)
 Test-Case 'offline create count' $offline.Count 2
 Test-Case 'offline second name' $offline[1].Name 'VendorManagement'
+Test-Case 'offline format uses defaultEnabled' ((Format-UiFeatureTogglePlan -Plan $offline[0] -IdToName (@{ tdd = 'tdd'; uat = 'uat'; prod = 'prod' })) -match 'default=off') $true
 
 $repoSystem = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..' 'system.json') -Raw | ConvertFrom-Json
 Assert-UiFeatureToggleSystem $repoSystem
@@ -142,7 +194,9 @@ $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ensure-ui-feature-t
 Test-Case 'script has no api key literal' ($source -match 'API-[A-Za-z0-9]{8,}') $false
 Test-Case 'script does not say fleet' ($source -match '(?i)fleet') $false
 Test-Case 'script calls featuretoggles' ($source -match '/featuretoggles') $true
-Test-Case 'script does not call feature-flags' ($source -match '/feature-flags') $false
+Test-Case 'script uri helpers use featuretoggles' ((Get-UiFeatureToggleCollectionUri 'https://example/p') -eq 'https://example/p/featuretoggles') $true
+Test-Case 'script uri helpers omit feature-flags path' ((Get-UiFeatureToggleCollectionUri 'https://example/p') -match '/feature-flags') $false
+Test-Case 'script has no upgrade endpoint helper' ($source -match 'function\s+.*Upgrade|featuretoggles/upgrade|/feature-flags/.*/upgrade') $false
 
 $projectBase = 'https://example.test/api/Spaces-355/projects/Projects-981'
 Test-Case 'list uri' (Get-UiFeatureToggleListUri $projectBase 0 100) "$projectBase/featuretoggles?skip=0&take=100"
@@ -241,6 +295,9 @@ $runbook = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..' 'docs' 'ops' '
 Test-Case 'runbook turns tdd off' ($runbook.Contains('-Name BuildingManagement -Environment tdd -Enabled:false')) $true
 Test-Case 'runbook turns tdd on' ($runbook.Contains('-Name BuildingManagement -Environment tdd -Enabled:true')) $true
 Test-Case 'runbook reads back with show' ($runbook -match '(?s)-Enabled:false\r?\n.*-Action Show\r?\n.*-Enabled:true\r?\n.*-Action Show') $true
+Test-Case 'runbook mentions rules' ($runbook -match '(?i)rules') $true
+Test-Case 'runbook mentions OpenFeature 4.0.0' ($runbook -match '4\.0\.0') $true
+Test-Case 'runbook notes providers below minimum' ($runbook -match '(?i)below the minimum|earlier provider|keep the flag values') $true
 $fencesHaveDollarBool = $false
 foreach ($fence in [regex]::Matches($runbook, '(?s)```[a-z]*\r?\n(.*?)```')) {
     if ($fence.Groups[1].Value -match '\$true|\$false') { $fencesHaveDollarBool = $true }
@@ -254,9 +311,9 @@ $script:toggleState = @{
         Description      = 'buildings'
         DefaultIsEnabled = $false
         Environments     = [ordered]@{
-            'Environments-1' = $true
-            'Environments-2' = $false
-            'Environments-3' = $false
+            'Environments-1' = @{ Enabled = $true; Phases = @(@{ Rules = @() }) }
+            'Environments-2' = @{ Enabled = $false; Phases = @() }
+            'Environments-3' = @{ Enabled = $false; Phases = @() }
         }
     }
     'FeatureToggles-2' = @{
@@ -265,9 +322,9 @@ $script:toggleState = @{
         Description      = 'vendors'
         DefaultIsEnabled = $false
         Environments     = [ordered]@{
-            'Environments-1' = $true
-            'Environments-2' = $false
-            'Environments-3' = $false
+            'Environments-1' = @{ Enabled = $true; Phases = @(@{ Rules = @() }) }
+            'Environments-2' = @{ Enabled = $false; Phases = @() }
+            'Environments-3' = @{ Enabled = $false; Phases = @() }
         }
     }
 }
@@ -276,10 +333,11 @@ $script:octopusCalls = [System.Collections.Generic.List[object]]::new()
 function New-FakeToggle([string] $Id) {
     $entry = $script:toggleState[$Id]
     $environments = foreach ($environmentId in @($entry.Environments.Keys)) {
+        $row = $entry.Environments[$environmentId]
         [pscustomobject]@{
             DeploymentEnvironmentId = [string]$environmentId
-            IsEnabled               = [bool]$entry.Environments[$environmentId]
-            Phases                  = @()
+            IsEnabled               = [bool]$row.Enabled
+            Phases                  = @($row.Phases)
         }
     }
     return [pscustomobject]@{
@@ -335,9 +393,14 @@ function Invoke-Octopus {
     if ($Uri -match '/featuretoggles/(FeatureToggles-\d+)$' -and $Method -eq 'Put') {
         $id = $Matches[1]
         $parsed = $bodyText | ConvertFrom-Json
+        if ($bodyText -match 'RolloutPercentage') { throw 'put carried RolloutPercentage' }
         foreach ($configured in @(ConvertTo-ObjectList $parsed.Environments)) {
             $environmentId = [string]$configured.DeploymentEnvironmentId
-            $script:toggleState[$id].Environments[$environmentId] = [bool]$configured.IsEnabled
+            $phases = @(ConvertTo-ObjectList (Get-NoteProperty $configured 'Phases'))
+            $script:toggleState[$id].Environments[$environmentId] = @{
+                Enabled = [bool]$configured.IsEnabled
+                Phases  = $phases
+            }
         }
         return New-FakeToggle $id
     }
@@ -425,8 +488,12 @@ $puts = @($script:octopusCalls | Where-Object { $_.Method -eq 'Put' })
 Test-Case 'four writes for off on disable enable' $puts.Count 4
 $putTargetsOk = $true
 $uatProdStayOff = $true
+$putsHavePhases = $true
+$putsHaveLegacy = $false
 foreach ($put in $puts) {
     if ($put.Uri -notmatch '/featuretoggles/FeatureToggles-1$') { $putTargetsOk = $false }
+    if ($put.Body -notmatch '"Phases"') { $putsHavePhases = $false }
+    if ($put.Body -match 'RolloutPercentage') { $putsHaveLegacy = $true }
     $parsed = $put.Body | ConvertFrom-Json
     $byId = @{}
     foreach ($configured in @($parsed.Environments)) { $byId[[string]$configured.DeploymentEnvironmentId] = [bool]$configured.IsEnabled }
@@ -434,6 +501,8 @@ foreach ($put in $puts) {
 }
 Test-Case 'writes touch only building management' $putTargetsOk $true
 Test-Case 'writes leave uat and prod off' $uatProdStayOff $true
+Test-Case 'writes include phases' $putsHavePhases $true
+Test-Case 'writes omit RolloutPercentage' (-not $putsHaveLegacy) $true
 $posted = @($script:octopusCalls | Where-Object { $_.Method -eq 'Post' })
 Test-Case 'mock did not create' $posted.Count 0
 $carriedCredential = $false
