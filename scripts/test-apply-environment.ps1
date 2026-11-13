@@ -28,7 +28,7 @@ if ($parseErrors.Count -gt 0) {
     Write-Host "FAIL apply-environment.ps1 does not parse: $($parseErrors[0])"
     exit 1
 }
-$needed = @('Get-DeprecatedProdComputeName', 'Select-PresentResourceName')
+$needed = @('Get-DeprecatedProdComputeName', 'Select-PresentResourceName', 'Remove-DeprecatedProdCompute')
 foreach ($fn in $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     if ($needed -contains $fn.Name) {
         . ([scriptblock]::Create($fn.Extent.Text))
@@ -114,6 +114,18 @@ Test-Case 'apply-environment documents #575' (
 
 Test-Case 'apply-environment calls Remove-DeprecatedProdCompute before stack apply' (
     (Get-Content -LiteralPath $scriptPath -Raw) -match 'Remove-DeprecatedProdCompute[\s\S]*Invoke-StackApply'
+) $true
+
+# Regression: system 1.0.207 failed in tdd because Mandatory [string[]] $Name rejected @().
+$emptyCallOk = try { Remove-DeprecatedProdCompute -Group 'rg-cmdemo1-nonprod' -Name @(); $true } catch { $false }
+Test-Case 'Remove-DeprecatedProdCompute accepts empty -Name (tdd/uat)' $emptyCallOk $true
+
+Test-Case 'Remove-DeprecatedProdCompute declares AllowEmptyCollection' (
+    (Get-Content -LiteralPath $scriptPath -Raw) -match 'AllowEmptyCollection\(\)\]\s*\[string\[\]\]\s*\$Name'
+) $true
+
+Test-Case 'apply-environment skips Remove when no deprecated prod names' (
+    (Get-Content -LiteralPath $scriptPath -Raw) -match 'if \(\$deprecatedProdCompute\.Count -gt 0\)'
 ) $true
 
 if ($failures -gt 0) {

@@ -535,7 +535,9 @@ function Select-PresentResourceName {
 function Remove-DeprecatedProdCompute {
     param(
         [Parameter(Mandatory)] [string] $Group,
-        [Parameter(Mandatory)] [string[]] $Name
+        # AllowEmptyCollection: tdd/uat pass @() here. Mandatory without it rejects an empty array and failed
+        # system 1.0.207 in tdd (~78s) after #671.
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Name
     )
     if ($Name.Count -eq 0) { return }
     $PSNativeCommandUseErrorActionPreference = $false
@@ -554,7 +556,10 @@ function Remove-DeprecatedProdCompute {
     }
 }
 $deprecatedProdCompute = @(Get-DeprecatedProdComputeName -Slug $slug -Environment $environmentName -Retired $retiredDeployables)
-Remove-DeprecatedProdCompute -Group $resourceGroup -Name $deprecatedProdCompute
+# Only call when prod has names to consider: an empty -Name @() used to fail Mandatory binding (system 1.0.207 tdd).
+if ($deprecatedProdCompute.Count -gt 0) {
+    Remove-DeprecatedProdCompute -Group $resourceGroup -Name $deprecatedProdCompute
+}
 
 try {
     $result = Invoke-StackApply -Name $stackName -Group $resourceGroup -TemplateFile $template -ParametersFile $parametersFile
