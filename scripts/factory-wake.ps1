@@ -8,11 +8,12 @@
 .DESCRIPTION
     Workflow factory-wake runs this when workflow env-checks completes. It acts only for a pull_request run whose head
     branch is not the default branch, whose conclusion is success or failure, whose open pull request is by
-    cm-ai-ops-bot, and whose linked issues still need a Review or fix. For each such issue it removes and re-adds the
+    cm-ai-ops-bot, and whose linked issues still need a Review or fix.     For each such issue it removes and re-adds the
     cm-ai-ops-bot assignee (assigner becomes github-actions[bot]), which fires the bot's existing issue-assigned
-    listener. It posts no comments and uses only GITHUB_TOKEN. Dedupe: skip an issue if cm-ai-ops-bot was assigned on
-    it in the last 10 minutes, or if it already has a Review verdict comment posted after the pull request's head
-    commit date.
+    listener. It posts no comments and uses only GITHUB_TOKEN. Dedupe: skip an issue if it already has a Review
+    verdict comment posted after the pull request's head commit date. The 10-minute recent-assign window does not
+    apply when the wake reason is CI finished (this script), so a green bot PR still gets a Review nudge even if
+    the bot was just assigned for In Progress → Review.
 
 .PARAMETER Repository
     owner/name of this repository.
@@ -29,7 +30,8 @@
 .PARAMETER BotLogin
     The factory bot login to re-assign.
 .PARAMETER DedupeMinutes
-    Skip when the bot was assigned on the issue within this many minutes.
+    Recent-assign window in minutes. Unused for the CI-finished wake reason (this script); kept for
+    Get-IssueNudgeDecision when a non-CI reason is passed in tests.
 .PARAMETER Now
     Clock for the recent-assign window (UTC). Tests pass a fixed instant.
 .PARAMETER DryRun
@@ -60,7 +62,7 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
 
-$script:VerdictPrefixes = @('Review → Merged', 'Review → Done', 'Review → In Progress')
+$script:VerdictPrefixes = @('Review → Merged', 'Review → Done', 'Review → In Progress', 'Review: PASS')
 $script:ClosesPattern = '(?im)\bCloses\s+#(?<n>\d+)\b'
 
 function Get-FactValue($Object, [string] $Name) {
@@ -173,6 +175,7 @@ function Test-ReviewVerdictAfterHead {
 
 function Get-IssueNudgeDecision {
     # Per linked issue: nudge (re-assign), or skip with reason.
+    # CI finished: do not apply the recent-assign debounce (In Progress → Review assign must not block the Review nudge).
     param(
         [int] $IssueNumber,
         [object[]] $AssignedEvents,
@@ -180,15 +183,9 @@ function Get-IssueNudgeDecision {
         [datetime] $HeadCommitDate,
         [string] $BotLogin,
         [datetime] $Now,
-        [int] $DedupeMinutes
+        [int] $DedupeMinutes,
+        [string] $WakeReason = 'CI finished'
     )
-    if (Test-BotAssignedRecently -AssignedEvents $AssignedEvents -BotLogin $BotLogin -Now $Now -Minutes $DedupeMinutes) {
-        return [ordered] @{
-            Issue  = $IssueNumber
-            Action = 'skip'
-            Reason = "cm-ai-ops-bot was assigned on #${IssueNumber} within the last $DedupeMinutes minutes"
-        }
-    }
     if (Test-ReviewVerdictAfterHead -Comments $Comments -HeadCommitDate $HeadCommitDate) {
         return [ordered] @{
             Issue  = $IssueNumber
@@ -196,10 +193,18 @@ function Get-IssueNudgeDecision {
             Reason = "issue #${IssueNumber} already has a Review verdict comment after the head commit"
         }
     }
+    if ($WakeReason -cne 'CI finished' -and
+        (Test-BotAssignedRecently -AssignedEvents $AssignedEvents -BotLogin $BotLogin -Now $Now -Minutes $DedupeMinutes)) {
+        return [ordered] @{
+            Issue  = $IssueNumber
+            Action = 'skip'
+            Reason = "cm-ai-ops-bot was assigned on #${IssueNumber} within the last $DedupeMinutes minutes"
+        }
+    }
     return [ordered] @{
         Issue  = $IssueNumber
         Action = 'nudge'
-        Reason = "re-assign $BotLogin on #${IssueNumber} (CI finished)"
+        Reason = "re-assign $BotLogin on #${IssueNumber} ($WakeReason)"
     }
 }
 
