@@ -502,6 +502,60 @@ if ($retiredPlans.Count -gt 0) {
     }
 }
 
+# Deprecated aisf/fworker container apps and fwrunner jobs in prod (#575). Retirement (deployables[].retired,
+# decision 0058 / #617) already omits them from the stack template, and --action-on-unmanage deleteResources removes
+# stack-managed ones. This deletes the four exact prod names when they are still in the group (jobs that left the
+# stack oddly, or a prior apply that did not finish the delete), as the prod deploy identity, idempotently. tdd/uat
+# are left alone here: uat was #574. Identities, storage and AI leftovers stay for #578.
+function Get-DeprecatedProdComputeName {
+    param(
+        [Parameter(Mandatory)] [string] $Slug,
+        [Parameter(Mandatory)] [string] $Environment,
+        [string[]] $Retired = @()
+    )
+    # Unary comma keeps an empty array as an empty array through the pipeline (plain @() becomes $null).
+    if ($Environment -cne 'prod') { return , @() }
+    $retiredSet = @($Retired | ForEach-Object { [string] $_ })
+    if ($retiredSet -cnotcontains 'aisf' -or $retiredSet -cnotcontains 'fworker') { return , @() }
+    # Exact names from issue #575 (resource group rg-<slug>-prod). The container-app suffix is the live prod name.
+    return , @(
+        "ca-$Slug-prod-aisf-bhj5"
+        "ca-$Slug-prod-fworker-bhj5"
+        "caj-$Slug-prod-fwrunner"
+        "caj-$Slug-prod-fwrunner-codex"
+    )
+}
+function Select-PresentResourceName {
+    # Names from -Wanted that appear in -Present (case-insensitive Azure resource names). Pure: no Azure call.
+    param([string[]] $Wanted = @(), [string[]] $Present = @())
+    $presentLower = @{}
+    foreach ($name in @($Present)) { if ($name) { $presentLower[([string] $name).ToLowerInvariant()] = [string] $name } }
+    return , @($Wanted | Where-Object { $_ -and $presentLower.ContainsKey(([string] $_).ToLowerInvariant()) } | ForEach-Object { $presentLower[([string] $_).ToLowerInvariant()] })
+}
+function Remove-DeprecatedProdCompute {
+    param(
+        [Parameter(Mandatory)] [string] $Group,
+        [Parameter(Mandatory)] [string[]] $Name
+    )
+    if ($Name.Count -eq 0) { return }
+    $PSNativeCommandUseErrorActionPreference = $false
+    $listed = @(az resource list --resource-group $Group --query '[].{id:id,name:name}' --output json 2>$null | ConvertFrom-Json)
+    $PSNativeCommandUseErrorActionPreference = $true
+    $presentNames = @($listed | ForEach-Object { [string] $_.name })
+    $toRemove = @(Select-PresentResourceName -Wanted $Name -Present $presentNames)
+    if ($toRemove.Count -eq 0) {
+        Write-Host "Deprecated prod aisf/fworker/fwrunner compute (#575): none of $($Name -join ', ') remain in $Group."
+        return
+    }
+    foreach ($gone in $toRemove) {
+        $id = [string] (@($listed | Where-Object { [string] $_.name -ieq $gone })[0].id)
+        Write-Host "Deleting deprecated prod compute $($gone) (#575): retired aisf/fworker; stack apply would omit it."
+        az resource delete --ids $id --output none
+    }
+}
+$deprecatedProdCompute = @(Get-DeprecatedProdComputeName -Slug $slug -Environment $environmentName -Retired $retiredDeployables)
+Remove-DeprecatedProdCompute -Group $resourceGroup -Name $deprecatedProdCompute
+
 try {
     $result = Invoke-StackApply -Name $stackName -Group $resourceGroup -TemplateFile $template -ParametersFile $parametersFile
 }
