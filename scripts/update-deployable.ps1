@@ -12,9 +12,10 @@
     stack (an environment release, or the nightly drift check) agrees with what runs. The deploy identity is excluded
     from the stack's deny settings, so it may make this change. It then waits until the new revision is ready, and fails
     at once, with the container's last console lines, when the revision cannot start. When the deployable is ui and
-    Octopus.FeatureToggles.ClientIdentifier has text, that same update sets the container app environment variable
-    Octopus__FeatureFlags__ClientIdentifier. A container app has no package transform. The variable empty, or any
-    other deployable, leaves the update as it was.
+    Octopus.FeatureFlags.ClientIdentifier (or the deprecated alias Octopus.FeatureToggles.ClientIdentifier) has text,
+    that same update sets the container app environment variable Octopus__FeatureFlags__ClientIdentifier. A container
+    app has no package transform. Both variables empty, or any other deployable, leaves the update as it was. The
+    value is never logged.
 
 .PARAMETER LoadOnly
     Defines the planner functions and stops, for scripts/test-update-deployable.ps1. Octopus runs this file with the
@@ -28,11 +29,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Resolve-FeatureFlagClientIdentifier {
+    # Prefer the current Octopus name; fall back to the deprecated alias. Never log the value (a JWT).
+    param($Parameters)
+    if ($null -eq $Parameters) { return '' }
+    $preferred = [string] $Parameters['Octopus.FeatureFlags.ClientIdentifier']
+    if (-not [string]::IsNullOrWhiteSpace($preferred)) { return $preferred }
+    return [string] $Parameters['Octopus.FeatureToggles.ClientIdentifier']
+}
+
 function Get-FeatureFlagClientInject {
-    # Octopus feature toggles: the client identifier is Octopus.FeatureToggles.ClientIdentifier, a variable of a
-    # project that has toggles. A container app has no package transform, so the ui deploy writes it as the
-    # environment variable the OpenFeature provider reads. Empty, missing, or any deployable other than ui: nothing
-    # is added, and the container app update is the one it was.
+    # Octopus feature flags: the client identifier is Octopus.FeatureFlags.ClientIdentifier (current), or
+    # Octopus.FeatureToggles.ClientIdentifier (deprecated alias). A container app has no package transform, so the
+    # ui deploy writes it as the environment variable the OpenFeature provider reads. Empty, missing, or any
+    # deployable other than ui: nothing is added, and the container app update is the one it was. Never log the value.
     param(
         [Parameter(Mandatory)] [string] $Deployable,
         [AllowEmptyString()] [string] $ClientIdentifier
@@ -375,7 +385,7 @@ else {
     Write-Host "Updating $app from $currentImage to $image"
     # Feature toggles on ui only. The arguments are empty unless the client identifier is set, so every other
     # deployable keeps the update it had. A project without the variable reads as empty here.
-    $featureFlags = Get-FeatureFlagClientInject -Deployable $deployable -ClientIdentifier ([string] $OctopusParameters['Octopus.FeatureToggles.ClientIdentifier'])
+    $featureFlags = Get-FeatureFlagClientInject -Deployable $deployable -ClientIdentifier (Resolve-FeatureFlagClientIdentifier -Parameters $OctopusParameters)
     if ($express) {
         # The environment's shared identity pulls the image (the seed gave it AcrPull); the app carries it already.
         $pullIdentity = [string] (@($current.identity.userAssignedIdentities.Keys | Where-Object { $_ -match "/id-$([regex]::Escape($slug))-$([regex]::Escape($environmentName))-app$" }) | Select-Object -First 1)

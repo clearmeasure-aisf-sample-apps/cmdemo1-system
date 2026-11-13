@@ -227,6 +227,22 @@ resource "octopusdeploy_variable" "github_token" {
   }
 }
 
+# ui only: OpenFeature client identifier for Octopus feature flags. Current name and deprecated alias, same value.
+# Created only when TF_VAR_feature_toggles_client_identifier (repository secret OCTOPUS_FEATURES_CLIENT_IDENTIFIER) has text.
+resource "octopusdeploy_variable" "feature_toggles_client_identifier" {
+  for_each = contains(keys(local.deployables), "ui") && nonsensitive(var.feature_toggles_client_identifier != "") ? toset([
+    "Octopus.FeatureFlags.ClientIdentifier",
+    "Octopus.FeatureToggles.ClientIdentifier",
+  ]) : toset([])
+
+  owner_id        = local.project_ids["ui"]
+  name            = each.value
+  type            = "Sensitive"
+  is_sensitive    = true
+  sensitive_value = var.feature_toggles_client_identifier
+  description     = "Client identifier for Octopus feature flags on ui. Current name Octopus.FeatureFlags.ClientIdentifier; Octopus.FeatureToggles.ClientIdentifier is the deprecated alias. Step Update deployable writes it as Octopus__FeatureFlags__ClientIdentifier on the ui container app. From repository secret OCTOPUS_FEATURES_CLIENT_IDENTIFIER. Never print the value."
+}
+
 # One task per environment at a time, across both projects and the runbooks: an app deployment, a system deployment
 # and a restore test touch the same stack and database, and running them together fails (stack outputs read while the
 # stack redeploys, ConflictingDatabaseOperation). Octopus queues tasks that share a concurrency tag.

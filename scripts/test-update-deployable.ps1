@@ -25,10 +25,34 @@ function Test-Case([string] $Name, $Actual, $Expected) {
 
 $envName = 'Octopus__FeatureFlags__ClientIdentifier'
 $client = 'client-identifier-tdd'
+$aliasClient = 'client-identifier-alias'
 $others = @(
     @{ name = 'OTEL_SERVICE_NAME'; value = 'cmdemo1-ui' }
     @{ name = 'AI_OpenAI_ApiKey'; secretRef = 'ai-openai-apikey' }
 )
+
+$preferred = Resolve-FeatureFlagClientIdentifier -Parameters @{
+    'Octopus.FeatureFlags.ClientIdentifier'   = $client
+    'Octopus.FeatureToggles.ClientIdentifier' = $aliasClient
+}
+Test-Case 'resolver prefers FeatureFlags' $preferred $client
+$fallback = Resolve-FeatureFlagClientIdentifier -Parameters @{
+    'Octopus.FeatureFlags.ClientIdentifier'   = ''
+    'Octopus.FeatureToggles.ClientIdentifier' = $aliasClient
+}
+Test-Case 'resolver falls back to FeatureToggles' $fallback $aliasClient
+$blankPreferred = Resolve-FeatureFlagClientIdentifier -Parameters @{
+    'Octopus.FeatureFlags.ClientIdentifier'   = '   '
+    'Octopus.FeatureToggles.ClientIdentifier' = $aliasClient
+}
+Test-Case 'resolver treats blank FeatureFlags as missing' $blankPreferred $aliasClient
+$bothEmpty = Resolve-FeatureFlagClientIdentifier -Parameters @{
+    'Octopus.FeatureFlags.ClientIdentifier'   = ''
+    'Octopus.FeatureToggles.ClientIdentifier' = ''
+}
+Test-Case 'resolver empty when both empty' $bothEmpty ''
+$noParams = Resolve-FeatureFlagClientIdentifier -Parameters $null
+Test-Case 'resolver empty when parameters missing' $noParams ''
 
 $ui = Get-FeatureFlagClientInject -Deployable 'ui' -ClientIdentifier $client
 Test-Case 'ui with identifier applies' $ui.Apply $true
@@ -86,9 +110,15 @@ Test-Case 'set inject adds the env assignment' @($recorded) @('--name', 'app', '
 $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'update-deployable.ps1') -Raw
 Test-Case 'script still fails fast' ($source -match 'function Get-RevisionProblem') $true
 Test-Case 'script asks the planner' ($source -match 'Get-FeatureFlagClientInject') $true
+Test-Case 'script resolves the client identifier' ($source -match 'Resolve-FeatureFlagClientIdentifier -Parameters \$OctopusParameters') $true
 Test-Case 'script merges express env' ($source -match 'Merge-FeatureFlagClientEnv') $true
 Test-Case 'script keeps the image update' ($source -match 'az containerapp update --name \$app --resource-group \$resourceGroup --image \$image @featureFlagArguments --no-wait --output none') $true
 Test-Case 'script builds the splat from the planner' ($source -match 'Get-FeatureFlagUpdateArguments -Inject \$featureFlags') $true
+# The JWT must never be written to the deployment log.
+Test-Case 'script never logs the client identifier value' (
+    ($source -notmatch 'Write-Host.*(FeatureFlags\.ClientIdentifier|FeatureToggles\.ClientIdentifier|featureFlags\.Value)') -and
+    ($source -notmatch 'Write-Verbose.*(FeatureFlags\.ClientIdentifier|FeatureToggles\.ClientIdentifier|featureFlags\.Value)')
+) $true
 
 if ($failures -gt 0) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'OK'

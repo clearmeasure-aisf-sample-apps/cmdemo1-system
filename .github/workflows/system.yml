@@ -64,6 +64,7 @@ jobs:
         shell: pwsh
         env:
           TF_VAR_github_token: ${{ secrets.OCTOPUS_GITHUB_TOKEN }}
+          TF_VAR_feature_toggles_client_identifier: ${{ secrets.OCTOPUS_FEATURES_CLIENT_IDENTIFIER }}
           TF_VAR_github_app_private_key: ${{ secrets.SYSTEM_APP_PRIVATE_KEY }}
         run: |
           $ErrorActionPreference = 'Stop'
