@@ -22,7 +22,9 @@ On means the surface is available. Off hides it and rejects the call.
 
 `octopus/` is Terraform provider `OctopusDeploy/octopusdeploy` **1.20.0**, which has no feature-toggle resource. Job `system` (`octopus-apply`) does not create these toggles and does not put a flipped environment back. Do not copy the on/off values into `system.json` `settings`: those are container environment variables, not feature flags, and they would ship only on a system deployment.
 
-The client identifier is the Octopus variable `Octopus.FeatureToggles.ClientIdentifier`. It is a credential for the flag service. Do not write it into git, `system.json`, an issue, or a workflow log. `scripts/update-deployable.ps1` writes it onto the UI container app as `Octopus__FeatureFlags__ClientIdentifier` when the variable has text and the deployable is `ui`. Octopus inlines that script when the system configuration is applied. A `ui` release created after that apply is the one that injects it. A project without the variable is unchanged. Until the app runtime ships ([cmdemo1-workorders#1466](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1466)), a flip changes Octopus only. `GET /api/features/flags` will not follow the toggle.
+The client identifier is the Octopus variable `Octopus.FeatureFlags.ClientIdentifier` (current name). `Octopus.FeatureToggles.ClientIdentifier` is a deprecated alias that still works. It is a JWT for the flag service. Do not write it into git, `system.json`, an issue, a PR, or a workflow log. Do not print it. Repository secret `OCTOPUS_FEATURES_CLIENT_IDENTIFIER` (name only; never the value) feeds Terraform as `TF_VAR_feature_toggles_client_identifier`; `octopus/` creates both Octopus variable names on project `cmdemo1-ui` when that secret has text. `scripts/update-deployable.ps1` prefers `Octopus.FeatureFlags.ClientIdentifier`, falls back to `Octopus.FeatureToggles.ClientIdentifier`, and writes the value onto the UI container app as `Octopus__FeatureFlags__ClientIdentifier` when either has text and the deployable is `ui`. Empty leaves the update unchanged. Octopus inlines that script when the system configuration is applied. A `ui` release created after that apply is the one that injects it. A project without the variable is unchanged.
+
+Acceptance is a live flip in `tdd`: after the identifier reaches the tdd ui container, flipping a `cmdemo1-ui` flag in Octopus changes tdd `GET /api/features/flags`. That flip also proves Container Apps can reach `https://features.octopus.com`.
 
 ## Create
 
@@ -81,7 +83,7 @@ pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name Ve
 From pwsh, `-Enabled $true` and `-Enabled $false` still bind. Set refuses a toggle that has not been created yet.
 
 5. When the UI process is evaluating live flags, refresh the site. No redeploy is required for the flip itself. A short cache can take a few seconds. Confirm with `GET /api/features/flags` on that environment's UI: the slug is true or false with the row you set.
-6. The client identifier reaches the running container on the next `ui` release after the system configuration that inlines `scripts/update-deployable.ps1` is applied. Until [cmdemo1-workorders#1466](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1466) has shipped, stop after the save. The row in Octopus is the record of the flip. The running app does not read it yet, and a missing client identifier stays off once it does.
+6. The client identifier reaches the running container on the next `ui` release after the system configuration that creates the Octopus variables and inlines `scripts/update-deployable.ps1` is applied (secret `OCTOPUS_FEATURES_CLIENT_IDENTIFIER` must already hold the JWT). When the UI process evaluates live flags, a flip changes `GET /api/features/flags` with no new image; that also proves egress to `https://features.octopus.com`. A missing client identifier stays off.
 
 To put a demo back: the same row off, or `-ResetDefaults`.
 
@@ -89,6 +91,7 @@ To put a demo back: the same row off, or `-ResetDefaults`.
 
 - Running Ensure (or the UI create) against `https://clearmeasure.octopus.app`. This repository does not hold an Octopus credential, and the agent that added the script did not call the API.
 - The service-account dispatch above, if you use the workflow rather than a user key.
+- Setting repository secret `OCTOPUS_FEATURES_CLIENT_IDENTIFIER` (name only) so the next system apply creates the Octopus variables on `cmdemo1-ui`.
 - Applying the system configuration, then creating a `ui` release, so Update deployable writes `Octopus__FeatureFlags__ClientIdentifier`. The script is in this repository; the release is what puts the variable on the container app.
-- The OpenFeature runtime ([cmdemo1-workorders#1466](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1466)). Without it, the toggles have no live effect on the UI, the API, or MCP.
-- If the script's slug is not the name, telling issue 1466 the slug `Show` printed.
+- A live flip in tdd to confirm `GET /api/features/flags` follows the row (and that the container can reach `https://features.octopus.com`).
+- If the script's slug is not the name, recording that printed slug for the app lookup.

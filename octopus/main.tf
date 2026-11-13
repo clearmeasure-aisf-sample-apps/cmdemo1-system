@@ -13,6 +13,13 @@ variable "github_token" {
   sensitive   = true
 }
 
+variable "feature_toggles_client_identifier" {
+  description = "Octopus feature-flags client identifier for the ui project (repository secret OCTOPUS_FEATURES_CLIENT_IDENTIFIER). Empty skips creating the Octopus variables. A JWT: never commit or print it."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "test_runner_image" {
   description = "Execution container of the acceptance-test steps (on mcr.microsoft.com): Chromium, pwsh and .NET; the step adds .NET 10. Match the Playwright version of the app's AcceptanceTests project (cmdemo1-workorders: Microsoft.Playwright.NUnit 1.61.0, Chromium 1228): an image without the suite's Chromium makes the step install it with a warning in every deployment log."
   type        = string
