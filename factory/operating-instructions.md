@@ -26,8 +26,9 @@ below). In order:
    - a review or CI event on a pull request that is not by `cm-ai-ops-bot`.
    Otherwise, when it is an `issue-assigned` wake whose assigner is `github-actions[bot]` on an issue already in
    **Review** or **In Progress**, treat it as a CI-finished nudge from workflow `factory-wake` (env-checks completed
-   on the bot PR that closes that issue): run that item's Review (green checks) or fix (red checks) in this session,
-   then apply the existing "any Review item with green checks" and "pick up the oldest Todo when WIP frees" rules
+   on the bot PR that closes that issue): run that item's Review (green checks) or fix (red checks) in this session.
+   A CI-finished Review must post a verdict even when merge is held for Jeffrey (`Review: PASS, not merged` is
+   enough). Then apply the existing "any Review item with green checks" and end-of-wake startable-Todo sweep rules
    when the board read below is allowed. Do not post a pickup comment again.
 2. Read the issue or pull request the event names through **REST only**
    (`gh api repos/<owner>/<repo>/issues/<n>`, `…/pulls/<n>`, then REST for comments, checks and runs). Do not use
@@ -66,13 +67,18 @@ below). In order:
    }' -f id='PVT_kwDOD_ESUc4BliGL' -f q='assignee:cm-ai-ops-bot -status:Done'
    ```
    (Omit `-f cursor=…` on the first page; pass `-f cursor=<endCursor>` on later pages.) WIP is the count of those
-   items whose Status is **In Progress** or **Review**. The next Todo is the oldest **Todo** in that list. An
-   assigned open issue that is missing from the board: add it to project 679 in **Todo**.
+   items whose Status is **In Progress** or **Review**. The next Todo is the oldest **startable** **Todo** in that
+   list (skip items already marked `Blocker:` waiting for Jeffrey, and `needs-approval` items). An assigned open
+   issue that is missing from the board: add it to project 679 in **Todo**.
 5. Act only on: a new item in Todo with WIP room, the item or pull request the event names, Merged / TDD / UAT
    items (step "Deployments"), and any **Review** item whose PR has all required checks green but no verdict comment
    yet: run its Review in this session (one `gh pr checks` call per Review item; CI events don't always wake you).
-   When a merge in this session frees WIP room, pick up the oldest queued Todo item before ending (skipped when
-   step 3 withheld the board read). If nothing needs action, end. Do not re-read files, re-post status or explore a
+   Before ending, when the board read was allowed (step 3 did not withhold it) and any repository still has a free
+   WIP slot, pick the highest-priority **startable** Todo for that repo (board-wide, not only the woken issue). Do
+   this whenever a wake ends with room — after a merge, a `Blocker:` that leaves the item in Todo, a
+   `Queued: WIP is full` comment, a Review verdict that does not merge, a column move or PR close that frees a slot,
+   and after issue-assigned events that arrived during the run. Re-read the board at the end of the run so mid-run
+   assignments are not dropped. If nothing needs action, end. Do not re-read files, re-post status or explore a
    repository to confirm that nothing changed.
 
 ## Board flow and WIP
@@ -85,7 +91,8 @@ Todo → In Progress → Review → Merged → TDD → UAT → Done.
   at its limit, leave its new items in Todo and take the next Todo item from a repo with room; post one
   `Queued: WIP is full for <repo> (2).` comment on each skipped item once, never again (`<repo>` is the short
   repository name, e.g. `cmdemo1-system`).
-- Oldest assigned Todo item first (skip an item whose repo is at its limit; continue down the list).
+- Oldest assigned **startable** Todo item first (skip an item whose repo is at its limit, one already marked
+  `Blocker:` waiting for Jeffrey, or a `needs-approval` item; continue down the list to the next startable one).
 - Move the Status with `gh project item-edit` (project `PVT_kwDOD_ESUc4BliGL`, field `PVTSSF_lADOD_ESUc4BliGLzhkOn7g`;
   option ids: Todo `f75ad846`, In Progress `47fc9ee4`, Review `e19122d0`, Merged `8012c69b`, TDD `eeb01ba5`,
   UAT `ebff1a13`, Done `98236657`).
@@ -112,9 +119,10 @@ At most these comments per item:
    and link it from the comment.
 2. **In Progress → Review**: the PR link, required checks result, one line on what changed. Opening the PR moves the
    item to Review.
-3. **Review verdict**: one line per acceptance criterion with its evidence. PASS: merge first, then post it as
-   `Review → Merged`, with the merge commit — or `Review → Done` when Docs-only is yes. FAIL: `Review → In Progress`
-   and what to fix.
+3. **Review verdict**: one line per acceptance criterion with its evidence. PASS and merge allowed: merge first,
+   then post it as `Review → Merged`, with the merge commit — or `Review → Done` when Docs-only is yes. PASS but
+   merge held for Jeffrey: post `Review: PASS, not merged` (leave the item in Review; a hold is not a substitute
+   for a verdict). FAIL: `Review → In Progress` and what to fix.
 4. **Done**: `UAT → Done` (or `TDD → Done` / `Merged → Done` when that is the column the prod deploy advances from),
    the prod version and the prod `/_build` commit that contains the merge. Deploy comments for earlier environments
    are `Merged → TDD` and `TDD → UAT` (see Deployments).
@@ -166,8 +174,12 @@ duplicate journals, or a comment within a minute of another one on the same item
   - docs-only: check each criterion against the diff text; do not build or run the app;
   - otherwise: run the app (or the tests the criterion names) and take evidence from the running app: a screenshot,
     an HTTP probe or a test result for the exact page or state the criterion names. Reading the code is not evidence.
-- PASS and required checks green: squash-merge, then move to Merged — or straight to Done when Docs-only is yes
-  (every changed file is `*.md` or under `docs/**`). One comment.
+- PASS and required checks green, merge allowed: squash-merge, then move to Merged — or straight to Done when
+  Docs-only is yes (every changed file is `*.md` or under `docs/**`). One comment.
+- PASS and required checks green, but merge is held for Jeffrey (credentials, secrets, Octopus, Azure, gates, or a
+  pipeline/workflow PR whose issue was not opened by `jeffreypalermo`): post `Review: PASS, not merged` with the
+  criterion evidence, leave the item in Review, and do not merge. A hold is not a substitute for a verdict. A
+  factory-wake CI-finished reassign must still produce that verdict in the same session.
 - FAIL: back to In Progress with the failed criteria; at most 2 FAILs per item, then a Blocker comment for Jeffrey.
 - A review that requests changes is a FAIL from a person: fix it in the same PR.
 

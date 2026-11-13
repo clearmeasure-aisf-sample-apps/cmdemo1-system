@@ -103,6 +103,8 @@ Test-Case 'verdict: Review → Merged after head' (Test-ReviewVerdictAfterHead -
 Test-Case 'verdict: Review → Done before head does not count' (Test-ReviewVerdictAfterHead -Comments $verdictBefore -HeadCommitDate $headDate) $false
 Test-Case 'verdict: Review → In Progress after head' (Test-ReviewVerdictAfterHead -Comments $progressAfter -HeadCommitDate $headDate) $true
 Test-Case 'verdict: other comment after head does not count' (Test-ReviewVerdictAfterHead -Comments $otherComment -HeadCommitDate $headDate) $false
+$passNotMerged = @([ordered] @{ body = "Review: PASS, not merged`nheld for Jeffrey"; createdAt = $headDate.AddMinutes(2) })
+Test-Case 'verdict: Review: PASS, not merged after head' (Test-ReviewVerdictAfterHead -Comments $passNotMerged -HeadCommitDate $headDate) $true
 
 # --- Full plans: bot green, bot red, non-bot, default branch, 10-minute dedupe ---
 $botGreen = Get-FactoryWakePlan `
@@ -129,17 +131,34 @@ $onDefault = Get-FactoryWakePlan `
     -Issues @((New-IssueFacts)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: default-branch run skips without touching issues' @($onDefault.Action, @($onDefault.Issues).Count) @('skip', 0)
 
-$deduped = Get-FactoryWakePlan `
+$ciFinishedRecent = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
     -PullRequest (New-BotPull) -ClosingReferences @(585) `
     -Issues @((New-IssueFacts -Assigned $recent)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
-Test-Case 'plan: 10-minute dedupe skips the nudge' @($deduped.Action, $deduped.Issues[0].Action) @('skip', 'skip')
+Test-Case 'plan: CI finished ignores 10-minute assign debounce' `
+    @($ciFinishedRecent.Action, $ciFinishedRecent.Issues[0].Action, $ciFinishedRecent.Issues[0].Reason) `
+    @('nudge', 'nudge', 're-assign cm-ai-ops-bot on #585 (CI finished)')
 
 $afterVerdict = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
     -PullRequest (New-BotPull) -ClosingReferences @(585) `
     -Issues @((New-IssueFacts -Comments $verdictAfter)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: existing Review verdict after head skips' @($afterVerdict.Action, $afterVerdict.Issues[0].Action) @('skip', 'skip')
+
+$afterPassHeld = Get-FactoryWakePlan `
+    -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
+    -PullRequest (New-BotPull) -ClosingReferences @(585) `
+    -Issues @((New-IssueFacts -Assigned $recent -Comments $passNotMerged)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+Test-Case 'plan: Review: PASS, not merged after head skips even with recent assign' `
+    @($afterPassHeld.Action, $afterPassHeld.Issues[0].Action) @('skip', 'skip')
+
+# Direct decision: non-CI wake reason still honors the assign debounce.
+$nonCiDedupe = Get-IssueNudgeDecision `
+    -IssueNumber 585 -AssignedEvents $recent -Comments @() -HeadCommitDate $headDate `
+    -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10 -WakeReason 'manual'
+Test-Case 'decision: non-CI wake reason still applies 10-minute assign debounce' `
+    @($nonCiDedupe.Action, $nonCiDedupe.Reason) `
+    @('skip', 'cm-ai-ops-bot was assigned on #585 within the last 10 minutes')
 
 $bodyFallback = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
