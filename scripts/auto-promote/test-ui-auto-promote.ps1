@@ -857,6 +857,110 @@ Test-Case 'master: one pending is pending' (Get-MasterState @(@{ Name = 'a'; Sta
 Test-Case 'master: one failed is red' (Get-MasterState @(@{ Name = 'a'; State = 'failure'; Url = '' }, @{ Name = 'b'; State = 'pending'; Url = '' })).State 'red'
 Test-Case 'master: no check is not green' (Get-MasterState @()).State 'pending'
 
+# Issue #697: when master is only pending (none failed), wait in the same run then decide (injectable poll/timeout).
+function New-Master([string] $State, [object[]] $Evidence = @(), [string] $Sha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', [string] $Branch = 'master') {
+    @{ State = $State; Evidence = @($Evidence); Sha = $Sha; Branch = $Branch }
+}
+$masterWait = @{ PauseCount = 0; Logs = [Collections.Generic.List[string]]::new() }
+$masterNoPause = { param([int] $Seconds) $masterWait.PauseCount++ }.GetNewClosure()
+$masterLog = { param([string] $Message) $masterWait.Logs.Add($Message) }.GetNewClosure()
+
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$pendingThenGreen = [Collections.Queue]::new()
+$pendingThenGreen.Enqueue((New-Master 'green'))
+$waitGreen = Wait-MasterPendingClear -Initial (New-Master 'pending' @('deployments')) `
+    -ReadAgain { $pendingThenGreen.Dequeue() }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 3 -WriteLog $masterLog
+$d = Get-PromotionDecision -Facts (New-Pipe 60 $waitGreen.State)
+Test-Case '697: pending then green: wait state is green' $waitGreen.State 'green'
+Test-Case '697: pending then green: promotes by the override' @($d.Decision, $d.Reason) @('promote', 'pipeline-override')
+Test-Case '697: pending then green: paused once' $masterWait.PauseCount 1
+Test-Case '697: pending then green: log shows the wait-then-decide path' @(
+    ($masterWait.Logs[0] -like '*Waiting for master*checks*'),
+    ($masterWait.Logs[-1] -like '*green after waiting*')
+) @($true, $true)
+
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$pendingThenRed = [Collections.Queue]::new()
+$pendingThenRed.Enqueue((New-Master 'red' @('delivery https://example/x')))
+$waitRed = Wait-MasterPendingClear -Initial (New-Master 'pending' @('delivery')) `
+    -ReadAgain { $pendingThenRed.Dequeue() }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 3 -WriteLog $masterLog
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'red' @{ PipelineOverride = @{ Minutes = 60; MasterState = 'red'; MasterEvidence = @($waitRed.Evidence) } })
+Test-Case '697: pending then failure: wait state is red' $waitRed.State 'red'
+Test-Case '697: pending then failure: holds' $d.Decision 'hold'
+Test-Case '697: pending then failure: note names master is red' ($d.Note -like '*master is red*delivery*') $true
+Test-Case '697: pending then failure: log shows wait then red' @(
+    ($masterWait.Logs[0] -like '*Waiting for master*'),
+    ($masterWait.Logs[-1] -like '*red after waiting*')
+) @($true, $true)
+
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$stillPending = New-Master 'pending' @('deployments', 'workitems')
+$waitTimeout = Wait-MasterPendingClear -Initial (New-Master 'pending' @('deployments')) `
+    -ReadAgain { $stillPending }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 3 -WriteLog $masterLog
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'pending' @{ PipelineOverride = @{ Minutes = 60; MasterState = 'pending'; MasterEvidence = @($waitTimeout.Evidence) } })
+Test-Case '697: pending past timeout: still pending' $waitTimeout.State 'pending'
+Test-Case '697: pending past timeout: holds' $d.Decision 'hold'
+Test-Case '697: pending past timeout: note keeps the promised time and pending' ($d.Note -like '*after 2026-10-14 05:00 UTC if master*pending*') $true
+Test-Case '697: pending past timeout: paused TimeoutSeconds/PollSeconds times' $masterWait.PauseCount 3
+Test-Case '697: pending past timeout: log shows still pending after timeout' ($masterWait.Logs[-1] -like '*still pending after 3s*') $true
+
+# Read-MasterState wires the wait: first pending answer is waited out via ReadAgain.
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$readOnceQ = [Collections.Queue]::new()
+$readOnceQ.Enqueue((New-Master 'pending' @('no check has reported yet')))
+$readOnceQ.Enqueue((New-Master 'green'))
+$readViaWait = Read-MasterState -ReadAgain { $readOnceQ.Dequeue() }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 2 -WriteLog $masterLog
+Test-Case '697: Read-MasterState waits then returns green' $readViaWait.State 'green'
+Test-Case '697: Read-MasterState wait was logged' ($masterWait.Logs[0] -like '*Waiting for master*') $true
+# Already green: no wait.
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$readGreen = Read-MasterState -ReadAgain { New-Master 'green' }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 2 -WriteLog $masterLog
+Test-Case '697: Read-MasterState green skips the wait' @($readGreen.State, $masterWait.PauseCount, $masterWait.Logs.Count) @('green', 0, 0)
+# Already red: no wait (a failed check must still hold without polling).
+$readRed = Read-MasterState -ReadAgain { New-Master 'red' @('Build result') }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 2 -WriteLog $masterLog
+Test-Case '697: Read-MasterState red skips the wait' @($readRed.State, $masterWait.PauseCount) @('red', 0)
+
+# PR #698 review: remaining-time budget so the wait never risks the 55-minute promote job timeout.
+Test-Case '698: reserve covers Sign-off, health pause and runbook wait' $MasterPendingJobReserveSeconds (900 + $HealthPauseSeconds + ($RunbookBusyRetrySeconds * $RunbookBusyRetryLimit))
+Test-Case '698: job timeout minutes match the workflow' $MasterPendingJobTimeoutMinutes 55
+$budgetClock = @{ Now = $t0 }
+$budgetGetNow = { $budgetClock.Now }.GetNewClosure()
+$budgetStart = '2026-10-14T04:00:00Z'
+$budgetDeadline = Get-MasterPendingDeadline -StartedAt $budgetStart -JobTimeoutMinutes 55 -ReserveSeconds 1360
+Test-Case '698: deadline is start + timeout − reserve' $budgetDeadline $t0.AddMinutes(55).AddSeconds(-1360)
+Test-Case '698: no start time means no deadline' (Get-MasterPendingDeadline -StartedAt '') $null
+
+# Budget exhausted: skip wait, stay pending, hold (never promote).
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$budgetClock.Now = $t0
+$stillPendingBudget = New-Master 'pending' @('deployments')
+$waitBudgetOut = Wait-MasterPendingClear -Initial (New-Master 'pending' @('deployments')) `
+    -ReadAgain { $stillPendingBudget }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 10 `
+    -Deadline $t0.AddSeconds(-1) -GetNow $budgetGetNow -WriteLog $masterLog
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'pending' @{ PipelineOverride = @{ Minutes = 60; MasterState = 'pending'; MasterEvidence = @($waitBudgetOut.Evidence) } })
+Test-Case '698: budget exhausted: no wait' $masterWait.PauseCount 0
+Test-Case '698: budget exhausted: still pending' $waitBudgetOut.State 'pending'
+Test-Case '698: budget exhausted: holds' $d.Decision 'hold'
+Test-Case '698: budget exhausted: note keeps pending hold wording' ($d.Note -like '*after 2026-10-14 05:00 UTC if master*pending*') $true
+Test-Case '698: budget exhausted: log says skipping wait' ($masterWait.Logs[0] -like '*Skipping wait*not enough job time*') $true
+
+# Small budget shortens the wait below TimeoutSeconds (injectable clock + deadline).
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$budgetClock.Now = $t0
+$waitBudgetShort = Wait-MasterPendingClear -Initial (New-Master 'pending' @('deployments')) `
+    -ReadAgain { New-Master 'pending' @('deployments') }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 10 `
+    -Deadline $t0.AddSeconds(2) -GetNow $budgetGetNow -WriteLog $masterLog
+Test-Case '698: small budget: still pending' $waitBudgetShort.State 'pending'
+Test-Case '698: small budget: pauses only remaining seconds' $masterWait.PauseCount 2
+Test-Case '698: small budget: log uses the shortened timeout' ($masterWait.Logs[-1] -like '*still pending after 2s*') $true
+
+# Read-MasterState honours an injected deadline (budget exhausted → pending, no pause).
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$budgetClock.Now = $t0
+$readBudgetOut = Read-MasterState -ReadAgain { New-Master 'pending' @('deployments') }.GetNewClosure() `
+    -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 10 -Deadline $t0.AddSeconds(-5) -GetNow $budgetGetNow -WriteLog $masterLog
+Test-Case '698: Read-MasterState budget exhausted skips wait' @($readBudgetOut.State, $masterWait.PauseCount) @('pending', 0)
+
 # Release notes commit (#574): apps say "Build … of <sha>", system says "Commit <sha>: …" (system.yml).
 $sha40 = '875cf235b557b570b11ade1ce9f02ac381a92469'
 Test-Case 'commit: app Build … of <sha>' (Get-Commit @{ ReleaseNotes = "Build https://github.com/o/r/actions/runs/1 of $sha40, committed 2026-11-11T20:00:00Z" }) $sha40
