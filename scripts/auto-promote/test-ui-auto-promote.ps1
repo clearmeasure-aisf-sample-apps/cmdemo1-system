@@ -191,6 +191,22 @@ Test-Case 'ui in uat blocks a prod promotion' ([bool] (Get-BusyReason @(@{ Kind 
 Test-Case 'ui in tdd does not block' ([bool] (Get-BusyReason @(@{ Kind = 'deployment'; ProjectId = 'P-ui'; EnvironmentId = 'E-tdd' }) 'E-uat' 'E-tdd' 'P-ui')) $false
 Test-Case 'another project elsewhere does not block' ([bool] (Get-BusyReason @($busyA) 'E-uat' 'E-tdd' 'P-ui')) $false
 Test-Case 'nothing active does not block' ([bool] (Get-BusyReason @() 'E-uat' 'E-tdd' 'P-ui')) $false
+# Busy reason names the unfinished Octopus task (#701) so a stall can be diagnosed from the run log.
+Test-Case 'busy reason names task release and state to the target' (
+    Get-BusyReason @(@{
+            Kind = 'deployment'; ProjectId = 'Projects-981'; EnvironmentId = 'E-prod'
+            TaskId = 'ServerTasks-99'; ReleaseVersion = '1.0.211'; State = 'Executing'
+        }) 'E-prod' 'E-tdd' 'P-system' 'system'
+) 'a deployment of project Projects-981 to the target environment is not finished (task ServerTasks-99, release 1.0.211, state Executing)'
+Test-Case 'busy reason names task release and state in another environment' (
+    Get-BusyReason @(@{
+            Kind = 'deployment'; ProjectId = 'P-system'; EnvironmentId = 'E-uat'
+            TaskId = 'ServerTasks-100'; ReleaseVersion = '1.0.211'; State = 'Waiting'
+        }) 'E-prod' 'E-tdd' 'P-system' 'system'
+) 'a system deployment is not finished in another environment (task ServerTasks-100, release 1.0.211, state Waiting)'
+Test-Case 'busy reason without task fields keeps the short message' (
+    Get-BusyReason @(@{ Kind = 'deployment'; ProjectId = 'P-other'; EnvironmentId = 'E-prod' }) 'E-prod' 'E-tdd' 'P-ui'
+) 'a deployment of project P-other to the target environment is not finished'
 
 # Refused Sign-off is a hold, not a workflow failure (#569)
 function New-DeniedError([string] $Message) {
@@ -317,7 +333,7 @@ try {
 } catch { $waitExhaustedThrew = $true }
 Test-Case 'runbook still busy after budget: does not throw' $waitExhaustedThrew $false
 Test-Case 'runbook still busy after budget: Exhausted' $waitExhausted.Exhausted $true
-Test-Case 'runbook still busy after budget: Busy kept' $waitExhausted.Busy 'a runbook of project Projects-982 to the target environment is not finished'
+Test-Case 'runbook still busy after budget: Busy kept' $waitExhausted.Busy 'a runbook of project Projects-982 to the target environment is not finished (task ServerTasks-2)'
 Test-Case 'runbook still busy after budget: paused RetryLimit times' $runbookWaitState.PauseCount 3
 
 $runbookWaitState.PauseCount = 0; $runbookWaitState.Logs.Clear(); $runbookWaitState.RelistCalled = $false
@@ -328,7 +344,7 @@ $waitDeploy = Wait-BusyRunbookClear -Items @(@{ Kind = 'deployment'; ProjectId =
     -RetrySeconds 1 -RetryLimit 3 -WriteLog $captureLog
 Test-Case 'running deployment blocks at once: not Cleared' $waitDeploy.Cleared $false
 Test-Case 'running deployment blocks at once: not Exhausted' $waitDeploy.Exhausted $false
-Test-Case 'running deployment blocks at once: Busy names deployment' $waitDeploy.Busy 'a deployment of project P-dash to the target environment is not finished'
+Test-Case 'running deployment blocks at once: Busy names deployment' $waitDeploy.Busy 'a deployment of project P-dash to the target environment is not finished (task ServerTasks-3)'
 Test-Case 'running deployment blocks at once: no pause' $runbookWaitState.PauseCount 0
 Test-Case 'running deployment blocks at once: no re-list' $runbookWaitState.RelistCalled $false
 
@@ -347,6 +363,7 @@ function Get-OctopusAll([string] $Path) {
         return @(@{
                 Id        = 'ServerTasks-rb'
                 Name      = 'RunbookRun'
+                State     = 'Executing'
                 Arguments = @{ RunbookRunId = 'RunbookRuns-1' }
             })
     }
@@ -362,6 +379,59 @@ $listedOnce = Get-ActiveBusyItems
 Test-Case 'Get-ActiveBusyItems: kind project task from script-scope Octopus' @(
     $listedOnce.Items[0].Kind, $listedOnce.Items[0].ProjectId, $listedOnce.Items[0].TaskId, $listedOnce.ActiveTaskIds[0]
 ) @('runbook', 'Projects-982', 'ServerTasks-rb', 'ServerTasks-rb')
+Test-Case 'Get-ActiveBusyItems: copies State onto the busy item' $listedOnce.Items[0].State 'Executing'
+
+# Deploy path: TaskId, State and ReleaseVersion are filled so Get-BusyReason can name them (#701).
+$script:octopusRelistPhase = 0
+function Get-OctopusAll([string] $Path) {
+    if ($Path -notlike '*/tasks?*') { throw "unexpected Get-OctopusAll $Path" }
+    if ($Path -like '*states=Cancelling*') { return @() }
+    @(@{
+            Id        = 'ServerTasks-dep'
+            Name      = 'Deploy'
+            State     = 'Waiting'
+            Arguments = @{ DeploymentId = 'Deployments-1' }
+        })
+}
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    if ($Path -eq '/api/Spaces-test/deployments/Deployments-1') {
+        return @{ ProjectId = 'Projects-981'; EnvironmentId = 'E-prod'; ReleaseId = 'Releases-211' }
+    }
+    if ($Path -eq '/api/Spaces-test/releases/Releases-211') {
+        return @{ Version = '1.0.211' }
+    }
+    throw "unexpected Invoke-Octopus $Path"
+}
+$listedDeploy = Get-ActiveBusyItems
+Test-Case 'Get-ActiveBusyItems: deploy item names task state and release' @(
+    $listedDeploy.Items[0].Kind, $listedDeploy.Items[0].TaskId, $listedDeploy.Items[0].State, $listedDeploy.Items[0].ReleaseVersion
+) @('deployment', 'ServerTasks-dep', 'Waiting', '1.0.211')
+Test-Case 'Get-ActiveBusyItems: deploy busy reason includes task release state' (
+    Get-BusyReason -Items $listedDeploy.Items -TargetEnvironmentId 'E-prod' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-system' -Name 'system'
+) 'a deployment of project Projects-981 to the target environment is not finished (task ServerTasks-dep, release 1.0.211, state Waiting)'
+
+# Restore the runbook stub for the re-list wait test below.
+$script:octopusRelistPhase = 0
+function Get-OctopusAll([string] $Path) {
+    if ($Path -notlike '*/tasks?*') { throw "unexpected Get-OctopusAll $Path" }
+    if ($Path -like '*states=Cancelling*') { return @() }
+    $script:octopusRelistPhase++
+    if ($script:octopusRelistPhase -eq 1) {
+        return @(@{
+                Id        = 'ServerTasks-rb'
+                Name      = 'RunbookRun'
+                State     = 'Executing'
+                Arguments = @{ RunbookRunId = 'RunbookRuns-1' }
+            })
+    }
+    @()
+}
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    if ($Path -eq '/api/Spaces-test/runbookRuns/RunbookRuns-1') {
+        return @{ ProjectId = 'Projects-982'; EnvironmentId = 'E-uat' }
+    }
+    throw "unexpected Invoke-Octopus $Path"
+}
 
 $script:octopusRelistPhase = 0
 $runbookWaitState.PauseCount = 0; $runbookWaitState.Logs.Clear()
