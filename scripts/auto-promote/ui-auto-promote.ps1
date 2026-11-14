@@ -18,7 +18,10 @@
     parsable one; Assembled only between equal or unparsable versions: releases can be assembled out of order); the first whose latest deployment to the previous
     environment (tdd before uat, uat before prod) succeeded. It is the candidate when it has no deployment at all to the
     next environment (any state: a canceled one is a person's no) and is newer than the release running there; prod is
-    looked at before uat. The newest $ReleaseWindow releases are listed; a running release older than those is found through
+    looked at before uat. Exception (issue #688): an open release-held issue for this deployable before that environment
+    whose body lists Pipeline or infra change keeps that held release as the candidate until it is promoted (or no longer
+    qualifies); a newer success in the previous environment does not supersede it and does not restart the 60-minute
+    pipeline-change clock. The newest $ReleaseWindow releases are listed; a running release older than those is found through
     the newest deployments to that environment (issue #314). A newer release that ended otherwise in the previous environment is skipped and the run log says so.
     Nothing is promoted while any deployment or runbook run (any project) to the target environment, or any ui
     deployment to a later-than-first environment, is queued, running, cancelling or waiting at an interruption; a call that
@@ -70,7 +73,8 @@
     Flagged: the deployment is NOT created, so no Sign-off waits in the environment and holds it for every other
     deployable. One issue "<deployable> <version> held before <env>" (label release-held, no assignee) lists each flag with its
     evidence; it is edited only when the evidence changes. It closes when that release has a deployment in the environment
-    that no longer waits for this workflow, or a newer release is the candidate or runs there already.
+    that no longer waits for this workflow, or a newer release is the candidate or runs there already (a newer tdd
+    release does not become the candidate over an open pipeline-change hold: issue #688).
     A candidate whose release notes name no commit (hand-created in Octopus, issue #621) is the same hold pattern, not a
     workflow failure: one issue "<deployable> <version> held: release notes name no commit", no promotion, step finishes green.
     Pipeline-only override (owner, 2026-10-14): when flag 3 (a known change, not "comparison incomplete") is the only flag
@@ -785,43 +789,80 @@ function Select-Candidate {
        EnvironmentId, TaskId, Created); GetTaskState {param($deployment)} -> Octopus task state; GetRunningOutside
        {param($target)} -> the release running in the target when no listed release ran there (it may be older than the
        list; Get-RunningReleaseByEnvironment), or $null; when it throws, the running release is unknown: RunningUnknown
-       says why, and the evaluation flags "comparison incomplete" (no base commit). Returns
+       says why, and the evaluation flags "comparison incomplete" (no base commit). PreferHeld: @{ Version; Environment }
+       from Get-HeldPipelinePrefer — when that version still qualifies for Environment, it is the candidate even if a
+       newer release also succeeded in the previous environment (issue #688). Returns
        @{ Release; Target; Previous; RunningReleaseId; Running; RunningUnknown; Notes } or $null with Notes. Looks at the
        last environment first. #>
-    param([object[]] $Environments, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState, [scriptblock] $GetRunningOutside = $null)
+    param([object[]] $Environments, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState, [scriptblock] $GetRunningOutside = $null, [object[]] $PreferHeld = @())
     $sorted = @(Get-ReleasesNewestFirst $Releases)
     $cache = @{}; $outside = @{}
     $deps = { param($r) if (-not $cache.ContainsKey($r.Id)) { $cache[$r.Id] = @(& $GetDeployments $r.Id) }; $cache[$r.Id] }
     $notes = [Collections.Generic.List[string]]::new()
+    $resolveRunning = {
+        param($target)
+        $running = $null; $unknown = $null
+        foreach ($o in $sorted) {
+            $ran = @(& $deps $o | Where-Object { $_.EnvironmentId -eq $target.Id } | Sort-Object { [datetimeoffset] $_.Created } -Descending | Where-Object { (& $GetTaskState $_) -eq 'Success' }) | Select-Object -First 1
+            if ($ran) { $running = $o; break }
+        }
+        if (-not $running -and $GetRunningOutside) {
+            if (-not $outside.ContainsKey($target.Id)) {
+                $outside[$target.Id] = try { @{ Release = (& $GetRunningOutside $target); Unknown = $null } } catch { if (-not (Test-RunningLookupError $_)) { throw }; @{ Release = $null; Unknown = $_.Exception.Message } }
+                if ($outside[$target.Id].Release) { $notes.Add("the release running in $($target.Name), $($outside[$target.Id].Release.Version), is older than the listed releases: read through its deployment") }
+            }
+            $running = $outside[$target.Id].Release; $unknown = $outside[$target.Id].Unknown
+        }
+        @{ Running = $running; Unknown = $unknown }
+    }
     for ($i = $Environments.Count - 1; $i -ge 1; $i--) {
         $target = $Environments[$i]; $previous = $Environments[$i - 1]
+        $preferVersion = $null
+        foreach ($p in @($PreferHeld)) {
+            if ($p -and [string] $p.Environment -eq $target.Name -and [string] $p.Version) { $preferVersion = [string] $p.Version; break }
+        }
+        $tryOrder = $sorted
+        if ($preferVersion) {
+            $heldRel = @($sorted | Where-Object { $_.Version -eq $preferVersion } | Select-Object -First 1)
+            if ($heldRel.Count -gt 0) { $tryOrder = @($heldRel[0]) + @($sorted | Where-Object { $_.Id -ne $heldRel[0].Id }) }
+        }
         $skipped = $null
-        foreach ($r in $sorted) {
+        foreach ($r in $tryOrder) {
             $here = @(& $deps $r)
             $prev = @($here | Where-Object { $_.EnvironmentId -eq $previous.Id } | Sort-Object { [datetimeoffset] $_.Created } -Descending) | Select-Object -First 1
             if (-not $prev) { continue }
             $state = & $GetTaskState $prev
             if ($state -ne 'Success') { if (-not $skipped) { $skipped = "$($r.Version) ended $state in $($previous.Name)" }; continue }
-            if (@($here | Where-Object { $_.EnvironmentId -eq $target.Id }).Count -gt 0) { break }
-            # Newer than the release running in the target?
-            $running = $null; $unknown = $null
-            foreach ($o in $sorted) {
-                $ran = @(& $deps $o | Where-Object { $_.EnvironmentId -eq $target.Id } | Sort-Object { [datetimeoffset] $_.Created } -Descending | Where-Object { (& $GetTaskState $_) -eq 'Success' }) | Select-Object -First 1
-                if ($ran) { $running = $o; break }
+            if (@($here | Where-Object { $_.EnvironmentId -eq $target.Id }).Count -gt 0) {
+                # Preferred held already in the target: fall through to the newest-first remainder (issue #688).
+                if ($preferVersion -and $r.Version -eq $preferVersion) { continue }
+                break
             }
-            if (-not $running -and $GetRunningOutside) {
-                # Not among the listed releases: read through the environment's own deployments (issue #314).
-                if (-not $outside.ContainsKey($target.Id)) {
-                    # Only the lookup's own "not found" leaves it unknown; a failed call stops the run (fail closed).
-                    $outside[$target.Id] = try { @{ Release = (& $GetRunningOutside $target); Unknown = $null } } catch { if (-not (Test-RunningLookupError $_)) { throw }; @{ Release = $null; Unknown = $_.Exception.Message } }
-                    if ($outside[$target.Id].Release) { $notes.Add("the release running in $($target.Name), $($outside[$target.Id].Release.Version), is older than the listed releases: read through its deployment") }
-                }
-                $running = $outside[$target.Id].Release; $unknown = $outside[$target.Id].Unknown
-            }
+            $runInfo = & $resolveRunning $target
+            $running = $runInfo.Running; $unknown = $runInfo.Unknown
             $runningId = if ($running) { $running.Id } else { $null }
-            if ($runningId -and $runningId -eq $r.Id) { break }
-            if ($running -and (Compare-Release $running $r) -ge 0) { break }
-            if ($skipped) { $notes.Add("newer release ${skipped}: the older release $($r.Version) is considered for $($target.Name)") }
+            if ($runningId -and $runningId -eq $r.Id) {
+                if ($preferVersion -and $r.Version -eq $preferVersion) { continue }
+                break
+            }
+            if ($running -and (Compare-Release $running $r) -ge 0) {
+                if ($preferVersion -and $r.Version -eq $preferVersion) { continue }
+                break
+            }
+            if ($preferVersion -and $r.Version -eq $preferVersion) {
+                $newerInPrev = @($sorted | Where-Object {
+                        if ((Compare-Release $_ $r) -le 0) { return $false }
+                        $h = @(& $deps $_)
+                        $p = @($h | Where-Object { $_.EnvironmentId -eq $previous.Id } | Sort-Object { [datetimeoffset] $_.Created } -Descending) | Select-Object -First 1
+                        if (-not $p -or ((& $GetTaskState $p) -ne 'Success')) { return $false }
+                        @($h | Where-Object { $_.EnvironmentId -eq $target.Id }).Count -eq 0
+                    })
+                if ($newerInPrev.Count -gt 0) {
+                    $notes.Add("$Deployable $($r.Version) is held under the pipeline-change window before $($target.Name): kept as the candidate (issue #688); newer $(@($newerInPrev | ForEach-Object Version) -join ', ') in $($previous.Name) is not considered yet")
+                } else {
+                    $notes.Add("$Deployable $($r.Version) is held under the pipeline-change window before $($target.Name): kept as the candidate (issue #688)")
+                }
+            } elseif ($skipped) { $notes.Add("newer release ${skipped}: the older release $($r.Version) is considered for $($target.Name)") }
             return @{ Release = $r; Target = $target; Previous = $previous; RunningReleaseId = $runningId; Running = $running; RunningUnknown = $unknown; Notes = @($notes) }
         }
     }
@@ -1048,6 +1089,30 @@ function Get-HeldTitleParts {
     # Version and Environment of a held issue of this deployable; $null for any other title (another deployable's too).
     param([string] $Title, [string] $Name = $Deployable)
     if ($Title -cmatch ('^' + [regex]::Escape($Name) + ' (\S+) held before (\S+)$')) { @{ Version = $Matches[1]; Environment = $Matches[2] } }
+}
+function Test-PipelineChangeHoldBody([string] $Body) {
+    # True when a release-held issue body lists the Pipeline or infra change flag (issue #688: keep that candidate).
+    [string] $Body -match '(?m)^\*\*Pipeline or infra change\*\*'
+}
+function Get-HeldPipelinePrefer {
+    <# Open pipeline-change holds of this deployable as PreferHeld for Select-Candidate: @{ Version; Environment }.
+       Oldest version per environment so a later hold does not restart the clock (issue #688). #>
+    param([object[]] $HeldIssues, [string] $Name = $Deployable)
+    $byEnv = @{}
+    foreach ($hi in @($HeldIssues)) {
+        $parts = Get-HeldTitleParts ([string] $hi.title) $Name
+        if (-not $parts) { continue }
+        if (-not (Test-PipelineChangeHoldBody ([string] $hi.body))) { continue }
+        $envName = [string] $parts.Environment
+        if (-not $byEnv.ContainsKey($envName)) { $byEnv[$envName] = [Collections.Generic.List[string]]::new() }
+        $byEnv[$envName].Add([string] $parts.Version)
+    }
+    $out = [Collections.Generic.List[object]]::new()
+    foreach ($envName in @($byEnv.Keys | Sort-Object)) {
+        $ranked = @($byEnv[$envName] | Sort-Object { $v = ConvertTo-ReleaseVersion $_; if ($v) { $v } else { [version]::new(0, 0, 0) } }, { $_ })
+        $out.Add(@{ Version = [string] $ranked[0]; Environment = $envName })
+    }
+    @($out)
 }
 function Get-StateKey([string] $DeploymentId, [string] $Name = $Deployable) {
     # Health reads are kept per deployable and deployment ("dashboard/Deployments-12"); Read-StateReads also finds ui's
@@ -1512,8 +1577,9 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
     }
 }
 
-# 3. Candidate.
-$candidate = Select-Candidate -Environments $envs -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t }
+# 3. Candidate. Prefer an open pipeline-change hold so a newer tdd release does not restart its 60-minute clock (#688).
+$preferHeld = @(Get-HeldPipelinePrefer -HeldIssues $heldIssues)
+$candidate = Select-Candidate -Environments $envs -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t } -PreferHeld $preferHeld
 $candidate.Notes | ForEach-Object { Say $_ }
 if (-not $candidate.Release) { Say "No $Deployable release waits for a next environment."; Close-HeldIssues $candidate $activeTaskIds; return }
 $release = $candidate.Release; $target = $candidate.Target; $previous = $candidate.Previous
