@@ -310,6 +310,94 @@ $rest404Result = Invoke-WithMockGh -ExitCode 1 -Stdout $rest404Json -Stderr 'gh:
 }
 Test-Case 'gh: REST HTTP 404 returns payload for skip' ([string] $rest404Result.status) '404'
 
+# --- Issue #707: post-merge startable-Todo pickup when WIP frees ---
+function New-AssignedIssue([int] $Number, [datetime] $CreatedAt, [object[]] $Comments, [string] $Repository = 'clearmeasure-aisf-sample-apps/cmdemo1-system') {
+    [ordered] @{
+        number     = $Number
+        repository = $Repository
+        createdAt  = $CreatedAt
+        comments   = @($Comments)
+    }
+}
+
+Test-Case 'phase: Queued comment alone is still todo (not filtered)' `
+    (Get-IssueWorkPhase -Comments @([ordered] @{ body = 'Queued: WIP is full for cmdemo1-workorders (2).'; createdAt = $now })) `
+    'todo'
+Test-Case 'phase: Blocker without pickup is blocked' `
+    (Get-IssueWorkPhase -Comments @([ordered] @{ body = "Blocker:`nneed Jeffrey"; createdAt = $now })) `
+    'blocked'
+Test-Case 'phase: Todo → In Progress without Merged is wip' `
+    (Get-IssueWorkPhase -Comments @([ordered] @{ body = "Todo → In Progress`ntaking"; createdAt = $now })) `
+    'wip'
+Test-Case 'phase: Review → Merged after pickup is finished' `
+    (Get-IssueWorkPhase -Comments @(
+            [ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate },
+            [ordered] @{ body = 'Review → Merged'; createdAt = $now }
+        )) `
+    'finished'
+Test-Case 'phase: empty comments is todo' (Get-IssueWorkPhase -Comments @()) 'todo'
+
+$queuedTodo = New-AssignedIssue 1753 $headDate.AddMinutes(-10) @(
+    [ordered] @{ body = 'Queued: WIP is full for cmdemo1-workorders (2).'; createdAt = $headDate }
+)
+$activeWip = New-AssignedIssue 1751 $headDate.AddHours(-1) @(
+    [ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate.AddMinutes(-30) },
+    [ordered] @{ body = 'In Progress → Review'; createdAt = $headDate }
+)
+$olderTodo = New-AssignedIssue 1740 $headDate.AddHours(-2) @()
+$blockedTodo = New-AssignedIssue 1660 $headDate.AddHours(-3) @(
+    [ordered] @{ body = "Blocker:`nworkflow change needs yes"; createdAt = $headDate }
+)
+
+$mergePickup = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -AssignedOpenIssues @($activeWip, $queuedTodo) -DefaultRepository $systemRepo
+Test-Case 'post-merge: nudges Queued Todo when WIP has room after bot merge (#707)' `
+    @($mergePickup.Action, $mergePickup.Issues[0].Action, $mergePickup.Issues[0].Issue, $mergePickup.Issues[0].Reason) `
+    @('nudge', 'nudge', 1753, "re-assign cm-ai-ops-bot on ${systemRepo}#1753 (post-merge Todo pickup)")
+
+$oldestWins = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -AssignedOpenIssues @($queuedTodo, $olderTodo) -DefaultRepository $systemRepo
+Test-Case 'post-merge: oldest startable Todo wins' `
+    @($oldestWins.Action, $oldestWins.Issues[0].Issue) `
+    @('nudge', 1740)
+
+$skipBlocked = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -AssignedOpenIssues @($blockedTodo, $queuedTodo) -DefaultRepository $systemRepo
+Test-Case 'post-merge: skips Blocker Todo and picks next startable' `
+    @($skipBlocked.Action, $skipBlocked.Issues[0].Issue) `
+    @('nudge', 1753)
+
+$wipFull = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -AssignedOpenIssues @(
+        (New-AssignedIssue 1 $headDate @([ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate })),
+        (New-AssignedIssue 2 $headDate @([ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate })),
+        $queuedTodo
+    ) -DefaultRepository $systemRepo
+Test-Case 'post-merge: does not loosen WIP limit of 2' `
+    @($wipFull.Action, $wipFull.Reason) `
+    @('skip', 'WIP is full (2/2)')
+
+$notMerged = Get-PostMergeTodoPickupPlan `
+    -Merged $false -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -AssignedOpenIssues @($queuedTodo) -DefaultRepository $systemRepo
+Test-Case 'post-merge: closed-without-merge skips' @($notMerged.Action) @('skip')
+
+$nonBotMerge = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'jeffreypalermo' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -AssignedOpenIssues @($queuedTodo) -DefaultRepository $systemRepo
+Test-Case 'post-merge: non-bot merge skips' @($nonBotMerge.Action) @('skip')
+
+$noTodo = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -AssignedOpenIssues @($activeWip) -DefaultRepository $systemRepo
+Test-Case 'post-merge: bot merge with no startable Todo skips' `
+    @($noTodo.Action, $noTodo.Reason) `
+    @('skip', 'merge freed WIP (1/2); no startable Todo assigned')
+
 if ($failures -gt 0) {
     Write-Host "$failures FAIL(s)"
     exit 1

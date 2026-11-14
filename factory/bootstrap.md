@@ -39,9 +39,13 @@ a day, almost always with nothing to do), `pr-opened` (the bot opens its own PRs
 required). Instead, each application repository that has PR CI runs workflow `factory-wake` when that CI finishes
 (`workflow_run` on the check that gates merges — `env-checks` here). It acts only for open `cm-ai-ops-bot` pull
 requests (not the default branch), and re-assigns the linked issue so the existing `issue-assigned` listener wakes the
-bot to Review (green) or fix (red). That keeps the wake filtered to bot PRs and needs no new routine or secret. A
-PR-scoped routine the bot creates for a slow PR (`ci-passed`, `ci-failed`, `review-changes-requested`, `pr-merged`,
-`pr-closed`) remains a fine extra backstop and still deletes itself when the PR merges or closes.
+bot to Review (green) or fix (red). The same workflow also runs when a bot pull request is merged (`pull_request`
+closed + merged): if that repository still has a free WIP slot, it re-assigns the oldest startable Todo assigned to
+the bot (including one with a prior `Queued: WIP is full` comment) so the `issue-assigned` listener picks it up —
+backstop when the merge session ends before the end-of-wake sweep (#707). That keeps the wake filtered to bot PRs and
+needs no new routine or secret. A PR-scoped routine the bot creates for a slow PR (`ci-passed`, `ci-failed`,
+`review-changes-requested`, `pr-merged`, `pr-closed`) remains a fine extra backstop and still deletes itself when the
+PR merges or closes.
 
 **Routine 1: `Factory bot: workorders, system, dashboard, scorecard-site`**
 

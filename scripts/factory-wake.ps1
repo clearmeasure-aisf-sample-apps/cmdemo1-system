@@ -3,30 +3,34 @@
 
 <#
 .SYNOPSIS
-    After env-checks finishes on a cm-ai-ops-bot pull request, nudge the factory bot by re-assigning the linked issue(s).
+    Nudge the factory bot by re-assigning issues after bot-PR CI finishes or after a bot PR merges.
 
 .DESCRIPTION
-    Workflow factory-wake runs this when workflow env-checks completes. It acts only for a pull_request run whose head
-    branch is not the default branch, whose conclusion is success or failure, whose open pull request is by
-    cm-ai-ops-bot, and whose linked issues still need a Review or fix.     For each such issue it removes and re-adds the
-    cm-ai-ops-bot assignee (assigner becomes github-actions[bot]), which fires the bot's existing issue-assigned
-    listener. It posts no comments and uses only GITHUB_TOKEN. Dedupe: skip an issue if it already has a Review
-    verdict comment posted after the pull request's head commit date. The 10-minute recent-assign window does not
-    apply when the wake reason is CI finished (this script), so a green bot PR still gets a Review nudge even if
-    the bot was just assigned for In Progress → Review.
+    Workflow factory-wake runs this when workflow env-checks completes, or when a bot pull request is merged.
+    CI-finished path: acts only for a pull_request run whose head branch is not the default branch, whose conclusion
+    is success or failure, whose open pull request is by cm-ai-ops-bot, and whose linked issues still need a Review
+    or fix. For each such issue it removes and re-adds the cm-ai-ops-bot assignee (assigner becomes
+    github-actions[bot]), which fires the bot's existing issue-assigned listener. Dedupe: skip an issue if it already
+    has a Review verdict comment posted after the pull request's head commit date. The 10-minute recent-assign window
+    does not apply when the wake reason is CI finished, so a green bot PR still gets a Review nudge even if the bot
+    was just assigned for In Progress → Review.
+    Post-merge path (#707): when a cm-ai-ops-bot pull request merges and the repository still has free WIP (under the
+    per-repo limit of 2), re-assign the oldest startable Todo assigned to the bot — including one with a prior
+    `Queued: WIP is full` comment — so the issue-assigned listener picks it up without a human nudge. Posts no
+    comments; uses only GITHUB_TOKEN.
 
 .PARAMETER Repository
     owner/name of this repository.
 .PARAMETER Event
-    The completed run's event (pull_request).
+    The completed run's event (pull_request), or pull_request for the merge path.
 .PARAMETER Conclusion
-    The completed run's conclusion (success or failure).
+    The completed run's conclusion (success or failure), or merged/closed for the merge path.
 .PARAMETER HeadBranch
-    The completed run's head branch.
+    The completed run's head branch (or the merged pull request's head ref).
 .PARAMETER HeadSha
-    The completed run's head commit SHA.
+    The completed run's head commit SHA (or the merged pull request's head SHA).
 .PARAMETER DefaultBranch
-    The repository default branch (runs whose head is this branch are ignored).
+    The repository default branch (CI runs whose head is this branch are ignored).
 .PARAMETER BotLogin
     The factory bot login to re-assign.
 .PARAMETER DedupeMinutes
@@ -34,6 +38,16 @@
     Get-IssueNudgeDecision when a non-CI reason is passed in tests.
 .PARAMETER Now
     Clock for the recent-assign window (UTC). Tests pass a fixed instant.
+.PARAMETER WakeReason
+    `CI finished` (default) or `pr-merged` for the post-merge Todo pickup path.
+.PARAMETER PullRequestNumber
+    Merged pull request number (pr-merged path).
+.PARAMETER PullRequestAuthor
+    Merged pull request author login (pr-merged path).
+.PARAMETER Merged
+    True when the pull request was merged (pr-merged path).
+.PARAMETER WipLimit
+    Per-repository WIP limit (In Progress + Review). Default 2; not loosened by this script.
 .PARAMETER DryRun
     Decide and log; change no assignees.
 .PARAMETER LoadOnly
@@ -41,6 +55,10 @@
 .EXAMPLE
     pwsh -NoProfile -File scripts/factory-wake.ps1 -Repository clearmeasure-aisf-sample-apps/cmdemo1-system `
       -Event pull_request -Conclusion success -HeadBranch cm-ai-ops-bot/x -HeadSha abc -DefaultBranch main
+.EXAMPLE
+    pwsh -NoProfile -File scripts/factory-wake.ps1 -Repository clearmeasure-aisf-sample-apps/cmdemo1-system `
+      -WakeReason pr-merged -Event pull_request -Conclusion merged -Merged `
+      -PullRequestNumber 700 -PullRequestAuthor cm-ai-ops-bot -HeadBranch cm-ai-ops-bot/x -HeadSha abc
 #>
 [CmdletBinding()]
 param(
@@ -53,6 +71,11 @@ param(
     [string] $BotLogin = 'cm-ai-ops-bot',
     [int] $DedupeMinutes = 10,
     [datetime] $Now = [datetime]::SpecifyKind([datetime]::UtcNow, [DateTimeKind]::Utc),
+    [string] $WakeReason = 'CI finished',
+    [int] $PullRequestNumber = 0,
+    [string] $PullRequestAuthor = '',
+    [switch] $Merged,
+    [int] $WipLimit = 2,
     [switch] $DryRun,
     [switch] $LoadOnly
 )
@@ -313,6 +336,116 @@ function Get-FactoryWakePlan {
     }
 }
 
+function Get-IssueWorkPhase {
+    # Classify an open assigned issue from bot column-move / blocker / queue comments (no project API).
+    # todo: not yet picked up (Queued: does not change this — still startable when WIP frees).
+    # blocked: Blocker: with no later Todo → In Progress.
+    # wip: Todo → In Progress without a later Review → Merged / Review → Done.
+    # finished: Review → Merged / Review → Done after pickup (unusual while still open).
+    param([object[]] $Comments)
+    $hasBlocker = $false
+    $hasPickup = $false
+    $hasFinished = $false
+    foreach ($c in @($Comments)) {
+        $body = [string] (Get-FactValue $c 'body')
+        if (-not $body) { continue }
+        if ($body.StartsWith('Blocker:', [StringComparison]::Ordinal)) {
+            $hasBlocker = $true
+        }
+        if ($body.StartsWith('Todo → In Progress', [StringComparison]::Ordinal)) {
+            $hasPickup = $true
+            $hasBlocker = $false
+        }
+        if ($body.StartsWith('Review → In Progress', [StringComparison]::Ordinal)) {
+            $hasPickup = $true
+            $hasFinished = $false
+        }
+        if ($body.StartsWith('Review → Merged', [StringComparison]::Ordinal) -or
+            $body.StartsWith('Review → Done', [StringComparison]::Ordinal)) {
+            $hasFinished = $true
+        }
+    }
+    if ($hasPickup -and -not $hasFinished) { return 'wip' }
+    if ($hasFinished) { return 'finished' }
+    if ($hasBlocker) { return 'blocked' }
+    return 'todo'
+}
+
+function Get-PostMergeTodoPickupPlan {
+    # After a bot PR merges: when WIP (open assigned issues in phase wip) is under the per-repo limit, nudge the
+    # oldest startable Todo. A prior Queued: comment does not disqualify. WIP limit is not raised.
+    param(
+        [bool] $Merged,
+        [string] $PullRequestAuthor,
+        [string] $BotLogin,
+        [int] $WipLimit = 2,
+        [object[]] $AssignedOpenIssues,
+        [string] $DefaultRepository = ''
+    )
+    if (-not $Merged) {
+        return [ordered] @{ Action = 'skip'; Reason = 'pull request was not merged'; Issues = @() }
+    }
+    if ($PullRequestAuthor -cne $BotLogin) {
+        return [ordered] @{
+            Action = 'skip'
+            Reason = "pull request author is '$PullRequestAuthor', not $BotLogin"
+            Issues = @()
+        }
+    }
+    $classified = [Collections.Generic.List[object]]::new()
+    foreach ($issue in @($AssignedOpenIssues)) {
+        if ($null -eq $issue) { continue }
+        $num = [int] (Get-FactValue $issue 'number')
+        if ($num -le 0) { continue }
+        $repo = [string] (Get-FactValue $issue 'repository')
+        if (-not $repo) { $repo = $DefaultRepository }
+        $created = Get-FactValue $issue 'createdAt'
+        if ($null -eq $created) { $created = [datetime]::SpecifyKind([datetime]::MinValue, [DateTimeKind]::Utc) }
+        else { $created = [datetime]::SpecifyKind([datetime] $created, [DateTimeKind]::Utc) }
+        $phase = Get-IssueWorkPhase -Comments @(Get-FactValue $issue 'comments')
+        $classified.Add([ordered] @{
+                number     = $num
+                repository = $repo
+                createdAt  = $created
+                phase      = $phase
+            })
+    }
+    $wipCount = @($classified | Where-Object { $_.phase -eq 'wip' }).Count
+    if ($wipCount -ge $WipLimit) {
+        return [ordered] @{
+            Action = 'skip'
+            Reason = "WIP is full ($wipCount/$WipLimit)"
+            Issues = @()
+        }
+    }
+    $todos = @(
+        $classified |
+            Where-Object { $_.phase -eq 'todo' } |
+            Sort-Object { $_.createdAt }, { $_.number }
+    )
+    if ($todos.Count -eq 0) {
+        return [ordered] @{
+            Action = 'skip'
+            Reason = "merge freed WIP ($wipCount/$WipLimit); no startable Todo assigned"
+            Issues = @()
+        }
+    }
+    $pick = $todos[0]
+    $label = "$($pick.repository)#$($pick.number)"
+    return [ordered] @{
+        Action = 'nudge'
+        Reason = "merge freed WIP ($wipCount/$WipLimit); re-assign oldest startable Todo $label"
+        Issues = @(
+            [ordered] @{
+                Issue      = [int] $pick.number
+                Repository = [string] $pick.repository
+                Action     = 'nudge'
+                Reason     = "re-assign $BotLogin on $label (post-merge Todo pickup)"
+            }
+        )
+    }
+}
+
 function ConvertFrom-GhJson([string] $Text) {
     if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
     return $Text | ConvertFrom-Json -Depth 40
@@ -543,6 +676,46 @@ function Invoke-IssueAssigneeNudge {
     Write-Host "Added $BotLogin to #${Number}"
 }
 
+function Get-BotAssignedOpenIssues {
+    # Open issues assigned to the bot in this repository, with comments (REST). Pull requests are excluded.
+    param(
+        [string] $Repository,
+        [string] $BotLogin
+    )
+    $result = [Collections.Generic.List[object]]::new()
+    $page = 1
+    while ($true) {
+        $batch = @(Invoke-GhApi "repos/$Repository/issues" -f "state=open" -f "assignee=$BotLogin" -f 'per_page=100' -f "page=$page")
+        if ($batch.Count -eq 0) { break }
+        foreach ($item in $batch) {
+            # Issues API includes pull requests; skip those.
+            if ($null -ne (Get-FactValue $item 'pull_request')) { continue }
+            $num = [int] (Get-FactValue $item 'number')
+            if ($num -le 0) { continue }
+            $created = [datetime]::SpecifyKind([datetime] (Get-FactValue $item 'created_at'), [DateTimeKind]::Utc)
+            $commentsRaw = @(Invoke-GhApi "repos/$Repository/issues/$num/comments" -f 'per_page=100')
+            $comments = @(
+                foreach ($c in $commentsRaw) {
+                    [ordered] @{
+                        body      = [string] (Get-FactValue $c 'body')
+                        createdAt = [datetime]::SpecifyKind([datetime] (Get-FactValue $c 'created_at'), [DateTimeKind]::Utc)
+                    }
+                }
+            )
+            $result.Add([ordered] @{
+                    number     = $num
+                    repository = $Repository
+                    createdAt  = $created
+                    comments   = $comments
+                })
+        }
+        if ($batch.Count -lt 100) { break }
+        $page++
+        if ($page -gt 5) { break }
+    }
+    return @($result)
+}
+
 if ($LoadOnly) { return }
 
 if (-not $Repository) { $Repository = [string] $env:GITHUB_REPOSITORY }
@@ -553,7 +726,30 @@ $name = $Matches['name']
 
 $Now = [datetime]::SpecifyKind($Now.ToUniversalTime(), [DateTimeKind]::Utc)
 
-Write-Host "factory-wake: repository=$Repository event=$Event conclusion=$Conclusion head=$HeadBranch sha=$HeadSha default=$DefaultBranch"
+Write-Host "factory-wake: repository=$Repository wakeReason=$WakeReason event=$Event conclusion=$Conclusion head=$HeadBranch sha=$HeadSha default=$DefaultBranch"
+
+if ($WakeReason -ceq 'pr-merged') {
+    Write-Host "post-merge Todo pickup: pr=#$PullRequestNumber author=$PullRequestAuthor merged=$Merged wipLimit=$WipLimit"
+    $assignedOpen = @(Get-BotAssignedOpenIssues -Repository $Repository -BotLogin $BotLogin)
+    Write-Host "open issues assigned to ${BotLogin}: $($assignedOpen.Count)"
+    $plan = Get-PostMergeTodoPickupPlan `
+        -Merged:([bool] $Merged) `
+        -PullRequestAuthor $PullRequestAuthor `
+        -BotLogin $BotLogin `
+        -WipLimit $WipLimit `
+        -AssignedOpenIssues $assignedOpen `
+        -DefaultRepository $Repository
+    Write-Host "plan: $($plan.Action) — $($plan.Reason)"
+    foreach ($d in @($plan.Issues)) {
+        $targetRepo = [string] (Get-FactValue $d 'Repository')
+        if (-not $targetRepo) { $targetRepo = $Repository }
+        Write-Host "issue ${targetRepo}#$($d.Issue): $($d.Action) — $($d.Reason)"
+        if ($d.Action -eq 'nudge') {
+            Invoke-IssueAssigneeNudge -Repository $targetRepo -Number ([int] $d.Issue) -BotLogin $BotLogin -DryRun:$DryRun
+        }
+    }
+    exit 0
+}
 
 $runGate = Get-RunGate -Event $Event -Conclusion $Conclusion -HeadBranch $HeadBranch -DefaultBranch $DefaultBranch
 Write-Host "run gate: $($runGate.Action) — $($runGate.Reason)"
