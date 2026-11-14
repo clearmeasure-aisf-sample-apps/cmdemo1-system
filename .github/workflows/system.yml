@@ -2,9 +2,11 @@
 # environments/*/versions.json, the pin, environments/*/nodes.json, the nodes an application with its own runtime
 # reported, or environments/*/database.json, the tables a deployment read from the database; and a documentation
 # change under docs/ or in Markdown):
-#   1. octopus-apply   configures Octopus from octopus/ and system.json (environments, lifecycle, accounts, projects)
-#   2. system-release  packages this commit as <slug>-system <version> and creates the release of <slug>-system;
-#                      the lifecycle deploys it to the first environment, which applies infra/ there.
+#   1. publish-test-runner  builds images/test-runner (Playwright + .NET 10 SDK) and pushes it to GHCR so the
+#                           Acceptance tests steps can pull it (issue #648)
+#   2. octopus-apply        configures Octopus from octopus/ and system.json (environments, lifecycle, accounts, projects)
+#   3. system-release       packages this commit as <slug>-system <version> and creates the release of <slug>-system;
+#                           the lifecycle deploys it to the first environment, which applies infra/ there.
 # On the very first push this run is what creates the Octopus projects and then the first Azure environment.
 # Credentials: GitHub OIDC only. Azure as id-<slug>-octopus-config (Terraform state), Octopus as the system's service
 # account (OctopusDeploy/login). The one stored secret is the GitHub credential that Octopus reads and commits to this
@@ -42,7 +44,52 @@ env:
   OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE_NAME }}
 
 jobs:
+  # Bake Playwright + .NET 10 into the worker image before octopus-apply points the Acceptance tests steps at it.
+  # Keep IMAGE in sync with images/test-runner/image.txt and variable test_runner_image in octopus/main.tf.
+  publish-test-runner:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: Build and push the acceptance-test worker image
+        env:
+          IMAGE: ghcr.io/clearmeasure-aisf-sample-apps/cmdemo1-test-runner:v1.61.0-dotnet10
+          REGISTRY: ghcr.io
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected="$(grep -vE '^\s*(#|$)' images/test-runner/image.txt | head -n1 | tr -d '[:space:]')"
+          got="${IMAGE#"$REGISTRY"/}"
+          if [ "$got" != "$expected" ]; then
+            echo "IMAGE $got does not match images/test-runner/image.txt ($expected)" >&2
+            exit 1
+          fi
+          echo "$GH_TOKEN" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          docker build --file images/test-runner/Dockerfile --tag "$IMAGE" images/test-runner
+          docker push "$IMAGE"
+          # Public so Octopus Cloud workers can pull without a GHCR credential on the ghcr feed.
+          # Indexing can lag the push: retry before failing the job (do not point Octopus at a private image).
+          package_api="/orgs/${{ github.repository_owner }}/packages/container/cmdemo1-test-runner"
+          ok=0
+          for attempt in 1 2 3 4 5 6; do
+            if gh api --method PUT -H "Accept: application/vnd.github+json" \
+              "$package_api/visibility" -f visibility=public; then
+              ok=1
+              break
+            fi
+            echo "visibility update attempt $attempt failed; waiting..."
+            sleep $((attempt * 5))
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Could not make cmdemo1-test-runner public on GHCR" >&2
+            exit 1
+          fi
+
   octopus-apply:
+    needs: publish-test-runner
     runs-on: ubuntu-24.04
     environment: octopus
     steps:
