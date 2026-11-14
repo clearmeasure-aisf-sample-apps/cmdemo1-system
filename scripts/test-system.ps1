@@ -499,6 +499,6 @@ Write-Host 'All system checks passed.'
 # Select-DeliveryDeployable omits azureExcludeDeployables and retired (#577): same reason as above.
 & (Join-Path $PSScriptRoot 'test-write-delivery.ps1')
 
-# Deprecated prod aisf/fworker/fwrunner removal helpers (#575): env-checks already runs this file; keep the proof
-# here so workflows/ need not change.
+# Deprecated aisf/fworker/fwrunner removal helpers (#575 compute, #578 leftovers): env-checks already runs this
+# file; keep the proof here so workflows/ need not change.
 & (Join-Path $PSScriptRoot 'test-apply-environment.ps1')
