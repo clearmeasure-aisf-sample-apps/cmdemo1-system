@@ -3,13 +3,13 @@
 
 <#
 .SYNOPSIS
-    Tests the deprecated prod aisf/fworker/fwrunner removal helpers without Azure.
+    Tests the deprecated aisf/fworker/fwrunner removal helpers without Azure.
 
 .DESCRIPTION
-    Loads Get-DeprecatedProdComputeName and Select-PresentResourceName from scripts/apply-environment.ps1
-    (AST only: that script has no LoadOnly and is inlined into the Octopus system step). Proves #575: the four
-    exact prod resource names are selected only in prod when aisf and fworker are retired, and selection against a
-    present list is idempotent (already-gone names are skipped).
+    Loads helpers from scripts/apply-environment.ps1 (AST only: that script has no LoadOnly and is inlined into the
+    Octopus system step). Proves #575: the four exact prod compute names are selected only in prod when aisf and
+    fworker are retired. Proves #578: the ten leftover identity/storage/AI names are selected only in prod and uat
+    when those deployables are retired, keep-list names are never wanted, and ui settings detection is pure.
 
 .EXAMPLE
     pwsh -NoProfile -File scripts/test-apply-environment.ps1
@@ -28,7 +28,16 @@ if ($parseErrors.Count -gt 0) {
     Write-Host "FAIL apply-environment.ps1 does not parse: $($parseErrors[0])"
     exit 1
 }
-$needed = @('Get-DeprecatedProdComputeName', 'Select-PresentResourceName', 'Remove-DeprecatedProdCompute')
+$needed = @(
+    'Get-DeprecatedProdComputeName'
+    'Select-PresentResourceName'
+    'Remove-DeprecatedProdCompute'
+    'Get-DeprecatedAisfLeftoverName'
+    'Get-DeprecatedAisfComputePrerequisiteName'
+    'Get-AisfLeftoverKeepName'
+    'Test-UiReferencesAisfLeftover'
+    'Remove-DeprecatedAisfLeftover'
+)
 foreach ($fn in $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     if ($needed -contains $fn.Name) {
         . ([scriptblock]::Create($fn.Extent.Text))
@@ -50,6 +59,10 @@ function Test-Case([string] $Name, $Actual, $Expected) {
     $expectedJson = ConvertTo-Json -InputObject $expectedList -Compress -Depth 8
     if ($actualJson -ceq $expectedJson) { Write-Host "PASS $Name" }
     else { Write-Host "FAIL ${Name}: expected $expectedJson, got $actualJson"; $script:failures++ }
+}
+function Test-Bool([string] $Name, [bool] $Actual, [bool] $Expected) {
+    if ($Actual -eq $Expected) { Write-Host "PASS $Name" }
+    else { Write-Host "FAIL ${Name}: expected $Expected, got $Actual"; $script:failures++ }
 }
 
 $prodFour = @(
@@ -148,6 +161,160 @@ $getFn = ($ast.FindAll({ param($node) $node -is [Management.Automation.Language.
 Test-Case 'Get-DeprecatedProdComputeName body has no unary-comma empty return' (
     $getFn -and ($getFn.Body.Extent.Text -notmatch 'return\s*,\s*@\(\)')
 ) $true
+
+# --- #578 leftover identities / fwrunner storage / unused AI accounts ---
+$prodFive = @(
+    'id-cmdemo1-prod-aisf'
+    'id-cmdemo1-prod-fworker'
+    'id-cmdemo1-prod-fwrunner'
+    'stcmdemo1prodfwrj7265dy3'
+    'aif-cmdemo1-prod'
+)
+$uatFive = @(
+    'id-cmdemo1-uat-aisf'
+    'id-cmdemo1-uat-fworker'
+    'id-cmdemo1-uat-fwrunner'
+    'stcmdemo1uatfwr2bttonyso'
+    'aif-cmdemo1-uat'
+)
+
+Test-Case 'prod leftovers: the five exact names (#578)' (
+    Get-DeprecatedAisfLeftoverName -Slug 'cmdemo1' -Environment 'prod' -Retired @('aisf', 'fworker', 'scorecard')
+) $prodFive
+
+Test-Case 'uat leftovers: the five exact names (#578)' (
+    Get-DeprecatedAisfLeftoverName -Slug 'cmdemo1' -Environment 'uat' -Retired @('aisf', 'fworker')
+) $uatFive
+
+Test-Case 'tdd leftovers: none (#578)' (
+    Get-DeprecatedAisfLeftoverName -Slug 'cmdemo1' -Environment 'tdd' -Retired @('aisf', 'fworker')
+) @()
+
+Test-Case 'prod leftovers without retired aisf: nothing' (
+    Get-DeprecatedAisfLeftoverName -Slug 'cmdemo1' -Environment 'prod' -Retired @('fworker')
+) @()
+
+Test-Case 'uat leftovers without retired fworker: nothing' (
+    Get-DeprecatedAisfLeftoverName -Slug 'cmdemo1' -Environment 'uat' -Retired @('aisf')
+) @()
+
+Test-Case 'leftover slug is part of the exact names' (
+    Get-DeprecatedAisfLeftoverName -Slug 'other' -Environment 'prod' -Retired @('aisf', 'fworker')
+) @(
+    'id-other-prod-aisf'
+    'id-other-prod-fworker'
+    'id-other-prod-fwrunner'
+    'stotherprodfwrj7265dy3'
+    'aif-other-prod'
+)
+
+Test-Case 'prod prerequisite compute names (#575 / #578)' (
+    Get-DeprecatedAisfComputePrerequisiteName -Slug 'cmdemo1' -Environment 'prod'
+) $prodFour
+
+Test-Case 'uat prerequisite compute names (#574 / #578)' (
+    Get-DeprecatedAisfComputePrerequisiteName -Slug 'cmdemo1' -Environment 'uat'
+) @(
+    'ca-cmdemo1-uat-aisf-fccv'
+    'ca-cmdemo1-uat-fworker-fccv'
+    'caj-cmdemo1-uat-fwrunner'
+    'caj-cmdemo1-uat-fwrunner-codex'
+)
+
+Test-Case 'tdd has no leftover prerequisite list' (
+    Get-DeprecatedAisfComputePrerequisiteName -Slug 'cmdemo1' -Environment 'tdd'
+) @()
+
+$keep = @(Get-AisfLeftoverKeepName -Slug 'cmdemo1')
+Test-Case 'keep-list includes app/ui/deploy/plan/acr/octopus/scorecard-site and kept storage' (
+    $keep
+) @(
+    'id-cmdemo1-tdd-app'
+    'id-cmdemo1-uat-app'
+    'id-cmdemo1-prod-app'
+    'id-cmdemo1-tdd-ui'
+    'id-cmdemo1-uat-ui'
+    'id-cmdemo1-prod-ui'
+    'id-cmdemo1-deploy-nonprod'
+    'id-cmdemo1-deploy-prod'
+    'id-cmdemo1-plan'
+    'id-cmdemo1-acr-push'
+    'id-cmdemo1-octopus-config'
+    'id-cmdemo1-prod-scorecard-site'
+    'stcmdemo1prodsscj7265dy3'
+    'stcmdemo1tfchu4gq'
+)
+
+$wantedTen = @($prodFive + $uatFive)
+$overlap = @($wantedTen | Where-Object { $keep -contains $_ })
+Test-Case 'wanted leftovers never intersect keep-list' $overlap @()
+
+Test-Bool 'ui settings that name aif leftover are a reference' (
+    Test-UiReferencesAisfLeftover -SettingsJson '[{"name":"X","value":"https://aif-cmdemo1-prod.cognitiveservices.azure.com/"}]' -LeftoverName $prodFive
+) $true
+
+Test-Bool 'ui settings with only AI_OpenAI_Url are not a leftover reference' (
+    Test-UiReferencesAisfLeftover -SettingsJson '[{"name":"AI_OpenAI_Url","value":"https://jeffr-mlq3cayr-swedencentral.openai.azure.com/"}]' -LeftoverName $prodFive
+) $false
+
+Test-Bool 'empty ui settings are not a leftover reference' (
+    Test-UiReferencesAisfLeftover -SettingsJson '' -LeftoverName $prodFive
+) $false
+
+Test-Case 'apply-environment documents #578' (
+    (Get-Content -LiteralPath $scriptPath -Raw) -match '\#578'
+) $true
+
+Test-Case 'apply-environment lists blobs before storage delete' (
+    (Get-Content -LiteralPath $scriptPath -Raw) -match 'Write-StorageAccountBlobInventory'
+) $true
+
+Test-Case 'apply-environment calls Remove-DeprecatedAisfLeftover before stack apply' (
+    (Get-Content -LiteralPath $scriptPath -Raw) -match 'Remove-DeprecatedAisfLeftover[\s\S]*Invoke-StackApply'
+) $true
+
+Test-Case 'apply-environment skips leftover Remove when Length 0' (
+    (Get-Content -LiteralPath $scriptPath -Raw) -match 'if \(\$deprecatedAisfLeftover\.Length -gt 0\)'
+) $true
+
+$emptyLeftoverOk = try {
+    Remove-DeprecatedAisfLeftover -Group 'rg-cmdemo1-nonprod' -Slug 'cmdemo1' -Environment 'tdd' -Name @() -PrerequisiteName @()
+    $true
+} catch { $false }
+Test-Case 'Remove-DeprecatedAisfLeftover accepts empty -Name (tdd)' $emptyLeftoverOk $true
+
+foreach ($envName in @('tdd')) {
+    $leftover = Get-DeprecatedAisfLeftoverName -Slug 'cmdemo1' -Environment $envName -Retired @('aisf', 'fworker')
+    if ($null -eq $leftover) { $leftover = [string[]]@() }
+    elseif ($leftover -isnot [string[]]) { $leftover = [string[]]@($leftover) }
+    Test-Case "call site leftover ${envName} Length 0" $leftover.Length 0
+    Test-Case "call site leftover ${envName} does not call Remove" ($leftover.Length -gt 0) $false
+}
+foreach ($envName in @('uat', 'prod')) {
+    $leftover = Get-DeprecatedAisfLeftoverName -Slug 'cmdemo1' -Environment $envName -Retired @('aisf', 'fworker')
+    if ($null -eq $leftover) { $leftover = [string[]]@() }
+    elseif ($leftover -isnot [string[]]) { $leftover = [string[]]@($leftover) }
+    Test-Case "call site leftover ${envName} Length 5" $leftover.Length 5
+    Test-Case "call site leftover ${envName} would call Remove" ($leftover.Length -gt 0) $true
+}
+
+$getLeftoverFn = ($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-DeprecatedAisfLeftoverName' }, $false) | Select-Object -First 1)
+Test-Case 'Get-DeprecatedAisfLeftoverName body has no unary-comma empty return' (
+    $getLeftoverFn -and ($getLeftoverFn.Body.Extent.Text -notmatch 'return\s*,\s*@\(\)')
+) $true
+
+# system.json: ui OpenAI is not the leftover AI accounts; aisf and fworker stay retired.
+$systemPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'system.json'
+$system = Get-Content -LiteralPath $systemPath -Raw | ConvertFrom-Json -AsHashtable
+$ui = @($system.deployables | Where-Object { [string] $_.name -eq 'ui' })[0]
+$openaiUrl = [string] $ui.settings.AI_OpenAI_Url
+Test-Bool 'system.json ui AI_OpenAI_Url is not aif-cmdemo1-prod/uat' (
+    ($openaiUrl -notmatch 'aif-cmdemo1-(prod|uat)') -and ($openaiUrl.Length -gt 0)
+) $true
+foreach ($name in @('aisf', 'fworker')) {
+    $d = @($system.deployables | Where-Object { [string] $_.name -eq $name })[0]
+    Test-Bool "system.json $name is retired" ([bool] $d.retired) $true
+}
 
 if ($failures -gt 0) {
     Write-Host "$failures apply-environment check(s) failed."

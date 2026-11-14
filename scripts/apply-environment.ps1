@@ -568,6 +568,178 @@ if ($deprecatedProdCompute.Length -gt 0) {
     Remove-DeprecatedProdCompute -Group $resourceGroup -Name $deprecatedProdCompute
 }
 
+# Leftover AISF/fworker identities, fwrunner storage and unused AI accounts in prod and uat (#578). #542 removed them
+# from infra/own; stack --action-on-unmanage deleteResources may have already cleared them. This deletes the exact
+# names when still present, as the tier deploy identity, after confirming the env's aisf/fworker apps and fwrunner
+# jobs are gone (#574 / #575). Keep-list identities and storage (app/ui/deploy/plan/acr/octopus/scorecard-site,
+# st…ssc…, st…tf…) are never in the wanted set. tdd has no leftovers here.
+function Get-DeprecatedAisfLeftoverName {
+    param(
+        [Parameter(Mandatory)] [string] $Slug,
+        [Parameter(Mandatory)] [string] $Environment,
+        [string[]] $Retired = @()
+    )
+    if ($Environment -cnotin @('prod', 'uat')) { return [string[]]@() }
+    $retiredSet = @($Retired | ForEach-Object { [string] $_ })
+    if ($retiredSet -cnotcontains 'aisf' -or $retiredSet -cnotcontains 'fworker') { return [string[]]@() }
+    # Exact names from issue #578. Storage suffixes are the live uniqueString values for this system's groups.
+    $storage = if ($Environment -ceq 'prod') { "st${Slug}prodfwrj7265dy3" } else { "st${Slug}uatfwr2bttonyso" }
+    return [string[]]@(
+        "id-$Slug-$Environment-aisf"
+        "id-$Slug-$Environment-fworker"
+        "id-$Slug-$Environment-fwrunner"
+        $storage
+        "aif-$Slug-$Environment"
+    )
+}
+function Get-DeprecatedAisfComputePrerequisiteName {
+    # Apps/jobs that must already be gone before leftover delete (#574 uat, #575 prod). Exact live suffixes.
+    param(
+        [Parameter(Mandatory)] [string] $Slug,
+        [Parameter(Mandatory)] [string] $Environment
+    )
+    if ($Environment -ceq 'prod') {
+        return [string[]]@(
+            "ca-$Slug-prod-aisf-bhj5"
+            "ca-$Slug-prod-fworker-bhj5"
+            "caj-$Slug-prod-fwrunner"
+            "caj-$Slug-prod-fwrunner-codex"
+        )
+    }
+    if ($Environment -ceq 'uat') {
+        return [string[]]@(
+            "ca-$Slug-uat-aisf-fccv"
+            "ca-$Slug-uat-fworker-fccv"
+            "caj-$Slug-uat-fwrunner"
+            "caj-$Slug-uat-fwrunner-codex"
+        )
+    }
+    return [string[]]@()
+}
+function Get-AisfLeftoverKeepName {
+    # Names #578 must never delete (identities/storage that stay). Used by tests and as a belt-and-braces filter.
+    param([Parameter(Mandatory)] [string] $Slug)
+    return [string[]]@(
+        "id-$Slug-tdd-app"
+        "id-$Slug-uat-app"
+        "id-$Slug-prod-app"
+        "id-$Slug-tdd-ui"
+        "id-$Slug-uat-ui"
+        "id-$Slug-prod-ui"
+        "id-$Slug-deploy-nonprod"
+        "id-$Slug-deploy-prod"
+        "id-$Slug-plan"
+        "id-$Slug-acr-push"
+        "id-$Slug-octopus-config"
+        "id-$Slug-prod-scorecard-site"
+        "st${Slug}prodsscj7265dy3"
+        "st${Slug}tfchu4gq"
+    )
+}
+function Write-StorageAccountBlobInventory {
+    # List container names and blob counts before deleting a fwrunner storage account (#578 rollback note). No blob
+    # content, no keys: auth-mode login as the deploy identity. Missing account is a no-op line.
+    param([Parameter(Mandatory)] [string] $AccountName, [Parameter(Mandatory)] [string] $Group)
+    $PSNativeCommandUseErrorActionPreference = $false
+    $exists = az storage account show --name $AccountName --resource-group $Group --query name --output tsv 2>$null
+    $PSNativeCommandUseErrorActionPreference = $true
+    if (-not $exists) {
+        Write-Host "Blob inventory $($AccountName): account already absent in $Group (nothing to list)."
+        return
+    }
+    $PSNativeCommandUseErrorActionPreference = $false
+    $containersJson = az storage container list --account-name $AccountName --auth-mode login --query '[].name' --output json 2>$null
+    $listCode = $LASTEXITCODE
+    $PSNativeCommandUseErrorActionPreference = $true
+    if ($listCode -ne 0 -or -not $containersJson) {
+        Write-Host "Blob inventory $($AccountName): could not list containers (exit $listCode); delete continues."
+        return
+    }
+    $containers = @($containersJson | ConvertFrom-Json)
+    if ($containers.Count -eq 0) {
+        Write-Host "Blob inventory $($AccountName): 0 containers."
+        return
+    }
+    foreach ($container in $containers) {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $count = az storage blob list --account-name $AccountName --container-name $container --auth-mode login --query 'length(@)' --output tsv 2>$null
+        $PSNativeCommandUseErrorActionPreference = $true
+        if (-not $count) { $count = '?' }
+        Write-Host "Blob inventory $($AccountName): container '$container' blobCount=$count"
+    }
+}
+function Test-UiReferencesAisfLeftover {
+    # Pure: true when a ui app-settings JSON (az containerapp show) still names any leftover. ui uses its own OpenAI
+    # endpoint (system.json AI_OpenAI_Url), not aif-cmdemo1-*.
+    param([string] $SettingsJson = '', [string[]] $LeftoverName = @())
+    if (-not $SettingsJson -or $LeftoverName.Count -eq 0) { return $false }
+    $lower = $SettingsJson.ToLowerInvariant()
+    foreach ($name in $LeftoverName) {
+        if ($name -and $lower.Contains(([string] $name).ToLowerInvariant())) { return $true }
+    }
+    return $false
+}
+function Remove-DeprecatedAisfLeftover {
+    param(
+        [Parameter(Mandatory)] [string] $Group,
+        [Parameter(Mandatory)] [string] $Slug,
+        [Parameter(Mandatory)] [string] $Environment,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Name,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $PrerequisiteName
+    )
+    if ($Name.Count -eq 0) { return }
+    $keep = @(Get-AisfLeftoverKeepName -Slug $Slug)
+    $keepLower = @{}
+    foreach ($k in $keep) { $keepLower[$k.ToLowerInvariant()] = $true }
+    $blocked = @($Name | Where-Object { $_ -and $keepLower.ContainsKey(([string] $_).ToLowerInvariant()) })
+    if ($blocked.Count -gt 0) {
+        Fail-Step "Deprecated aisf leftovers (#578): refused to delete keep-list name(s) $($blocked -join ', ')."
+    }
+    $PSNativeCommandUseErrorActionPreference = $false
+    $listed = @(az resource list --resource-group $Group --query '[].{id:id,name:name,type:type}' --output json 2>$null | ConvertFrom-Json)
+    $PSNativeCommandUseErrorActionPreference = $true
+    $presentNames = @($listed | ForEach-Object { [string] $_.name })
+    $prereqStillThere = @(Select-PresentResourceName -Wanted $PrerequisiteName -Present $presentNames)
+    if ($prereqStillThere.Count -gt 0) {
+        Fail-Step "Deprecated aisf leftovers (#578): prerequisite compute still present in ${Group}: $($prereqStillThere -join ', '). Finish #574/#575 (aisf/fworker apps and fwrunner jobs) before removing identities/storage/AI accounts."
+    }
+    # ui app settings must not still name a leftover (Key Vault secret refs / OpenAI endpoint / identity ids).
+    $uiNamePattern = '^ca-' + [regex]::Escape($Slug) + '-' + [regex]::Escape($Environment) + '-ui'
+    $uiApps = @($listed | Where-Object { [string] $_.type -ieq 'Microsoft.App/containerApps' -and [string] $_.name -match $uiNamePattern })
+    foreach ($ui in $uiApps) {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $settingsJson = az containerapp show --ids ([string] $ui.id) --query 'properties.template.containers[0].env' --output json 2>$null
+        $PSNativeCommandUseErrorActionPreference = $true
+        if (Test-UiReferencesAisfLeftover -SettingsJson ([string] $settingsJson) -LeftoverName $Name) {
+            Fail-Step "Deprecated aisf leftovers (#578): ui app $([string] $ui.name) still references a leftover name. Clear that reference before delete."
+        }
+    }
+    $toRemove = @(Select-PresentResourceName -Wanted $Name -Present $presentNames)
+    if ($toRemove.Count -eq 0) {
+        Write-Host "Deprecated aisf/fworker leftovers (#578): none of $($Name -join ', ') remain in $Group."
+        return
+    }
+    foreach ($gone in $toRemove) {
+        $row = @($listed | Where-Object { [string] $_.name -ieq $gone })[0]
+        $id = [string] $row.id
+        $type = [string] $row.type
+        if ($type -ieq 'Microsoft.Storage/storageAccounts') {
+            Write-StorageAccountBlobInventory -AccountName $gone -Group $Group
+        }
+        Write-Host "Deleting deprecated aisf/fworker leftover $($gone) (#578): identities/storage/AI left by retired aisf/fworker."
+        az resource delete --ids $id --output none
+    }
+}
+$deprecatedAisfLeftover = Get-DeprecatedAisfLeftoverName -Slug $slug -Environment $environmentName -Retired $retiredDeployables
+if ($null -eq $deprecatedAisfLeftover) { $deprecatedAisfLeftover = [string[]]@() }
+elseif ($deprecatedAisfLeftover -isnot [string[]]) { $deprecatedAisfLeftover = [string[]]@($deprecatedAisfLeftover) }
+$deprecatedAisfPrereq = Get-DeprecatedAisfComputePrerequisiteName -Slug $slug -Environment $environmentName
+if ($null -eq $deprecatedAisfPrereq) { $deprecatedAisfPrereq = [string[]]@() }
+elseif ($deprecatedAisfPrereq -isnot [string[]]) { $deprecatedAisfPrereq = [string[]]@($deprecatedAisfPrereq) }
+if ($deprecatedAisfLeftover.Length -gt 0) {
+    Remove-DeprecatedAisfLeftover -Group $resourceGroup -Slug $slug -Environment $environmentName -Name $deprecatedAisfLeftover -PrerequisiteName $deprecatedAisfPrereq
+}
+
 try {
     $result = Invoke-StackApply -Name $stackName -Group $resourceGroup -TemplateFile $template -ParametersFile $parametersFile
 }
