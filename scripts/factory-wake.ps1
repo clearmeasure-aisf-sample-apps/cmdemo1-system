@@ -63,7 +63,8 @@ $PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
 
 $script:VerdictPrefixes = @('Review → Merged', 'Review → Done', 'Review → In Progress', 'Review: PASS')
-$script:ClosesPattern = '(?im)\bCloses\s+#(?<n>\d+)\b'
+# Closes #N (same repo) or Closes owner/name#N (cross-repo).
+$script:ClosesPattern = '(?im)\bCloses\s+(?:(?<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#|#)(?<n>\d+)\b'
 
 function Get-FactValue($Object, [string] $Name) {
     # Value of a property or hashtable key; $null when missing (Safe for StrictMode).
@@ -121,20 +122,45 @@ function Get-PullRequestGate {
     return [ordered] @{ Action = 'consider'; Reason = "open bot pull request #${number}" }
 }
 
-function Get-ClosingIssueNumbers {
-    # Issues the pull request closes: GraphQL closingIssuesReferences when present, else Closes #N in the body.
+function Get-ClosingIssues {
+    # Issues the pull request closes: GraphQL closingIssuesReferences when present (number + repository),
+    # else Closes #N / Closes owner/name#N in the body. Each item is @{ number; repository }.
     param(
-        [int[]] $ClosingReferences,
-        [string] $Body
+        [object[]] $ClosingReferences,
+        [string] $Body,
+        [string] $DefaultRepository = ''
     )
-    $fromRefs = @($ClosingReferences | Where-Object { $_ -gt 0 } | Select-Object -Unique)
-    if ($fromRefs.Count -gt 0) { return @($fromRefs) }
-    $fromBody = [Collections.Generic.List[int]]::new()
+    $result = [Collections.Generic.List[object]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+    function Add-ClosingLink {
+        param([int] $Number, [string] $Repository)
+        if ($Number -le 0) { return }
+        if (-not $Repository) { $Repository = $DefaultRepository }
+        if (-not $Repository) { return }
+        $key = "$Repository#$Number"
+        if (-not $seen.Add($key)) { return }
+        $result.Add([ordered] @{ number = $Number; repository = $Repository })
+    }
+
+    foreach ($ref in @($ClosingReferences)) {
+        if ($null -eq $ref) { continue }
+        if ($ref -is [int] -or $ref -is [long] -or ($ref -is [string] -and "$ref" -match '^\d+$')) {
+            Add-ClosingLink -Number ([int] $ref) -Repository $DefaultRepository
+            continue
+        }
+        $n = [int] (Get-FactValue $ref 'number')
+        $repo = [string] (Get-FactValue $ref 'repository')
+        Add-ClosingLink -Number $n -Repository $repo
+    }
+    if ($result.Count -gt 0) { return @($result) }
+
     foreach ($m in [regex]::Matches([string] $Body, $script:ClosesPattern)) {
         $n = [int] $m.Groups['n'].Value
-        if ($n -gt 0 -and -not $fromBody.Contains($n)) { $fromBody.Add($n) }
+        $repo = [string] $m.Groups['repo'].Value
+        Add-ClosingLink -Number $n -Repository $repo
     }
-    return @($fromBody.ToArray())
+    return @($result)
 }
 
 function Test-BotAssignedRecently {
@@ -178,6 +204,7 @@ function Get-IssueNudgeDecision {
     # CI finished: do not apply the recent-assign debounce (In Progress → Review assign must not block the Review nudge).
     param(
         [int] $IssueNumber,
+        [string] $Repository = '',
         [object[]] $AssignedEvents,
         [object[]] $Comments,
         [datetime] $HeadCommitDate,
@@ -186,25 +213,29 @@ function Get-IssueNudgeDecision {
         [int] $DedupeMinutes,
         [string] $WakeReason = 'CI finished'
     )
+    $label = if ($Repository) { "$Repository#$IssueNumber" } else { "#$IssueNumber" }
     if (Test-ReviewVerdictAfterHead -Comments $Comments -HeadCommitDate $HeadCommitDate) {
         return [ordered] @{
-            Issue  = $IssueNumber
-            Action = 'skip'
-            Reason = "issue #${IssueNumber} already has a Review verdict comment after the head commit"
+            Issue      = $IssueNumber
+            Repository = $Repository
+            Action     = 'skip'
+            Reason     = "issue $label already has a Review verdict comment after the head commit"
         }
     }
     if ($WakeReason -cne 'CI finished' -and
         (Test-BotAssignedRecently -AssignedEvents $AssignedEvents -BotLogin $BotLogin -Now $Now -Minutes $DedupeMinutes)) {
         return [ordered] @{
-            Issue  = $IssueNumber
-            Action = 'skip'
-            Reason = "cm-ai-ops-bot was assigned on #${IssueNumber} within the last $DedupeMinutes minutes"
+            Issue      = $IssueNumber
+            Repository = $Repository
+            Action     = 'skip'
+            Reason     = "cm-ai-ops-bot was assigned on $label within the last $DedupeMinutes minutes"
         }
     }
     return [ordered] @{
-        Issue  = $IssueNumber
-        Action = 'nudge'
-        Reason = "re-assign $BotLogin on #${IssueNumber} ($WakeReason)"
+        Issue      = $IssueNumber
+        Repository = $Repository
+        Action     = 'nudge'
+        Reason     = "re-assign $BotLogin on $label ($WakeReason)"
     }
 }
 
@@ -216,8 +247,9 @@ function Get-FactoryWakePlan {
         [string] $HeadBranch,
         [string] $DefaultBranch,
         $PullRequest,
-        [int[]] $ClosingReferences,
+        [object[]] $ClosingReferences,
         [object[]] $Issues,
+        [string] $DefaultRepository = '',
         [string] $BotLogin,
         [datetime] $Now,
         [int] $DedupeMinutes
@@ -231,8 +263,8 @@ function Get-FactoryWakePlan {
         return [ordered] @{ Action = 'skip'; Reason = $pr.Reason; Issues = @() }
     }
     $body = if ($null -ne $PullRequest) { [string] $PullRequest.body } else { '' }
-    $numbers = @(Get-ClosingIssueNumbers -ClosingReferences $ClosingReferences -Body $body)
-    if ($numbers.Count -eq 0) {
+    $links = @(Get-ClosingIssues -ClosingReferences $ClosingReferences -Body $body -DefaultRepository $DefaultRepository)
+    if ($links.Count -eq 0) {
         return [ordered] @{
             Action = 'skip'
             Reason = "pull request #$([int] $PullRequest.number) closes no issues"
@@ -240,19 +272,24 @@ function Get-FactoryWakePlan {
         }
     }
     $headDate = [datetime]::SpecifyKind([datetime] (Get-FactValue $PullRequest 'headCommitDate'), [DateTimeKind]::Utc)
-    $byNumber = @{}
+    $byKey = @{}
     foreach ($issue in @($Issues)) {
         $num = [int] (Get-FactValue $issue 'number')
-        if ($num -gt 0) { $byNumber[$num] = $issue }
+        $repo = [string] (Get-FactValue $issue 'repository')
+        if (-not $repo) { $repo = $DefaultRepository }
+        if ($num -gt 0 -and $repo) { $byKey["$repo#$num"] = $issue }
     }
     $decisions = [Collections.Generic.List[object]]::new()
-    foreach ($n in $numbers) {
-        $issue = $byNumber[$n]
+    foreach ($link in $links) {
+        $n = [int] $link.number
+        $repo = [string] $link.repository
+        $issue = $byKey["$repo#$n"]
         if ($null -eq $issue) {
             $decisions.Add([ordered] @{
-                    Issue  = $n
-                    Action = 'skip'
-                    Reason = "issue #${n} was not found"
+                    Issue      = $n
+                    Repository = $repo
+                    Action     = 'skip'
+                    Reason     = "issue ${repo}#${n} was not found"
                 })
             continue
         }
@@ -260,6 +297,7 @@ function Get-FactoryWakePlan {
         $comments = @(Get-FactValue $issue 'comments')
         $decisions.Add((Get-IssueNudgeDecision `
                     -IssueNumber $n `
+                    -Repository $repo `
                     -AssignedEvents $assignedEvents `
                     -Comments $comments `
                     -HeadCommitDate $headDate `
@@ -270,7 +308,7 @@ function Get-FactoryWakePlan {
     $nudgeCount = @($decisions | Where-Object { $_.Action -eq 'nudge' }).Count
     return [ordered] @{
         Action = $(if ($nudgeCount -gt 0) { 'nudge' } else { 'skip' })
-        Reason = "$($pr.Reason); $($numbers.Count) linked issue(s); $nudgeCount to nudge"
+        Reason = "$($pr.Reason); $($links.Count) linked issue(s); $nudgeCount to nudge"
         Issues = @($decisions)
     }
 }
@@ -280,12 +318,68 @@ function ConvertFrom-GhJson([string] $Text) {
     return $Text | ConvertFrom-Json -Depth 40
 }
 
-function Invoke-GhApi {
-    # Runs gh api and returns the JSON object (or throws). Arguments after the verb go to gh.
+function Test-GhGraphqlNotFoundOnly {
+    # True when errors is non-empty and every GraphQL error is type NOT_FOUND (missing issue/repository).
+    # FORBIDDEN, INSUFFICIENT_SCOPES, RATE_LIMITED, mixed types, and empty/missing errors are not "not found".
+    param($Parsed)
+    if ($null -eq $Parsed) { return $false }
+    $errorsRaw = Get-FactValue $Parsed 'errors'
+    # @() from an if-branch / @( $null ) is unsafe under StrictMode; build the list explicitly.
+    $errors = [System.Collections.Generic.List[object]]::new()
+    if ($null -ne $errorsRaw) { foreach ($err in @($errorsRaw)) { $errors.Add($err) } }
+    if ($errors.Count -eq 0) { return $false }
+    foreach ($err in $errors) {
+        if ([string] (Get-FactValue $err 'type') -cne 'NOT_FOUND') { return $false }
+    }
+    return $true
+}
+
+function Test-GhRestHttp404 {
+    # True when a REST call returned exactly HTTP 404 (JSON status or gh stderr summary).
+    param($Parsed, [string] $Stderr = '')
+    $status = [string] (Get-FactValue $Parsed 'status')
+    return ($status -ceq '404') -or ($Stderr -match '(?i)\bHTTP 404\b')
+}
+
+function Invoke-GhApiRaw {
+    # Runs gh api without throwing NativeCommandExitException. Returns ExitCode, Stdout, Stderr, Parsed.
+    # With $PSNativeCommandUseErrorActionPreference = $true (required preamble), a non-zero gh exit
+    # would otherwise throw before $LASTEXITCODE can be read (#649 / same pattern as #646).
+    # Stderr is kept out of the JSON body (gh prints a summary line there on GraphQL field errors).
     param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Arguments)
-    $raw = (& gh api @Arguments 2>&1) -join "`n"
-    if ($LASTEXITCODE -ne 0) { throw "gh api failed ($LASTEXITCODE): $raw" }
-    return ConvertFrom-GhJson $raw
+    $previous = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+    try {
+        $written = @(& gh api @Arguments 2>&1)
+        $code = [int] $LASTEXITCODE
+    }
+    finally {
+        $PSNativeCommandUseErrorActionPreference = $previous
+    }
+    $stdout = @($written | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join "`n"
+    $stderr = @($written | Where-Object { $_ -is [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" } | Where-Object { $_ }) -join "`n"
+    return [ordered] @{
+        ExitCode = $code
+        Stdout   = $stdout
+        Stderr   = $stderr
+        Parsed   = (ConvertFrom-GhJson $stdout)
+    }
+}
+
+function Invoke-GhApi {
+    # Runs gh api and returns the JSON object. On a non-zero exit, only a genuine not-found is returned
+    # for the caller to skip: GraphQL errors that are all NOT_FOUND, or a REST HTTP 404. FORBIDDEN /
+    # INSUFFICIENT_SCOPES / RATE_LIMITED / mixed errors / and any other non-zero exit throw (#649 review).
+    param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Arguments)
+    $r = Invoke-GhApiRaw @Arguments
+    if ($r.ExitCode -ne 0) {
+        if ((Test-GhGraphqlNotFoundOnly -Parsed $r.Parsed) -or (Test-GhRestHttp404 -Parsed $r.Parsed -Stderr $r.Stderr)) {
+            return $r.Parsed
+        }
+        $detail = if ($r.Stdout) { $r.Stdout } elseif ($r.Stderr) { $r.Stderr } else { '(no output)' }
+        throw "gh api failed ($($r.ExitCode)): $detail"
+    }
+    return $r.Parsed
 }
 
 function Get-OpenPullRequestForHead {
@@ -309,7 +403,12 @@ query($owner: String!, $name: String!, $oid: GitObjectID!) {
             author { login }
             headRefOid
             commits(last: 1) { nodes { commit { oid committedDate } } }
-            closingIssuesReferences(first: 20) { nodes { number } }
+            closingIssuesReferences(first: 20) {
+              nodes {
+                number
+                repository { nameWithOwner }
+              }
+            }
           }
         }
       }
@@ -337,13 +436,22 @@ query($owner: String!, $name: String!, $oid: GitObjectID!) {
             $headCommitDate = [datetime]::SpecifyKind([datetime] $lastDate, [DateTimeKind]::Utc)
         }
         $closingNodes = Get-FactValue (Get-FactValue $node 'closingIssuesReferences') 'nodes'
+        $closingReferences = @(
+            foreach ($c in @($closingNodes)) {
+                $num = [int] (Get-FactValue $c 'number')
+                if ($num -le 0) { continue }
+                $repoNode = Get-FactValue $c 'repository'
+                $nameWithOwner = [string] (Get-FactValue $repoNode 'nameWithOwner')
+                [ordered] @{ number = $num; repository = $nameWithOwner }
+            }
+        )
         return [ordered] @{
             number            = [int] (Get-FactValue $node 'number')
             state             = [string] (Get-FactValue $node 'state')
             body              = [string] (Get-FactValue $node 'body')
             author            = [string] (Get-FactValue (Get-FactValue $node 'author') 'login')
             headCommitDate    = $headCommitDate
-            closingReferences = @($closingNodes | ForEach-Object { [int] (Get-FactValue $_ 'number') })
+            closingReferences = $closingReferences
         }
     }
     return $null
@@ -375,8 +483,11 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }
 '@
+    # Invoke-GhApi returns the payload when errors are all NOT_FOUND; other non-zero exits throw (#649).
     $answer = Invoke-GhApi graphql -f "query=$query" -f "owner=$Owner" -f "name=$Name" -F "number=$Number"
-    $issue = $answer.data.repository.issue
+    $repoNode = Get-FactValue (Get-FactValue $answer 'data') 'repository'
+    if ($null -eq $repoNode) { return $null }
+    $issue = Get-FactValue $repoNode 'issue'
     if ($null -eq $issue) { return $null }
     $assigned = [Collections.Generic.List[object]]::new()
     foreach ($ev in @($issue.timelineItems.nodes)) {
@@ -396,6 +507,7 @@ query($owner: String!, $name: String!, $number: Int!) {
         })
     return [ordered] @{
         number         = [int] $issue.number
+        repository     = "$Owner/$Name"
         assignedEvents = @($assigned)
         comments       = $comments
         botLogin       = $BotLogin
@@ -453,15 +565,20 @@ Write-Host "pull request gate: $($prGate.Action) — $($prGate.Reason)"
 if ($prGate.Action -eq 'skip') { exit 0 }
 
 $closing = @($pull.closingReferences)
-$issueNumbers = @(Get-ClosingIssueNumbers -ClosingReferences $closing -Body ([string] $pull.body))
-Write-Host ("linked issues: " + $(if ($issueNumbers.Count) { ($issueNumbers | ForEach-Object { "#$_" }) -join ', ' } else { '(none)' }))
-if ($issueNumbers.Count -eq 0) { exit 0 }
+$links = @(Get-ClosingIssues -ClosingReferences $closing -Body ([string] $pull.body) -DefaultRepository $Repository)
+Write-Host ("linked issues: " + $(if ($links.Count) { ($links | ForEach-Object { "$($_.repository)#$($_.number)" }) -join ', ' } else { '(none)' }))
+if ($links.Count -eq 0) { exit 0 }
 
 $issueFacts = [Collections.Generic.List[hashtable]]::new()
-foreach ($n in $issueNumbers) {
-    $facts = Get-IssueWakeFacts -Owner $owner -Name $name -Number $n -BotLogin $BotLogin
+foreach ($link in $links) {
+    $repoFull = [string] $link.repository
+    if ($repoFull -notmatch '^(?<issueOwner>[^/]+)/(?<issueName>[^/]+)$') {
+        Write-Host "issue #$($link.number): skip — repository '$repoFull' is not owner/name"
+        continue
+    }
+    $facts = Get-IssueWakeFacts -Owner $Matches['issueOwner'] -Name $Matches['issueName'] -Number ([int] $link.number) -BotLogin $BotLogin
     if ($null -eq $facts) {
-        Write-Host "issue #${n}: skip — not found"
+        Write-Host "issue ${repoFull}#$($link.number): skip — not found"
         continue
     }
     $issueFacts.Add($facts)
@@ -475,15 +592,18 @@ $plan = Get-FactoryWakePlan `
     -PullRequest $pull `
     -ClosingReferences $closing `
     -Issues @($issueFacts) `
+    -DefaultRepository $Repository `
     -BotLogin $BotLogin `
     -Now $Now `
     -DedupeMinutes $DedupeMinutes
 
 Write-Host "plan: $($plan.Action) — $($plan.Reason)"
 foreach ($d in @($plan.Issues)) {
-    Write-Host "issue #$($d.Issue): $($d.Action) — $($d.Reason)"
+    $targetRepo = [string] (Get-FactValue $d 'Repository')
+    if (-not $targetRepo) { $targetRepo = $Repository }
+    Write-Host "issue ${targetRepo}#$($d.Issue): $($d.Action) — $($d.Reason)"
     if ($d.Action -eq 'nudge') {
-        Invoke-IssueAssigneeNudge -Repository $Repository -Number ([int] $d.Issue) -BotLogin $BotLogin -DryRun:$DryRun
+        Invoke-IssueAssigneeNudge -Repository $targetRepo -Number ([int] $d.Issue) -BotLogin $BotLogin -DryRun:$DryRun
     }
 }
 
