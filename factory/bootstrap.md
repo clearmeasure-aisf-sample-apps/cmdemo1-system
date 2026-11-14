@@ -2,7 +2,8 @@
 
 Everything the bot does is in `factory/operating-instructions.md`. The account holds only secrets, connectors and three
 routines whose prompts point at that file, so a new account is connected in a few minutes and a change to how the bot
-works is a pull request here, not an edit in grok.com.
+works is a pull request here, not an edit in grok.com. The bot approves and merges his own pull requests when his
+review is PASS and required checks are green; he does not wait for a human yes in chat.
 
 ## 1. Secrets (names only; values never go in a repository, a comment or a chat)
 
