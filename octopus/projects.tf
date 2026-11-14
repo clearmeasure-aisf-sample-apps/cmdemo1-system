@@ -299,8 +299,8 @@ resource "octopusdeploy_process_step" "seed_demo_employees" {
 # Acceptance tests, in the environments with "acceptanceTests": true only: the full suite, or the tests of the
 # deployable's acceptanceTestsFilter. "Prepare test runner" starts with "Migrate database" and pulls the test image
 # meanwhile. The test steps stand before the failure rollback ("Revert deployable", "Verify revert", "Revert pin"),
-# so a failed test runs that rollback: the pin goes back, and a deployable with hosting "own" is put back and then
-# asked ("Verify revert"). A failed test fails the deployment, which blocks its promotion.
+# so a failed test runs that rollback: the pin goes back, and a deployable with hosting "own" or "containerapp" is
+# put back and then asked ("Verify revert"). A failed test fails the deployment, which blocks its promotion.
 resource "octopusdeploy_process_step" "prepare_tests" {
   for_each = local.tested_deployables
 
@@ -583,9 +583,9 @@ resource "octopusdeploy_process_step" "record_nodes" {
 }
 
 # Runs only when an earlier step failed, before "Revert pin": the application's deploy.ps1 again, with the version the
-# environment ran before. For any other deployable the next apply of the stack puts the pinned version back; nothing
-# of the system's applies an application's own runtime, so without this step a failed verification would leave the
-# environment on the release that failed while versions.json names the one before (principle 002).
+# environment ran before. Nothing of the system's applies an application's own runtime, so without this step a failed
+# verification would leave the environment on the release that failed while versions.json names the one before
+# (principle 002). Container deployables have the same-named steps below (revert_container / verify_container_revert).
 resource "octopusdeploy_process_step" "revert_own" {
   for_each = local.own_deployables
 
@@ -615,6 +615,29 @@ resource "octopusdeploy_process_step" "revert_own" {
     "Octopus.Action.Script.ScriptSource" = "Inline"
     "Octopus.Action.Script.Syntax"       = "PowerShell"
     "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/invoke-application.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
+# Same failure-only rollback for a container app: "Update deployable" already pointed the app at the failed release's
+# image, and the next stack apply is too late (hours, or the next system release). scripts/update-deployable.ps1 again,
+# with the version before from "Pin version", then "Verify revert" asks that it serves.
+resource "octopusdeploy_process_step" "revert_container" {
+  for_each = local.container_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Revert deployable"
+  type           = "Octopus.AzurePowerShell"
+  condition      = "Failure"
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/update-deployable.ps1")
     "OctopusUseBundledTooling"           = "False"
   }
 }
@@ -657,6 +680,28 @@ resource "octopusdeploy_process_step" "verify_revert" {
     "Octopus.Action.Script.ScriptSource" = "Inline"
     "Octopus.Action.Script.Syntax"       = "PowerShell"
     "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/invoke-application.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
+# Container counterpart of verify_revert: scripts/verify-environment.ps1 asks the health path and that the image tag
+# is the version before. Same step name and failure condition so the process reads like the own-runtime rollback.
+resource "octopusdeploy_process_step" "verify_container_revert" {
+  for_each = local.container_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Verify revert"
+  type           = "Octopus.AzurePowerShell"
+  condition      = "Failure"
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/verify-environment.ps1")
     "OctopusUseBundledTooling"           = "False"
   }
 }
@@ -753,14 +798,18 @@ resource "octopusdeploy_process_steps_order" "deployable" {
       octopusdeploy_process_step.acceptance_tests[each.key].id,
       octopusdeploy_process_step.close_test_database[each.key].id,
     ] : [],
-    # On failure, in this order: the environment is put back first (hosting "own"), then asked ("Verify revert"),
-    # then the two records are written (the nodes, then the pin). None of these steps reads versions.json: each takes
-    # the version before from "Pin version". A deployable without acceptance tests keeps this rollback immediately
-    # after verify.
+    # On failure, in this order: the environment is put back first (hosting "own" or "containerapp"), then asked
+    # ("Verify revert"), then the records are written (nodes for own, then the pin for every deployable). None of
+    # these steps reads versions.json: each takes the version before from "Pin version". A deployable without
+    # acceptance tests keeps this rollback immediately after verify.
     contains(keys(local.own_deployables), each.key) ? [
       octopusdeploy_process_step.revert_own[each.key].id,
       octopusdeploy_process_step.verify_revert[each.key].id,
       octopusdeploy_process_step.record_reverted_nodes[each.key].id,
+    ] : [],
+    contains(keys(local.container_deployables), each.key) ? [
+      octopusdeploy_process_step.revert_container[each.key].id,
+      octopusdeploy_process_step.verify_container_revert[each.key].id,
     ] : [],
     [octopusdeploy_process_step.revert_pin[each.key].id],
   )

@@ -3,19 +3,25 @@
 
 <#
 .SYNOPSIS
-    Points the deployable's container app at the release's image.
+    Points the deployable's container app at the release's image, or at the previous image after a failed step.
 
 .DESCRIPTION
-    Step "Update deployable" of the Octopus project <slug>-<deployable>; octopus/projects.tf inlines this file. The
-    fast path of a deployment: the image tag <registry>/<slug>/<deployable>:<release> and the app's port, on the
-    container app the stack created. The pin step already wrote the same version to Git, so the next apply of the
-    stack (an environment release, or the nightly drift check) agrees with what runs. The deploy identity is excluded
-    from the stack's deny settings, so it may make this change. It then waits until the new revision is ready, and fails
-    at once, with the container's last console lines, when the revision cannot start. When the deployable is ui and
-    Octopus.FeatureFlags.ClientIdentifier (or the deprecated alias Octopus.FeatureToggles.ClientIdentifier) has text,
-    that same update sets the container app environment variable Octopus__FeatureFlags__ClientIdentifier. A container
-    app has no package transform. Both variables empty, or any other deployable, leaves the update as it was. The
-    value is never logged.
+    Steps "Update deployable" and "Revert deployable" of the Octopus project <slug>-<deployable>; octopus/projects.tf
+    inlines this file for both. The fast path of a deployment: the image tag <registry>/<slug>/<deployable>:<release>
+    and the app's port, on the container app the stack created. The pin step already wrote the same version to Git, so
+    the next apply of the stack (an environment release, or the nightly drift check) agrees with what runs. The deploy
+    identity is excluded from the stack's deny settings, so it may make this change. It then waits until the new
+    revision is ready, and fails at once, with the container's last console lines, when the revision cannot start.
+    When the deployable is ui and Octopus.FeatureFlags.ClientIdentifier (or the deprecated alias
+    Octopus.FeatureToggles.ClientIdentifier) has text, that same update sets the container app environment variable
+    Octopus__FeatureFlags__ClientIdentifier. A container app has no package transform. Both variables empty, or any
+    other deployable, leaves the update as it was. The value is never logged.
+
+    "Revert deployable" runs only after a failed step: the same update with the version the environment ran before
+    ("Pin version" recorded it as PreviousVersion), so the container app serves what versions.json will name once
+    "Revert pin" has put it back. Without this step a failed acceptance test would leave the new image running while
+    the pin alone went back: the next stack apply is too late. The first deployment to an environment has no version
+    before it; nothing is put back then. On success it sets output variable Reverted for "Verify revert".
 
 .PARAMETER LoadOnly
     Defines the planner functions and stops, for scripts/test-update-deployable.ps1. Octopus runs this file with the
@@ -28,6 +34,27 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Get-ContainerRevertTarget {
+    # "Revert deployable" takes the version before from "Pin version". Any other step keeps the release number.
+    # Skip when nothing was pinned or the environment ran no version before: there is no image to put back.
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $StepName,
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $ReleaseVersion,
+        [AllowEmptyString()] [string] $Pinned,
+        [AllowEmptyString()] [string] $PreviousVersion
+    )
+    if ($StepName -cne 'Revert deployable') {
+        return [pscustomobject]@{ IsRevert = $false; Skip = $false; Version = $ReleaseVersion; Reason = '' }
+    }
+    if ($Pinned -cne 'True') {
+        return [pscustomobject]@{ IsRevert = $true; Skip = $true; Version = ''; Reason = 'not-pinned' }
+    }
+    if ([string]::IsNullOrWhiteSpace($PreviousVersion)) {
+        return [pscustomobject]@{ IsRevert = $true; Skip = $true; Version = ''; Reason = 'no-previous' }
+    }
+    return [pscustomobject]@{ IsRevert = $true; Skip = $false; Version = $PreviousVersion; Reason = '' }
+}
 
 function Resolve-FeatureFlagClientIdentifier {
     # Prefer the current Octopus name; fall back to the deprecated alias. Never log the value (a JWT).
@@ -125,7 +152,24 @@ $resourceGroup = [string] $OctopusParameters['Azure.ResourceGroup']
 $deployable = [string] $OctopusParameters['Deployable.Name']
 $port = [string] $OctopusParameters['Deployable.Port']
 $registry = [string] $OctopusParameters['Azure.RegistryServer']
-$version = [string] $OctopusParameters['Octopus.Release.Number']
+$release = [string] $OctopusParameters['Octopus.Release.Number']
+$step = [string] $OctopusParameters['Octopus.Step.Name']
+$revert = Get-ContainerRevertTarget -StepName $step -ReleaseVersion $release `
+    -Pinned ([string] $OctopusParameters['Octopus.Action[Pin version].Output.Pinned']) `
+    -PreviousVersion ([string] $OctopusParameters['Octopus.Action[Pin version].Output.PreviousVersion'])
+if ($revert.Skip) {
+    if ($revert.Reason -eq 'not-pinned') {
+        Write-Host "$deployable $release was not pinned in ${environmentName}: nothing was deployed, nothing to revert."
+    }
+    else {
+        Write-Host "$environmentName ran no version of $deployable before ${release}: there is none to go back to."
+    }
+    exit 0
+}
+$version = [string] $revert.Version
+if ($revert.IsRevert) {
+    Write-Host "Going back to $deployable $version in $environmentName (image of the version before $release)."
+}
 # A system without a container app has no registry (system.json has no azure.registry), and this step is not in its
 # projects; a container app without one cannot name its image.
 if (-not $registry) {
@@ -454,7 +498,14 @@ if ($probe) {
 else {
     Write-Host "First deployment of $deployable in ${environmentName}: it replaces the placeholder, so its availability is measured from the next deployment on."
 }
-Write-Highlight "$deployable $version runs in $environmentName ($app)."
+if ($revert.IsRevert) {
+    # For "Verify revert": the version before was put back by an update that ended with 0.
+    Set-OctopusVariable -name 'Reverted' -value 'True'
+    Write-Highlight "The deployment of $deployable $release to $environmentName failed. $deployable $version runs in $environmentName again ($app)."
+}
+else {
+    Write-Highlight "$deployable $version runs in $environmentName ($app)."
+}
 
 # Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
 # whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).

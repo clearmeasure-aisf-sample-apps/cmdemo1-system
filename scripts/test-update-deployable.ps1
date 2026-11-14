@@ -3,7 +3,7 @@
 
 <#
 .SYNOPSIS
-    Tests the Update deployable feature-toggle client inject without Azure.
+    Tests the Update deployable feature-toggle client inject and container revert planner without Azure.
 
 .EXAMPLE
     pwsh -NoProfile -File scripts/test-update-deployable.ps1
@@ -22,6 +22,21 @@ function Test-Case([string] $Name, $Actual, $Expected) {
     if ($actualJson -ceq $expectedJson) { Write-Host "PASS $Name" }
     else { Write-Host "FAIL ${Name}: expected $expectedJson, got $actualJson"; $script:failures++ }
 }
+
+$updateKeep = Get-ContainerRevertTarget -StepName 'Update deployable' -ReleaseVersion '2.4.2210' -Pinned 'True' -PreviousVersion '2.4.2206'
+Test-Case 'update keeps the release version' @($updateKeep.IsRevert, $updateKeep.Skip, $updateKeep.Version) @($false, $false, '2.4.2210')
+
+$revertOk = Get-ContainerRevertTarget -StepName 'Revert deployable' -ReleaseVersion '2.4.2210' -Pinned 'True' -PreviousVersion '2.4.2206'
+Test-Case 'revert uses PreviousVersion' @($revertOk.IsRevert, $revertOk.Skip, $revertOk.Version, $revertOk.Reason) @($true, $false, '2.4.2206', '')
+
+$notPinned = Get-ContainerRevertTarget -StepName 'Revert deployable' -ReleaseVersion '2.4.2210' -Pinned 'False' -PreviousVersion '2.4.2206'
+Test-Case 'revert skips when not pinned' @($notPinned.IsRevert, $notPinned.Skip, $notPinned.Reason) @($true, $true, 'not-pinned')
+
+$noPrevious = Get-ContainerRevertTarget -StepName 'Revert deployable' -ReleaseVersion '2.4.2210' -Pinned 'True' -PreviousVersion ''
+Test-Case 'revert skips when no previous version' @($noPrevious.IsRevert, $noPrevious.Skip, $noPrevious.Reason) @($true, $true, 'no-previous')
+
+$blankPrevious = Get-ContainerRevertTarget -StepName 'Revert deployable' -ReleaseVersion '2.4.2210' -Pinned 'True' -PreviousVersion '   '
+Test-Case 'revert skips blank previous version' @($blankPrevious.Skip, $blankPrevious.Reason) @($true, 'no-previous')
 
 $envName = 'Octopus__FeatureFlags__ClientIdentifier'
 $client = 'client-identifier-tdd'
@@ -114,11 +129,39 @@ Test-Case 'script resolves the client identifier' ($source -match 'Resolve-Featu
 Test-Case 'script merges express env' ($source -match 'Merge-FeatureFlagClientEnv') $true
 Test-Case 'script keeps the image update' ($source -match 'az containerapp update --name \$app --resource-group \$resourceGroup --image \$image @featureFlagArguments --no-wait --output none') $true
 Test-Case 'script builds the splat from the planner' ($source -match 'Get-FeatureFlagUpdateArguments -Inject \$featureFlags') $true
+Test-Case 'script plans a container revert from Pin version' ($source -match 'Get-ContainerRevertTarget') $true
+Test-Case 'script sets Reverted after a successful container revert' ($source -match "Set-OctopusVariable -name 'Reverted' -value 'True'") $true
 # The JWT must never be written to the deployment log.
 Test-Case 'script never logs the client identifier value' (
     ($source -notmatch 'Write-Host.*(FeatureFlags\.ClientIdentifier|FeatureToggles\.ClientIdentifier|featureFlags\.Value)') -and
     ($source -notmatch 'Write-Verbose.*(FeatureFlags\.ClientIdentifier|FeatureToggles\.ClientIdentifier|featureFlags\.Value)')
 ) $true
+
+$projects = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'octopus/projects.tf') -Raw
+Test-Case 'projects.tf has container Revert deployable on failure' (
+    $projects -match 'resource "octopusdeploy_process_step" "revert_container"' -and
+    $projects -match 'for_each = local\.container_deployables' -and
+    $projects -match 'name\s+= "Revert deployable"' -and
+    $projects -match 'condition\s+= "Failure"' -and
+    $projects -match 'update-deployable\.ps1'
+) $true
+Test-Case 'projects.tf has container Verify revert on failure' (
+    $projects -match 'resource "octopusdeploy_process_step" "verify_container_revert"' -and
+    $projects -match 'name\s+= "Verify revert"' -and
+    $projects -match 'verify-environment\.ps1'
+) $true
+Test-Case 'projects.tf orders container revert before Revert pin' (
+    $projects -match 'octopusdeploy_process_step\.revert_container\[each\.key\]\.id' -and
+    $projects -match 'octopusdeploy_process_step\.verify_container_revert\[each\.key\]\.id' -and
+    $projects -match 'octopusdeploy_process_step\.revert_pin\[each\.key\]\.id'
+) $true
+
+$verify = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'verify-environment.ps1') -Raw
+Test-Case 'verify-environment handles Verify revert' ($verify -match "Verify revert") $true
+Test-Case 'verify-environment requires Reverted after container revert' (
+    $verify -match "Octopus\.Action\[Revert deployable\]\.Output\.Reverted"
+) $true
+Test-Case 'verify-environment checks previous image tag after revert' ($verify -match 'EndsWith\("\:\$previous"\)') $true
 
 if ($failures -gt 0) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'OK'

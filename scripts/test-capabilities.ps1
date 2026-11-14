@@ -428,22 +428,27 @@ $checks = [ordered] @{
         $steps = @(Get-ProcessStep $deployableProject)
         $step = @($steps | Where-Object Name -eq 'Revert pin')
         Assert-That ($step.Count -eq 1 -and $step[0].Condition -eq 'Failure') 'no Revert pin on failure'
-        if (-not $ownRuntime) { return 'Revert pin runs on failure' }
-        # An application that brings its own runtime: nothing of the system's puts the version before back, so its
-        # own deploy.ps1 does, in a step of its own that stands before "Revert pin".
         $names = @($steps | ForEach-Object { [string] $_.Name })
+        # Container apps and applications that bring their own runtime both put the version before back before
+        # "Revert pin"; a static site has no running image to swap, so the pin alone is enough.
+        $firstHosting = if ($system.deployables[0].ContainsKey('hosting')) { [string] $system.deployables[0].hosting } else { 'containerapp' }
+        if ($firstHosting -in 'staticwebapp', 'storagewebsite') { return 'Revert pin runs on failure' }
         $revert = @($steps | Where-Object Name -eq 'Revert deployable')
         Assert-That ($revert.Count -eq 1 -and $revert[0].Condition -eq 'Failure') 'no Revert deployable on failure'
         Assert-That ($names.IndexOf('Revert deployable') -lt $names.IndexOf('Revert pin')) 'Revert deployable does not stand before Revert pin'
-        # A rollback is verified like an update (decision 0018): the application's verify.ps1 right after the revert,
-        # on failure only, waiting for it; then the nodes it reported, and the pin last.
+        # A rollback is verified like an update (decision 0018): right after the revert, on failure only, waiting for
+        # it; then (for hosting "own") the nodes it reported, and the pin last.
         $verify = @($steps | Where-Object Name -eq 'Verify revert')
         Assert-That ($verify.Count -eq 1 -and $verify[0].Condition -eq 'Failure' -and [string] $verify[0].StartTrigger -ne 'StartWithPrevious') 'no Verify revert on failure that waits for the revert'
         Assert-That ($names.IndexOf('Verify revert') -eq $names.IndexOf('Revert deployable') + 1) 'Verify revert does not stand right after Revert deployable'
-        $record = @($steps | Where-Object Name -eq 'Record nodes after revert')
-        Assert-That ($record.Count -eq 1 -and $record[0].Condition -eq 'Failure') 'no Record nodes after revert on failure'
-        Assert-That ($names.IndexOf('Verify revert') -lt $names.IndexOf('Record nodes after revert') -and $names.IndexOf('Record nodes after revert') -lt $names.IndexOf('Revert pin')) 'the failure steps are not in the order revert, verify, record, pin'
-        'Revert deployable, Verify revert, Record nodes after revert, then Revert pin, run on failure'
+        if ($ownRuntime) {
+            $record = @($steps | Where-Object Name -eq 'Record nodes after revert')
+            Assert-That ($record.Count -eq 1 -and $record[0].Condition -eq 'Failure') 'no Record nodes after revert on failure'
+            Assert-That ($names.IndexOf('Verify revert') -lt $names.IndexOf('Record nodes after revert') -and $names.IndexOf('Record nodes after revert') -lt $names.IndexOf('Revert pin')) 'the failure steps are not in the order revert, verify, record, pin'
+            return 'Revert deployable, Verify revert, Record nodes after revert, then Revert pin, run on failure'
+        }
+        Assert-That ($names.IndexOf('Verify revert') -lt $names.IndexOf('Revert pin')) 'Verify revert does not stand before Revert pin'
+        'Revert deployable, Verify revert, then Revert pin, run on failure'
     }
     'CAP-010' = { Assert-AppRepository; Assert-That ((Get-AppRequiredCheck) -contains 'Build result') 'Build result not required'; 'Build result required on the app' }
     'CAP-011' = { $noisy = @(Get-NoisyDeployment); Assert-That ($noisy.Count -eq 0) "warnings in: $($noisy -join '; ')"; 'the current deployment of every project and environment logged no warning or error' }

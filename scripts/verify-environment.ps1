@@ -6,14 +6,19 @@
     Verifies the deployables of one environment answer over HTTPS.
 
 .DESCRIPTION
-    Last step of every Octopus project of the system ("Verify environment" in <slug>-system, "Verify deployable" in
-    <slug>-<deployable>); octopus/projects.tf inlines this file. Reads the stack outputs of stack-<slug>-<env> and
-    polls each deployable's URL (its health path once a version runs, / for a placeholder) until it answers 200.
-    Deployable.Name limits the check to one deployable. The deadline covers a scale-from-zero start and a SQL
-    database resuming from auto-pause; a revision that cannot start (crash loop, image pull failure, failed
-    provisioning) fails the step at once, with the container's last console lines. A static site (hosting
-    "staticwebapp" or "storagewebsite") has no revision to ask: only its URL is polled. A storage website
-    serves nothing before its first release, so "Verify environment" passes over one the stack knows no version of.
+    Steps "Verify environment" (<slug>-system), "Verify deployable" and "Verify revert" (<slug>-<deployable>);
+    octopus/projects.tf inlines this file. Reads the stack outputs of stack-<slug>-<env> and polls each deployable's
+    URL (its health path once a version runs, / for a placeholder) until it answers 200. Deployable.Name limits the
+    check to one deployable. The deadline covers a scale-from-zero start and a SQL database resuming from auto-pause;
+    a revision that cannot start (crash loop, image pull failure, failed provisioning) fails the step at once, with
+    the container's last console lines. A static site (hosting "staticwebapp" or "storagewebsite") has no revision to
+    ask: only its URL is polled. A storage website serves nothing before its first release, so "Verify environment"
+    passes over one the stack knows no version of.
+
+    "Verify revert" runs only after a failed step, right after "Revert deployable" for a container deployable: it
+    asks whether the previous image serves again. "Revert deployable" must have set Reverted (otherwise a healthy
+    failed release would pass a health-only check). No version before, or nothing pinned: nothing was put back, the
+    step says so and runs no check. In every case the deployment stays failed.
 
     A deployable that brings its own runtime (hosting "own") is not in the stack and verifies itself, in its own
     project (scripts/invoke-application.ps1). "Verify environment" therefore passes over a stack that lists no
@@ -49,6 +54,27 @@ $slug = [string] $OctopusParameters['System.Slug']
 $resourceGroup = [string] $OctopusParameters['Azure.ResourceGroup']
 $only = [string] $OctopusParameters['Deployable.Name']
 $deadlineMinutes = 10
+$step = [string] $OctopusParameters['Octopus.Step.Name']
+$afterRevert = $step -eq 'Verify revert'
+$release = [string] $OctopusParameters['Octopus.Release.Number']
+$previous = ''
+if ($afterRevert) {
+    $previous = [string] $OctopusParameters['Octopus.Action[Pin version].Output.PreviousVersion']
+    if ([string] $OctopusParameters['Octopus.Action[Pin version].Output.Pinned'] -ne 'True') {
+        Write-Highlight "The deployment of $only $release to $environmentName failed, and it had not pinned the version (it failed before the pin, or the version was pinned already): nothing was put back, so there is no revert to verify. $environmentName keeps what the failed deployment left."
+        exit 0
+    }
+    if (-not $previous) {
+        Write-Highlight "The deployment of $only $release to $environmentName failed, and $environmentName ran no version before it: nothing was put back, so there is no revert to verify. $environmentName keeps what the failed deployment left."
+        exit 0
+    }
+    if ([string] $OctopusParameters['Octopus.Action[Revert deployable].Output.Reverted'] -ne 'True') {
+        $differs = "The deployment of $release failed, and versions.json names $previous once 'Revert pin' has run: what runs and what is recorded differ until a deployment succeeds."
+        Write-Highlight "The deployment of $only $release to $environmentName failed, and the revert failed too: 'Revert deployable' did not put $previous back. The revert is not verified."
+        Fail-Step "The revert is not verified: 'Revert deployable' did not put $only $previous back in $environmentName (its step is above). $environmentName may be down, or still run what the failed deployment left. $differs"
+    }
+    Write-Host "Asking whether $only $previous serves in $environmentName again after the container revert."
+}
 
 $stack = az stack group show --name "stack-$slug-$environmentName" --resource-group $resourceGroup --output json | ConvertFrom-Json -AsHashtable
 $deployables = @($stack.outputs.deployables.value | Where-Object { -not $only -or $_.name -eq $only })
@@ -154,7 +180,20 @@ foreach ($deployable in $deployables) {
         Start-Sleep -Seconds 15
     }
     if ($status -eq 200) {
-        Write-Highlight "PASS $($deployable.name) in ${environmentName}: $uri"
+        # After a container revert, health alone is not enough: the failed release may still answer 200. The image
+        # tag must be the version before (Revert deployable set it; this proves it stayed).
+        if ($afterRevert -and $app -and [string] $deployable['hosting'] -notin 'staticwebapp', 'storagewebsite') {
+            $image = [string] (az containerapp show --name $app --resource-group $resourceGroup --query 'properties.template.containers[0].image' --output tsv)
+            if (-not $image.EndsWith(":$previous")) {
+                Write-Warning "FAIL $($deployable.name) in ${environmentName}: expected image tag :$previous after revert, got $image"
+                $failed++
+                continue
+            }
+            Write-Highlight "PASS $($deployable.name) in ${environmentName}: $uri (image $image)"
+        }
+        else {
+            Write-Highlight "PASS $($deployable.name) in ${environmentName}: $uri"
+        }
     }
     elseif ($status -eq -1) {
         $failed++
@@ -199,7 +238,14 @@ if ($edgeGroup) {
 }
 
 if ($failed -gt 0) {
+    if ($afterRevert) {
+        Fail-Step "The revert is not verified: $failed deployable(s) of $environmentName did not answer as $previous after 'Revert deployable'."
+    }
     Fail-Step "$failed deployable(s) of $environmentName did not answer."
+}
+
+if ($afterRevert) {
+    Write-Highlight "The deployment of $only $release to $environmentName failed. The revert is verified: $previous serves in $environmentName again."
 }
 
 # Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one

@@ -39,6 +39,7 @@ In Octopus, two kinds of project run against these environments:
   2. migrate the database;
   3. update the app where its `hosting` says it runs (a container app or a static site);
   4. verify.
+  On failure after that (including a red acceptance test), container apps and deployables with hosting `own` also run **Revert deployable** and **Verify revert** before **Revert pin**: the previous image or runtime is put back and checked, then the pin in Git.
 
 ## Common changes
 
