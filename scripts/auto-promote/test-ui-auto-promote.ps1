@@ -1003,5 +1003,42 @@ Test-Case 'aisf is not promoted: LoadOnly stops the script' $threwAisf $true
 $threwFworker = try { . (Join-Path $PSScriptRoot 'ui-auto-promote.ps1') -LoadOnly -Deployable fworker; $false } catch { $_.Exception.Message -like 'deployable fworker is not promoted automatically*' }
 Test-Case 'fworker is not promoted: LoadOnly stops the script' $threwFworker $true
 
+# Issue #646: GitHub Actions' pwsh shell appends `exit $LASTEXITCODE` to every step. A leftover non-zero from an
+# expected gh/git refusal must not turn a successful promote red; a real throw must still exit non-zero.
+function Invoke-LikeActionsPwshStep([string] $StepBody) {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("ui-auto-promote-exit-" + [guid]::NewGuid().ToString('n') + '.ps1')
+    # Same wrap as actions/runner ScriptHandlerHelpers for pwsh.
+    @(
+        "`$ErrorActionPreference = 'stop'"
+        $StepBody
+        "if ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit `$LASTEXITCODE }"
+    ) -join [Environment]::NewLine | Set-Content -LiteralPath $tmp -Encoding utf8
+    # LoadOnly set $PSNativeCommandUseErrorActionPreference; a nested pwsh that exits 1 must not throw here.
+    $prevNative = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+    try {
+        & pwsh -NoProfile -Command ". '$($tmp.Replace('''', ''''''))'" *> $null
+        return [int] $LASTEXITCODE
+    } finally {
+        $PSNativeCommandUseErrorActionPreference = $prevNative
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+$promoteScript = (Join-Path $PSScriptRoot 'ui-auto-promote.ps1').Replace('''', '''''')
+$successExit = Invoke-LikeActionsPwshStep @"
+`$PSNativeCommandUseErrorActionPreference = `$false
+bash -c 'exit 1'
+. '$promoteScript' -LoadOnly
+Complete-AutoPromoteSuccess
+"@
+Test-Case 'success path exits 0 despite leftover LASTEXITCODE (#646)' $successExit 0
+$throwExit = Invoke-LikeActionsPwshStep @"
+. '$promoteScript' -LoadOnly
+throw 'simulated promote failure'
+"@
+Test-Case 'throw still exits non-zero (#646)' ($throwExit -ne 0) $true
+
 if ($failures -gt 0) { Write-Host "$failures case(s) failed."; exit 1 }
 Write-Host 'All cases passed.'
+# Actions' pwsh shell would otherwise exit with a leftover LASTEXITCODE from the nested probes above.
+exit 0

@@ -1208,6 +1208,14 @@ function Get-ContainerAddress($Addresses, [string] $EnvironmentName, [string] $D
     return [string] $depProp.Value
 }
 
+function Complete-AutoPromoteSuccess {
+    # Said as an exit code: GitHub Actions' pwsh shell appends `exit $LASTEXITCODE` to every step
+    # (ScriptHandlerHelpers). A native gh/git call whose non-zero was expected and handled
+    # (merge-base --is-ancestor, issue 404) leaves $LASTEXITCODE at 1; without this, a successful
+    # promote still fails the step after "Signed off" (#646).
+    exit 0
+}
+
 if ($LoadOnly) { return }
 
 # --- Running ------------------------------------------------------------------------------------------------------
@@ -1546,7 +1554,7 @@ try {
     $listed = Get-ActiveBusyItems
     $busyItems = @($listed.Items)
     $activeTaskIds = @($listed.ActiveTaskIds)
-} catch { Say "Waiting: Octopus tasks could not be read whole ($($_.Exception.Message))"; return }
+} catch { Say "Waiting: Octopus tasks could not be read whole ($($_.Exception.Message))"; Complete-AutoPromoteSuccess }
 
 # Deployments parked only on a refused Sign-off hold do not block other deployables (#569).
 $projectIdByDeployable = @{}
@@ -1586,7 +1594,7 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
 $preferHeld = @(Get-HeldPipelinePrefer -HeldIssues $heldIssues)
 $candidate = Select-Candidate -Environments $envs -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t } -PreferHeld $preferHeld
 $candidate.Notes | ForEach-Object { Say $_ }
-if (-not $candidate.Release) { Say "No $Deployable release waits for a next environment."; Close-HeldIssues $candidate $activeTaskIds; return }
+if (-not $candidate.Release) { Say "No $Deployable release waits for a next environment."; Close-HeldIssues $candidate $activeTaskIds; Complete-AutoPromoteSuccess }
 $release = $candidate.Release; $target = $candidate.Target; $previous = $candidate.Previous
 Close-HeldIssues $candidate $activeTaskIds
 $busy = Get-BusyReason -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id
@@ -1596,28 +1604,29 @@ if ($busy -and (Test-BusyOnlyRunbookToTarget -Items $busyItems -TargetEnvironmen
     $wait = Wait-BusyRunbookClear -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id `
         -EnvironmentName $target.Name -Pause $RunbookBusyPause -WriteLog { param([string] $Message) Say $Message } `
         -GetBusyItems { @((Get-ActiveBusyItemsMarked).Items) }
-    if ($wait.Failed) { return }
+    if ($wait.Failed) { Complete-AutoPromoteSuccess }
     $busyItems = @($wait.Items)
     $busy = $wait.Busy
 }
-if ($busy) { Say "Nothing to do: $busy."; return }
+if ($busy) { Say "Nothing to do: $busy."; Complete-AutoPromoteSuccess }
 Say "Candidate: $Deployable $($release.Version) to $($target.Name) (commit $(Get-Commit $release))"
 
 $running = $candidate.Running
 if ($candidate.RunningUnknown) { Say "The release running in $($target.Name) is unknown: $($candidate.RunningUnknown)" }
 $ev = Get-Evaluation -Release $release -Target $target -Previous $previous -RunningRelease $running -RunningUnknown ([string] $candidate.RunningUnknown)
-if ($ev.Behind) { Say "commit $($ev.Sha) is behind the running $($ev.BaseSha): not promoted."; return }
+if ($ev.Behind) { Say "commit $($ev.Sha) is behind the running $($ev.BaseSha): not promoted."; Complete-AutoPromoteSuccess }
 $decision = $ev.Decision
 Say "Decision: $($decision.Decision)"
-if ($decision.Decision -eq 'wait') { $decision.Waiting | ForEach-Object { Say "  waiting: $_" }; return }
-if ($decision.Decision -eq 'hold') { Set-HeldIssue -Release $release -Target $target -Evaluation $ev; return }
+if ($decision.Decision -eq 'wait') { $decision.Waiting | ForEach-Object { Say "  waiting: $_" }; Complete-AutoPromoteSuccess }
+if ($decision.Decision -eq 'hold') { Set-HeldIssue -Release $release -Target $target -Evaluation $ev; Complete-AutoPromoteSuccess }
 
 $reason = Format-PromotionReason -Decision $decision -Previous $previous.Name -RunUrl $RunUrl
 Say $reason
-if ($DryRun) { return }
+if ($DryRun) { Complete-AutoPromoteSuccess }
 $created = Invoke-Octopus "/api/$space/deployments" 'Post' @{ ReleaseId = $release.Id; EnvironmentId = $target.Id; Comments = "${PromotionMarker}: $RunUrl" }
 Say "Deployment $($created.Id) to $($target.Name) (task $($created.TaskId))"
 $signOff = Submit-SignOff -TaskId $created.TaskId -Reason $reason -ProjectName $project.Name -ReleaseVersion $release.Version -EnvironmentName $target.Name
 if ($signOff -eq 'refused') {
     Set-HeldIssue -Release $release -Target $target -Evaluation (New-SignOffRefusedEvaluation -Sha (Get-Commit $release) -ProjectName $project.Name -ReleaseVersion $release.Version -EnvironmentName $target.Name) -DeploymentNote "The deployment $($created.Id) waits at its Sign-off: the auto-promote account was refused permission to take it."
 }
+Complete-AutoPromoteSuccess
