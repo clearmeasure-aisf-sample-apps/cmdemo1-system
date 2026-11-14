@@ -612,6 +612,59 @@ Test-Case 'pipeline only, 59 minutes: hold with the promised time' @($d.Decision
 $d = Get-PromotionDecision -Facts (New-Pipe 60 'green')
 Test-Case 'pipeline only, 60 minutes, master green: promote by the override' @($d.Decision, $d.Reason, $d.Note) @('promote', 'pipeline-override')
 Test-Case 'override Sign-off note names the rule' ((Format-PromotionReason -Decision $d -Previous 'uat' -RunUrl 'r1') -like 'Auto-promoted after 60 minutes: pipeline change accepted (owner rule 2026-10-14), master green, no other flag;*run r1') $true
+
+# Issue #688: a pipeline-change hold keeps its candidate; a newer tdd release must not restart the 60-minute clock.
+$pipeHoldBody = @"
+ui 2.4.2292 (commit abc) is not promoted to uat automatically. Flags:
+
+**Pipeline or infra change**
+- .github/workflows/build.yml (outside src/)
+
+Pipeline change is the only flag: promoted automatically after 2026-11-14 07:27 UTC if master of the application repository is green (owner rule 2026-10-14).
+"@
+Test-Case 'pipeline hold body is recognized' (Test-PipelineChangeHoldBody $pipeHoldBody) $true
+Test-Case 'non-pipeline hold body is not preferred' (Test-PipelineChangeHoldBody "**Red build or tests**`n- CRAP") $false
+$heldPrefer = @(Get-HeldPipelinePrefer -HeldIssues @(
+        @{ number = 684; title = 'ui 2.4.2292 held before uat'; body = $pipeHoldBody },
+        @{ number = 686; title = 'ui 2.4.2296 held before uat'; body = $pipeHoldBody.Replace('2.4.2292', '2.4.2296') },
+        @{ number = 9; title = 'dashboard 1.0.1 held before uat'; body = $pipeHoldBody }
+    ))
+Test-Case 'prefer held: oldest pipeline hold per environment, this deployable only' @($heldPrefer.Count, $heldPrefer[0].Version, $heldPrefer[0].Environment) @(1, '2.4.2292', 'uat')
+$rHeld = New-Rel 'R2292' '2.4.2292' 5; $rNewer = New-Rel 'R2298' '2.4.2298' 6; $rUat = New-Rel 'R2237' '2.4.2237' 1
+# Same shape as the starvation case: 2.4.2237 already in uat and prod; held and newer only in tdd.
+$keepDeps = @(
+    (New-Dep 'R2237' 'E1' '01' 't2237'),
+    (New-Dep 'R2237' 'E2' '02' 'u2237'),
+    (New-Dep 'R2237' 'E3' '03' 'p2237'),
+    (New-Dep 'R2292' 'E1' '10' 't2292'),
+    (New-Dep 'R2298' 'E1' '20' 't2298')
+)
+$keepStates = @{ t2237 = 'Success'; u2237 = 'Success'; p2237 = 'Success'; t2292 = 'Success'; t2298 = 'Success' }
+$c = Select-Candidate -Environments $envs3 -Releases @($rHeld, $rNewer, $rUat) `
+    -GetDeployments { param($id) @($keepDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() `
+    -GetTaskState { param($d) $keepStates[$d.TaskId] }.GetNewClosure() `
+    -PreferHeld @(@{ Version = '2.4.2292'; Environment = 'uat' })
+Test-Case '688 (1): held pipeline release is not superseded by newer tdd' @($c.Release.Id, $c.Target.Name, ($c.Notes[0] -like '*kept as the candidate (issue #688)*2.4.2298*')) @('R2292', 'uat', $true)
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'green')
+Test-Case '688 (1): that held release promotes when its window passes' @($d.Decision, $d.Reason) @('promote', 'pipeline-override')
+# After the held release has been promoted through uat (and on to prod), the newer tdd release is compared to that
+# uat commit: pipeline paths are already there, so no new 60-minute hold.
+$afterDeps = $keepDeps + @((New-Dep 'R2292' 'E2' '30' 'u2292'), (New-Dep 'R2292' 'E3' '40' 'p2292'))
+$afterStates = $keepStates + @{ u2292 = 'Success'; p2292 = 'Success' }
+$c = Select-Candidate -Environments $envs3 -Releases @($rHeld, $rNewer, $rUat) `
+    -GetDeployments { param($id) @($afterDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() `
+    -GetTaskState { param($d) $afterStates[$d.TaskId] }.GetNewClosure()
+Test-Case '688 (2): after held promotes, newer tdd is the candidate' @($c.Release.Id, $c.Target.Name) @('R2298', 'uat')
+$d = Get-PromotionDecision -Facts (New-Facts @{ Paths = @('src/UI/Server/Program.cs') })
+Test-Case '688 (2): newer with no new pipeline paths vs uat promotes without a hold' @($d.Decision, $d.Reason, @(Flags (New-Facts @{ Paths = @('src/UI/Server/Program.cs') }))) @('promote', 'no-flag', @())
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'green' @{ PreviousState = 'Failed' })
+Test-Case '688 (3): held release whose own deployment failed still holds' @($d.Decision, @(Flags (New-Pipe 60 'green' @{ PreviousState = 'Failed' }))) @('hold', @('Deployment or health failed', 'Pipeline or infra change'))
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'green' @{ HealthReads = @(@{ At = $t0.AddMinutes(3); Status = 'Unhealthy' }, @{ At = $t0.AddMinutes(11); Status = 'Unhealthy' }) })
+Test-Case '688 (3): held release whose own deployment turns unhealthy still holds' @($d.Decision, @(Flags (New-Pipe 60 'green' @{ HealthReads = @(@{ At = $t0.AddMinutes(3); Status = 'Unhealthy' }, @{ At = $t0.AddMinutes(11); Status = 'Unhealthy' }) }))) @('hold', @('Deployment or health failed', 'Pipeline or infra change'))
+$c = Select-Candidate -Environments $envs3 -Releases @($rHeld, $rNewer, $rUat) `
+    -GetDeployments { param($id) @($keepDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() `
+    -GetTaskState { param($d) $keepStates[$d.TaskId] }.GetNewClosure()
+Test-Case 'without a prefer list, newest tdd is still the candidate' $c.Release.Id 'R2298'
 $d = Get-PromotionDecision -Facts (New-Pipe 60 'pending')
 Test-Case 'pipeline only, 60 minutes, master pending: hold with the promised time' @($d.Decision, ($d.Note -like '*after 2026-10-14 05:00 UTC if master*pending*')) @('hold', $true)
 $d = Get-PromotionDecision -Facts (New-Pipe 60 'red')

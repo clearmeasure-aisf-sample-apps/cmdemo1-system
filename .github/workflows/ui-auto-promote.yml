@@ -13,7 +13,8 @@
 # one job (never two promotions to one environment at once). The per-deployable settings (application paths, health
 # path, build path) are a table at the top of the script.
 # scripts/auto-promote/ui-auto-promote.ps1 -Deployable <name> finds the newest release that succeeded in the previous environment (tdd before uat, uat before prod) and has no
-# deployment yet to the next, one environment step per run, never while a deployment of it to uat or prod is queued,
+# deployment yet to the next (except: an open pipeline-change hold keeps that release as the candidate so a newer tdd
+# finish does not restart the 60-minute clock; issue #688), one environment step per run, never while a deployment of it to uat or prod is queued,
 # running or waiting. It promotes it, and answers its Sign-off as the system's service account with a reason that names
 # this run, unless something flags it. The flags (every rule is a function, tested by scripts/auto-promote/test-ui-auto-promote.ps1,
 # which this workflow runs first; the owner's lists of documentation paths and build files are at the top of the script):
