@@ -513,12 +513,14 @@ function Get-DeprecatedProdComputeName {
         [Parameter(Mandatory)] [string] $Environment,
         [string[]] $Retired = @()
     )
-    # Unary comma keeps an empty array as an empty array through the pipeline (plain @() becomes $null).
-    if ($Environment -cne 'prod') { return , @() }
+    # Always [string[]] (possibly empty). A unary-comma empty return wrapped in @() nests an empty array so .Count
+    # is 1 and -Name fails (system 1.0.208 in tdd after #674). Plain empty becomes $null on assignment; the caller
+    # normalizes null to [string[]]@().
+    if ($Environment -cne 'prod') { return [string[]]@() }
     $retiredSet = @($Retired | ForEach-Object { [string] $_ })
-    if ($retiredSet -cnotcontains 'aisf' -or $retiredSet -cnotcontains 'fworker') { return , @() }
+    if ($retiredSet -cnotcontains 'aisf' -or $retiredSet -cnotcontains 'fworker') { return [string[]]@() }
     # Exact names from issue #575 (resource group rg-<slug>-prod). The container-app suffix is the live prod name.
-    return , @(
+    return [string[]]@(
         "ca-$Slug-prod-aisf-bhj5"
         "ca-$Slug-prod-fworker-bhj5"
         "caj-$Slug-prod-fwrunner"
@@ -530,13 +532,14 @@ function Select-PresentResourceName {
     param([string[]] $Wanted = @(), [string[]] $Present = @())
     $presentLower = @{}
     foreach ($name in @($Present)) { if ($name) { $presentLower[([string] $name).ToLowerInvariant()] = [string] $name } }
-    return , @($Wanted | Where-Object { $_ -and $presentLower.ContainsKey(([string] $_).ToLowerInvariant()) } | ForEach-Object { $presentLower[([string] $_).ToLowerInvariant()] })
+    $found = [string[]]@($Wanted | Where-Object { $_ -and $presentLower.ContainsKey(([string] $_).ToLowerInvariant()) } | ForEach-Object { $presentLower[([string] $_).ToLowerInvariant()] })
+    if ($null -eq $found) { return [string[]]@() }
+    return $found
 }
 function Remove-DeprecatedProdCompute {
     param(
         [Parameter(Mandatory)] [string] $Group,
-        # AllowEmptyCollection: tdd/uat pass @() here. Mandatory without it rejects an empty array and failed
-        # system 1.0.207 in tdd (~78s) after #671.
+        # AllowEmptyCollection: safe if called with @(). Prefer skipping the call when Count is 0 (tdd/uat).
         [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Name
     )
     if ($Name.Count -eq 0) { return }
@@ -555,9 +558,13 @@ function Remove-DeprecatedProdCompute {
         az resource delete --ids $id --output none
     }
 }
-$deprecatedProdCompute = @(Get-DeprecatedProdComputeName -Slug $slug -Environment $environmentName -Retired $retiredDeployables)
-# Only call when prod has names to consider: an empty -Name @() used to fail Mandatory binding (system 1.0.207 tdd).
-if ($deprecatedProdCompute.Count -gt 0) {
+# Normalize: empty [string[]] from the function becomes $null on assignment in PowerShell.
+$deprecatedProdCompute = Get-DeprecatedProdComputeName -Slug $slug -Environment $environmentName -Retired $retiredDeployables
+if ($null -eq $deprecatedProdCompute) { $deprecatedProdCompute = [string[]]@() }
+elseif ($deprecatedProdCompute -isnot [string[]]) { $deprecatedProdCompute = [string[]]@($deprecatedProdCompute) }
+# Only call when prod has names: nested empty arrays from an old `return , @()` + `@()` wrapper made Count 1 and
+# failed system 1.0.208 in tdd (#575 / #674).
+if ($deprecatedProdCompute.Length -gt 0) {
     Remove-DeprecatedProdCompute -Group $resourceGroup -Name $deprecatedProdCompute
 }
 

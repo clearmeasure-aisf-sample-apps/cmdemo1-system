@@ -125,7 +125,28 @@ Test-Case 'Remove-DeprecatedProdCompute declares AllowEmptyCollection' (
 ) $true
 
 Test-Case 'apply-environment skips Remove when no deprecated prod names' (
-    (Get-Content -LiteralPath $scriptPath -Raw) -match 'if \(\$deprecatedProdCompute\.Count -gt 0\)'
+    (Get-Content -LiteralPath $scriptPath -Raw) -match 'if \(\$deprecatedProdCompute\.Length -gt 0\)'
+) $true
+
+# Regression: system 1.0.208 — call site must match apply-environment.ps1 (no `@()` around Get-*, null → @()).
+# `return , @()` + `@($result)` made Count 1 with a nested empty array and -Name failed as empty string.
+foreach ($envName in @('tdd', 'uat')) {
+    $deprecatedProdCompute = Get-DeprecatedProdComputeName -Slug 'cmdemo1' -Environment $envName -Retired @('aisf', 'fworker')
+    if ($null -eq $deprecatedProdCompute) { $deprecatedProdCompute = [string[]]@() }
+    elseif ($deprecatedProdCompute -isnot [string[]]) { $deprecatedProdCompute = [string[]]@($deprecatedProdCompute) }
+    Test-Case "call site ${envName} Length 0" $deprecatedProdCompute.Length 0
+    $wouldCall = $deprecatedProdCompute.Length -gt 0
+    Test-Case "call site ${envName} does not call Remove" $wouldCall $false
+}
+$prodNames = Get-DeprecatedProdComputeName -Slug 'cmdemo1' -Environment 'prod' -Retired @('aisf', 'fworker')
+if ($null -eq $prodNames) { $prodNames = [string[]]@() }
+elseif ($prodNames -isnot [string[]]) { $prodNames = [string[]]@($prodNames) }
+Test-Case 'call site prod: Length 4' $prodNames.Length 4
+Test-Case 'call site prod: would call Remove' ($prodNames.Length -gt 0) $true
+# Prove the broken pattern is not used in executable code (comments may mention it).
+$getFn = ($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-DeprecatedProdComputeName' }, $false) | Select-Object -First 1)
+Test-Case 'Get-DeprecatedProdComputeName body has no unary-comma empty return' (
+    $getFn -and ($getFn.Body.Extent.Text -notmatch 'return\s*,\s*@\(\)')
 ) $true
 
 if ($failures -gt 0) {
