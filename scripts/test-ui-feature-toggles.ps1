@@ -26,10 +26,18 @@ function Test-Case([string] $Name, $Actual, $Expected) {
 $ids = @{ tdd = 'Environments-1'; uat = 'Environments-2'; prod = 'Environments-3' }
 $building = (Get-UiFeatureToggleSpecs)[0]
 $vendor = (Get-UiFeatureToggleSpecs)[1]
+$priority = (Get-UiFeatureToggleSpecs)[2]
+$buildingDefaults = Get-UiFeatureToggleDefaults $building
+$vendorDefaults = Get-UiFeatureToggleDefaults $vendor
+$priorityDefaults = Get-UiFeatureToggleDefaults $priority
 
-Test-Case 'defaults' @(Get-UiFeatureToggleDefaults).tdd, (Get-UiFeatureToggleDefaults).uat, (Get-UiFeatureToggleDefaults).prod @($true, $false, $false)
-Test-Case 'names' @($building.Name, $vendor.Name) @('BuildingManagement', 'VendorManagement')
-Test-Case 'slugs match names' @($building.Slug, $vendor.Slug) @($building.Name, $vendor.Name)
+Test-Case 'environment names' (@(Get-UiFeatureToggleEnvironmentNames) -join ',') 'tdd,uat,prod'
+Test-Case 'building defaults' @($buildingDefaults.tdd, $buildingDefaults.uat, $buildingDefaults.prod) @($true, $false, $false)
+Test-Case 'vendor defaults' @($vendorDefaults.tdd, $vendorDefaults.uat, $vendorDefaults.prod) @($true, $false, $false)
+Test-Case 'priority defaults all on' @($priorityDefaults.tdd, $priorityDefaults.uat, $priorityDefaults.prod) @($true, $true, $true)
+Test-Case 'names' @($building.Name, $vendor.Name, $priority.Name) @('BuildingManagement', 'VendorManagement', 'ShowPriorityBadges')
+Test-Case 'building and vendor slugs match names' @($building.Slug, $vendor.Slug) @($building.Name, $vendor.Name)
+Test-Case 'priority slug is compact' $priority.Slug 'showprioritybadges'
 foreach ($spec in @(Get-UiFeatureToggleSpecs)) {
     Test-Case "$($spec.Name) description length" (($spec.Description.Length -gt 0) -and ($spec.Description.Length -le 1000)) $true
 }
@@ -44,6 +52,14 @@ Test-Case 'create plan has no IsEnabled' (@($create.Environments | Where-Object 
 Test-Case 'create plan has no DefaultIsEnabled' ($null -eq (Get-NoteProperty $create 'DefaultIsEnabled')) $true
 Test-Case 'create plan has no RolloutPercentage' (@($create.Environments | Where-Object { $null -ne (Get-NoteProperty $_ 'RolloutPercentage') }).Count) 0
 
+$priorityCreate = Get-UiFeatureTogglePlan -Spec $priority -Current $null -EnvironmentIds $ids -Mode Ensure
+Test-Case 'priority create action' $priorityCreate.Action 'create'
+Test-Case 'priority create default off' @($priorityCreate.DefaultEnabled, $priorityCreate.ChangeDefault) @($false, $true)
+Test-Case 'priority create tdd on' (Get-UiFeatureToggleEnvironmentEnabled ($priorityCreate.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-1' })) $true
+Test-Case 'priority create uat on' (Get-UiFeatureToggleEnvironmentEnabled ($priorityCreate.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' })) $true
+Test-Case 'priority create prod on' (Get-UiFeatureToggleEnvironmentEnabled ($priorityCreate.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' })) $true
+Test-Case 'priority requested slug' $priorityCreate.RequestedSlug 'showprioritybadges'
+
 $json = ConvertTo-OctopusJson @{ Environments = (New-FeatureToggleEnvironmentWires $create.Environments) }
 Test-Case 'json environments array' ($json -match '"Environments":\[') $true
 Test-Case 'json rules wire one on' ([regex]::Matches($json, '"IsEnabled":true').Count) 1
@@ -51,6 +67,9 @@ Test-Case 'json rules wire two off' ([regex]::Matches($json, '"IsEnabled":false'
 Test-Case 'json rules wire empty phases' ([regex]::Matches($json, '"Phases":\[\]').Count) 3
 Test-Case 'json has no RolloutPercentage' ($json -match 'RolloutPercentage') $false
 Test-Case 'json has no api key' ($json -match 'API-') $false
+$priorityJson = ConvertTo-OctopusJson @{ Environments = (New-FeatureToggleEnvironmentWires $priorityCreate.Environments) }
+Test-Case 'priority json three on' ([regex]::Matches($priorityJson, '"IsEnabled":true').Count) 3
+Test-Case 'priority json zero off' ([regex]::Matches($priorityJson, '"IsEnabled":false').Count) 0
 $createBody = ConvertTo-OctopusJson (New-FeatureToggleBody 'Projects-981' 'Spaces-355' $building $create $null)
 Test-Case 'create body name' $createBody.Contains('"Name":"BuildingManagement"') $true
 Test-Case 'create body project' $createBody.Contains('"ProjectId":"Projects-981"') $true
@@ -102,6 +121,70 @@ Test-Case 'reset uat off' (Get-UiFeatureToggleEnvironmentEnabled ($reset.Environ
 Test-Case 'reset keeps the extra environment' (Get-UiFeatureToggleEnvironmentEnabled ($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-9' })) $true
 Test-Case 'reset keeps the phase' @(($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).Phases).Count 1
 Test-Case 'reset keeps the phase name' (($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }).Phases | Select-Object -First 1).Name 'Phase 1'
+
+# Per-flag defaults: ResetDefaults on BuildingManagement still uses building defaults (uat/prod off),
+# not ShowPriorityBadges all-on. A later Ensure leaves a flipped building uat alone.
+$buildingAtDefaults = [pscustomobject]@{
+    Name             = 'BuildingManagement'
+    Slug             = 'BuildingManagement'
+    Description      = 'buildings'
+    DefaultIsEnabled = $false
+    Environments     = @(
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @() }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-2'; IsEnabled = $false; Phases = @() }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-3'; IsEnabled = $false; Phases = @() }
+    )
+}
+$buildingResetAtDefaults = Get-UiFeatureTogglePlan -Spec $building -Current $buildingAtDefaults -EnvironmentIds $ids -Mode ResetDefaults
+Test-Case 'building reset at defaults is none' $buildingResetAtDefaults.Action 'none'
+Test-Case 'building reset leaves uat off' (Get-UiFeatureToggleEnvironmentEnabled ($buildingResetAtDefaults.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' })) $false
+Test-Case 'building reset leaves prod off' (Get-UiFeatureToggleEnvironmentEnabled ($buildingResetAtDefaults.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' })) $false
+$buildingEnsureAtDefaults = Get-UiFeatureTogglePlan -Spec $building -Current $buildingAtDefaults -EnvironmentIds $ids -Mode Ensure
+Test-Case 'building ensure at defaults is none' $buildingEnsureAtDefaults.Action 'none'
+
+$priorityCurrent = [pscustomobject]@{
+    Name             = 'ShowPriorityBadges'
+    Slug             = 'showprioritybadges'
+    Description      = 'badges'
+    DefaultIsEnabled = $false
+    Environments     = @(
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @() }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-2'; IsEnabled = $true; Phases = @() }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-3'; IsEnabled = $true; Phases = @() }
+    )
+}
+$priorityReset = Get-UiFeatureTogglePlan -Spec $priority -Current $priorityCurrent -EnvironmentIds $ids -Mode ResetDefaults
+Test-Case 'priority reset at all-on is none' $priorityReset.Action 'none'
+Test-Case 'priority reset keeps uat on' (Get-UiFeatureToggleEnvironmentEnabled ($priorityReset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' })) $true
+Test-Case 'priority reset keeps prod on' (Get-UiFeatureToggleEnvironmentEnabled ($priorityReset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' })) $true
+$priorityFlippedOff = [pscustomobject]@{
+    Name             = 'ShowPriorityBadges'
+    Slug             = 'showprioritybadges'
+    Description      = 'badges'
+    DefaultIsEnabled = $false
+    Environments     = @(
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @() }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-2'; IsEnabled = $false; Phases = @() }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-3'; IsEnabled = $false; Phases = @() }
+    )
+}
+$priorityRestore = Get-UiFeatureTogglePlan -Spec $priority -Current $priorityFlippedOff -EnvironmentIds $ids -Mode ResetDefaults
+Test-Case 'priority reset restores uat on' (Get-UiFeatureToggleEnvironmentEnabled ($priorityRestore.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' })) $true
+Test-Case 'priority reset restores prod on' (Get-UiFeatureToggleEnvironmentEnabled ($priorityRestore.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' })) $true
+$priorityMissingProd = [pscustomobject]@{
+    Name             = 'ShowPriorityBadges'
+    Slug             = 'showprioritybadges'
+    Description      = 'badges'
+    DefaultIsEnabled = $false
+    Environments     = @(
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-1'; IsEnabled = $true; Phases = @() }
+        [pscustomobject]@{ DeploymentEnvironmentId = 'Environments-2'; IsEnabled = $true; Phases = @() }
+    )
+}
+$priorityAdded = Get-UiFeatureTogglePlan -Spec $priority -Current $priorityMissingProd -EnvironmentIds $ids -Mode Ensure
+Test-Case 'priority missing prod is an update' $priorityAdded.Action 'update'
+Test-Case 'priority missing prod added on' (Get-UiFeatureToggleEnvironmentEnabled ($priorityAdded.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-3' })) $true
+Test-Case 'priority ensure does not reset uat' (Get-UiFeatureToggleEnvironmentEnabled ($priorityAdded.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' })) $true
 $oneList = [System.Collections.Generic.List[object]]::new()
 $oneList.Add(($reset.Environments | Where-Object { $_.DeploymentEnvironmentId -eq 'Environments-2' }))
 $oneEnvironment = ConvertTo-OctopusJson @{ Environments = (New-FeatureToggleEnvironmentWires $oneList) }
@@ -179,12 +262,18 @@ Test-Case 'unknown environment refused' $unknown $true
 
 $chosen = @(Select-UiFeatureToggleSpecs 'Set' 'VendorManagement')
 Test-Case 'set selects one' @($chosen.Count, $chosen[0].Name) @(1, 'VendorManagement')
-Test-Case 'ensure selects both' @(Select-UiFeatureToggleSpecs 'Ensure' '').Count 2
+$chosenPriority = @(Select-UiFeatureToggleSpecs 'Set' 'ShowPriorityBadges')
+Test-Case 'set selects priority by name' @($chosenPriority.Count, $chosenPriority[0].Slug) @(1, 'showprioritybadges')
+$chosenPrioritySlug = @(Select-UiFeatureToggleSpecs 'Set' 'showprioritybadges')
+Test-Case 'set selects priority by slug' @($chosenPrioritySlug.Count, $chosenPrioritySlug[0].Name) @(1, 'ShowPriorityBadges')
+Test-Case 'ensure selects three' @(Select-UiFeatureToggleSpecs 'Ensure' '').Count 3
 
 $offline = @(Get-OfflineEnsurePlans)
-Test-Case 'offline create count' $offline.Count 2
+Test-Case 'offline create count' $offline.Count 3
 Test-Case 'offline second name' $offline[1].Name 'VendorManagement'
+Test-Case 'offline third name' $offline[2].Name 'ShowPriorityBadges'
 Test-Case 'offline format uses defaultEnabled' ((Format-UiFeatureTogglePlan -Plan $offline[0] -IdToName (@{ tdd = 'tdd'; uat = 'uat'; prod = 'prod' })) -match 'default=off') $true
+Test-Case 'offline priority all on' ((Format-UiFeatureTogglePlan -Plan $offline[2] -IdToName (@{ tdd = 'tdd'; uat = 'uat'; prod = 'prod' })) -match 'tdd=on uat=on prod=on') $true
 
 $repoSystem = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..' 'system.json') -Raw | ConvertFrom-Json
 Assert-UiFeatureToggleSystem $repoSystem
@@ -298,6 +387,10 @@ Test-Case 'runbook reads back with show' ($runbook -match '(?s)-Enabled:false\r?
 Test-Case 'runbook mentions rules' ($runbook -match '(?i)rules') $true
 Test-Case 'runbook mentions OpenFeature 4.0.0' ($runbook -match '4\.0\.0') $true
 Test-Case 'runbook notes providers below minimum' ($runbook -match '(?i)below the minimum|earlier provider|keep the flag values') $true
+Test-Case 'runbook documents ShowPriorityBadges' ($runbook -match 'ShowPriorityBadges') $true
+Test-Case 'runbook documents compact slug' ($runbook -match 'showprioritybadges') $true
+Test-Case 'runbook notes slug may differ' ($runbook -match '(?i)NOTE|different slug|assigns a different') $true
+Test-Case 'runbook documents per-flag defaults' ($runbook -match '(?i)per flag|Defaults are per flag') $true
 $fencesHaveDollarBool = $false
 foreach ($fence in [regex]::Matches($runbook, '(?s)```[a-z]*\r?\n(.*?)```')) {
     if ($fence.Groups[1].Value -match '\$true|\$false') { $fencesHaveDollarBool = $true }
@@ -325,6 +418,17 @@ $script:toggleState = @{
             'Environments-1' = @{ Enabled = $true; Phases = @(@{ Rules = @() }) }
             'Environments-2' = @{ Enabled = $false; Phases = @() }
             'Environments-3' = @{ Enabled = $false; Phases = @() }
+        }
+    }
+    'FeatureToggles-3' = @{
+        Name             = 'ShowPriorityBadges'
+        Slug             = 'showprioritybadges'
+        Description      = 'badges'
+        DefaultIsEnabled = $false
+        Environments     = [ordered]@{
+            'Environments-1' = @{ Enabled = $true; Phases = @() }
+            'Environments-2' = @{ Enabled = $true; Phases = @() }
+            'Environments-3' = @{ Enabled = $true; Phases = @() }
         }
     }
 }
@@ -419,12 +523,16 @@ function Write-Host {
 }
 $showOff = @()
 $showOn = @()
+$showAfterEnsureReset = @()
 $ensureMessage = ''
 $bothMessage = ''
 $mixedMessage = ''
 $setOffLine = ''
 $setOnLine = ''
+$ensureLines = ''
+$resetLines = ''
 $callsAfterReject = 0
+$putsBeforeEnsureReset = @()
 try {
     try { Invoke-UiFeatureToggleCommand -Action Ensure -Enable } catch { $ensureMessage = [string]$_.Exception.Message }
     try { Invoke-UiFeatureToggleCommand -Action Set -Name BuildingManagement -Environment tdd -Enable -Disable } catch { $bothMessage = [string]$_.Exception.Message }
@@ -449,6 +557,20 @@ try {
 
     Invoke-UiFeatureToggleCommand -Action Set -Name BuildingManagement -Environment tdd -Disable
     Invoke-UiFeatureToggleCommand -Action Set -Name BuildingManagement -Environment tdd -Enable
+
+    $putsBeforeEnsureReset = @($script:octopusCalls | Where-Object { $_.Method -eq 'Put' })
+
+    # Ensure / ResetDefaults leave BuildingManagement and VendorManagement uat/prod as they were
+    # (off) and keep ShowPriorityBadges on in all three.
+    $script:hostLines.Clear()
+    Invoke-UiFeatureToggleCommand -Action Ensure
+    $ensureLines = @($script:hostLines) -join "`n"
+    $script:hostLines.Clear()
+    Invoke-UiFeatureToggleCommand -ResetDefaults
+    $resetLines = @($script:hostLines) -join "`n"
+    $script:hostLines.Clear()
+    Invoke-UiFeatureToggleCommand -Action Show
+    $showAfterEnsureReset = @($script:hostLines)
 } finally {
     Remove-Item function:Write-Host -ErrorAction SilentlyContinue
     Remove-Item function:Invoke-Octopus -ErrorAction SilentlyContinue
@@ -483,8 +605,11 @@ Test-Case 'show after on' (Get-ShownEnvironment $showOn 'BuildingManagement' 'td
 Test-Case 'show after on leaves uat' (Get-ShownEnvironment $showOn 'BuildingManagement' 'uat') 'off'
 Test-Case 'show after on leaves prod' (Get-ShownEnvironment $showOn 'BuildingManagement' 'prod') 'off'
 Test-Case 'vendor tdd stays on' (Get-ShownEnvironment $showOn 'VendorManagement' 'tdd') 'on'
+Test-Case 'priority tdd stays on' (Get-ShownEnvironment $showOn 'ShowPriorityBadges' 'tdd') 'on'
+Test-Case 'priority uat stays on' (Get-ShownEnvironment $showOn 'ShowPriorityBadges' 'uat') 'on'
+Test-Case 'priority prod stays on' (Get-ShownEnvironment $showOn 'ShowPriorityBadges' 'prod') 'on'
 
-$puts = @($script:octopusCalls | Where-Object { $_.Method -eq 'Put' })
+$puts = @($putsBeforeEnsureReset)
 Test-Case 'four writes for off on disable enable' $puts.Count 4
 $putTargetsOk = $true
 $uatProdStayOff = $true
@@ -509,13 +634,25 @@ $carriedCredential = $false
 foreach ($call in $script:octopusCalls) {
     if ($call.Uri.Contains($script:toggleCredential) -or $call.Body.Contains($script:toggleCredential)) { $carriedCredential = $true }
 }
-$shown = ($showOff + $showOn) -join "`n"
+$shown = ($showOff + $showOn + $showAfterEnsureReset) -join "`n"
 if ($carriedCredential -or $shown.Contains($script:toggleCredential) -or $setOffLine.Contains($script:toggleCredential) -or $setOnLine.Contains($script:toggleCredential)) {
     Write-Host 'FAIL output contained the credential'
     $failures++
 } else {
     Write-Host 'PASS output omits the credential'
 }
+
+Test-Case 'ensure/reset leaves building uat off' (Get-ShownEnvironment $showAfterEnsureReset 'BuildingManagement' 'uat') 'off'
+Test-Case 'ensure/reset leaves building prod off' (Get-ShownEnvironment $showAfterEnsureReset 'BuildingManagement' 'prod') 'off'
+Test-Case 'ensure/reset leaves vendor uat off' (Get-ShownEnvironment $showAfterEnsureReset 'VendorManagement' 'uat') 'off'
+Test-Case 'ensure/reset leaves vendor prod off' (Get-ShownEnvironment $showAfterEnsureReset 'VendorManagement' 'prod') 'off'
+Test-Case 'ensure/reset keeps priority tdd on' (Get-ShownEnvironment $showAfterEnsureReset 'ShowPriorityBadges' 'tdd') 'on'
+Test-Case 'ensure/reset keeps priority uat on' (Get-ShownEnvironment $showAfterEnsureReset 'ShowPriorityBadges' 'uat') 'on'
+Test-Case 'ensure/reset keeps priority prod on' (Get-ShownEnvironment $showAfterEnsureReset 'ShowPriorityBadges' 'prod') 'on'
+Test-Case 'ensure/reset output omits client identifier name value' (
+    ($ensureLines -notmatch '(?i)client.?identifier\s*[:=]\s*\S') -and
+    ($resetLines -notmatch '(?i)client.?identifier\s*[:=]\s*\S')
+) $true
 
 function Invoke-ToggleScriptFromBash {
     param([string[]] $Argument)
@@ -534,7 +671,13 @@ function Invoke-ToggleScriptFromBash {
 
 $whatIf = Invoke-ToggleScriptFromBash -Argument @('-WhatIf')
 Test-Case 'whatif exits clean' $whatIf.ExitCode 0
-Test-Case 'whatif prints both creates' (($whatIf.Output -match 'BuildingManagement: create') -and ($whatIf.Output -match 'VendorManagement: create')) $true
+Test-Case 'whatif prints three creates' (
+    ($whatIf.Output -match 'BuildingManagement: create') -and
+    ($whatIf.Output -match 'VendorManagement: create') -and
+    ($whatIf.Output -match 'ShowPriorityBadges: create')
+) $true
+Test-Case 'whatif priority all on' ($whatIf.Output -match 'ShowPriorityBadges: create default=off tdd=on uat=on prod=on') $true
+Test-Case 'whatif building uat off' ($whatIf.Output -match 'BuildingManagement: create default=off tdd=on uat=off prod=off') $true
 
 $bashForms = @(
     @{ Label = 'colon false'; Args = @('-Action', 'Set', '-Name', 'BuildingManagement', '-Environment', 'tdd', '-Enabled:false') }
