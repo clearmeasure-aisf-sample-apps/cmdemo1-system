@@ -366,6 +366,15 @@
       }
     }
   ],
+  "pool": {
+    "slots": 8,
+    "warm": 2,
+    "elasticPoolEdtus": 50,
+    "appCpu": "1",
+    "maxReplicas": 3,
+    "httpConcurrentRequests": 10,
+    "artifactsRetentionDays": 14
+  },
   "github": {
     "app": {
       "id": 5274931,

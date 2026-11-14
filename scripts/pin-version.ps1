@@ -112,9 +112,10 @@ for ($attempt = 1; $attempt -le 4; $attempt++) {
         return
     }
     catch {
-        # 409: another pin changed the file since it was read; read it again.
+        # 409: another pin changed the file since it was read; read it again. A conflict the next attempt gets
+        # past is information, not a warning (health treats deployment warnings as failure: CAP-011/CAP-071).
         if ((Get-HttpStatus -ErrorRecord $_) -eq 409 -and $attempt -lt 4) {
-            Write-Warning "versions.json changed while pinning (attempt $attempt of 4); reading it again."
+            Write-Host "versions.json changed while pinning (attempt $attempt of 4); reading it again."
             Start-Sleep -Seconds (5 * $attempt)
             continue
         }

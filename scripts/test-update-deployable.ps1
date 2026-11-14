@@ -120,5 +120,29 @@ Test-Case 'script never logs the client identifier value' (
     ($source -notmatch 'Write-Verbose.*(FeatureFlags\.ClientIdentifier|FeatureToggles\.ClientIdentifier|featureFlags\.Value)')
 ) $true
 
+# Container rollback (#650): "Revert deployable" uses PreviousVersion; skip when there is nothing to put back.
+$update = Resolve-ContainerDeployVersion -Step 'Update deployable' -Release '2.4.2214' -Parameters @{
+    'Octopus.Action[Pin version].Output.Pinned'          = 'True'
+    'Octopus.Action[Pin version].Output.PreviousVersion' = '2.4.2206'
+}
+Test-Case 'update uses the release' @($update.Version, $update.Revert, $update.Skip) @('2.4.2214', $false, $false)
+$revert = Resolve-ContainerDeployVersion -Step 'Revert deployable' -Release '2.4.2214' -Parameters @{
+    'Octopus.Action[Pin version].Output.Pinned'          = 'True'
+    'Octopus.Action[Pin version].Output.PreviousVersion' = '2.4.2206'
+}
+Test-Case 'revert uses PreviousVersion' @($revert.Version, $revert.Revert, $revert.Skip, $revert.Reason) @('2.4.2206', $true, $false, '')
+$notPinned = Resolve-ContainerDeployVersion -Step 'Revert deployable' -Release '2.4.2214' -Parameters @{
+    'Octopus.Action[Pin version].Output.Pinned'          = 'False'
+    'Octopus.Action[Pin version].Output.PreviousVersion' = '2.4.2206'
+}
+Test-Case 'revert skips when not pinned' @($notPinned.Skip, $notPinned.Reason) @($true, 'not-pinned')
+$noPrevious = Resolve-ContainerDeployVersion -Step 'Revert deployable' -Release '2.4.2214' -Parameters @{
+    'Octopus.Action[Pin version].Output.Pinned'          = 'True'
+    'Octopus.Action[Pin version].Output.PreviousVersion' = ''
+}
+Test-Case 'revert skips when no previous' @($noPrevious.Skip, $noPrevious.Reason) @($true, 'no-previous')
+Test-Case 'script resolves the deploy version' ($source -match 'Resolve-ContainerDeployVersion -Step \$step -Release \$release -Parameters \$OctopusParameters') $true
+Test-Case 'script sets Reverted on a successful revert' ($source -match "Set-OctopusVariable -name 'Reverted' -value 'True'") $true
+
 if ($failures -gt 0) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'OK'

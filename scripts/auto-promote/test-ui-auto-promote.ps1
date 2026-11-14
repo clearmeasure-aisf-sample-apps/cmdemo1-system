@@ -500,6 +500,25 @@ Test-Case '2.4.10 is newer than 2.4.9 (numeric, not text)' ((Compare-Release @{ 
 $c = Select-With @($r3) @((New-Dep 'R3' 'E1' '10' 't3')) @{ t3 = 'Running' }
 Test-Case 'a deployment still running in tdd is not a success' $c.Release $null
 
+# Default channel only (issue #655): Pull requests channel releases are never promoted or treated as current.
+$chDefault = 'Channels-Default'
+$chPr = 'Channels-PR'
+Test-Case 'Default channel ids come from channels named Default' @(Get-DefaultChannelIds @(@{ Id = $chDefault; Name = 'Default' }, @{ Id = $chPr; Name = 'Pull requests' })) @($chDefault)
+Test-Case 'no Default channel yields no ids' @(Get-DefaultChannelIds @(@{ Id = $chPr; Name = 'Pull requests' })).Count 0
+Test-Case 'Default channel release is kept' (Test-DefaultChannelRelease @{ Id = 'R1'; ChannelId = $chDefault; Version = '2.4.100' } @($chDefault)) $true
+Test-Case 'Pull requests channel release is ignored' (Test-DefaultChannelRelease @{ Id = 'R2'; ChannelId = $chPr; Version = '2.4.999-pr.12' } @($chDefault)) $false
+Test-Case 'release without ChannelId is ignored' (Test-DefaultChannelRelease @{ Id = 'R3'; Version = '2.4.100' } @($chDefault)) $false
+Test-Case 'PR version string still parses as Major.Minor.Patch (why channel filter matters)' ((ConvertTo-ReleaseVersion '2.4.999-pr.12').ToString()) '2.4.999'
+$rPr655 = @{ Id = 'Rpr'; Version = '2.4.999-pr.12'; ChannelId = $chPr; Assembled = '2026-10-14T09:00:00+00:00' }
+$rDef655 = @{ Id = 'Rdef'; Version = '2.4.100'; ChannelId = $chDefault; Assembled = '2026-10-14T08:00:00+00:00' }
+$rUat655 = @{ Id = 'Ruat'; Version = '2.4.90'; ChannelId = $chDefault; Assembled = '2026-10-14T07:00:00+00:00' }
+Test-Case 'Select-DefaultChannelReleases drops Pull requests channel' @(Select-DefaultChannelReleases @($rPr655, $rDef655, $rUat655) @($chDefault) | ForEach-Object Id) @('Rdef', 'Ruat')
+$onlyDefault655 = @(Select-DefaultChannelReleases @($rPr655, $rDef655, $rUat655) @($chDefault))
+$c = Select-With $onlyDefault655 @((New-Dep 'Rdef' 'E1' '10' 'td'), (New-Dep 'Ruat' 'E1' '05' 'tu'), (New-Dep 'Ruat' 'E2' '06' 'uu'), (New-Dep 'Ruat' 'E3' '07' 'up')) @{ td = 'Success'; tu = 'Success'; uu = 'Success'; up = 'Success' }
+Test-Case 'PR-channel release is not promoted; Default channel candidate wins' @($c.Release.Id, $c.Target.Name) @('Rdef', 'uat')
+$c = Select-With @($rPr655, $rDef655) @((New-Dep 'Rpr' 'E1' '10' 'tpr'), (New-Dep 'Rdef' 'E1' '05' 'tdef')) @{ tpr = 'Success'; tdef = 'Success' }
+Test-Case 'without channel filter a PR version would sort ahead (proves callers must filter)' $c.Release.Id 'Rpr'
+
 # The running release older than the listed releases (issue #314: fworker 1.0.587 held before uat, "no base commit",
 # while 1.0.474, about 113 versions back, ran in uat and prod).
 $r474 = New-Rel 'Releases-50899' '1.0.474' 1; $r587 = New-Rel 'Releases-51076' '1.0.587' 9
@@ -516,6 +535,13 @@ function New-EnvLookup($deps, $states, $rels, [int] $Total = -1) {
     }
 }
 $lk = New-EnvLookup $allDeps $allStates $allReleases
+# Issue #655: a successful Pull requests channel deployment is not the environment's current Default version.
+$prRunningDeps = @((New-Dep 'Rpr' 'E2' '20' 'pru'), (New-Dep 'Ruat' 'E2' '10' 'du'))
+$lkPr = New-EnvLookup $prRunningDeps @{ pru = 'Success'; du = 'Success' } @{ 'Rpr' = $rPr655; 'Ruat' = $rUat655 }
+$runDef = Get-RunningReleaseByEnvironment -Target $envs3[1] -GetEnvironmentDeployments $lkPr.GetEnvironmentDeployments -GetRelease $lkPr.GetRelease -GetTaskState $lkPr.GetTaskState -DefaultChannelIds @($chDefault)
+Test-Case 'running lookup skips Pull requests channel for Default current version' $runDef.Id 'Ruat'
+$runUnfiltered = Get-RunningReleaseByEnvironment -Target $envs3[1] -GetEnvironmentDeployments $lkPr.GetEnvironmentDeployments -GetRelease $lkPr.GetRelease -GetTaskState $lkPr.GetTaskState
+Test-Case 'running lookup without DefaultChannelIds still returns the newest success' $runUnfiltered.Id 'Rpr'
 # The function travels as a value: a closure does not see the script's own functions (run 40239181124).
 $byEnvironment = ${function:Get-RunningReleaseByEnvironment}
 $outsideLookup = { param($t) & $byEnvironment -Max 100 -Target $t -GetEnvironmentDeployments $lk.GetEnvironmentDeployments -GetRelease $lk.GetRelease -GetTaskState $lk.GetTaskState }.GetNewClosure()

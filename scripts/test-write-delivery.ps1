@@ -3,12 +3,13 @@
 
 <#
 .SYNOPSIS
-    Tests Select-DeliveryDeployable without Octopus or GitHub.
+    Tests Select-DeliveryDeployable and Default-channel release filtering without Octopus or GitHub.
 
 .DESCRIPTION
     Loads scripts/write-delivery.ps1 functions only, then proves delivery.json's deployable list omits
     system.azureExcludeDeployables (aisf, fworker) and retired scorecard (#577), and keeps ui and dashboard.
     The system project is added by write-delivery.ps1 after this filter; it is not a deployables[] entry.
+    Also proves Pull requests channel releases are ignored for delivery facts (issue #655).
 
 .EXAMPLE
     pwsh -NoProfile -File scripts/test-write-delivery.ps1
@@ -74,6 +75,20 @@ $source = Get-Content -LiteralPath $scriptPath -Raw
 Test-Case 'writer applies Select-DeliveryDeployable before projects' ($source -match 'Select-DeliveryDeployable \$system') $true
 Test-Case 'writer documents azureExcludeDeployables' ($source -match 'azureExcludeDeployables') $true
 Test-Case 'writer documents retired' ($source -match "retired") $true
+
+# Default channel only (issue #655): Pull requests channel releases are not delivery facts.
+$chDefault = 'Channels-Default'
+$chPr = 'Channels-PR'
+Test-Case 'Default channel ids come from channels named Default' @(Get-DefaultChannelIds @(@{ Id = $chDefault; Name = 'Default' }, @{ Id = $chPr; Name = 'Pull requests' })) @($chDefault)
+Test-Case 'Pull requests channel release is not a Default channel release' (Test-DefaultChannelRelease @{ Id = 'Rpr'; ChannelId = $chPr; Version = '2.4.999-pr.12' } @($chDefault)) $false
+Test-Case 'Default channel release is a Default channel release' (Test-DefaultChannelRelease @{ Id = 'Rdef'; ChannelId = $chDefault; Version = '2.4.100' } @($chDefault)) $true
+Test-Case 'Select-DefaultChannelReleases drops Pull requests channel versions' @(Select-DefaultChannelReleases @(
+        @{ Id = 'Rpr'; ChannelId = $chPr; Version = '2.4.999-pr.12' }
+        @{ Id = 'Rdef'; ChannelId = $chDefault; Version = '2.4.100' }
+    ) @($chDefault) | ForEach-Object { [string] $_.Version }) @('2.4.100')
+Test-Case 'writer filters releases by Default channel' ($source -match 'Select-DefaultChannelReleases') $true
+Test-Case 'writer documents Pull requests channel ignore' ($source -match 'Pull requests channel') $true
+Test-Case 'Get-DeploymentHistory requires a Default channel' ($source -match 'has no Default channel') $true
 
 if ($failures -gt 0) {
     Write-Host "$failures check(s) failed."
