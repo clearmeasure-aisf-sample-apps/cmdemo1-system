@@ -4,6 +4,11 @@
 # manual changes impossible in the first place, so drift here usually means a change merged but not yet promoted.
 # The result is also an issue with label "drift": opened or updated while an environment differs, closed when the
 # next run is clean, so nobody has to read workflow logs to know.
+#
+# Pool scale (issue #656): the pool manager changes Container Apps minReplicas / warm tags at runtime the same way
+# ui-auto-promote acts at runtime. Those scale-only differences are excluded from drift
+# (scripts/pool/common.ps1 Test-IsPoolScaleDriftProperty / Select-PoolDriftChanges). stack-<slug>-pool is still not
+# applied or what-if'd by this workflow; when it is checked later, use that exclusion so warmth changes do not fail.
 name: drift
 
 on:

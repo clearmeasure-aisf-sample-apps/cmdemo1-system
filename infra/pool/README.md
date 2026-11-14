@@ -38,4 +38,14 @@ Until then, validation is local and in `env-checks` only: `az bicep build` of th
 | `modules/vault.bicep` | Pool vault (SQL secrets) |
 | `modules/artifacts.bicep` | Private videos/traces storage, 14-day lifecycle |
 
-Shadow defaults in `system.json` `pool`: 8 slots, 2 warm, 50 eDTU, 1 vCPU / 2 GiB, maxReplicas 3 on HTTP concurrency.
+Shadow defaults in `system.json` `pool`: 8 slots, `pool.warm.count` 2 (plus warm/cool schedule), 50 eDTU, 1 vCPU /
+2 GiB, maxReplicas 3 on HTTP concurrency, and `pool.lease` caps (30 minutes / hold-env 24 hours).
+
+## Pool manager (issue #656)
+
+Scripts under `scripts/pool/` (lease/release/sweeper, reset, template refresh, warm/cool) and workflows
+`pool-manager`, `pool-reset`, `pool-template-refresh`. Decision rules are proven by `scripts/test-pool-manager.ps1`
+in `env-checks`. Warmth changes at runtime are excluded from drift (`Test-IsPoolScaleDriftProperty`).
+
+Live lease-store and Azure SQL / scale calls wait for Jeffrey's yes on #652 / #653; workflows stay on `-DryRun`
+until then.

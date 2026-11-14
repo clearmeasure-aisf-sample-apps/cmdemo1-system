@@ -1,7 +1,7 @@
 // Pull-request pool slots: one Container Apps environment and one container app per slot (pool-1 .. pool-N).
 // Warm slots keep minReplicas 1 (shadow mode); cool slots scale to 0. Every slot is 1 vCPU / 2 GiB with
-// maxReplicas on an HTTP concurrency rule. Image swaps and warm/cool changes are later work (pool manager);
-// this module only defines the apps as code.
+// maxReplicas on an HTTP concurrency rule. Runtime warm/cool is scripts/pool/manage-warm.ps1 (issue #656);
+// scale-only drift is excluded. This module defines all 8 apps as code; only warmth changes at runtime.
 targetScope = 'resourceGroup'
 
 param slug string

@@ -85,6 +85,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-pool.ps1
 
+      - name: Pool manager (lease, reset, warm, drift exclusion)
+        shell: pwsh
+        run: ./scripts/test-pool-manager.ps1
+
       - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.16.4"
