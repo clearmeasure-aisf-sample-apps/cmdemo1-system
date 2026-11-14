@@ -685,7 +685,8 @@ function Get-BotAssignedOpenIssues {
     $result = [Collections.Generic.List[object]]::new()
     $page = 1
     while ($true) {
-        $batch = @(Invoke-GhApi "repos/$Repository/issues" -f "state=open" -f "assignee=$BotLogin" -f 'per_page=100' -f "page=$page")
+        # -f alone makes gh api POST; list endpoints need an explicit GET (#725).
+        $batch = @(Invoke-GhApi --method GET "repos/$Repository/issues" -f "state=open" -f "assignee=$BotLogin" -f 'per_page=100' -f "page=$page")
         if ($batch.Count -eq 0) { break }
         foreach ($item in $batch) {
             # Issues API includes pull requests; skip those.
@@ -693,7 +694,7 @@ function Get-BotAssignedOpenIssues {
             $num = [int] (Get-FactValue $item 'number')
             if ($num -le 0) { continue }
             $created = [datetime]::SpecifyKind([datetime] (Get-FactValue $item 'created_at'), [DateTimeKind]::Utc)
-            $commentsRaw = @(Invoke-GhApi "repos/$Repository/issues/$num/comments" -f 'per_page=100')
+            $commentsRaw = @(Invoke-GhApi --method GET "repos/$Repository/issues/$num/comments" -f 'per_page=100')
             $comments = @(
                 foreach ($c in $commentsRaw) {
                     [ordered] @{
