@@ -1,0 +1,5 @@
+# Image reference on GHCR (feed "ghcr" in octopus/main.tf). Keep in sync with:
+#   - variable "test_runner_image" default in octopus/main.tf
+#   - IMAGE in job publish-test-runner of .github/workflows/system.yml
+#   - scripts/test-test-runner.ps1
+clearmeasure-aisf-sample-apps/cmdemo1-test-runner:v1.61.0-dotnet10

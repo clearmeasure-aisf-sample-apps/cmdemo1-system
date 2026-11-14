@@ -8,10 +8,11 @@
 .DESCRIPTION
     Step "Acceptance tests" of the Octopus project <slug>-<deployable>, in the environments whose system.json entry has
     "acceptanceTests": true (the first environment: the first time a version runs on its real Azure resources);
-    octopus/projects.tf inlines this file. It runs in the Playwright image (Chromium and pwsh included) on the
-    release's acceptance-test package:
+    octopus/projects.tf inlines this file. It runs in the custom test-runner image (Playwright plus the .NET 10 SDK,
+    images/test-runner; Chromium and pwsh included) on the release's acceptance-test package:
       1. The suite's Chromium when the image lacks it (the suite's Playwright is newer than the image's), with the
-         image's own pwsh and .NET 8; then the .NET 10 SDK into a temporary folder (the image carries .NET 8).
+         image's own pwsh; then the image's .NET 10 SDK when present, otherwise a temporary install with retries
+         (fallback only: the worker image is meant to carry the SDK so deploys do not download it).
       2. The suite in remote mode (no local server, no Worker: those tests skip themselves) against the app's URL,
          with the database connection from "Open test database": every test, or only the tests of the deployable's
          acceptanceTestsFilter in system.json (AcceptanceTests.Filter, a dotnet test filter such as
@@ -35,6 +36,35 @@ $PSNativeCommandArgumentPassing = 'Standard'
 $PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
 
+function Test-DotNetSdkListHas10 {
+    # True when --list-sdks output already names a 10.x SDK (the baked worker image).
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]] $SdkList)
+    return @($SdkList | Where-Object { $_ -match '^\s*10\.' }).Count -gt 0
+}
+
+function Install-DotNet10Sdk {
+    # Fallback when the worker image has no SDK 10: download with retries and alternate official script URLs.
+    param([Parameter(Mandatory)][string] $InstallDir)
+    $installer = Join-Path ([IO.Path]::GetTempPath()) 'dotnet-install.sh'
+    $installerUrls = @('https://dot.net/v1/dotnet-install.sh', 'https://builds.dotnet.microsoft.com/dotnet/scripts/v1/dotnet-install.sh')
+    $maxAttempts = 5
+    $installed = $false
+    for ($attempt = 1; $attempt -le $maxAttempts -and -not $installed; $attempt++) {
+        $url = $installerUrls[($attempt - 1) % $installerUrls.Count]
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $installer -TimeoutSec 120
+            bash $installer --channel 10.0 --install-dir $InstallDir --no-path | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "dotnet-install.sh exited with $LASTEXITCODE" }
+            $installed = $true
+        }
+        catch {
+            Write-Warning "dotnet SDK install attempt $attempt of $maxAttempts from $url failed: $($_.Exception.Message)"
+            if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds (5 * $attempt) }
+        }
+    }
+    if (-not $installed) { throw "The .NET 10 SDK install failed after $maxAttempts attempts." }
+}
+
 $package = [string] $OctopusParameters['Octopus.Action.Package[tests].ExtractedPath']
 $testAssembly = Join-Path $package ([string] $OctopusParameters['AcceptanceTests.Assembly'])
 $loaderAssembly = Join-Path $package ([string] $OctopusParameters['DataLoader.Assembly'])
@@ -48,10 +78,10 @@ $results = Join-Path (Get-Location) 'results'
 New-Item -ItemType Directory -Path $results -Force | Out-Null
 
 $clock = [Diagnostics.Stopwatch]::StartNew()
-# The suite's Chromium, before .NET 10 below: the suite's playwright.ps1 runs in a child pwsh, which is a .NET 8 app
-# (framework-dependent) and cannot start once DOTNET_ROOT points at the .NET 10 folder (cmdemo1, Playwright 1.61 on the
-# 1.54 image, 2026-10-26). Zip extraction drops the execute bit of Playwright's Node driver. A headless run uses the
-# headless shell since Playwright 1.49: both are checked, and "install chromium" brings both.
+# The suite's Chromium before any DOTNET_ROOT change: the suite's playwright.ps1 runs in a child pwsh that may be a
+# framework-dependent .NET app and cannot start once DOTNET_ROOT points only at a temporary .NET 10 folder (cmdemo1,
+# Playwright 1.61 on the 1.54 image, 2026-10-26). Zip extraction drops the execute bit of Playwright's Node driver. A
+# headless run uses the headless shell since Playwright 1.49: both are checked, and "install chromium" brings both.
 Get-ChildItem -LiteralPath (Join-Path $package '.playwright') -Recurse -File -Force -Filter 'node' | ForEach-Object { chmod +x $_.FullName }
 $browsers = @((Get-Content -LiteralPath (Join-Path $package '.playwright' 'package' 'browsers.json') -Raw | ConvertFrom-Json).browsers)
 $revision = @($browsers | Where-Object { $_.name -eq 'chromium' })[0].revision
@@ -64,32 +94,25 @@ if ($absent.Count -gt 0) {
 }
 
 $clock.Restart()
-$dotnetRoot = Join-Path ([IO.Path]::GetTempPath()) 'dotnet10'
-$installer = Join-Path ([IO.Path]::GetTempPath()) 'dotnet-install.sh'
-# The installer download and the SDK install both hit the network: retry with backoff and fall back to the second
-# official script URL, so one connection reset does not fail the deploy. Only every attempt failing throws.
-$installerUrls = @('https://dot.net/v1/dotnet-install.sh', 'https://builds.dotnet.microsoft.com/dotnet/scripts/v1/dotnet-install.sh')
-$maxAttempts = 5
-$installed = $false
-for ($attempt = 1; $attempt -le $maxAttempts -and -not $installed; $attempt++) {
-    $url = $installerUrls[($attempt - 1) % $installerUrls.Count]
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $installer -TimeoutSec 120
-        bash $installer --channel 10.0 --install-dir $dotnetRoot --no-path | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "dotnet-install.sh exited with $LASTEXITCODE" }
-        $installed = $true
-    }
-    catch {
-        Write-Warning "dotnet SDK install attempt $attempt of $maxAttempts from $url failed: $($_.Exception.Message)"
-        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds (5 * $attempt) }
-    }
-}
-if (-not $installed) { throw "The .NET 10 SDK install failed after $maxAttempts attempts." }
-$env:DOTNET_ROOT = $dotnetRoot
-$env:PATH = "${dotnetRoot}:$env:PATH"
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:DOTNET_NOLOGO = '1'
-Write-Host ".NET $(dotnet --version) SDK in $([int] $clock.Elapsed.TotalSeconds) s"
+$sdkList = @()
+$dotnetCommand = Get-Command dotnet -ErrorAction SilentlyContinue
+if ($dotnetCommand) {
+    $PSNativeCommandUseErrorActionPreference = $false
+    $sdkList = @(& $dotnetCommand.Source --list-sdks 2>$null)
+    $PSNativeCommandUseErrorActionPreference = $true
+}
+if (Test-DotNetSdkListHas10 -SdkList $sdkList) {
+    Write-Host ".NET $(dotnet --version) SDK (image) in $([int] $clock.Elapsed.TotalSeconds) s"
+}
+else {
+    $dotnetRoot = Join-Path ([IO.Path]::GetTempPath()) 'dotnet10'
+    Install-DotNet10Sdk -InstallDir $dotnetRoot
+    $env:DOTNET_ROOT = $dotnetRoot
+    $env:PATH = "${dotnetRoot}:$env:PATH"
+    Write-Host ".NET $(dotnet --version) SDK (fallback install) in $([int] $clock.Elapsed.TotalSeconds) s"
+}
 
 # Before the try: the data reload in finally needs the deployed environment's database, whatever failed first
 # (without it the loader falls back to SQLite and fails on its own, which hides the cause).

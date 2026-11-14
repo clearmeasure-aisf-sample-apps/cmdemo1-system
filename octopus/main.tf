@@ -21,9 +21,9 @@ variable "feature_toggles_client_identifier" {
 }
 
 variable "test_runner_image" {
-  description = "Execution container of the acceptance-test steps (on mcr.microsoft.com): Chromium, pwsh and .NET; the step adds .NET 10. Match the Playwright version of the app's AcceptanceTests project (cmdemo1-workorders: Microsoft.Playwright.NUnit 1.61.0, Chromium 1228): an image without the suite's Chromium makes the step install it with a warning in every deployment log."
+  description = "Execution container of the acceptance-test steps (on ghcr.io): Playwright (Chromium, pwsh) plus the .NET 10 SDK, built from images/test-runner and published by job publish-test-runner of system.yml. Keep in sync with images/test-runner/image.txt. Match the Playwright version of the app's AcceptanceTests project (cmdemo1-workorders: Microsoft.Playwright.NUnit 1.61.0, Chromium 1228): an image without the suite's Chromium makes the step install it with a warning in every deployment log."
   type        = string
-  default     = "playwright/dotnet:v1.61.0-noble"
+  default     = "clearmeasure-aisf-sample-apps/cmdemo1-test-runner:v1.61.0-dotnet10"
 }
 
 variable "worker_tools_image" {
@@ -196,6 +196,16 @@ resource "octopusdeploy_docker_container_registry" "mcr" {
   download_retry_backoff_seconds = 10
 }
 
+# Public GHCR package of images/test-runner (Playwright + .NET 10 SDK). No credentials: the package is public so
+# Octopus Cloud workers can pull it the same way they pull mcr.microsoft.com images.
+resource "octopusdeploy_docker_container_registry" "ghcr" {
+  name                           = "ghcr"
+  feed_uri                       = "https://ghcr.io"
+  api_version                    = "v2"
+  download_attempts              = 3
+  download_retry_backoff_seconds = 10
+}
+
 data "octopusdeploy_worker_pools" "hosted_ubuntu" {
   partial_name = "Hosted Ubuntu"
   take         = 10
@@ -216,7 +226,7 @@ locals {
     image   = var.worker_tools_image
   }
   test_container = {
-    feed_id = octopusdeploy_docker_container_registry.mcr.id
+    feed_id = octopusdeploy_docker_container_registry.ghcr.id
     image   = var.test_runner_image
   }
 }
