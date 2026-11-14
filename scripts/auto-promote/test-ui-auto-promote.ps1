@@ -920,6 +920,47 @@ Test-Case '697: Read-MasterState green skips the wait' @($readGreen.State, $mast
 $readRed = Read-MasterState -ReadAgain { New-Master 'red' @('Build result') }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 2 -WriteLog $masterLog
 Test-Case '697: Read-MasterState red skips the wait' @($readRed.State, $masterWait.PauseCount) @('red', 0)
 
+# PR #698 review: remaining-time budget so the wait never risks the 55-minute promote job timeout.
+Test-Case '698: reserve covers Sign-off, health pause and runbook wait' $MasterPendingJobReserveSeconds (900 + $HealthPauseSeconds + ($RunbookBusyRetrySeconds * $RunbookBusyRetryLimit))
+Test-Case '698: job timeout minutes match the workflow' $MasterPendingJobTimeoutMinutes 55
+$budgetClock = @{ Now = $t0 }
+$budgetGetNow = { $budgetClock.Now }.GetNewClosure()
+$budgetStart = '2026-10-14T04:00:00Z'
+$budgetDeadline = Get-MasterPendingDeadline -StartedAt $budgetStart -JobTimeoutMinutes 55 -ReserveSeconds 1360
+Test-Case '698: deadline is start + timeout − reserve' $budgetDeadline $t0.AddMinutes(55).AddSeconds(-1360)
+Test-Case '698: no start time means no deadline' (Get-MasterPendingDeadline -StartedAt '') $null
+
+# Budget exhausted: skip wait, stay pending, hold (never promote).
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$budgetClock.Now = $t0
+$stillPendingBudget = New-Master 'pending' @('deployments')
+$waitBudgetOut = Wait-MasterPendingClear -Initial (New-Master 'pending' @('deployments')) `
+    -ReadAgain { $stillPendingBudget }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 10 `
+    -Deadline $t0.AddSeconds(-1) -GetNow $budgetGetNow -WriteLog $masterLog
+$d = Get-PromotionDecision -Facts (New-Pipe 60 'pending' @{ PipelineOverride = @{ Minutes = 60; MasterState = 'pending'; MasterEvidence = @($waitBudgetOut.Evidence) } })
+Test-Case '698: budget exhausted: no wait' $masterWait.PauseCount 0
+Test-Case '698: budget exhausted: still pending' $waitBudgetOut.State 'pending'
+Test-Case '698: budget exhausted: holds' $d.Decision 'hold'
+Test-Case '698: budget exhausted: note keeps pending hold wording' ($d.Note -like '*after 2026-10-14 05:00 UTC if master*pending*') $true
+Test-Case '698: budget exhausted: log says skipping wait' ($masterWait.Logs[0] -like '*Skipping wait*not enough job time*') $true
+
+# Small budget shortens the wait below TimeoutSeconds (injectable clock + deadline).
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$budgetClock.Now = $t0
+$waitBudgetShort = Wait-MasterPendingClear -Initial (New-Master 'pending' @('deployments')) `
+    -ReadAgain { New-Master 'pending' @('deployments') }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 10 `
+    -Deadline $t0.AddSeconds(2) -GetNow $budgetGetNow -WriteLog $masterLog
+Test-Case '698: small budget: still pending' $waitBudgetShort.State 'pending'
+Test-Case '698: small budget: pauses only remaining seconds' $masterWait.PauseCount 2
+Test-Case '698: small budget: log uses the shortened timeout' ($masterWait.Logs[-1] -like '*still pending after 2s*') $true
+
+# Read-MasterState honours an injected deadline (budget exhausted → pending, no pause).
+$masterWait.PauseCount = 0; $masterWait.Logs.Clear()
+$budgetClock.Now = $t0
+$readBudgetOut = Read-MasterState -ReadAgain { New-Master 'pending' @('deployments') }.GetNewClosure() `
+    -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 10 -Deadline $t0.AddSeconds(-5) -GetNow $budgetGetNow -WriteLog $masterLog
+Test-Case '698: Read-MasterState budget exhausted skips wait' @($readBudgetOut.State, $masterWait.PauseCount) @('pending', 0)
+
 # Release notes commit (#574): apps say "Build … of <sha>", system says "Commit <sha>: …" (system.yml).
 $sha40 = '875cf235b557b570b11ade1ce9f02ac381a92469'
 Test-Case 'commit: app Build … of <sha>' (Get-Commit @{ ReleaseNotes = "Build https://github.com/o/r/actions/runs/1 of $sha40, committed 2026-11-11T20:00:00Z" }) $sha40

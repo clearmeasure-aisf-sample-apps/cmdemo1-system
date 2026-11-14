@@ -82,8 +82,9 @@
     and nothing waits, the release is promoted anyway once 60 minutes ($PipelineOverrideMinutes) have passed since its deployment to the
     previous environment finished AND the head commit of the application repository's default branch (master) is green:
     every check run and commit status completed success, skipped or neutral. Pending (none failed): the same run waits and
-    polls the head's checks (every $MasterPendingPollSeconds s, up to $MasterPendingTimeoutSeconds s; issue #697) then
-    decides: green continues, any failure holds, still pending at the timeout holds. Red, or a read that failed: hold.
+    polls the head's checks (every $MasterPendingPollSeconds s, up to $MasterPendingTimeoutSeconds s, never longer than
+    the remaining job-time budget before Sign-off/health/runbook; issue #697) then decides: green continues, any failure
+    holds, still pending at the timeout or when the budget is too small to wait holds. Red, or a read that failed: hold.
     Until then the held issue says when it will be promoted.
     Security-advisory exemption (owner, 2026-11-11): the same pipeline-only case skips that 60-minute wait when every path that
     triggered flag 3 comes from source PRs that only change package version numbers (project/package files and
@@ -192,10 +193,18 @@ $RunbookBusyRetryLimit = 4
 $RunbookBusyPause = { param([int] $Seconds) Start-Sleep -Seconds $Seconds }
 # When master's head has only pending checks (none failed), wait in the same run and re-read check runs and statuses
 # this often, for at most this long, before holding (issue #697). $MasterPendingPause is replaced by the harness so
-# tests do not really sleep; PollSeconds and TimeoutSeconds are injectable for the same reason.
+# tests do not really sleep; PollSeconds, TimeoutSeconds, Deadline and GetNow are injectable for the same reason.
 $MasterPendingPollSeconds = 30
 $MasterPendingTimeoutSeconds = 600
 $MasterPendingPause = { param([int] $Seconds) Start-Sleep -Seconds $Seconds }
+# Job-time budget so the wait never risks the promote job's timeout (review of PR #698): deadline =
+# AUTO_PROMOTE_JOB_STARTED_AT + JobTimeoutMinutes − reserve. Reserve is the worst-case work after the wait in one
+# Promote-or-hold step (Sign-off, second health pause, runbook busy wait). The wait uses
+# min($MasterPendingTimeoutSeconds, remaining); too little remaining skips the wait and holds (pending). Never
+# promotes when the budget is exhausted. Job timeout stays 55 minutes.
+$MasterPendingJobTimeoutMinutes = 55
+$SignOffWaitSeconds = 900
+$MasterPendingJobReserveSeconds = $SignOffWaitSeconds + $HealthPauseSeconds + ($RunbookBusyRetrySeconds * $RunbookBusyRetryLimit)
 
 $Settings = $DeployableSettings[$Deployable]
 if (-not $Settings) { throw "deployable $Deployable is not promoted automatically: no entry in `$DeployableSettings ($(@($DeployableSettings.Keys | Sort-Object) -join ', '))" }
@@ -349,10 +358,30 @@ function Get-MasterState {
     @{ State = 'green'; Evidence = @() }
 }
 
+function Get-MasterPendingDeadline {
+    <# Absolute UTC deadline for finishing the master-pending wait. Null when the job start is unset (local runs /
+       tests without a budget). start + JobTimeoutMinutes − reserve; reserve covers Sign-off, health pause, runbook. #>
+    param(
+        [string] $StartedAt = $env:AUTO_PROMOTE_JOB_STARTED_AT,
+        [int] $JobTimeoutMinutes = $MasterPendingJobTimeoutMinutes,
+        [int] $ReserveSeconds = $MasterPendingJobReserveSeconds
+    )
+    if (-not $StartedAt) { return $null }
+    $start = [datetime]::Parse(
+        $StartedAt,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind
+    ).ToUniversalTime()
+    $start.AddMinutes($JobTimeoutMinutes).AddSeconds(-$ReserveSeconds)
+}
+
 function Wait-MasterPendingClear {
     <# When master's checks are only pending (none failed), wait and re-read until green, red, unknown, or the timeout.
        Does not loosen the gate: a failed check still holds; still pending at the timeout still holds (issue #697).
-       Pause / PollSeconds / TimeoutSeconds are injectable so the harness does not sleep.
+       Caps the wait by Deadline − GetNow when a Deadline is set so the promote job can still finish Sign-off, a
+       health pause and a runbook wait before its timeout (PR #698 review). Too little remaining: skip wait, return
+       pending (hold). Never promotes when the budget is exhausted.
+       Pause / PollSeconds / TimeoutSeconds / Deadline / GetNow are injectable so the harness does not sleep.
        ReadAgain: { } -> @{ State; Evidence; Sha; Branch } (one fresh read of the current head, no wait).
        Returns the last master state. #>
     param(
@@ -361,11 +390,22 @@ function Wait-MasterPendingClear {
         [scriptblock] $Pause = $MasterPendingPause,
         [int] $PollSeconds = $MasterPendingPollSeconds,
         [int] $TimeoutSeconds = $MasterPendingTimeoutSeconds,
-        [scriptblock] $WriteLog = { param([string] $Message) Write-Host $Message }
+        [scriptblock] $WriteLog = { param([string] $Message) Write-Host $Message },
+        $Deadline = $null,
+        [scriptblock] $GetNow = { [datetime]::UtcNow }
     )
     $current = $Initial
     if ($current.State -ne 'pending') { return $current }
-    $limit = [math]::Max(1, [int][math]::Ceiling($TimeoutSeconds / [double]$PollSeconds))
+    $effectiveTimeout = $TimeoutSeconds
+    if ($null -ne $Deadline) {
+        $remaining = [int][math]::Floor((([datetime]$Deadline).ToUniversalTime() - (& $GetNow).ToUniversalTime()).TotalSeconds)
+        if ($remaining -lt $PollSeconds) {
+            & $WriteLog "Skipping wait for master's checks: not enough job time left before the promote timeout (need ${PollSeconds}s, have ${remaining}s; reserve covers Sign-off, health pause, runbook wait)."
+            return $current
+        }
+        $effectiveTimeout = [math]::Min($TimeoutSeconds, $remaining)
+    }
+    $limit = [math]::Max(1, [int][math]::Floor($effectiveTimeout / [double]$PollSeconds))
     for ($n = 1; $n -le $limit; $n++) {
         $why = if (@($current.Evidence).Count) { ": $(@($current.Evidence) -join ', ')" } else { '' }
         & $WriteLog "Waiting for master's checks to finish ($n/$limit, ${PollSeconds}s)$why."
@@ -387,7 +427,7 @@ function Wait-MasterPendingClear {
         }
     }
     $stillWhy = if (@($current.Evidence).Count) { ": $(@($current.Evidence) -join ', ')" } else { '' }
-    & $WriteLog "Master still pending after ${TimeoutSeconds}s$stillWhy."
+    & $WriteLog "Master still pending after ${effectiveTimeout}s$stillWhy."
     $current
 }
 
@@ -1273,20 +1313,24 @@ function Read-MasterStateOnce {
 
 function Read-MasterState {
     # The head commit of the application repository's default branch, and its checks. When only pending (none failed),
-    # wait in this run and poll until green, red, or the timeout (issue #697). Any failure: unknown.
-    # Pause / PollSeconds / TimeoutSeconds / WriteLog / ReadAgain are injectable so tests do not sleep or call GitHub.
+    # wait in this run and poll until green, red, or the timeout (issue #697), capped by the job-time budget (PR #698).
+    # Any failure: unknown. Pause / PollSeconds / TimeoutSeconds / Deadline / GetNow / WriteLog / ReadAgain are
+    # injectable so tests do not sleep or call GitHub.
     param(
         [scriptblock] $ReadAgain = $null,
         [scriptblock] $Pause = $MasterPendingPause,
         [int] $PollSeconds = $MasterPendingPollSeconds,
         [int] $TimeoutSeconds = $MasterPendingTimeoutSeconds,
-        [scriptblock] $WriteLog = { param([string] $Message) Write-Host $Message }
+        [scriptblock] $WriteLog = { param([string] $Message) Write-Host $Message },
+        $Deadline = $(Get-MasterPendingDeadline),
+        [scriptblock] $GetNow = { [datetime]::UtcNow }
     )
     $once = if ($ReadAgain) { $ReadAgain } else { { Read-MasterStateOnce } }
     $result = & $once
     if ($result.State -eq 'pending') {
         $result = Wait-MasterPendingClear -Initial $result -ReadAgain $once -Pause $Pause `
-            -PollSeconds $PollSeconds -TimeoutSeconds $TimeoutSeconds -WriteLog $WriteLog
+            -PollSeconds $PollSeconds -TimeoutSeconds $TimeoutSeconds -WriteLog $WriteLog `
+            -Deadline $Deadline -GetNow $GetNow
     }
     $result
 }
