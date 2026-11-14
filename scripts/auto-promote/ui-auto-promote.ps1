@@ -592,14 +592,40 @@ function Get-PromotionDecision {
     @{ Decision = $decision; Reason = $reason; Note = $note; Flags = @($flags); Waiting = @($waiting); Passed = @($c.Passed | ForEach-Object Name) }
 }
 
+function Get-BusyItemProperty($Item, [string] $Name) {
+    # Optional busy-item field under StrictMode: hashtable key or note property; otherwise $null.
+    if ($null -eq $Item) { return $null }
+    if ($Item -is [hashtable]) {
+        if (-not $Item.ContainsKey($Name)) { return $null }
+        return $Item[$Name]
+    }
+    if ($Item.PSObject.Properties[$Name]) { return $Item.$Name }
+    $null
+}
+
+function Format-BusyItemDetail($Item) {
+    # Names the unfinished Octopus task so a stall can be diagnosed from the run log (#701).
+    $parts = [Collections.Generic.List[string]]::new()
+    $taskId = Get-BusyItemProperty $Item 'TaskId'
+    $version = Get-BusyItemProperty $Item 'ReleaseVersion'
+    $state = Get-BusyItemProperty $Item 'State'
+    if ($taskId) { $parts.Add("task $taskId") }
+    if ($version) { $parts.Add("release $version") }
+    if ($state) { $parts.Add("state $state") }
+    if ($parts.Count -eq 0) { return '' }
+    " ($($parts -join ', '))"
+}
+
 function Get-BusyReason {
-    # Items: @{ Kind = deployment|runbook; ProjectId; EnvironmentId; SignOffRefused? } of every task that is not finished.
+    # Items: @{ Kind = deployment|runbook; ProjectId; EnvironmentId; TaskId?; ReleaseVersion?; State?; SignOffRefused? }
+    # of every task that is not finished. TaskId / ReleaseVersion / State are named in the message when present (#701).
     # SignOffRefused: a deployment parked only because Octopus refused this account the Sign-off (#569) does not block.
     param([object[]] $Items, [string] $TargetEnvironmentId, [string] $FirstEnvironmentId, [string] $ProjectId, [string] $Name = $Deployable)
     foreach ($i in @($Items)) {
         if (Test-BusyItemSignOffRefused $i) { continue }
-        if ($i.EnvironmentId -eq $TargetEnvironmentId) { return "a $($i.Kind) of project $($i.ProjectId) to the target environment is not finished" }
-        if ($i.Kind -eq 'deployment' -and $i.ProjectId -eq $ProjectId -and $i.EnvironmentId -ne $FirstEnvironmentId) { return "a $Name deployment is not finished in another environment" }
+        $detail = Format-BusyItemDetail $i
+        if ($i.EnvironmentId -eq $TargetEnvironmentId) { return "a $($i.Kind) of project $($i.ProjectId) to the target environment is not finished$detail" }
+        if ($i.Kind -eq 'deployment' -and $i.ProjectId -eq $ProjectId -and $i.EnvironmentId -ne $FirstEnvironmentId) { return "a $Name deployment is not finished in another environment$detail" }
     }
 }
 
@@ -1237,17 +1263,23 @@ function Get-Commit($release) {
 function Get-ActiveBusyItems {
     # Active and Cancelling Octopus tasks as busy items. Calls script-scope Get-OctopusAll / Invoke-Octopus and
     # reads $space: do not wrap callers in GetNewClosure (#589) or those names are not found.
+    # Each item carries TaskId, State, and (for deployments) ReleaseVersion so Get-BusyReason can name them (#701).
     $active = @(Get-OctopusAll "/api/$space/tasks?active=true") + @(Get-OctopusAll "/api/$space/tasks?states=Cancelling")
     $items = [Collections.Generic.List[object]]::new()
     $ids = [Collections.Generic.List[string]]::new()
     foreach ($t in @($active | Sort-Object Id -Unique)) {
         $ids.Add([string] $t.Id)
+        $state = [string] (Get-BusyItemProperty $t 'State')
         if ($t.Name -eq 'Deploy') {
             $d = Invoke-Octopus "/api/$space/deployments/$($t.Arguments.DeploymentId)"
-            $items.Add(@{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id; SignOffRefused = $false })
+            $version = $null
+            if ($d.ReleaseId) {
+                $version = (Invoke-Octopus "/api/$space/releases/$($d.ReleaseId)").Version
+            }
+            $items.Add(@{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id; State = $state; ReleaseVersion = $version; SignOffRefused = $false })
         } elseif ($t.Name -eq 'RunbookRun') {
             $d = Invoke-Octopus "/api/$space/runbookRuns/$($t.Arguments.RunbookRunId)"
-            $items.Add(@{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id; SignOffRefused = $false })
+            $items.Add(@{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id; State = $state; SignOffRefused = $false })
         }
     }
     @{ Items = @($items); ActiveTaskIds = @($ids) }
@@ -1255,7 +1287,10 @@ function Get-ActiveBusyItems {
 
 function Get-BusyReleaseVersion {
     # Release version for a busy deployment item; uses script-scope $releaseVersionCache / Invoke-Octopus / $space.
+    # Prefer ReleaseVersion already filled by Get-ActiveBusyItems (#701).
     param($b)
+    $existing = Get-BusyItemProperty $b 'ReleaseVersion'
+    if ($existing) { return $existing }
     $rid = $b.Deployment.ReleaseId
     if (-not $releaseVersionCache.ContainsKey($rid)) {
         $releaseVersionCache[$rid] = (Invoke-Octopus "/api/$space/releases/$rid").Version
