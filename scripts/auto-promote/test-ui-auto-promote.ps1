@@ -624,6 +624,26 @@ Pipeline change is the only flag: promoted automatically after 2026-11-14 07:27 
 "@
 Test-Case 'pipeline hold body is recognized' (Test-PipelineChangeHoldBody $pipeHoldBody) $true
 Test-Case 'non-pipeline hold body is not preferred' (Test-PipelineChangeHoldBody "**Red build or tests**`n- CRAP") $false
+$mixedDeployHoldBody = @"
+ui 2.4.2292 (commit abc) is not promoted to uat automatically. Flags:
+
+**Deployment or health failed**
+- the deployment to the previous environment ended Failed
+
+**Pipeline or infra change**
+- .github/workflows/build.yml (outside src/)
+"@
+$mixedRedHoldBody = @"
+ui 2.4.2292 (commit abc) is not promoted to uat automatically. Flags:
+
+**Red build or tests**
+- CRAP https://example/x
+
+**Pipeline or infra change**
+- .github/workflows/build.yml (outside src/)
+"@
+Test-Case 'pipeline plus deployment failed hold body is not preferred' (Test-PipelineChangeHoldBody $mixedDeployHoldBody) $false
+Test-Case 'pipeline plus red build hold body is not preferred' (Test-PipelineChangeHoldBody $mixedRedHoldBody) $false
 $heldPrefer = @(Get-HeldPipelinePrefer -HeldIssues @(
         @{ number = 684; title = 'ui 2.4.2292 held before uat'; body = $pipeHoldBody },
         @{ number = 686; title = 'ui 2.4.2296 held before uat'; body = $pipeHoldBody.Replace('2.4.2292', '2.4.2296') },
@@ -661,6 +681,26 @@ $d = Get-PromotionDecision -Facts (New-Pipe 60 'green' @{ PreviousState = 'Faile
 Test-Case '688 (3): held release whose own deployment failed still holds' @($d.Decision, @(Flags (New-Pipe 60 'green' @{ PreviousState = 'Failed' }))) @('hold', @('Deployment or health failed', 'Pipeline or infra change'))
 $d = Get-PromotionDecision -Facts (New-Pipe 60 'green' @{ HealthReads = @(@{ At = $t0.AddMinutes(3); Status = 'Unhealthy' }, @{ At = $t0.AddMinutes(11); Status = 'Unhealthy' }) })
 Test-Case '688 (3): held release whose own deployment turns unhealthy still holds' @($d.Decision, @(Flags (New-Pipe 60 'green' @{ HealthReads = @(@{ At = $t0.AddMinutes(3); Status = 'Unhealthy' }, @{ At = $t0.AddMinutes(11); Status = 'Unhealthy' }) }))) @('hold', @('Deployment or health failed', 'Pipeline or infra change'))
+# Mixed-flag holds must not pin the version: Get-PromotionDecision refuses them, Close-HeldIssues skips the candidate,
+# and a newer healthy tdd release would starve if preference still matched on any Pipeline heading.
+$preferMixedDeploy = @(Get-HeldPipelinePrefer -HeldIssues @(
+        @{ number = 684; title = 'ui 2.4.2292 held before uat'; body = $mixedDeployHoldBody }
+    ))
+Test-Case 'mixed deploy+pipeline hold is not preferred' $preferMixedDeploy.Count 0
+$c = Select-Candidate -Environments $envs3 -Releases @($rHeld, $rNewer, $rUat) `
+    -GetDeployments { param($id) @($keepDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() `
+    -GetTaskState { param($d) $keepStates[$d.TaskId] }.GetNewClosure() `
+    -PreferHeld $preferMixedDeploy
+Test-Case 'mixed deploy+pipeline hold: newer tdd is the candidate' @($c.Release.Id, $c.Target.Name) @('R2298', 'uat')
+$preferMixedRed = @(Get-HeldPipelinePrefer -HeldIssues @(
+        @{ number = 684; title = 'ui 2.4.2292 held before uat'; body = $mixedRedHoldBody }
+    ))
+Test-Case 'mixed red+pipeline hold is not preferred' $preferMixedRed.Count 0
+$c = Select-Candidate -Environments $envs3 -Releases @($rHeld, $rNewer, $rUat) `
+    -GetDeployments { param($id) @($keepDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() `
+    -GetTaskState { param($d) $keepStates[$d.TaskId] }.GetNewClosure() `
+    -PreferHeld $preferMixedRed
+Test-Case 'mixed red+pipeline hold: newer tdd is the candidate' @($c.Release.Id, $c.Target.Name) @('R2298', 'uat')
 $c = Select-Candidate -Environments $envs3 -Releases @($rHeld, $rNewer, $rUat) `
     -GetDeployments { param($id) @($keepDeps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() `
     -GetTaskState { param($d) $keepStates[$d.TaskId] }.GetNewClosure()

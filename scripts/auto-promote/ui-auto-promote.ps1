@@ -19,9 +19,10 @@
     environment (tdd before uat, uat before prod) succeeded. It is the candidate when it has no deployment at all to the
     next environment (any state: a canceled one is a person's no) and is newer than the release running there; prod is
     looked at before uat. Exception (issue #688): an open release-held issue for this deployable before that environment
-    whose body lists Pipeline or infra change keeps that held release as the candidate until it is promoted (or no longer
-    qualifies); a newer success in the previous environment does not supersede it and does not restart the 60-minute
-    pipeline-change clock. The newest $ReleaseWindow releases are listed; a running release older than those is found through
+    whose body lists Pipeline or infra change as its only flag keeps that held release as the candidate until it is
+    promoted (or no longer qualifies, including when the hold later lists another flag); a newer success in the previous
+    environment does not supersede it and does not restart the 60-minute pipeline-change clock. The newest $ReleaseWindow
+    releases are listed; a running release older than those is found through
     the newest deployments to that environment (issue #314). A newer release that ended otherwise in the previous environment is skipped and the run log says so.
     Nothing is promoted while any deployment or runbook run (any project) to the target environment, or any ui
     deployment to a later-than-first environment, is queued, running, cancelling or waiting at an interruption; a call that
@@ -74,7 +75,7 @@
     deployable. One issue "<deployable> <version> held before <env>" (label release-held, no assignee) lists each flag with its
     evidence; it is edited only when the evidence changes. It closes when that release has a deployment in the environment
     that no longer waits for this workflow, or a newer release is the candidate or runs there already (a newer tdd
-    release does not become the candidate over an open pipeline-change hold: issue #688).
+    release does not become the candidate over an open pipeline-only hold: issue #688).
     A candidate whose release notes name no commit (hand-created in Octopus, issue #621) is the same hold pattern, not a
     workflow failure: one issue "<deployable> <version> held: release notes name no commit", no promotion, step finishes green.
     Pipeline-only override (owner, 2026-10-14): when flag 3 (a known change, not "comparison incomplete") is the only flag
@@ -1091,12 +1092,16 @@ function Get-HeldTitleParts {
     if ($Title -cmatch ('^' + [regex]::Escape($Name) + ' (\S+) held before (\S+)$')) { @{ Version = $Matches[1]; Environment = $Matches[2] } }
 }
 function Test-PipelineChangeHoldBody([string] $Body) {
-    # True when a release-held issue body lists the Pipeline or infra change flag (issue #688: keep that candidate).
-    [string] $Body -match '(?m)^\*\*Pipeline or infra change\*\*'
+    # True when a release-held issue body lists Pipeline or infra change as its only flag heading (issue #688: keep that
+    # candidate for the 60-minute window). Format-HeldEvidence writes **Flag** for every flag; a hold that also lists
+    # Deployment or health failed, Red build or tests, Hold label, etc. must not pin the version — newest-first resumes.
+    $flagHeadings = @([regex]::Matches([string] $Body, '(?m)^\*\*([^*]+)\*\*') | ForEach-Object { $_.Groups[1].Value })
+    $flagHeadings.Count -eq 1 -and $flagHeadings[0] -eq 'Pipeline or infra change'
 }
 function Get-HeldPipelinePrefer {
-    <# Open pipeline-change holds of this deployable as PreferHeld for Select-Candidate: @{ Version; Environment }.
-       Oldest version per environment so a later hold does not restart the clock (issue #688). #>
+    <# Open pipeline-only holds of this deployable as PreferHeld for Select-Candidate: @{ Version; Environment }.
+       Oldest version per environment so a later hold does not restart the clock (issue #688). A hold whose body lists
+       any other flag is skipped so a newer healthy release can become the candidate. #>
     param([object[]] $HeldIssues, [string] $Name = $Deployable)
     $byEnv = @{}
     foreach ($hi in @($HeldIssues)) {
