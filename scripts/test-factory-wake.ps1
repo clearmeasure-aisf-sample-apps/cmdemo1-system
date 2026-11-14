@@ -22,6 +22,8 @@ function Test-Case([string] $Name, $Actual, $Expected) {
 
 $now = [datetime]::Parse('2026-11-12T18:00:00Z').ToUniversalTime()
 $headDate = [datetime]::Parse('2026-11-12T17:30:00Z').ToUniversalTime()
+$systemRepo = 'clearmeasure-aisf-sample-apps/cmdemo1-system'
+$workordersRepo = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders'
 
 function New-BotPull([string] $ConclusionLabel = 'green') {
     [ordered] @{
@@ -33,12 +35,17 @@ function New-BotPull([string] $ConclusionLabel = 'green') {
     }
 }
 
-function New-IssueFacts([int] $Number = 585, [object[]] $Assigned = @(), [object[]] $Comments = @()) {
+function New-IssueFacts([int] $Number = 585, [string] $Repository = 'clearmeasure-aisf-sample-apps/cmdemo1-system', [object[]] $Assigned = @(), [object[]] $Comments = @()) {
     [ordered] @{
         number         = $Number
+        repository     = $Repository
         assignedEvents = @($Assigned)
         comments       = @($Comments)
     }
+}
+
+function New-ClosingRef([int] $Number, [string] $Repository) {
+    [ordered] @{ number = $Number; repository = $Repository }
 }
 
 # --- Run gate ---
@@ -72,19 +79,21 @@ Test-Case 'pr: missing pull request is skipped' `
     ((Get-PullRequestGate -PullRequest $null -BotLogin 'cm-ai-ops-bot').Action) `
     'skip'
 
-# --- Closing issue numbers ---
-Test-Case 'closes: GraphQL references win' `
-    @(Get-ClosingIssueNumbers -ClosingReferences @(585, 590) -Body 'Closes #1') `
-    @(585, 590)
-Test-Case 'closes: body Closes #N when GraphQL is empty' `
-    @(Get-ClosingIssueNumbers -ClosingReferences @() -Body "See notes.`nCloses #585`n") `
-    @(585)
+# --- Closing issues (number + repository) ---
+$fromGraphql = @(Get-ClosingIssues -ClosingReferences @((New-ClosingRef 585 $systemRepo), (New-ClosingRef 590 $systemRepo)) -Body 'Closes #1' -DefaultRepository $systemRepo)
+Test-Case 'closes: GraphQL references win' @($fromGraphql | ForEach-Object { "$($_.repository)#$($_.number)" }) @("$systemRepo#585", "$systemRepo#590")
+$fromBody = @(Get-ClosingIssues -ClosingReferences @() -Body "See notes.`nCloses #585`n" -DefaultRepository $systemRepo)
+Test-Case 'closes: body Closes #N when GraphQL is empty' @($fromBody | ForEach-Object { "$($_.repository)#$($_.number)" }) @("$systemRepo#585")
+$fromCrossBody = @(Get-ClosingIssues -ClosingReferences @() -Body "Closes $workordersRepo#1657" -DefaultRepository $systemRepo)
+Test-Case 'closes: body Closes owner/name#N is cross-repo' @($fromCrossBody | ForEach-Object { "$($_.repository)#$($_.number)" }) @("$workordersRepo#1657")
 Test-Case 'closes: Fixes #N alone is not enough (Closes only)' `
-    @(Get-ClosingIssueNumbers -ClosingReferences @() -Body 'Fixes #12') `
+    @(Get-ClosingIssues -ClosingReferences @() -Body 'Fixes #12' -DefaultRepository $systemRepo | ForEach-Object { "$($_.repository)#$($_.number)" }) `
     @()
 Test-Case 'closes: none' `
-    @(Get-ClosingIssueNumbers -ClosingReferences @() -Body 'no link') `
+    @(Get-ClosingIssues -ClosingReferences @() -Body 'no link' -DefaultRepository $systemRepo | ForEach-Object { "$($_.repository)#$($_.number)" }) `
     @()
+$crossRef = @(Get-ClosingIssues -ClosingReferences @((New-ClosingRef 1657 $workordersRepo)) -Body '' -DefaultRepository $systemRepo)
+Test-Case 'closes: GraphQL cross-repo reference keeps its repository' @($crossRef | ForEach-Object { "$($_.repository)#$($_.number)" }) @("$workordersRepo#1657")
 
 # --- Recent assign dedupe ---
 $recent = @([ordered] @{ assignee = 'cm-ai-ops-bot'; createdAt = $now.AddMinutes(-3) })
@@ -109,62 +118,90 @@ Test-Case 'verdict: Review: PASS, not merged after head' (Test-ReviewVerdictAfte
 # --- Full plans: bot green, bot red, non-bot, default branch, 10-minute dedupe ---
 $botGreen = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
-    -PullRequest (New-BotPull) -ClosingReferences @(585) `
-    -Issues @((New-IssueFacts)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+    -PullRequest (New-BotPull) -ClosingReferences @((New-ClosingRef 585 $systemRepo)) `
+    -Issues @((New-IssueFacts)) -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: bot PR green nudges linked issue' @($botGreen.Action, $botGreen.Issues[0].Action) @('nudge', 'nudge')
 
 $botRed = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'failure' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
-    -PullRequest (New-BotPull 'red') -ClosingReferences @(585) `
-    -Issues @((New-IssueFacts)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+    -PullRequest (New-BotPull 'red') -ClosingReferences @((New-ClosingRef 585 $systemRepo)) `
+    -Issues @((New-IssueFacts)) -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: bot PR red also nudges' @($botRed.Action, $botRed.Issues[0].Action) @('nudge', 'nudge')
 
 $nonBot = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'person/feature' -DefaultBranch 'main' `
     -PullRequest ([ordered] @{ number = 2; state = 'OPEN'; body = 'Closes #10'; author = 'jeffreypalermo'; headCommitDate = $headDate }) `
-    -ClosingReferences @(10) -Issues @((New-IssueFacts 10)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+    -ClosingReferences @((New-ClosingRef 10 $systemRepo)) -Issues @((New-IssueFacts 10)) `
+    -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: non-bot PR skips without touching issues' @($nonBot.Action, @($nonBot.Issues).Count) @('skip', 0)
 
 $onDefault = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'main' -DefaultBranch 'main' `
-    -PullRequest (New-BotPull) -ClosingReferences @(585) `
-    -Issues @((New-IssueFacts)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+    -PullRequest (New-BotPull) -ClosingReferences @((New-ClosingRef 585 $systemRepo)) `
+    -Issues @((New-IssueFacts)) -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: default-branch run skips without touching issues' @($onDefault.Action, @($onDefault.Issues).Count) @('skip', 0)
 
 $ciFinishedRecent = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
-    -PullRequest (New-BotPull) -ClosingReferences @(585) `
-    -Issues @((New-IssueFacts -Assigned $recent)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+    -PullRequest (New-BotPull) -ClosingReferences @((New-ClosingRef 585 $systemRepo)) `
+    -Issues @((New-IssueFacts -Assigned $recent)) -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: CI finished ignores 10-minute assign debounce' `
     @($ciFinishedRecent.Action, $ciFinishedRecent.Issues[0].Action, $ciFinishedRecent.Issues[0].Reason) `
-    @('nudge', 'nudge', 're-assign cm-ai-ops-bot on #585 (CI finished)')
+    @('nudge', 'nudge', "re-assign cm-ai-ops-bot on ${systemRepo}#585 (CI finished)")
 
 $afterVerdict = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
-    -PullRequest (New-BotPull) -ClosingReferences @(585) `
-    -Issues @((New-IssueFacts -Comments $verdictAfter)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+    -PullRequest (New-BotPull) -ClosingReferences @((New-ClosingRef 585 $systemRepo)) `
+    -Issues @((New-IssueFacts -Comments $verdictAfter)) -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: existing Review verdict after head skips' @($afterVerdict.Action, $afterVerdict.Issues[0].Action) @('skip', 'skip')
 
 $afterPassHeld = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
-    -PullRequest (New-BotPull) -ClosingReferences @(585) `
-    -Issues @((New-IssueFacts -Assigned $recent -Comments $passNotMerged)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+    -PullRequest (New-BotPull) -ClosingReferences @((New-ClosingRef 585 $systemRepo)) `
+    -Issues @((New-IssueFacts -Assigned $recent -Comments $passNotMerged)) -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: Review: PASS, not merged after head skips even with recent assign' `
     @($afterPassHeld.Action, $afterPassHeld.Issues[0].Action) @('skip', 'skip')
 
 # Direct decision: non-CI wake reason still honors the assign debounce.
 $nonCiDedupe = Get-IssueNudgeDecision `
-    -IssueNumber 585 -AssignedEvents $recent -Comments @() -HeadCommitDate $headDate `
+    -IssueNumber 585 -Repository $systemRepo -AssignedEvents $recent -Comments @() -HeadCommitDate $headDate `
     -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10 -WakeReason 'manual'
 Test-Case 'decision: non-CI wake reason still applies 10-minute assign debounce' `
     @($nonCiDedupe.Action, $nonCiDedupe.Reason) `
-    @('skip', 'cm-ai-ops-bot was assigned on #585 within the last 10 minutes')
+    @('skip', "cm-ai-ops-bot was assigned on ${systemRepo}#585 within the last 10 minutes")
 
 $bodyFallback = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
     -PullRequest (New-BotPull) -ClosingReferences @() `
-    -Issues @((New-IssueFacts)) -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+    -Issues @((New-IssueFacts)) -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: body Closes #N is used when GraphQL refs are empty' @($bodyFallback.Action, $bodyFallback.Issues[0].Issue) @('nudge', 585)
+
+# --- Issue #649: cross-repo / missing-issue skip; same-repo nudge targets its repository ---
+$missingCross = Get-FactoryWakePlan `
+    -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/retry-dotnet-sdk-download' -DefaultBranch 'main' `
+    -PullRequest (New-BotPull) -ClosingReferences @((New-ClosingRef 1657 $workordersRepo)) `
+    -Issues @() -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+Test-Case 'plan: missing cross-repo issue is skipped (#649)' `
+    @($missingCross.Action, $missingCross.Issues[0].Action, $missingCross.Issues[0].Repository, $missingCross.Issues[0].Reason) `
+    @('skip', 'skip', $workordersRepo, "issue ${workordersRepo}#1657 was not found")
+
+$sameRepoNudge = Get-FactoryWakePlan `
+    -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/factory-wake' -DefaultBranch 'main' `
+    -PullRequest (New-BotPull) -ClosingReferences @((New-ClosingRef 585 $systemRepo)) `
+    -Issues @((New-IssueFacts -Number 585 -Repository $systemRepo)) `
+    -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+Test-Case 'plan: same-repo linked issue is nudged in its repository (#649)' `
+    @($sameRepoNudge.Action, $sameRepoNudge.Issues[0].Action, $sameRepoNudge.Issues[0].Repository, $sameRepoNudge.Issues[0].Issue) `
+    @('nudge', 'nudge', $systemRepo, 585)
+
+$crossRepoNudge = Get-FactoryWakePlan `
+    -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/retry-dotnet-sdk-download' -DefaultBranch 'main' `
+    -PullRequest (New-BotPull) -ClosingReferences @((New-ClosingRef 1657 $workordersRepo)) `
+    -Issues @((New-IssueFacts -Number 1657 -Repository $workordersRepo)) `
+    -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
+Test-Case 'plan: cross-repo linked issue is nudged in its actual repository (#649)' `
+    @($crossRepoNudge.Action, $crossRepoNudge.Issues[0].Action, $crossRepoNudge.Issues[0].Repository, $crossRepoNudge.Issues[0].Issue) `
+    @('nudge', 'nudge', $workordersRepo, 1657)
 
 if ($failures -gt 0) {
     Write-Host "$failures FAIL(s)"
