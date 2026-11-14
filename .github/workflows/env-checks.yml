@@ -61,16 +61,21 @@ jobs:
 
       - name: Bicep build
         # Warnings fail like errors (no broken windows): Bicep writes its diagnostics to stderr with exit code 0. The
-        # setting keeps az from reporting its own config change when it installs Bicep.
+        # setting keeps az from reporting its own config change when it installs Bicep. infra/pool is code-only until
+        # Jeffrey says yes to apply stack-<slug>-pool (#653); building it here never creates Azure resources.
         env:
           AZURE_BICEP_USE_BINARY_FROM_PATH: "false"
         run: |
           set -euo pipefail
           az bicep install
-          for file in infra/main.bicep bootstrap/seed.bicep; do
+          for file in infra/main.bicep infra/pool/main.bicep bootstrap/seed.bicep; do
             diagnostics=$(az bicep build --file "$file" --stdout 2>&1 >/dev/null | grep -E ': (Warning|Error) ' || true)
             if [ -n "$diagnostics" ]; then echo "$diagnostics"; exit 1; fi
           done
+
+      - name: Pool stack (code only, no apply)
+        shell: pwsh
+        run: ./scripts/test-pool.ps1
 
       - uses: hashicorp/setup-terraform@v4
         with:
