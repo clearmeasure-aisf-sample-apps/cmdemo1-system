@@ -1,0 +1,92 @@
+{
+  "generated": "2026-11-14T06:45:43Z",
+  "currency": "USD",
+  "asOf": "2026-11-13",
+  "system": {
+    "yesterday": 3.15,
+    "last7Days": 95.67,
+    "monthToDate": 195.66
+  },
+  "environments": [
+    {
+      "name": "tdd",
+      "yesterday": 1.08,
+      "last7Days": 43.52,
+      "monthToDate": 102.68,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 76.37
+        },
+        {
+          "name": "Azure Monitor",
+          "monthToDate": 16.29
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 6.89
+        }
+      ]
+    },
+    {
+      "name": "uat",
+      "yesterday": 0.83,
+      "last7Days": 17.43,
+      "monthToDate": 30.7,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 27.63
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 2.09
+        },
+        {
+          "name": "Log Analytics",
+          "monthToDate": 0.94
+        }
+      ]
+    },
+    {
+      "name": "prod",
+      "yesterday": 0.85,
+      "last7Days": 31.69,
+      "monthToDate": 57.17,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 51.02
+        },
+        {
+          "name": "Log Analytics",
+          "monthToDate": 4.0
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 2.09
+        }
+      ]
+    },
+    {
+      "name": "shared",
+      "yesterday": 0.39,
+      "last7Days": 3.03,
+      "monthToDate": 5.11,
+      "topServices": [
+        {
+          "name": "Container Registry",
+          "monthToDate": 4.62
+        },
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 0.39
+        },
+        {
+          "name": "Azure Monitor",
+          "monthToDate": 0.09
+        }
+      ]
+    }
+  ]
+}
