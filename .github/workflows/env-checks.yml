@@ -43,6 +43,14 @@ jobs:
         shell: pwsh
         run: ./scripts/test-update-deployable.ps1
 
+      - name: Verify environment planner
+        shell: pwsh
+        run: ./scripts/test-verify-environment.ps1
+
+      - name: Container revert process
+        shell: pwsh
+        run: ./scripts/test-container-revert.ps1
+
       - name: Work items rules
         shell: pwsh
         run: ./scripts/workitems/test-write-workitems.ps1

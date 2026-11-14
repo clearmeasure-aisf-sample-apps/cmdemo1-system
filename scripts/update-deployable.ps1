@@ -17,6 +17,12 @@
     app has no package transform. Both variables empty, or any other deployable, leaves the update as it was. The
     value is never logged.
 
+    The same script is also step "Revert deployable" of a container deployable (condition Failure, before "Revert
+    pin"): it points the app at the version "Pin version" recorded in PreviousVersion, so a failed acceptance or
+    smoke test puts the previous image back instead of leaving the new one running while versions.json names the
+    one before. When the pin never ran, or the environment had no version before, it changes nothing and says so.
+    On success it sets output variable Reverted for "Verify revert".
+
 .PARAMETER LoadOnly
     Defines the planner functions and stops, for scripts/test-update-deployable.ps1. Octopus runs this file with the
     switch off.
@@ -28,6 +34,29 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Resolve-ContainerDeployVersion {
+    # Which image tag this step should put on the container app. "Update deployable" uses the release. "Revert
+    # deployable" uses the version the environment ran before (Pin version's PreviousVersion), and skips when there
+    # is nothing to put back. Never logs credential values.
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Step,
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Release,
+        $Parameters
+    )
+    if ($Step -ne 'Revert deployable') {
+        return [pscustomobject]@{ Version = $Release; Revert = $false; Skip = $false; Reason = '' }
+    }
+    if ($null -eq $Parameters) { $Parameters = @{} }
+    $previous = [string] $Parameters['Octopus.Action[Pin version].Output.PreviousVersion']
+    if ([string] $Parameters['Octopus.Action[Pin version].Output.Pinned'] -ne 'True') {
+        return [pscustomobject]@{ Version = $Release; Revert = $true; Skip = $true; Reason = 'not-pinned' }
+    }
+    if ([string]::IsNullOrWhiteSpace($previous)) {
+        return [pscustomobject]@{ Version = $Release; Revert = $true; Skip = $true; Reason = 'no-previous' }
+    }
+    return [pscustomobject]@{ Version = $previous; Revert = $true; Skip = $false; Reason = '' }
+}
 
 function Resolve-FeatureFlagClientIdentifier {
     # Prefer the current Octopus name; fall back to the deprecated alias. Never log the value (a JWT).
@@ -125,7 +154,24 @@ $resourceGroup = [string] $OctopusParameters['Azure.ResourceGroup']
 $deployable = [string] $OctopusParameters['Deployable.Name']
 $port = [string] $OctopusParameters['Deployable.Port']
 $registry = [string] $OctopusParameters['Azure.RegistryServer']
-$version = [string] $OctopusParameters['Octopus.Release.Number']
+$release = [string] $OctopusParameters['Octopus.Release.Number']
+$step = [string] $OctopusParameters['Octopus.Step.Name']
+$target = Resolve-ContainerDeployVersion -Step $step -Release $release -Parameters $OctopusParameters
+$version = [string] $target.Version
+if ($target.Skip) {
+    # Same words as hosting "own" (scripts/invoke-application.ps1): nothing was put back, so "Verify revert" must not
+    # read this as a successful revert.
+    if ($target.Reason -eq 'not-pinned') {
+        Write-Host "$deployable $release was not pinned in ${environmentName}: nothing was deployed, nothing to revert."
+    }
+    else {
+        Write-Host "$environmentName ran no version of $deployable before ${release}: there is none to go back to."
+    }
+    exit 0
+}
+if ($target.Revert) {
+    Write-Host "Going back to $deployable $version in $environmentName (release $release failed)."
+}
 # A system without a container app has no registry (system.json has no azure.registry), and this step is not in its
 # projects; a container app without one cannot name its image.
 if (-not $registry) {
@@ -455,6 +501,10 @@ else {
     Write-Host "First deployment of $deployable in ${environmentName}: it replaces the placeholder, so its availability is measured from the next deployment on."
 }
 Write-Highlight "$deployable $version runs in $environmentName ($app)."
+if ($target.Revert) {
+    # For "Verify revert": the version before was put back by this step ending with 0.
+    Set-OctopusVariable -name 'Reverted' -value 'True'
+}
 
 # Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
 # whose refusal was expected and handled (a dormant system's resources that are gone: cmdemo2, 2026-10-15).
