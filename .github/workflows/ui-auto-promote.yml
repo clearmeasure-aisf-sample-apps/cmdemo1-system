@@ -98,7 +98,9 @@ jobs:
   promote:
     runs-on: ubuntu-24.04
     environment: octopus
-    timeout-minutes: 55
+    # 120: three deployables run sequentially; each can wait up to 10 min for pending master checks (#697),
+    # 15 min for Sign-off, 5 min for a late second health read, and ~3 min for a short-lived runbook, plus setup.
+    timeout-minutes: 120
     steps:
       - name: Check the request
         run: |
