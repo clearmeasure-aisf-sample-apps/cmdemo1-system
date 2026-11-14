@@ -14,15 +14,17 @@
     (the script stops). AISF and fworker (deprecated) are excluded. Run by workflow ui-auto-promote, once per
     deployable in $PromoteOrder, one after the other. Below, "ui" stands for the deployable.
 
-    Candidate (Select-Candidate): releases newest first by version (Major.Minor.Patch; an unparsable version below every
-    parsable one; Assembled only between equal or unparsable versions: releases can be assembled out of order); the first whose latest deployment to the previous
+    Candidate (Select-Candidate): only Default channel releases (issue #655: Pull requests channel versions like
+    2.4.<run>-pr.<n> are never candidates and never count as an environment's current version). Among those, newest first by
+    version (Major.Minor.Patch; an unparsable version below every parsable one; Assembled only between equal or unparsable
+    versions: releases can be assembled out of order); the first whose latest deployment to the previous
     environment (tdd before uat, uat before prod) succeeded. It is the candidate when it has no deployment at all to the
     next environment (any state: a canceled one is a person's no) and is newer than the release running there; prod is
     looked at before uat. Exception (issue #688): an open release-held issue for this deployable before that environment
     whose body lists Pipeline or infra change as its only flag keeps that held release as the candidate until it is
     promoted (or no longer qualifies, including when the hold later lists another flag); a newer success in the previous
     environment does not supersede it and does not restart the 60-minute pipeline-change clock. The newest $ReleaseWindow
-    releases are listed; a running release older than those is found through
+    Default channel releases are listed; a running Default release older than those is found through
     the newest deployments to that environment (issue #314). A newer release that ended otherwise in the previous environment is skipped and the run log says so.
     Nothing is promoted while any deployment or runbook run (any project) to the target environment, or any ui
     deployment to a later-than-first environment, is queued, running, cancelling or waiting at an interruption; a call that
@@ -846,7 +848,42 @@ function Set-SignOffRefusedOnBusyItems {
 
 function ConvertTo-ReleaseVersion([string] $Version) {
     # Major.Minor.Patch of a release version (a suffix is ignored); $null when it does not parse.
+    # A Pull requests channel version such as 2.4.999-pr.12 still parses as 2.4.999: callers must keep only Default
+    # channel releases (Select-DefaultChannelReleases / issue #655) before sorting or promoting.
     if ($Version -match '^v?(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?!\d)') { [version]::new([int] $Matches[1], [int] $Matches[2], [int] $Matches[3]) }
+}
+
+function Get-ReleaseChannelId($Release) {
+    # ChannelId of an Octopus release (hashtable or object); empty when absent.
+    if ($null -eq $Release) { return '' }
+    if ($Release -is [System.Collections.IDictionary]) {
+        if ($Release.Contains('ChannelId')) { return [string] $Release['ChannelId'] }
+        return ''
+    }
+    $property = $Release.PSObject.Properties['ChannelId']
+    if ($property) { [string] $property.Value } else { '' }
+}
+
+function Get-DefaultChannelIds([object[]] $Channels) {
+    # Ids of channels named Default (Octopus's built-in Default channel). Issue #655: only those releases are promoted.
+    @($Channels | Where-Object {
+            $name = if ($_ -is [System.Collections.IDictionary]) { [string] $_['Name'] } else { [string] $_.Name }
+            $name -ceq 'Default'
+        } | ForEach-Object {
+            if ($_ -is [System.Collections.IDictionary]) { [string] $_['Id'] } else { [string] $_.Id }
+        } | Where-Object { $_ })
+}
+
+function Test-DefaultChannelRelease($Release, [string[]] $DefaultChannelIds) {
+    # True when the release is on a Default channel. A missing ChannelId is not Default (fail closed).
+    $id = Get-ReleaseChannelId $Release
+    if (-not $id -or -not $DefaultChannelIds -or $DefaultChannelIds.Count -eq 0) { return $false }
+    $DefaultChannelIds -contains $id
+}
+
+function Select-DefaultChannelReleases([object[]] $Releases, [string[]] $DefaultChannelIds) {
+    # Keeps only Default channel releases (issue #655). Pull requests channel releases are dropped.
+    @($Releases | Where-Object { Test-DefaultChannelRelease $_ $DefaultChannelIds })
 }
 function Compare-Release($A, $B) {
     # Above 0 when release A is newer than B: by version; an unparsable version is older than every parsable one; by
@@ -868,11 +905,13 @@ function Get-RunningReleaseByEnvironment {
        releases, and the running one can be older (fworker 1.0.474, about 113 versions back, issue #314). The release of the
        newest deployment to Target whose task succeeded, read by its id. GetEnvironmentDeployments {param($environmentId,
        $take)} -> @{ Items (deployments of the project to that environment, newest first); Total }; GetRelease
-       {param($releaseId)}; GetTaskState {param($deployment)}. $null when the listing is whole and no deployment there
-       succeeded (nothing runs there). Throws "the release running in ..." when none of the newest $Max deployments
-       succeeded and there are more, or when the release answered is empty; a failed call throws its own error (the run
-       stops, as for every failed call). #>
-    param($Target, [scriptblock] $GetEnvironmentDeployments, [scriptblock] $GetRelease, [scriptblock] $GetTaskState, [int] $Max = $RunningLookupDeployments)
+       {param($releaseId)}; GetTaskState {param($deployment)}. DefaultChannelIds (issue #655): when set, a successful
+       deployment of a non-Default (e.g. Pull requests) channel release is skipped so it never counts as the environment's
+       current version. $null when the listing is whole and no Default deployment there succeeded (nothing runs there).
+       Throws "the release running in ..." when none of the newest $Max deployments succeeded (after channel filter) and
+       there are more, or when the release answered is empty; a failed call throws its own error (the run stops, as for
+       every failed call). #>
+    param($Target, [scriptblock] $GetEnvironmentDeployments, [scriptblock] $GetRelease, [scriptblock] $GetTaskState, [int] $Max = $RunningLookupDeployments, [string[]] $DefaultChannelIds = @())
     $list = & $GetEnvironmentDeployments $Target.Id $Max
     $items = @(@($list.Items) | Where-Object { $_ -and $_.EnvironmentId -eq $Target.Id } | Sort-Object { [datetimeoffset] $_.Created } -Descending)
     foreach ($d in $items) {
@@ -880,6 +919,7 @@ function Get-RunningReleaseByEnvironment {
         $r = & $GetRelease $d.ReleaseId
         $rid = if ($r) { try { [string] $r.Id } catch { '' } } else { '' }
         if (-not $rid) { throw "the release running in $($Target.Name) could not be read: release $($d.ReleaseId) of deployment $($d.Id)" }
+        if ($DefaultChannelIds.Count -gt 0 -and -not (Test-DefaultChannelRelease $r $DefaultChannelIds)) { continue }
         return $r
     }
     if ([int] $list.Total -gt @($list.Items).Count) { throw "the release running in $($Target.Name) was not found: none of the newest $(@($list.Items).Count) of $($list.Total) deployments there succeeded" }
@@ -1464,16 +1504,25 @@ $allProjects = @(Invoke-Octopus "/api/$space/projects/all")
 $project = (@($allProjects | Where-Object { $_.Name -eq "$slug-$Deployable" }) | Select-Object -First 1)
 if (-not $project) { throw "project $slug-$Deployable not found" }
 $first = $envs[0]
-$releases = @((Invoke-Octopus "/api/$space/projects/$($project.Id)/releases?take=$ReleaseWindow").Items)
+# Only Default channel releases (issue #655): Pull requests channel releases must not be promoted or used as the
+# environment's current version. Resolve Default, then list that channel's window (and filter again fail-closed).
+$channels = @(Get-OctopusAll "/api/$space/projects/$($project.Id)/channels")
+$defaultChannelIds = @(Get-DefaultChannelIds $channels)
+if ($defaultChannelIds.Count -eq 0) { throw "project $($project.Name) has no Default channel" }
+$defaultChannelId = $defaultChannelIds[0]
+$releases = @((Invoke-Octopus "/api/$space/projects/$($project.Id)/releases?channel=$defaultChannelId&take=$ReleaseWindow").Items)
+$releases = @(Select-DefaultChannelReleases $releases $defaultChannelIds)
 $taskCache = @{}
 function Get-TaskState($d) { if (-not $taskCache.ContainsKey($d.TaskId)) { $taskCache[$d.TaskId] = Invoke-Octopus "/api/tasks/$($d.TaskId)" }; $taskCache[$d.TaskId].State }
 function Get-ReleaseDeployments($releaseId) { Get-OctopusAll "/api/$space/releases/$releaseId/deployments" }
 function Get-RunningOutsideList($target) {
-    # The release running in the target when none of the listed releases ran there (issue #314).
+    # The release running in the target when none of the listed releases ran there (issue #314). Skip Pull requests
+    # channel successes so they never count as the current version (issue #655).
     Get-RunningReleaseByEnvironment -Target $target `
         -GetEnvironmentDeployments { param($environmentId, $take) $r = Invoke-Octopus "/api/$space/deployments?projects=$($project.Id)&environments=$environmentId&take=$take"; @{ Items = @($r.Items); Total = $r.TotalResults } } `
         -GetRelease { param($releaseId) Invoke-Octopus "/api/$space/releases/$releaseId" } `
-        -GetTaskState { param($d) Get-TaskState $d }
+        -GetTaskState { param($d) Get-TaskState $d } `
+        -DefaultChannelIds $defaultChannelIds
 }
 $heldIssues = @(& gh issue list -R $ownRepo --label release-held --state open --json number,title,body --limit 50 | ConvertFrom-Json)
 # Every run lists open holds (including refused Sign-offs) so they stay visible until cleared (#569).
