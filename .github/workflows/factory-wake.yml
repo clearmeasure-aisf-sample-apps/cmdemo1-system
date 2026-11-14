@@ -1,13 +1,17 @@
 # After env-checks finishes on a cm-ai-ops-bot pull request, re-assign the linked issue(s) so the factory bot's
-# existing issue-assigned listener wakes and reviews (green) or fixes (red). Event-driven only: no schedule. Uses
-# GITHUB_TOKEN with issues: write and pull-requests: read; posts no comments and needs no secret. Decision rules and
-# tests live in scripts/factory-wake.ps1 and scripts/test-factory-wake.ps1.
+# existing issue-assigned listener wakes and reviews (green) or fixes (red). After a bot PR merges, when the repo
+# still has free WIP, re-assign the oldest startable Todo (including one with a prior Queued comment) so pickup
+# does not wait for a human nudge (#707). Event-driven only: no schedule. Uses GITHUB_TOKEN with issues: write and
+# pull-requests: read; posts no comments and needs no secret. Decision rules and tests live in
+# scripts/factory-wake.ps1 and scripts/test-factory-wake.ps1.
 name: factory-wake
 
 on:
   workflow_run:
     workflows: [env-checks]
     types: [completed]
+  pull_request:
+    types: [closed]
   workflow_dispatch:
 
 permissions:
@@ -18,7 +22,9 @@ jobs:
   wake:
     if: >
       github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.event == 'pull_request' &&
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'pull_request' &&
        (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'))
     runs-on: ubuntu-24.04
     steps:
@@ -33,10 +39,30 @@ jobs:
           WAKE_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           WAKE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           WAKE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             Write-Host 'workflow_dispatch: no completed env-checks run to act on.'
             exit 0
+          }
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            $merged = $env:PR_MERGED -ceq 'true'
+            ./scripts/factory-wake.ps1 `
+              -Repository $env:GITHUB_REPOSITORY `
+              -WakeReason 'pr-merged' `
+              -Event 'pull_request' `
+              -Conclusion $(if ($merged) { 'merged' } else { 'closed' }) `
+              -HeadBranch $env:PR_HEAD_REF `
+              -HeadSha $env:PR_HEAD_SHA `
+              -DefaultBranch $env:WAKE_DEFAULT_BRANCH `
+              -PullRequestNumber ([int] $env:PR_NUMBER) `
+              -PullRequestAuthor $env:PR_AUTHOR `
+              -Merged:$merged
+            exit $LASTEXITCODE
           }
           ./scripts/factory-wake.ps1 `
             -Repository $env:GITHUB_REPOSITORY `

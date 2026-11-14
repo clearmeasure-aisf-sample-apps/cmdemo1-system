@@ -21,9 +21,11 @@ below). In order:
 
 1. Read the event that woke you. End immediately, with no comment and no report, when it is:
    - an `issue-assigned` event whose assignee is not `cm-ai-ops-bot`;
-   - a pull request merge whose `→ Merged` (or `→ Done`) comment is already on the issue: the session that
-     merged it handled it;
    - a review or CI event on a pull request that is not by `cm-ai-ops-bot`.
+   When it is a pull request merge whose `→ Merged` (or `→ Done`) comment is already on the issue: do **not** redo
+   the merge column move or re-post that comment — but do **not** end the wake. Continue from step 3 (board read
+   when allowed) through step 5's free-WIP startable-Todo sweep. The session that posted `Review → Merged` often
+   ends before that sweep; this `pr-merged` wake is the backstop (see #707).
    Otherwise, when it is an `issue-assigned` wake whose assigner is `github-actions[bot]` on an issue already in
    **Review** or **In Progress**, treat it as a CI-finished nudge from workflow `factory-wake` (env-checks completed
    on the bot PR that closes that issue): run that item's Review (green checks) or fix (red checks) in this session.
@@ -31,6 +33,9 @@ below). In order:
    same session; do not hold for a human yes. Then apply the existing "any Review item with green checks" and
    end-of-wake startable-Todo sweep rules
    when the board read below is allowed. Do not post a pickup comment again.
+   An `issue-assigned` wake whose assigner is `github-actions[bot]` on an issue still in **Todo** is a post-merge
+   (or free-WIP) pickup nudge from `factory-wake`: take that startable Todo when the repo has room (step 5), including
+   one that already has a `Queued: WIP is full` comment — that comment does not make the item unstartable.
 2. Read the issue or pull request the event names through **REST only**
    (`gh api repos/<owner>/<repo>/issues/<n>`, `…/pulls/<n>`, then REST for comments, checks and runs). Do not use
    GraphQL for that content.
@@ -77,12 +82,14 @@ below). In order:
    (including one with a prior `Review: PASS, not merged`): run its Review and merge in this session (one
    `gh pr checks` call per Review item; CI events don't always wake you).
    Before ending, when the board read was allowed (step 3 did not withhold it) and any repository still has a free
-   WIP slot, pick the highest-priority **startable** Todo for that repo (board-wide, not only the woken issue). Do
-   this whenever a wake ends with room — after a merge, a `Blocker:` that leaves the item in Todo, a
-   `Queued: WIP is full` comment, a Review verdict that does not merge, a column move or PR close that frees a slot,
-   and after issue-assigned events that arrived during the run. Re-read the board at the end of the run so mid-run
-   assignments are not dropped. If nothing needs action, end. Do not re-read files, re-post status or explore a
-   repository to confirm that nothing changed.
+   WIP slot, pick the highest-priority **startable** Todo for that repo (board-wide, not only the woken issue). A
+   prior `Queued: WIP is full` comment does **not** disqualify an item — it is still startable once that repo has
+   room. Do this whenever a wake ends with room — after posting `Review → Merged` / `Review → Done` (do not end
+   the wake until this sweep has run), after a `Blocker:` that leaves the item in Todo, a `Queued: WIP is full`
+   comment, a Review verdict that does not merge, a column move or PR close that frees a slot, a `pr-merged` wake
+   (even when the Merged comment already exists), and after issue-assigned events that arrived during the run.
+   Re-read the board at the end of the run so mid-run assignments are not dropped. If nothing needs action, end.
+   Do not re-read files, re-post status or explore a repository to confirm that nothing changed.
 
 ## Board flow and WIP
 
@@ -96,7 +103,8 @@ Todo → In Progress → Review → Merged → TDD → UAT → Done.
   repository name, e.g. `cmdemo1-system`).
 - Oldest assigned **startable** Todo item first (skip an item whose repo is at its limit, or one already marked
   `Blocker:` that still needs a reply the bot cannot provide, such as clarified acceptance criteria; do not skip
-  an item because it is waiting for a human approval to merge; continue down the list to the next startable one).
+  an item because it carries a prior `Queued: WIP is full` comment, and do not skip an item because it is waiting
+  for a human approval to merge; continue down the list to the next startable one).
 - Move the Status with `gh project item-edit` (project `PVT_kwDOD_ESUc4BliGL`, field `PVTSSF_lADOD_ESUc4BliGLzhkOn7g`;
   option ids: Todo `f75ad846`, In Progress `47fc9ee4`, Review `e19122d0`, Merged `8012c69b`, TDD `eeb01ba5`,
   UAT `ebff1a13`, Done `98236657`).
@@ -183,7 +191,7 @@ duplicate journals, or a comment within a minute of another one on the same item
   own work, including PRs for issues he opened, Azure, Octopus, infrastructure, pipeline, workflow, credential or
   gate-related changes, relays, and a prior `Review: PASS, not merged` on the same green head. Do not wait for a
   typed yes in chat, a human approving review, or any other human confirmation. Do not post `Review: PASS, not
-  merged`.
+  merged`. After that comment, run step 5's free-WIP startable-Todo sweep before ending (a merge frees a slot).
 - FAIL: back to In Progress with the failed criteria; at most 2 FAILs per item, then a Blocker comment for Jeffrey.
 - A review that requests changes is a FAIL from a person: fix it in the same PR.
 
