@@ -176,7 +176,38 @@ $bodyFallback = Get-FactoryWakePlan `
     -Issues @((New-IssueFacts)) -DefaultRepository $systemRepo -BotLogin 'cm-ai-ops-bot' -Now $now -DedupeMinutes 10
 Test-Case 'plan: body Closes #N is used when GraphQL refs are empty' @($bodyFallback.Action, $bodyFallback.Issues[0].Issue) @('nudge', 585)
 
-# --- Issue #649: cross-repo / missing-issue skip; same-repo nudge targets its repository ---
+# --- Issue #649: GraphQL NOT_FOUND vs unexpected errors; cross-repo / missing skip; same-repo nudge ---
+Test-Case 'graphql: only NOT_FOUND is treated as not-found' `
+    (Test-GhGraphqlNotFoundOnly ([ordered] @{
+            data   = [ordered] @{ repository = [ordered] @{ issue = $null } }
+            errors = @([ordered] @{ type = 'NOT_FOUND'; path = @('repository', 'issue') })
+        })) `
+    $true
+Test-Case 'graphql: FORBIDDEN is not treated as not-found' `
+    (Test-GhGraphqlNotFoundOnly ([ordered] @{
+            data   = [ordered] @{ repository = $null }
+            errors = @([ordered] @{ type = 'FORBIDDEN'; path = @('repository') })
+        })) `
+    $false
+Test-Case 'graphql: INSUFFICIENT_SCOPES is not treated as not-found' `
+    (Test-GhGraphqlNotFoundOnly ([ordered] @{
+            data   = [ordered] @{ repository = [ordered] @{ issue = $null } }
+            errors = @([ordered] @{ type = 'INSUFFICIENT_SCOPES' })
+        })) `
+    $false
+Test-Case 'graphql: mixed NOT_FOUND and FORBIDDEN is not treated as not-found' `
+    (Test-GhGraphqlNotFoundOnly ([ordered] @{
+            errors = @(
+                [ordered] @{ type = 'NOT_FOUND' },
+                [ordered] @{ type = 'FORBIDDEN' }
+            )
+        })) `
+    $false
+Test-Case 'graphql: empty errors is not treated as not-found' `
+    (Test-GhGraphqlNotFoundOnly ([ordered] @{ data = [ordered] @{ repository = $null }; errors = @() })) `
+    $false
+Test-Case 'graphql: null parse is not treated as not-found' (Test-GhGraphqlNotFoundOnly $null) $false
+
 $missingCross = Get-FactoryWakePlan `
     -Event 'pull_request' -Conclusion 'success' -HeadBranch 'cm-ai-ops-bot/retry-dotnet-sdk-download' -DefaultBranch 'main' `
     -PullRequest (New-BotPull) -ClosingReferences @((New-ClosingRef 1657 $workordersRepo)) `

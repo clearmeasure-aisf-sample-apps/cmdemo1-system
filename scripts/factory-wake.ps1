@@ -318,10 +318,23 @@ function ConvertFrom-GhJson([string] $Text) {
     return $Text | ConvertFrom-Json -Depth 40
 }
 
-function Invoke-GhApi {
-    # Runs gh api and returns the JSON object (or throws). Arguments after the verb go to gh.
+function Test-GhGraphqlNotFoundOnly {
+    # True when every GraphQL error is type NOT_FOUND (missing issue/repository). FORBIDDEN,
+    # INSUFFICIENT_SCOPES, RATE_LIMITED, and any other type must not be treated as "not found".
+    param($Parsed)
+    if ($null -eq $Parsed) { return $false }
+    $errors = @(Get-FactValue $Parsed 'errors')
+    if ($errors.Count -eq 0) { return $false }
+    foreach ($err in $errors) {
+        if ([string] (Get-FactValue $err 'type') -cne 'NOT_FOUND') { return $false }
+    }
+    return $true
+}
+
+function Invoke-GhApiRaw {
+    # Runs gh api without throwing NativeCommandExitException. Returns ExitCode, Stdout, Stderr, Parsed.
     # With $PSNativeCommandUseErrorActionPreference = $true (required preamble), a non-zero gh exit
-    # throws NativeCommandExitException before $LASTEXITCODE can be read (#649 / same pattern as #646).
+    # would otherwise throw before $LASTEXITCODE can be read (#649 / same pattern as #646).
     # Stderr is kept out of the JSON body (gh prints a summary line there on GraphQL field errors).
     param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Arguments)
     $previous = $PSNativeCommandUseErrorActionPreference
@@ -335,16 +348,23 @@ function Invoke-GhApi {
     }
     $stdout = @($written | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join "`n"
     $stderr = @($written | Where-Object { $_ -is [Management.Automation.ErrorRecord] } | ForEach-Object { "$_" } | Where-Object { $_ }) -join "`n"
-    $parsed = ConvertFrom-GhJson $stdout
-    if ($code -ne 0) {
-        # GraphQL often exits 1 with a usable `data` payload plus field errors (e.g. issue NOT_FOUND).
-        if ($null -ne $parsed -and $null -ne (Get-FactValue $parsed 'data')) {
-            return $parsed
-        }
-        $detail = if ($stdout) { $stdout } elseif ($stderr) { $stderr } else { "(no output)" }
-        throw "gh api failed ($code): $detail"
+    return [ordered] @{
+        ExitCode = $code
+        Stdout   = $stdout
+        Stderr   = $stderr
+        Parsed   = (ConvertFrom-GhJson $stdout)
     }
-    return $parsed
+}
+
+function Invoke-GhApi {
+    # Runs gh api and returns the JSON object, or throws on any non-zero exit.
+    param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Arguments)
+    $r = Invoke-GhApiRaw @Arguments
+    if ($r.ExitCode -ne 0) {
+        $detail = if ($r.Stdout) { $r.Stdout } elseif ($r.Stderr) { $r.Stderr } else { '(no output)' }
+        throw "gh api failed ($($r.ExitCode)): $detail"
+    }
+    return $r.Parsed
 }
 
 function Get-OpenPullRequestForHead {
@@ -448,7 +468,15 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }
 '@
-    $answer = Invoke-GhApi graphql -f "query=$query" -f "owner=$Owner" -f "name=$Name" -F "number=$Number"
+    # Soft-read: GraphQL exits 1 with errors[].type NOT_FOUND when the issue (or repository) is missing.
+    # Only that case is skipped; FORBIDDEN / INSUFFICIENT_SCOPES / rate-limit / other errors must throw (#649).
+    $r = Invoke-GhApiRaw graphql -f "query=$query" -f "owner=$Owner" -f "name=$Name" -F "number=$Number"
+    if ($r.ExitCode -ne 0) {
+        if (Test-GhGraphqlNotFoundOnly -Parsed $r.Parsed) { return $null }
+        $detail = if ($r.Stdout) { $r.Stdout } elseif ($r.Stderr) { $r.Stderr } else { '(no output)' }
+        throw "gh api failed ($($r.ExitCode)): $detail"
+    }
+    $answer = $r.Parsed
     $repoNode = Get-FactValue (Get-FactValue $answer 'data') 'repository'
     if ($null -eq $repoNode) { return $null }
     $issue = Get-FactValue $repoNode 'issue'
