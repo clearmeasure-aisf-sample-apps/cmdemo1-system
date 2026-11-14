@@ -43,6 +43,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-update-deployable.ps1
 
+      - name: Pin version conflict retry
+        shell: pwsh
+        run: ./scripts/test-pin-version.ps1
+
       - name: Verify environment planner
         shell: pwsh
         run: ./scripts/test-verify-environment.ps1
