@@ -189,6 +189,7 @@ module telemetry 'modules/telemetry.bicep' = if (contains(capabilities, 'telemet
     environmentName: environmentName
     location: appLocation
     tags: tags
+    tier: environment.tier
   }
 }
 
