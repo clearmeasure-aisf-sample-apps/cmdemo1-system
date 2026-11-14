@@ -81,8 +81,10 @@
     Pipeline-only override (owner, 2026-10-14): when flag 3 (a known change, not "comparison incomplete") is the only flag
     and nothing waits, the release is promoted anyway once 60 minutes ($PipelineOverrideMinutes) have passed since its deployment to the
     previous environment finished AND the head commit of the application repository's default branch (master) is green:
-    every check run and commit status completed success, skipped or neutral. Pending: hold until green; red, or a read that
-    failed: hold. Until then the held issue says when it will be promoted.
+    every check run and commit status completed success, skipped or neutral. Pending (none failed): the same run waits and
+    polls the head's checks (every $MasterPendingPollSeconds s, up to $MasterPendingTimeoutSeconds s; issue #697) then
+    decides: green continues, any failure holds, still pending at the timeout holds. Red, or a read that failed: hold.
+    Until then the held issue says when it will be promoted.
     Security-advisory exemption (owner, 2026-11-11): the same pipeline-only case skips that 60-minute wait when every path that
     triggered flag 3 comes from source PRs that only change package version numbers (project/package files and
     unused-package-baseline.json) and each such PR has a GHSA-…. id in its title or body; master must still be green, and
@@ -188,6 +190,12 @@ $PromotionMarker = 'Promoted by workflow ui-auto-promote'
 $RunbookBusyRetrySeconds = 40
 $RunbookBusyRetryLimit = 4
 $RunbookBusyPause = { param([int] $Seconds) Start-Sleep -Seconds $Seconds }
+# When master's head has only pending checks (none failed), wait in the same run and re-read check runs and statuses
+# this often, for at most this long, before holding (issue #697). $MasterPendingPause is replaced by the harness so
+# tests do not really sleep; PollSeconds and TimeoutSeconds are injectable for the same reason.
+$MasterPendingPollSeconds = 30
+$MasterPendingTimeoutSeconds = 600
+$MasterPendingPause = { param([int] $Seconds) Start-Sleep -Seconds $Seconds }
 
 $Settings = $DeployableSettings[$Deployable]
 if (-not $Settings) { throw "deployable $Deployable is not promoted automatically: no entry in `$DeployableSettings ($(@($DeployableSettings.Keys | Sort-Object) -join ', '))" }
@@ -339,6 +347,48 @@ function Get-MasterState {
     if (@($Checks).Count -eq 0) { return @{ State = 'pending'; Evidence = @('no check has reported yet') } }
     if ($c.Pending.Count -gt 0) { return @{ State = 'pending'; Evidence = @($c.Pending | ForEach-Object Name) } }
     @{ State = 'green'; Evidence = @() }
+}
+
+function Wait-MasterPendingClear {
+    <# When master's checks are only pending (none failed), wait and re-read until green, red, unknown, or the timeout.
+       Does not loosen the gate: a failed check still holds; still pending at the timeout still holds (issue #697).
+       Pause / PollSeconds / TimeoutSeconds are injectable so the harness does not sleep.
+       ReadAgain: { } -> @{ State; Evidence; Sha; Branch } (one fresh read of the current head, no wait).
+       Returns the last master state. #>
+    param(
+        [hashtable] $Initial,
+        [scriptblock] $ReadAgain,
+        [scriptblock] $Pause = $MasterPendingPause,
+        [int] $PollSeconds = $MasterPendingPollSeconds,
+        [int] $TimeoutSeconds = $MasterPendingTimeoutSeconds,
+        [scriptblock] $WriteLog = { param([string] $Message) Write-Host $Message }
+    )
+    $current = $Initial
+    if ($current.State -ne 'pending') { return $current }
+    $limit = [math]::Max(1, [int][math]::Ceiling($TimeoutSeconds / [double]$PollSeconds))
+    for ($n = 1; $n -le $limit; $n++) {
+        $why = if (@($current.Evidence).Count) { ": $(@($current.Evidence) -join ', ')" } else { '' }
+        & $WriteLog "Waiting for master's checks to finish ($n/$limit, ${PollSeconds}s)$why."
+        & $Pause $PollSeconds
+        try {
+            $current = & $ReadAgain
+        } catch {
+            & $WriteLog "Waiting: master's checks could not be read ($($_.Exception.Message))"
+            return @{ State = 'unknown'; Evidence = @("read failed: $($_.Exception.Message)"); Sha = $current.Sha; Branch = $current.Branch }
+        }
+        if (-not $current -or -not $current.State) {
+            & $WriteLog 'Waiting: master state could not be read (empty answer).'
+            return @{ State = 'unknown'; Evidence = @('read failed: empty answer'); Sha = $Initial.Sha; Branch = $Initial.Branch }
+        }
+        if ($current.State -ne 'pending') {
+            $afterWhy = if (@($current.Evidence).Count) { ': ' + (@($current.Evidence) -join ', ') } else { '' }
+            & $WriteLog "Master ($($current.Branch) $($current.Sha)): $($current.State) after waiting$afterWhy"
+            return $current
+        }
+    }
+    $stillWhy = if (@($current.Evidence).Count) { ": $(@($current.Evidence) -join ', ')" } else { '' }
+    & $WriteLog "Master still pending after ${TimeoutSeconds}s$stillWhy."
+    $current
 }
 
 function Get-CheckFindings {
@@ -1208,6 +1258,39 @@ function Get-ContainerAddress($Addresses, [string] $EnvironmentName, [string] $D
     return [string] $depProp.Value
 }
 
+function Read-MasterStateOnce {
+    # One read of the application repository's default-branch head and its checks (no wait). Any failure: unknown.
+    # Calls Invoke-Gh / Get-CommitChecks (defined after LoadOnly); the harness injects ReadAgain on Read-MasterState.
+    try {
+        $branch = [string] (Invoke-Gh @("repos/$appRepo")).default_branch
+        if (-not $branch) { throw 'no default branch' }
+        $head = [string] (Invoke-Gh @("repos/$appRepo/branches/$branch")).commit.sha
+        if ($head -notmatch '^[0-9a-f]{40}$') { throw "no head commit of $branch" }
+        $m = Get-MasterState -Checks @(Get-CommitChecks $head)
+        @{ State = $m.State; Evidence = @($m.Evidence); Sha = $head; Branch = $branch }
+    } catch { @{ State = 'unknown'; Evidence = @("read failed: $($_.Exception.Message)"); Sha = $null; Branch = $null } }
+}
+
+function Read-MasterState {
+    # The head commit of the application repository's default branch, and its checks. When only pending (none failed),
+    # wait in this run and poll until green, red, or the timeout (issue #697). Any failure: unknown.
+    # Pause / PollSeconds / TimeoutSeconds / WriteLog / ReadAgain are injectable so tests do not sleep or call GitHub.
+    param(
+        [scriptblock] $ReadAgain = $null,
+        [scriptblock] $Pause = $MasterPendingPause,
+        [int] $PollSeconds = $MasterPendingPollSeconds,
+        [int] $TimeoutSeconds = $MasterPendingTimeoutSeconds,
+        [scriptblock] $WriteLog = { param([string] $Message) Write-Host $Message }
+    )
+    $once = if ($ReadAgain) { $ReadAgain } else { { Read-MasterStateOnce } }
+    $result = & $once
+    if ($result.State -eq 'pending') {
+        $result = Wait-MasterPendingClear -Initial $result -ReadAgain $once -Pause $Pause `
+            -PollSeconds $PollSeconds -TimeoutSeconds $TimeoutSeconds -WriteLog $WriteLog
+    }
+    $result
+}
+
 function Complete-AutoPromoteSuccess {
     # Said as an exit code: GitHub Actions' pwsh shell appends `exit $LASTEXITCODE` to every step
     # (ScriptHandlerHelpers). A native gh/git call whose non-zero was expected and handled
@@ -1366,18 +1449,6 @@ function Get-CommitChecks([string] $Sha) {
     $checks
 }
 
-function Read-MasterState {
-    # The head commit of the application repository's default branch, and its checks. Any failure: unknown.
-    try {
-        $branch = [string] (Invoke-Gh @("repos/$appRepo")).default_branch
-        if (-not $branch) { throw 'no default branch' }
-        $head = [string] (Invoke-Gh @("repos/$appRepo/branches/$branch")).commit.sha
-        if ($head -notmatch '^[0-9a-f]{40}$') { throw "no head commit of $branch" }
-        $m = Get-MasterState -Checks @(Get-CommitChecks $head)
-        @{ State = $m.State; Evidence = @($m.Evidence); Sha = $head; Branch = $branch }
-    } catch { @{ State = 'unknown'; Evidence = @("read failed: $($_.Exception.Message)"); Sha = $null; Branch = $null } }
-}
-
 function Get-Evaluation {
     # RunningUnknown: why the release running in the target could not be determined (it then names no base commit).
     # No commit in the release notes: hold (issue #621), never throw and never promote.
@@ -1467,7 +1538,7 @@ function Get-Evaluation {
         # The pipeline-only override: master of the application repository, read only when it can matter.
         # Security-advisory exemption (owner 2026-11-11): skip the 60-minute wait when every flag-3 path is a
         # package-version-only GHSA fix; fail closed when diffs or PR lookup are unreadable.
-        $m = Read-MasterState
+        $m = Read-MasterState -WriteLog { param([string] $Message) Say $Message }
         Say "Master ($($m.Branch) $($m.Sha)): $($m.State)$(if (@($m.Evidence).Count) { ': ' + (@($m.Evidence) -join ', ') })"
         $masterEvidence = if ($m.State -eq 'unknown') { @('read failed') } else { @($m.Evidence | Select-Object -First 5) }
         $pipelineEvidence = @(Get-PipelineEvidence -Paths @($facts.Paths))
