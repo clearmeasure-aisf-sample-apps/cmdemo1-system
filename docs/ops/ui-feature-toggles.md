@@ -1,6 +1,6 @@
 # cmdemo1-ui feature toggles
 
-Building management and vendor management are Octopus feature toggles on project **cmdemo1-ui** (`Projects-981`) in space **cmdemo1-demo** (`Spaces-355`). The API is `/api/Spaces-355/projects/Projects-981/featuretoggles`. The project UI may label that screen **Feature Flags**. This runbook calls them toggles.
+Building management, vendor management, and priority badges are Octopus feature toggles on project **cmdemo1-ui** (`Projects-981`) in space **cmdemo1-demo** (`Spaces-355`). The API is `/api/Spaces-355/projects/Projects-981/featuretoggles`. The project UI may label that screen **Feature Flags**. This runbook calls them toggles.
 
 Targeting uses the **rules** model ([feature flags](https://octopus.com/docs/feature-flags), [rules](https://octopus.com/docs/feature-flags/rules), [upgrading to rules](https://octopus.com/docs/feature-flags/upgrading-to-rules)). Each environment has an on/off switch and optional phases of rules. An environment that is on with no rules is on for everyone. An environment that is off is off for everyone, whatever its rules say. An environment with no row uses the flag default.
 
@@ -8,17 +8,21 @@ Targeting uses the **rules** model ([feature flags](https://octopus.com/docs/fea
 |---|---|---|---|---|---|
 | `BuildingManagement` | `BuildingManagement` | on (no rules) | off | off | off |
 | `VendorManagement` | `VendorManagement` | on (no rules) | off | off | off |
+| `ShowPriorityBadges` | `showprioritybadges` | on (no rules) | on (no rules) | on (no rules) | off |
 
-The app evaluates the **slug**. The script asks Octopus to use the name as the slug. If Octopus assigns a different slug, the script prints it: that printed slug is the evaluation key, and [cmdemo1-workorders#1466](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/1466) has to use it.
+Defaults are per flag. BuildingManagement and VendorManagement stay tdd on and uat/prod off. ShowPriorityBadges stays on in tdd, uat, and prod. Ensure and `-ResetDefaults` use each flag's own row of that table, so they do not turn BuildingManagement or VendorManagement off in uat or prod when those rows already match their defaults, and they keep ShowPriorityBadges on in all three.
 
-`tdd` stays on so Buildings and Vendors acceptance keeps passing once the app reads the toggles. `uat` and `prod` stay off until someone flips them for a demo. A missing client identifier also fails closed in the app.
+The app evaluates the **slug**. For BuildingManagement and VendorManagement the script asks Octopus to use the name as the slug. For ShowPriorityBadges the script requests the compact form `showprioritybadges`. If Octopus assigns a different slug, the script prints a NOTE: that printed slug is the evaluation key, and the app lookup (cmdemo1-workorders) has to use it.
 
-On means the surface is available. Off hides it and rejects the call.
+`tdd` stays on for BuildingManagement and VendorManagement so Buildings and Vendors acceptance keeps passing once the app reads the toggles. `uat` and `prod` stay off for those two until someone flips them for a demo. ShowPriorityBadges stays on in every environment so the High badge matches the appsettings fallback. A missing client identifier also fails closed in the app for BuildingManagement and VendorManagement; ShowPriorityBadges stays on via appsettings when Octopus is unset.
+
+On means the surface is available. Off hides it and rejects the call (or hides the badge).
 
 | Toggle | On | Off, and still available |
 |---|---|---|
 | `BuildingManagement` | Nav **Buildings & Rooms**, `/admin/buildings`, building-room summary reads | Work order building text, the Open by Building report |
 | `VendorManagement` | Vendors on Teams & Vendors, vendor commands and queries, MCP vendor tools | Waiting on a vendor, the teams portion of that page |
+| `ShowPriorityBadges` | High badge on the work order search list and board | Search and the board without the badge |
 
 After a project is upgraded to rules, applications on an OpenFeature provider **below the minimum** keep the flag values they had at upgrade time and do not see later flips ([providers](https://octopus.com/docs/feature-flags/providers)). cmdemo1-workorders already references `Octopus.OpenFeature` **4.0.0**, the minimum .NET version for rules. Upgrade every consumer before upgrading the project; the upgrade cannot be undone.
 
@@ -48,13 +52,13 @@ With a credential that can edit feature toggles on `cmdemo1-ui`:
 pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1
 ```
 
-Ensure creates a missing toggle at the defaults above (rules shape). Running it again does not turn `uat` or `prod` back off after a flip. An environment that is missing from an existing toggle is added at the default. `-ResetDefaults` is the way back to the table (phases already stored on an environment stay; legacy rollout fields are not rewritten):
+Ensure creates a missing toggle at that flag's defaults above (rules shape). Running it again does not turn a flipped environment back. An environment that is missing from an existing toggle is added at that flag's default. `-ResetDefaults` is the way back to the table (phases already stored on an environment stay; legacy rollout fields are not rewritten):
 
 ```pwsh
 pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -ResetDefaults
 ```
 
-After this workflow is on `main`, Actions → **ui-feature-toggles** → Run workflow runs that same Ensure as the system's Octopus service account (`OctopusDeploy/login`, GitHub environment `octopus`). It does not run on push, so a merge does not reset a demo flip. If the run stops with 403, that account can read the project and cannot edit feature toggles: run the script as a user who can. If Octopus answers 404, the instance is not serving `/featuretoggles` on this project. Create the two toggles in the UI instead (next section) with the same names and the same on/off values, leave the toggle default off, and leave rules empty on `tdd`.
+After this workflow is on `main`, Actions → **ui-feature-toggles** → Run workflow runs that same Ensure as the system's Octopus service account (`OctopusDeploy/login`, GitHub environment `octopus`). It does not run on push, so a merge does not reset a demo flip. If the run stops with 403, that account can read the project and cannot edit feature toggles: run the script as a user who can. If Octopus answers 404, the instance is not serving `/featuretoggles` on this project. Create the three toggles in the UI instead (next section) with the same names and the same on/off values, leave each toggle default off, and leave rules empty on environments that should be on.
 
 Read what is stored:
 
@@ -65,7 +69,7 @@ pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Show
 ## Flip
 
 1. Open project `cmdemo1-ui` in space `cmdemo1-demo`: [cmdemo1-ui](https://clearmeasure.octopus.app/app#/Spaces-355/projects/Projects-981).
-2. Open **Feature Flags**, then `BuildingManagement` or `VendorManagement`.
+2. Open **Feature Flags**, then `BuildingManagement`, `VendorManagement`, or `ShowPriorityBadges`.
 3. In the environment's rules editor, turn the environment switch on or off (`tdd`, `uat`, or `prod`). Leave rules empty unless you are narrowing who gets the flag. Save. Octopus publishes the manifest on save. This is not a release and not a new container image.
 4. Or, with a credential in the environment. These lines work as written in bash and in pwsh. `-Enabled:false` and `-Enabled:true` contain no `$`, so both shells pass that text through:
 
@@ -89,7 +93,7 @@ pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -Action Set -Name Ve
 From pwsh, `-Enabled $true` and `-Enabled $false` still bind. Set refuses a toggle that has not been created yet. Set and Ensure refuse a write when the stored toggle is still on the legacy targeting model.
 
 5. When the UI process is evaluating live flags, refresh the site. No redeploy is required for the flip itself. A short cache can take a few seconds. Confirm with `GET /api/features/flags` on that environment's UI: the slug is true or false with the row you set. Providers below the minimum for rules will not follow the flip.
-6. The client identifier reaches the running container on the next `ui` release after the system configuration that creates the Octopus variables and inlines `scripts/update-deployable.ps1` is applied (secret `OCTOPUS_FEATURES_CLIENT_IDENTIFIER` must already hold the JWT). When the UI process evaluates live flags, a flip changes `GET /api/features/flags` with no new image; that also proves egress to `https://features.octopus.com`. A missing client identifier stays off.
+6. The client identifier reaches the running container on the next `ui` release after the system configuration that creates the Octopus variables and inlines `scripts/update-deployable.ps1` is applied (secret `OCTOPUS_FEATURES_CLIENT_IDENTIFIER` must already hold the JWT). When the UI process evaluates live flags, a flip changes `GET /api/features/flags` with no new image; that also proves egress to `https://features.octopus.com`. A missing client identifier stays off for BuildingManagement and VendorManagement; ShowPriorityBadges stays on via appsettings.
 
 To put a demo back: the same environment switch off, or `-ResetDefaults`.
 
@@ -101,4 +105,4 @@ To put a demo back: the same environment switch off, or `-ResetDefaults`.
 - Setting repository secret `OCTOPUS_FEATURES_CLIENT_IDENTIFIER` (name only) so the next system apply creates the Octopus variables on `cmdemo1-ui`.
 - Applying the system configuration, then creating a `ui` release, so Update deployable writes `Octopus__FeatureFlags__ClientIdentifier`. The script is in this repository; the release is what puts the variable on the container app.
 - A live flip in tdd to confirm `GET /api/features/flags` follows the row (and that the container can reach `https://features.octopus.com`).
-- If the script's slug is not the name, recording that printed slug for the app lookup.
+- If the script's requested slug is not what Octopus stored, recording that printed NOTE slug for the app lookup.

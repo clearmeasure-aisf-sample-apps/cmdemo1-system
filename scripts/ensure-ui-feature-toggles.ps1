@@ -3,7 +3,7 @@
 
 <#
 .SYNOPSIS
-    Creates BuildingManagement and VendorManagement on Octopus project cmdemo1-ui, or flips one environment.
+    Creates BuildingManagement, VendorManagement, and ShowPriorityBadges on Octopus project cmdemo1-ui, or flips one environment.
 
 .DESCRIPTION
     The toggles live on project cmdemo1-ui (Projects-981) in space cmdemo1-demo (Spaces-355). The API is
@@ -22,9 +22,12 @@
     environment off = switch off). Nested rule/condition shapes are not exercised here and are not verified beyond
     that empty-Phases case.
 
-    Ensure (the default) creates a missing toggle with tdd on, uat off, prod off, and the flag default off. A
-    toggle that already exists is left as it was, including a later flip, except an environment that is missing
-    from it is added at that default. -ResetDefaults puts the three environments and the flag default back.
+    Ensure (the default) creates a missing toggle at that flag's environment defaults (BuildingManagement and
+    VendorManagement: tdd on, uat off, prod off; ShowPriorityBadges: tdd, uat, and prod on) and the flag default
+    off. A toggle that already exists is left as it was, including a later flip, except an environment that is
+    missing from it is added at that flag's default. -ResetDefaults puts each flag's three environments and the
+    flag default back to that flag's defaults, so it does not turn BuildingManagement or VendorManagement off in
+    uat or prod when those rows already match their defaults, and it keeps ShowPriorityBadges on in all three.
     -Action Set flips one named toggle in one environment and leaves the others. -Action Show only reads.
     -WhatIf with no Octopus credential prints the create and does not call Octopus.
 
@@ -39,7 +42,7 @@
     Ensure (create missing, do not reset a flip), Set (one environment of one toggle), or Show (read).
 
 .PARAMETER Name
-    For Set: BuildingManagement or VendorManagement.
+    For Set: BuildingManagement, VendorManagement, or ShowPriorityBadges.
 
 .PARAMETER Environment
     For Set: tdd, uat, or prod.
@@ -55,7 +58,7 @@
     For Set: turn that environment off. Same as -Enabled:false. Do not combine with -Enabled or -Enable.
 
 .PARAMETER ResetDefaults
-    With Ensure: tdd on, uat off, prod off, flag default off. Phases already stored on an environment stay.
+    With Ensure: each flag's environment defaults and flag default off. Phases already stored on an environment stay.
 
 .PARAMETER LoadOnly
     Defines the functions and stops, for scripts/test-ui-feature-toggles.ps1.
@@ -125,12 +128,26 @@ $script:UiFeatureToggleLegacyEnvironmentFields = @(
     'Links'
 )
 
+function Get-UiFeatureToggleEnvironmentNames {
+    @('tdd', 'uat', 'prod')
+}
+
 function Get-UiFeatureToggleDefaults {
-    [ordered]@{
-        tdd  = $true
-        uat  = $false
-        prod = $false
+    param(
+        [Parameter(Mandatory)]
+        $Spec
+    )
+    if ($Spec -is [System.Collections.IDictionary]) {
+        if (-not $Spec.Contains('Defaults') -or $null -eq $Spec['Defaults']) {
+            throw "Toggle '$($Spec['Name'])' has no Defaults."
+        }
+        return $Spec['Defaults']
     }
+    $property = $Spec.PSObject.Properties['Defaults']
+    if ($null -eq $property -or $null -eq $property.Value) {
+        throw "Toggle '$($Spec.Name)' has no Defaults."
+    }
+    return $property.Value
 }
 
 function Get-UiFeatureToggleSpecs {
@@ -139,11 +156,31 @@ function Get-UiFeatureToggleSpecs {
             Name        = 'BuildingManagement'
             Slug        = 'BuildingManagement'
             Description = 'Buildings and Rooms admin (/admin/buildings) and the building-room summary reads. On: the nav link, the page, and those reads. Off: hidden, and those reads are rejected. Work order building text and the Open by Building report stay.'
+            Defaults    = [ordered]@{
+                tdd  = $true
+                uat  = $false
+                prod = $false
+            }
         }
         @{
             Name        = 'VendorManagement'
             Slug        = 'VendorManagement'
             Description = 'Vendor directory on Teams and Vendors, vendor commands and queries, and the MCP vendor tools. On: that section and those calls. Off: hidden, and those calls are rejected. Waiting on a vendor, and the teams portion of the page, stay.'
+            Defaults    = [ordered]@{
+                tdd  = $true
+                uat  = $false
+                prod = $false
+            }
+        }
+        @{
+            Name        = 'ShowPriorityBadges'
+            Slug        = 'showprioritybadges'
+            Description = 'High priority badge on the work order search list and board. On: a High-priority work order shows the badge. Off: the badge is hidden. Search and the board stay.'
+            Defaults    = [ordered]@{
+                tdd  = $true
+                uat  = $true
+                prod = $true
+            }
         }
     )
 }
@@ -386,7 +423,7 @@ function Get-UiFeatureTogglePlan {
         if (-not $EnvironmentIds.Contains($EnvironmentName)) { throw "No Octopus environment named '$EnvironmentName'." }
     }
 
-    $defaults = Get-UiFeatureToggleDefaults
+    $defaults = Get-UiFeatureToggleDefaults $Spec
     $force = $Mode -eq 'ResetDefaults' -or $Mode -eq 'Set'
     $names = [System.Collections.Generic.List[string]]::new()
     if ($Mode -eq 'Set') {
@@ -478,7 +515,7 @@ function Format-UiFeatureTogglePlan($Plan, $IdToName) {
 
 function Get-OfflineEnsurePlans {
     $ids = @{}
-    foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) { $ids[$environmentName] = $environmentName }
+    foreach ($environmentName in (Get-UiFeatureToggleEnvironmentNames)) { $ids[$environmentName] = $environmentName }
     foreach ($spec in Get-UiFeatureToggleSpecs) {
         Get-UiFeatureTogglePlan -Spec $spec -Current $null -EnvironmentIds $ids -Mode Ensure
     }
@@ -522,7 +559,7 @@ function Assert-UiFeatureToggleSystem($System) {
         throw "This script is for project $($script:UiFeatureToggleProjectSlug). system.json slug '$($System.system.slug)' does not name it."
     }
     $names = @($System.environments | ForEach-Object { [string]$_.name })
-    foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) {
+    foreach ($environmentName in (Get-UiFeatureToggleEnvironmentNames)) {
         if ($environmentName -notin $names) { throw "system.json has no environment '$environmentName'." }
     }
     $ui = @($System.deployables | Where-Object { $_.name -eq 'ui' -and -not [bool](Get-NoteProperty $_ 'retired') })
@@ -608,7 +645,7 @@ function Get-ProjectFeatureToggles([string] $Base) {
     } catch {
         $lastError = Get-OctopusError $_
         if ($lastError.Status -eq 404) {
-            throw "Octopus answered 404 for feature toggles on $($script:UiFeatureToggleProjectSlug). Create BuildingManagement and VendorManagement in the project UI (docs/ops/ui-feature-toggles.md). $($lastError.Detail)"
+            throw "Octopus answered 404 for feature toggles on $($script:UiFeatureToggleProjectSlug). Create BuildingManagement, VendorManagement, and ShowPriorityBadges in the project UI (docs/ops/ui-feature-toggles.md). $($lastError.Detail)"
         }
         if ($lastError.Status -eq 403) {
             throw "Octopus refused to read feature toggles (403). $($lastError.Detail)"
@@ -706,7 +743,7 @@ function Invoke-UiFeatureToggleCommand {
 
     if ($Action -eq 'Ensure') {
         if ($PSBoundParameters.ContainsKey('Name') -or $PSBoundParameters.ContainsKey('Environment') -or $PSBoundParameters.ContainsKey('Enabled') -or $Enable -or $Disable) {
-            throw 'Ensure takes no -Name, -Environment, -Enabled, -Enable, or -Disable. Use -Action Set to flip one environment, or -ResetDefaults to restore tdd on and uat and prod off.'
+            throw 'Ensure takes no -Name, -Environment, -Enabled, -Enable, or -Disable. Use -Action Set to flip one environment, or -ResetDefaults to restore each flag''s defaults.'
         }
     }
     if ($Action -eq 'Show') {
@@ -727,7 +764,7 @@ function Invoke-UiFeatureToggleCommand {
     if ($WhatIfPreference -and $Action -eq 'Ensure' -and -not (Test-OctopusCredential)) {
         foreach ($plan in Get-OfflineEnsurePlans) {
             $labels = @{}
-            foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) { $labels[$environmentName] = $environmentName }
+            foreach ($environmentName in (Get-UiFeatureToggleEnvironmentNames)) { $labels[$environmentName] = $environmentName }
             Write-Host (Format-UiFeatureTogglePlan -Plan $plan -IdToName $labels)
         }
         Write-Host 'WhatIf only: no Octopus credential, so Octopus was not called. This is the create the script would send, not a diff against the space.'
@@ -746,14 +783,15 @@ function Invoke-UiFeatureToggleCommand {
 
     $environmentIds = @{}
     $idToName = @{}
+    $environmentNames = @(Get-UiFeatureToggleEnvironmentNames)
     foreach ($octopusEnvironment in @(Invoke-Octopus -Method Get -Uri "$url/api/$space/environments/all")) {
         $environmentName = [string]$octopusEnvironment.Name
-        if ($environmentName -in @(Get-UiFeatureToggleDefaults).Keys) {
+        if ($environmentName -in $environmentNames) {
             $environmentIds[$environmentName] = [string]$octopusEnvironment.Id
             $idToName[[string]$octopusEnvironment.Id] = $environmentName
         }
     }
-    foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) {
+    foreach ($environmentName in $environmentNames) {
         if (-not $environmentIds.Contains($environmentName)) { throw "Octopus space $space has no environment '$environmentName'." }
     }
 
@@ -782,7 +820,7 @@ function Invoke-UiFeatureToggleCommand {
                 $state = if (ConvertTo-Boolean (Get-NoteProperty $configured 'IsEnabled')) { 'on' } else { 'off' }
                 Write-Host "  $label $state"
             }
-            foreach ($environmentName in (Get-UiFeatureToggleDefaults).Keys) {
+            foreach ($environmentName in (Get-UiFeatureToggleEnvironmentNames)) {
                 if (-not $seen.Contains($environmentName)) { Write-Host "  $environmentName not configured (evaluates the flag default)" }
             }
             continue
