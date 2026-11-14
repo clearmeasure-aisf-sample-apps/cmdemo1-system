@@ -368,7 +368,17 @@
   ],
   "pool": {
     "slots": 8,
-    "warm": 2,
+    "warm": {
+      "count": 2,
+      "managerIntervalMinutes": 5,
+      "waitToWarmMinutes": 1,
+      "idleToCoolMinutes": 30
+    },
+    "lease": {
+      "maxMinutes": 30,
+      "holdEnvMaxHours": 24,
+      "waitNotifyMinutes": 5
+    },
     "elasticPoolEdtus": 50,
     "appCpu": "1",
     "maxReplicas": 3,

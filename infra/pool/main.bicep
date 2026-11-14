@@ -24,7 +24,17 @@ var sqlLocation = union({ sqlLocation: location }, system.system).sqlLocation
 var registryServer = union({ registry: { loginServer: '' } }, system.azure).registry.loginServer
 var poolDefaults = {
   slots: 8
-  warm: 2
+  warm: {
+    count: 2
+    managerIntervalMinutes: 5
+    waitToWarmMinutes: 1
+    idleToCoolMinutes: 30
+  }
+  lease: {
+    maxMinutes: 30
+    holdEnvMaxHours: 24
+    waitNotifyMinutes: 5
+  }
   elasticPoolEdtus: 50
   appCpu: '1'
   maxReplicas: 3
@@ -33,7 +43,8 @@ var poolDefaults = {
 }
 var pool = union(poolDefaults, union({ pool: {} }, system).pool)
 var slotCount = int(pool.slots)
-var configuredWarm = int(pool.warm)
+// pool.warm.count is the shadow baseline; the pool manager may warm more at runtime (excluded from drift).
+var configuredWarm = int(pool.warm.count)
 var slots = [for i in range(1, slotCount): 'pool-${i}']
 var suffix = take(uniqueString(subscription().id, resourceGroup().id, 'pool'), 5)
 var sqlSuffix = sqlLocation == location ? suffix : take(uniqueString(subscription().id, resourceGroup().id, 'pool', sqlLocation), 5)
