@@ -51,7 +51,7 @@ resource "octopusdeploy_process_step" "system_sign_off" {
   execution_properties = {
     "Octopus.Action.RunOnServer"                       = "false"
     "Octopus.Action.Manual.Instructions"               = "Sign off #{Octopus.Project.Name} #{Octopus.Release.Number} for #{Octopus.Environment.Name}: check the earlier environments, then Proceed with a note, or Abort."
-    "Octopus.Action.Manual.ResponsibleTeamIds"         = local.system_sign_off_team_ids
+    "Octopus.Action.Manual.ResponsibleTeamIds"         = local.sign_off_team_id
     "Octopus.Action.Manual.BlockConcurrentDeployments" = "False"
   }
 }
@@ -103,8 +103,29 @@ resource "octopusdeploy_process_step" "system_verify" {
   }
 }
 
+# Only with an App Service deployable: its database login (scripts/grant-database-access.ps1), right after the apply
+# that keeps the login's password in the vault.
+resource "octopusdeploy_process_step" "system_grant" {
+  count = length(local.appservice_deployables) > 0 ? 1 : 0
+
+  process_id     = octopusdeploy_process.system.id
+  name           = "Grant database access"
+  type           = "Octopus.AzurePowerShell"
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/grant-database-access.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
 # Only where an environment declares employeeMiddleNames in system.json, and only in those environments: the demo data
-# (scripts/set-employee-middle-names.ps1, variable Employee.MiddleNames), after the apply.
+# (scripts/set-employee-middle-names.ps1, variable Employee.MiddleNames), after the database logins.
 resource "octopusdeploy_process_step" "system_middle_names" {
   count = length(local.middle_name_environments) > 0 ? 1 : 0
 
@@ -130,6 +151,7 @@ resource "octopusdeploy_process_steps_order" "system" {
   steps = concat(
     [octopusdeploy_process_step.system_sign_off.id],
     [octopusdeploy_process_step.system_apply.id],
+    [for step in octopusdeploy_process_step.system_grant : step.id],
     [for step in octopusdeploy_process_step.system_middle_names : step.id],
     [octopusdeploy_process_step.system_verify.id],
   )
@@ -298,9 +320,8 @@ resource "octopusdeploy_process_step" "seed_demo_employees" {
 
 # Acceptance tests, in the environments with "acceptanceTests": true only: the full suite, or the tests of the
 # deployable's acceptanceTestsFilter. "Prepare test runner" starts with "Migrate database" and pulls the test image
-# meanwhile. The test steps stand before the failure rollback ("Revert deployable", "Verify revert", "Revert pin"),
-# so a failed test runs that rollback: the pin goes back, and a deployable with hosting "own" is put back and then
-# asked ("Verify revert"). A failed test fails the deployment, which blocks its promotion.
+# meanwhile; the test steps follow "Revert pin", so a failed test keeps the pin (the version runs) but fails the
+# deployment, which blocks its promotion.
 resource "octopusdeploy_process_step" "prepare_tests" {
   for_each = local.tested_deployables
 
@@ -414,6 +435,40 @@ resource "octopusdeploy_process_step" "update" {
     "Octopus.Action.Script.ScriptSource" = "Inline"
     "Octopus.Action.Script.Syntax"       = "PowerShell"
     "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/update-deployable.ps1")
+    "OctopusUseBundledTooling"           = "False"
+  }
+}
+
+# App Service deployables: the release's zip (package <slug>-<deployable> in the built-in feed, not extracted) onto the
+# web app the stack created (scripts/deploy-appservice.ps1).
+resource "octopusdeploy_process_step" "deploy_appservice" {
+  for_each = local.appservice_deployables
+
+  process_id     = octopusdeploy_process.deployable[each.key].id
+  name           = "Update deployable"
+  type           = "Octopus.AzurePowerShell"
+  worker_pool_id = local.worker_pool_id
+  container      = local.container
+
+  packages = {
+    app = {
+      package_id           = "${local.slug}-${each.key}"
+      feed_id              = local.built_in_feed_id
+      acquisition_location = "Server"
+      properties = {
+        Extract       = "False"
+        Purpose       = ""
+        SelectionMode = "immediate"
+      }
+    }
+  }
+
+  execution_properties = {
+    "Octopus.Action.Azure.AccountId"     = "#{Azure.Account}"
+    "Octopus.Action.RunOnServer"         = "true"
+    "Octopus.Action.Script.ScriptSource" = "Inline"
+    "Octopus.Action.Script.Syntax"       = "PowerShell"
+    "Octopus.Action.Script.ScriptBody"   = file("${path.module}/../scripts/deploy-appservice.ps1")
     "OctopusUseBundledTooling"           = "False"
   }
 }
@@ -738,31 +793,26 @@ resource "octopusdeploy_process_steps_order" "deployable" {
     contains(keys(local.seeded_deployables), each.key) ? [octopusdeploy_process_step.seed_demo_employees[each.key].id] : [],
     contains(keys(local.schema_deployables), each.key) ? [octopusdeploy_process_step.record_schema[each.key].id] : [],
     contains(keys(local.container_deployables), each.key) ? [octopusdeploy_process_step.update[each.key].id] : [],
+    contains(keys(local.appservice_deployables), each.key) ? [octopusdeploy_process_step.deploy_appservice[each.key].id] : [],
     contains(keys(local.static_deployables), each.key) ? [octopusdeploy_process_step.deploy_staticwebapp[each.key].id] : [],
     contains(keys(local.storage_deployables), each.key) ? [octopusdeploy_process_step.deploy_storagewebsite[each.key].id] : [],
     contains(keys(local.own_deployables), each.key) ? [
       octopusdeploy_process_step.deploy_own[each.key].id,
       octopusdeploy_process_step.verify_own[each.key].id,
       octopusdeploy_process_step.record_nodes[each.key].id,
+      # On failure, in this order: the environment is put back first, then asked, then the two records are written
+      # (the nodes, then the pin: "Revert pin" below). None of these steps reads versions.json: each takes the
+      # version before from "Pin version".
+      octopusdeploy_process_step.revert_own[each.key].id,
+      octopusdeploy_process_step.verify_revert[each.key].id,
+      octopusdeploy_process_step.record_reverted_nodes[each.key].id,
     ] : [octopusdeploy_process_step.verify[each.key].id],
-    # Before the rollback, so a failed acceptance test triggers it. "Close test database" still runs after a failed
-    # test (its condition is the variable set when the database was opened). The rollback steps run on failure of any
-    # earlier step, including one before the tests.
+    [octopusdeploy_process_step.revert_pin[each.key].id],
     contains(keys(local.tested_deployables), each.key) ? [
       octopusdeploy_process_step.open_test_database[each.key].id,
       octopusdeploy_process_step.acceptance_tests[each.key].id,
       octopusdeploy_process_step.close_test_database[each.key].id,
     ] : [],
-    # On failure, in this order: the environment is put back first (hosting "own"), then asked ("Verify revert"),
-    # then the two records are written (the nodes, then the pin). None of these steps reads versions.json: each takes
-    # the version before from "Pin version". A deployable without acceptance tests keeps this rollback immediately
-    # after verify.
-    contains(keys(local.own_deployables), each.key) ? [
-      octopusdeploy_process_step.revert_own[each.key].id,
-      octopusdeploy_process_step.verify_revert[each.key].id,
-      octopusdeploy_process_step.record_reverted_nodes[each.key].id,
-    ] : [],
-    [octopusdeploy_process_step.revert_pin[each.key].id],
   )
 }
 

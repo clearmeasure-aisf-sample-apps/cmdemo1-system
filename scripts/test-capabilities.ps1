@@ -38,18 +38,12 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
 $env:AZURE_CORE_DISABLE_PROGRESS_BAR = 'true'
-# Names marked retired in system.json. A stack that has not been applied since then may still list their container
-# apps. Those leftovers are not live deployables: checks that walk the stack skip them. ui and dashboard are not here.
-$script:retiredDeployableNames = @()
 
 # pwsh -File passes "CAP-001,CAP-002" as one string.
 $Only = @($Only | ForEach-Object { $_ -split '[,\s]+' } | Where-Object { $_ })
 if (-not $ListChecks) {
     $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
     # A retired deployable (deployables[].retired, decision 0058) is in no environment: nothing below sees it.
-    # The names are kept so a stack that still lists the app (the apply that deletes it has not run) is not treated
-    # as a missing box or an always-on app of a live deployable.
-    $script:retiredDeployableNames = @($system.deployables | Where-Object { $_['retired'] -eq $true } | ForEach-Object { [string] $_.name })
     $system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
     $slug = [string] $system.system.slug
     $org = [string] $system.system.githubOrg
@@ -268,10 +262,8 @@ function Get-App([string] $Environment) {
 }
 function Get-ContainerApp([string] $Environment) {
     # Every container app of the environment, by the names the stack reports, each with the deployable it runs.
-    # A retired deployable is not one of them: its app may still be in a stack applied before the retirement.
     $entries = az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query 'outputs.deployables.value[?containerApp].{name: name, app: containerApp}' --output json | ConvertFrom-Json -AsHashtable
     foreach ($entry in @($entries)) {
-        if ($script:retiredDeployableNames -contains [string] $entry.name) { continue }
         $app = az containerapp show --name $entry.app --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
         $app.deployable = [string] $entry.name
         $app
@@ -538,16 +530,10 @@ $checks = [ordered] @{
             Assert-That ($s.Name -eq 'Sign-off' -and $s.Actions[0].ActionType -eq 'Octopus.Manual') "$project does not start with Sign-off"
             $responsible = $s.Actions[0].Properties.PSObject.Properties['Octopus.Action.Manual.ResponsibleTeamIds']
             $responsibleIds = if ($responsible) { [string] $responsible.Value } else { '' }
-            # pipelineSignOff (decision 0048) adds a second responsible team, "<slug> pipeline sign-off":
-            # system.pipelineSignOff for the system project, deployables[].pipelineSignOff for a deployable.
-            # Any other Sign-off has the approvers alone.
+            # A deployable with pipelineSignOff (decision 0048) has a second responsible team, "<slug> pipeline
+            # sign-off"; any other Sign-off has the approvers alone.
             $ids = @($responsibleIds -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            $pipeline = if ($project -eq $systemProject) {
-                $system.system['pipelineSignOff'] -eq $true
-            }
-            else {
-                @($system.deployables | Where-Object { "$slug-$($_.name)" -eq $project -and $_['pipelineSignOff'] -eq $true }).Count -gt 0
-            }
+            $pipeline = $project -ne $systemProject -and @($system.deployables | Where-Object { "$slug-$($_.name)" -eq $project -and $_['pipelineSignOff'] -eq $true }).Count -gt 0
             $pipelineTeam = if ($pipeline) { @((Invoke-Octopus "/api/$space/teams?partialName=$([uri]::EscapeDataString("$slug pipeline sign-off"))&take=100").Items | Where-Object { $_.Name -eq "$slug pipeline sign-off" -and $_.SpaceId -eq $space }) | Select-Object -First 1 }
             $want = @($team.Id) + @(if ($pipelineTeam) { $pipelineTeam.Id })
             Assert-That (-not $pipeline -or $null -ne $pipelineTeam) "$project has pipelineSignOff, and the space has no team '$slug pipeline sign-off'"
@@ -831,10 +817,7 @@ $checks = [ordered] @{
                 $manifest = $(if ($manifestAnswer.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($manifestAnswer.Content) } else { [string] $manifestAnswer.Content }) | ConvertFrom-Json -AsHashtable
                 $inStack = @(az stack group show --name "stack-$slug-$drawnEnvironment" --resource-group (Get-Group $drawnEnvironment) --query "outputs.deployables.value[?hosting=='containerapp'].name" --output json | ConvertFrom-Json)
                 $boxed = @($manifest['nodes'] | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['kind'] -eq 'containerapp' } | ForEach-Object { [string] $_['deployable'] })
-                # Retired deployables are not drawn (decision 0058). A stack applied before the retirement can still
-                # name them; that is not a missing box. A live deployable that the stack has and the diagram does not
-                # still fails.
-                $unboxed = @($inStack | Where-Object { $boxed -notcontains $_ -and $script:retiredDeployableNames -notcontains $_ })
+                $unboxed = @($inStack | Where-Object { $boxed -notcontains $_ })
                 Assert-That ($unboxed.Count -eq 0) "the runtime diagram of $drawnEnvironment in $e has no box for the container app(s) $($unboxed -join ', '): deploy the release of $slug-$dashboardName to $e again"
                 # Everything else the system's resource groups hold is on it too, in every group of azure.resourceGroups:
                 # what is tagged with the environment, and what no environment tag places (no tag, or a tag of no
@@ -986,13 +969,7 @@ $checks = [ordered] @{
             # Each container app of the environment has what the hourly health reports found for it (health.containerApps,
             # read from the reports' logs), once the system's last deployment there, which makes and removes the apps,
             # is 90 minutes old. An environment whose health the file does not have (no runbook, or not read) has none.
-            # Match write-delivery.ps1 Select-DeliveryDeployable (#577): azureExcludeDeployables and retired are absent.
-            $azureExcluded = @(if ($system.system['azureExcludeDeployables']) { $system.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
-            $apps = @($system.deployables | Where-Object {
-                    $_['retired'] -ne $true -and $azureExcluded -cnotcontains [string] $_.name -and
-                    (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
-                    (-not $_['environments'] -or @($_['environments']) -contains $e)
-                } | ForEach-Object { [string] $_.name })
+            $apps = @($system.deployables | Where-Object { (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and (-not $_['environments'] -or @($_['environments']) -contains $e) } | ForEach-Object { [string] $_.name })
             $health = $entry['health']
             if ($systemSettled -and $apps.Count -gt 0 -and $health -is [System.Collections.IDictionary]) {
                 $facts = @($health['containerApps'] | Where-Object { $_ -is [System.Collections.IDictionary] })
