@@ -234,9 +234,87 @@ Test-Case 'plan: cross-repo linked issue is nudged in its actual repository (#64
     @($crossRepoNudge.Action, $crossRepoNudge.Issues[0].Action, $crossRepoNudge.Issues[0].Repository, $crossRepoNudge.Issues[0].Issue) `
     @('nudge', 'nudge', $workordersRepo, 1657)
 
+# --- Invoke-GhApi error classification (#649 review): mock gh stdout/stderr + exit code ---
+function Invoke-WithMockGh {
+    param(
+        [int] $ExitCode,
+        [string] $Stdout = '',
+        [string] $Stderr = '',
+        [scriptblock] $Script
+    )
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('mock-gh-' + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $ghPath = Join-Path $dir 'gh'
+    @'
+#!/usr/bin/env bash
+if [ -n "${MOCK_GH_STDOUT+x}" ]; then printf '%s' "$MOCK_GH_STDOUT"; fi
+if [ -n "${MOCK_GH_STDERR+x}" ]; then printf '%s' "$MOCK_GH_STDERR" >&2; fi
+exit "${MOCK_GH_EXIT:-0}"
+'@ | Set-Content -LiteralPath $ghPath -Encoding utf8NoBOM
+    & chmod +x $ghPath
+    $oldPath = $env:PATH
+    $env:PATH = "$dir$([IO.Path]::PathSeparator)$oldPath"
+    $env:MOCK_GH_STDOUT = $Stdout
+    $env:MOCK_GH_STDERR = $Stderr
+    $env:MOCK_GH_EXIT = "$ExitCode"
+    try {
+        & $Script
+    }
+    finally {
+        $env:PATH = $oldPath
+        Remove-Item Env:\MOCK_GH_STDOUT, Env:\MOCK_GH_STDERR, Env:\MOCK_GH_EXIT -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$notFoundOnlyJson = '{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND","path":["repository","issue"],"message":"Could not resolve to an Issue with the number of 1657."}]}'
+$notFoundResult = Invoke-WithMockGh -ExitCode 1 -Stdout $notFoundOnlyJson -Stderr 'gh: GraphQL: Could not resolve to an Issue with the number of 1657.' -Script {
+    Invoke-GhApi graphql -f 'query=q'
+}
+Test-Case 'gh: NOT_FOUND only returns payload for skip' `
+    @([string] $notFoundResult.errors[0].type, ($null -eq $notFoundResult.data.repository.issue)) `
+    @('NOT_FOUND', $true)
+
+$forbiddenJson = '{"data":{"repository":null},"errors":[{"type":"FORBIDDEN","path":["repository"],"message":"Resource not accessible by integration"}]}'
+$forbiddenThrew = $false
+try {
+    Invoke-WithMockGh -ExitCode 1 -Stdout $forbiddenJson -Stderr 'gh: GraphQL: Resource not accessible by integration' -Script {
+        Invoke-GhApi graphql -f 'query=q'
+    } | Out-Null
+}
+catch { $forbiddenThrew = $true }
+Test-Case 'gh: FORBIDDEN with data throws' $forbiddenThrew $true
+
+$mixedJson = '{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND","message":"missing issue"},{"type":"FORBIDDEN","message":"no access"}]}'
+$mixedThrew = $false
+try {
+    Invoke-WithMockGh -ExitCode 1 -Stdout $mixedJson -Stderr 'gh: GraphQL: mixed errors' -Script {
+        Invoke-GhApi graphql -f 'query=q'
+    } | Out-Null
+}
+catch { $mixedThrew = $true }
+Test-Case 'gh: NOT_FOUND mixed with FORBIDDEN throws' $mixedThrew $true
+
+$noDataThrew = $false
+try {
+    Invoke-WithMockGh -ExitCode 1 -Stdout '{"errors":[{"type":"INSUFFICIENT_SCOPES","message":"token lacks scope"}]}' -Stderr 'gh: API error' -Script {
+        Invoke-GhApi graphql -f 'query=q'
+    } | Out-Null
+}
+catch { $noDataThrew = $true }
+Test-Case 'gh: non-zero with no skippable not-found (no data) throws' $noDataThrew $true
+
+$rest404Json = '{"message":"Not Found","documentation_url":"https://docs.github.com/rest/issues/issues#get-an-issue","status":"404"}'
+$rest404Result = Invoke-WithMockGh -ExitCode 1 -Stdout $rest404Json -Stderr 'gh: Not Found (HTTP 404)' -Script {
+    Invoke-GhApi --method DELETE 'repos/o/r/issues/1/assignees' -f 'assignees[]=bot'
+}
+Test-Case 'gh: REST HTTP 404 returns payload for skip' ([string] $rest404Result.status) '404'
+
 if ($failures -gt 0) {
     Write-Host "$failures FAIL(s)"
     exit 1
 }
 Write-Host 'All factory-wake tests passed.'
+# Nested mock-gh exits leave LASTEXITCODE non-zero; Actions' pwsh shell would fail the step without this.
+$global:LASTEXITCODE = 0
 exit 0

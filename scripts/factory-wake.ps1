@@ -319,16 +319,26 @@ function ConvertFrom-GhJson([string] $Text) {
 }
 
 function Test-GhGraphqlNotFoundOnly {
-    # True when every GraphQL error is type NOT_FOUND (missing issue/repository). FORBIDDEN,
-    # INSUFFICIENT_SCOPES, RATE_LIMITED, and any other type must not be treated as "not found".
+    # True when errors is non-empty and every GraphQL error is type NOT_FOUND (missing issue/repository).
+    # FORBIDDEN, INSUFFICIENT_SCOPES, RATE_LIMITED, mixed types, and empty/missing errors are not "not found".
     param($Parsed)
     if ($null -eq $Parsed) { return $false }
-    $errors = @(Get-FactValue $Parsed 'errors')
+    $errorsRaw = Get-FactValue $Parsed 'errors'
+    # @() from an if-branch / @( $null ) is unsafe under StrictMode; build the list explicitly.
+    $errors = [System.Collections.Generic.List[object]]::new()
+    if ($null -ne $errorsRaw) { foreach ($err in @($errorsRaw)) { $errors.Add($err) } }
     if ($errors.Count -eq 0) { return $false }
     foreach ($err in $errors) {
         if ([string] (Get-FactValue $err 'type') -cne 'NOT_FOUND') { return $false }
     }
     return $true
+}
+
+function Test-GhRestHttp404 {
+    # True when a REST call returned exactly HTTP 404 (JSON status or gh stderr summary).
+    param($Parsed, [string] $Stderr = '')
+    $status = [string] (Get-FactValue $Parsed 'status')
+    return ($status -ceq '404') -or ($Stderr -match '(?i)\bHTTP 404\b')
 }
 
 function Invoke-GhApiRaw {
@@ -357,10 +367,15 @@ function Invoke-GhApiRaw {
 }
 
 function Invoke-GhApi {
-    # Runs gh api and returns the JSON object, or throws on any non-zero exit.
+    # Runs gh api and returns the JSON object. On a non-zero exit, only a genuine not-found is returned
+    # for the caller to skip: GraphQL errors that are all NOT_FOUND, or a REST HTTP 404. FORBIDDEN /
+    # INSUFFICIENT_SCOPES / RATE_LIMITED / mixed errors / and any other non-zero exit throw (#649 review).
     param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Arguments)
     $r = Invoke-GhApiRaw @Arguments
     if ($r.ExitCode -ne 0) {
+        if ((Test-GhGraphqlNotFoundOnly -Parsed $r.Parsed) -or (Test-GhRestHttp404 -Parsed $r.Parsed -Stderr $r.Stderr)) {
+            return $r.Parsed
+        }
         $detail = if ($r.Stdout) { $r.Stdout } elseif ($r.Stderr) { $r.Stderr } else { '(no output)' }
         throw "gh api failed ($($r.ExitCode)): $detail"
     }
@@ -468,15 +483,8 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }
 '@
-    # Soft-read: GraphQL exits 1 with errors[].type NOT_FOUND when the issue (or repository) is missing.
-    # Only that case is skipped; FORBIDDEN / INSUFFICIENT_SCOPES / rate-limit / other errors must throw (#649).
-    $r = Invoke-GhApiRaw graphql -f "query=$query" -f "owner=$Owner" -f "name=$Name" -F "number=$Number"
-    if ($r.ExitCode -ne 0) {
-        if (Test-GhGraphqlNotFoundOnly -Parsed $r.Parsed) { return $null }
-        $detail = if ($r.Stdout) { $r.Stdout } elseif ($r.Stderr) { $r.Stderr } else { '(no output)' }
-        throw "gh api failed ($($r.ExitCode)): $detail"
-    }
-    $answer = $r.Parsed
+    # Invoke-GhApi returns the payload when errors are all NOT_FOUND; other non-zero exits throw (#649).
+    $answer = Invoke-GhApi graphql -f "query=$query" -f "owner=$Owner" -f "name=$Name" -F "number=$Number"
     $repoNode = Get-FactValue (Get-FactValue $answer 'data') 'repository'
     if ($null -eq $repoNode) { return $null }
     $issue = Get-FactValue $repoNode 'issue'
