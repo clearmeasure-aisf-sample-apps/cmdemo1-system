@@ -13,7 +13,9 @@
     Per environment of system.json and per deployable that still runs (the Octopus project <slug>-<deployable>, and
     <slug>-system as deployable "system"). Deployables listed in system.azureExcludeDeployables (#542) and those marked
     retired (decision 0058) are left out so the dashboard's Delivery cards do not show obsolete apps (#577):
-      version, deployedAt, releaseUrl   the release of the last successful deployment and when it finished
+      version, deployedAt, releaseUrl   the Default channel release of the last successful deployment and when it
+                                        finished (issue #655: Pull requests channel releases such as 2.4.<run>-pr.<n>
+                                        are never delivery facts for tdd, uat or prod)
       signedOffBy, reason               who answered that deployment's "Sign-off" with Proceed, and the note they gave
                                         (null in the first environment, which has no sign-off)
       lastPersonSignOff                 the newest successful deployment there whose "Sign-off" a person answered with
@@ -143,12 +145,44 @@ function Test-NotFound($ErrorRecord) {
     $ErrorRecord.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException] -and [int] $ErrorRecord.Exception.Response.StatusCode -eq 404
 }
 
+function Get-ReleaseChannelId($Release) {
+    # ChannelId of an Octopus release (JSON object or hashtable); empty when absent. Hashtables are used by tests.
+    if ($null -eq $Release) { return '' }
+    if ($Release -is [System.Collections.IDictionary]) {
+        if ($Release.Contains('ChannelId')) { return [string] $Release['ChannelId'] }
+        return ''
+    }
+    [string] (Get-Field $Release 'ChannelId')
+}
+function Get-DefaultChannelIds([object[]] $Channels) {
+    # Ids of channels named Default. Issue #655: delivery facts use only those releases.
+    @($Channels | ForEach-Object {
+            $name = if ($_ -is [System.Collections.IDictionary]) { [string] $_['Name'] } else { [string] (Get-Field $_ 'Name') }
+            if ($name -cne 'Default') { return }
+            if ($_ -is [System.Collections.IDictionary]) { [string] $_['Id'] } else { [string] (Get-Field $_ 'Id') }
+        } | Where-Object { $_ })
+}
+function Test-DefaultChannelRelease($Release, [string[]] $DefaultChannelIds) {
+    # True when the release is on a Default channel. Missing ChannelId is not Default (fail closed).
+    $id = Get-ReleaseChannelId $Release
+    if (-not $id -or -not $DefaultChannelIds -or $DefaultChannelIds.Count -eq 0) { return $false }
+    $DefaultChannelIds -contains $id
+}
+function Select-DefaultChannelReleases([object[]] $Releases, [string[]] $DefaultChannelIds) {
+    @($Releases | Where-Object { Test-DefaultChannelRelease $_ $DefaultChannelIds })
+}
+
 function Get-DeploymentHistory([string] $Project) {
-    # The releases of a project and every deployment of it with its task's result, newest first; $null when Octopus
-    # has no such project (yet). Three paged calls per project; any other failure is Octopus not answering.
+    # The Default channel releases of a project and every deployment of those releases with its task's result, newest
+    # first (issue #655: Pull requests channel releases are omitted so they never appear as an environment's current
+    # version or in behindFirst); $null when Octopus has no such project (yet). Channel list plus three paged calls per
+    # project; any other failure is Octopus not answering.
     try { $found = Invoke-Octopus "/api/$space/projects/$Project" }
     catch { if (Test-NotFound $_) { return $null }; throw }
-    $releases = @(Get-OctopusItem "/api/$space/projects/$($found.Id)/releases")
+    $defaultChannelIds = @(Get-DefaultChannelIds @(Get-OctopusItem "/api/$space/projects/$($found.Id)/channels"))
+    if ($defaultChannelIds.Count -eq 0) { throw "project $Project has no Default channel" }
+    $defaultChannelId = $defaultChannelIds[0]
+    $releases = @(Select-DefaultChannelReleases @(Get-OctopusItem "/api/$space/projects/$($found.Id)/releases?channel=$defaultChannelId") $defaultChannelIds)
     $releaseOf = @{}
     foreach ($release in $releases) { $releaseOf[[string] $release.Id] = $release }
     $taskOf = @{}
