@@ -914,10 +914,12 @@ Test-Case '697: Read-MasterState waits then returns green' $readViaWait.State 'g
 Test-Case '697: Read-MasterState wait was logged' ($masterWait.Logs[0] -like '*Waiting for master*') $true
 # Already green: no wait.
 $masterWait.PauseCount = 0; $masterWait.Logs.Clear()
-$readGreen = Read-MasterState -ReadAgain { New-Master 'green' }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 2 -WriteLog $masterLog
+$greenMaster = New-Master 'green'
+$readGreen = Read-MasterState -ReadAgain { $greenMaster }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 2 -WriteLog $masterLog
 Test-Case '697: Read-MasterState green skips the wait' @($readGreen.State, $masterWait.PauseCount, $masterWait.Logs.Count) @('green', 0, 0)
 # Already red: no wait (a failed check must still hold without polling).
-$readRed = Read-MasterState -ReadAgain { New-Master 'red' @('Build result') }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 2 -WriteLog $masterLog
+$redMaster = New-Master 'red' @('Build result')
+$readRed = Read-MasterState -ReadAgain { $redMaster }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 2 -WriteLog $masterLog
 Test-Case '697: Read-MasterState red skips the wait' @($readRed.State, $masterWait.PauseCount) @('red', 0)
 
 # PR #698 review: remaining-time budget so the wait never risks the 55-minute promote job timeout.
@@ -947,8 +949,9 @@ Test-Case '698: budget exhausted: log says skipping wait' ($masterWait.Logs[0] -
 # Small budget shortens the wait below TimeoutSeconds (injectable clock + deadline).
 $masterWait.PauseCount = 0; $masterWait.Logs.Clear()
 $budgetClock.Now = $t0
+$stillPendingBudgetShort = New-Master 'pending' @('deployments')
 $waitBudgetShort = Wait-MasterPendingClear -Initial (New-Master 'pending' @('deployments')) `
-    -ReadAgain { New-Master 'pending' @('deployments') }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 10 `
+    -ReadAgain { $stillPendingBudgetShort }.GetNewClosure() -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 10 `
     -Deadline $t0.AddSeconds(2) -GetNow $budgetGetNow -WriteLog $masterLog
 Test-Case '698: small budget: still pending' $waitBudgetShort.State 'pending'
 Test-Case '698: small budget: pauses only remaining seconds' $masterWait.PauseCount 2
@@ -957,7 +960,8 @@ Test-Case '698: small budget: log uses the shortened timeout' ($masterWait.Logs[
 # Read-MasterState honours an injected deadline (budget exhausted → pending, no pause).
 $masterWait.PauseCount = 0; $masterWait.Logs.Clear()
 $budgetClock.Now = $t0
-$readBudgetOut = Read-MasterState -ReadAgain { New-Master 'pending' @('deployments') }.GetNewClosure() `
+$pendingBudgetOut = New-Master 'pending' @('deployments')
+$readBudgetOut = Read-MasterState -ReadAgain { $pendingBudgetOut }.GetNewClosure() `
     -Pause $masterNoPause -PollSeconds 1 -TimeoutSeconds 10 -Deadline $t0.AddSeconds(-5) -GetNow $budgetGetNow -WriteLog $masterLog
 Test-Case '698: Read-MasterState budget exhausted skips wait' @($readBudgetOut.State, $masterWait.PauseCount) @('pending', 0)
 
