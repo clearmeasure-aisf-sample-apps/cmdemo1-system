@@ -135,15 +135,31 @@ function Get-PoolSlotFromLeaseBlob {
     throw "Lease blob name must be slot-N, got '$BlobName'."
 }
 
+function Test-IsPoolSlotContainerApp {
+    <#
+    .SYNOPSIS
+        True when a resource id/name is a pool slot Container App (ca-*-pool-N), never tdd/uat/prod.
+    #>
+    param(
+        [AllowEmptyString()]
+        [string] $ResourceId = ''
+    )
+    if ([string]::IsNullOrWhiteSpace($ResourceId)) { return $false }
+    $name = ($ResourceId.TrimEnd('/') -split '/')[-1]
+    # Slot apps are named ca-<slug>-pool-N (infra/pool/modules/slots.bicep). Also accept a bare pool-N leaf.
+    return $name -match '(?i)^(ca-.+-)?pool-\d+$'
+}
+
 function Test-IsPoolScaleDriftProperty {
     <#
     .SYNOPSIS
-        True when a what-if property path is only pool scale (minReplicas / warm tag), so drift must ignore it.
+        True when a what-if property path is exactly pool warmth (minReplicas or tags.warm).
 
     .DESCRIPTION
         The pool manager changes warmth at runtime without re-applying the stack (same idea as ui-auto-promote
-        acting at runtime). Declared desired state still has all 8 slots; only warmth changes. Drift of those
-        scale fields is expected and must not fail the nightly check.
+        acting at runtime). Only properties.template.scale.minReplicas and tags.warm are ignorable — not
+        scale.rules, scale.maxReplicas, or any other path that merely contains minReplicas. Callers must also
+        restrict this to pool slot Container Apps (see Select-PoolDriftChanges).
     #>
     param(
         [Parameter(Mandatory)]
@@ -152,18 +168,15 @@ function Test-IsPoolScaleDriftProperty {
     )
     if ([string]::IsNullOrWhiteSpace($PropertyPath)) { return $false }
     $path = $PropertyPath.TrimStart('.')
-    # ARM/Bicep what-if paths for Container Apps scale and the warm tag the manager flips with scale.
-    if ($path -match '(?i)(^|\.)properties\.template\.scale(\.|$)') { return $true }
-    if ($path -match '(?i)(^|\.)properties\.template\.scale\.minReplicas$') { return $true }
-    if ($path -match '(?i)(^|\.)tags\.warm$') { return $true }
-    if ($path -match '(?i)minReplicas') { return $true }
+    if ($path -match '(?i)^properties\.template\.scale\.minReplicas$') { return $true }
+    if ($path -match '(?i)^tags\.warm$') { return $true }
     return $false
 }
 
 function Select-PoolDriftChanges {
     <#
     .SYNOPSIS
-        Drop what-if changes that are only pool scale, keeping every other difference.
+        On pool slot Container Apps only, drop minReplicas / tags.warm what-if properties; keep everything else.
     #>
     param(
         [object[]] $Change = @()
@@ -176,6 +189,11 @@ function Select-PoolDriftChanges {
             if ($one.changeType -ne 'Modify') {
                 $one
             }
+            continue
+        }
+        if (-not (Test-IsPoolSlotContainerApp -ResourceId ([string] $one.resourceId))) {
+            # tdd/uat/prod (and any non-pool app): keep every property, including minReplicas / scale.*.
+            $one
             continue
         }
         $kept = @($properties | Where-Object { -not (Test-IsPoolScaleDriftProperty -PropertyPath ([string] $_)) })

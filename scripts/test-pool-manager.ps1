@@ -172,21 +172,50 @@ Test-Case 'cool action for pool-3' (@($cooled.Actions | Where-Object { $_.Slot -
 Test-Case 'minReplicas warm' (Get-PoolMinReplicasForSlot -Slot 'pool-1' -DesiredWarm @('pool-1', 'pool-2')) 1
 Test-Case 'minReplicas cool' (Get-PoolMinReplicasForSlot -Slot 'pool-8' -DesiredWarm @('pool-1', 'pool-2')) 0
 
-# --- drift exclusion (pool scale only) ---
+# --- drift exclusion (pool-slot minReplicas + tags.warm only; not wired into nightly drift yet) ---
 Test-True 'minReplicas path is scale drift' (Test-IsPoolScaleDriftProperty -PropertyPath 'properties.template.scale.minReplicas')
-Test-True 'scale child path is scale drift' (Test-IsPoolScaleDriftProperty -PropertyPath 'properties.template.scale.rules')
+Test-True 'scale.rules is NOT scale drift' (-not (Test-IsPoolScaleDriftProperty -PropertyPath 'properties.template.scale.rules'))
+Test-True 'scale.maxReplicas is NOT scale drift' (-not (Test-IsPoolScaleDriftProperty -PropertyPath 'properties.template.scale.maxReplicas'))
 Test-True 'warm tag is scale drift' (Test-IsPoolScaleDriftProperty -PropertyPath 'tags.warm')
 Test-True 'cpu change is not scale drift' (-not (Test-IsPoolScaleDriftProperty -PropertyPath 'properties.template.containers[0].resources.cpu'))
 Test-True 'empty path is not scale drift' (-not (Test-IsPoolScaleDriftProperty -PropertyPath ''))
+Test-True 'bare minReplicas substring is not scale drift' (-not (Test-IsPoolScaleDriftProperty -PropertyPath 'foo.minReplicas.bar'))
+Test-True 'pool slot app id matches' (Test-IsPoolSlotContainerApp -ResourceId '/subscriptions/x/resourceGroups/rg/providers/Microsoft.App/containerApps/ca-cmdemo1-pool-3')
+Test-True 'tdd-ui is not a pool slot' (-not (Test-IsPoolSlotContainerApp -ResourceId '/subscriptions/x/resourceGroups/rg/providers/Microsoft.App/containerApps/ca-cmdemo1-tdd-ui'))
+Test-True 'prod-ui is not a pool slot' (-not (Test-IsPoolSlotContainerApp -ResourceId '/subscriptions/x/resourceGroups/rg/providers/Microsoft.App/containerApps/ca-cmdemo1-prod-ui'))
 
 $filtered = @(Select-PoolDriftChanges -Change @(
         @{ changeType = 'Modify'; resourceId = '/subscriptions/x/resourceGroups/rg/providers/Microsoft.App/containerApps/ca-cmdemo1-pool-3'; properties = @('properties.template.scale.minReplicas', 'tags.warm') }
         @{ changeType = 'Modify'; resourceId = '/subscriptions/x/resourceGroups/rg/providers/Microsoft.App/containerApps/ca-cmdemo1-pool-3'; properties = @('properties.template.scale.minReplicas', 'properties.template.containers[0].image') }
+        @{ changeType = 'Modify'; resourceId = '/subscriptions/x/resourceGroups/rg/providers/Microsoft.App/containerApps/ca-cmdemo1-pool-3'; properties = @('properties.template.scale.rules', 'properties.template.scale.maxReplicas') }
+        @{ changeType = 'Modify'; resourceId = '/subscriptions/x/resourceGroups/rg/providers/Microsoft.App/containerApps/ca-cmdemo1-tdd-ui'; properties = @('properties.template.scale.minReplicas') }
+        @{ changeType = 'Modify'; resourceId = '/subscriptions/x/resourceGroups/rg/providers/Microsoft.App/containerApps/ca-cmdemo1-prod-ui'; properties = @('properties.template.scale.rules') }
         @{ changeType = 'Create'; resourceId = '/subscriptions/x/resourceGroups/rg/providers/Microsoft.App/containerApps/ca-new'; properties = @() }
     ))
-Test-Case 'scale-only modify dropped' (@($filtered | Where-Object { $_.resourceId -match 'pool-3' -and @($_.properties).Count -eq 0 }).Count) 0
-Test-True 'mixed modify keeps non-scale property' (
-    @($filtered | Where-Object { $_.resourceId -match 'pool-3' -and @($_.properties) -contains 'properties.template.containers[0].image' }).Count -eq 1
+Test-Case 'pool scale-only modify dropped' (@($filtered | Where-Object { $_.resourceId -match 'ca-cmdemo1-pool-3' -and (@($_.properties) -contains 'properties.template.scale.minReplicas' -or @($_.properties) -contains 'tags.warm') }).Count) 0
+Test-True 'pool mixed modify keeps image, drops minReplicas' (
+    (
+        @($filtered | Where-Object {
+                $_.resourceId -match 'ca-cmdemo1-pool-3' -and
+                @($_.properties) -contains 'properties.template.containers[0].image' -and
+                @($_.properties) -notcontains 'properties.template.scale.minReplicas'
+            }).Count -eq 1
+    )
+)
+Test-True 'pool slot scale.rules and maxReplicas are kept' (
+    (
+        @($filtered | Where-Object {
+                $_.resourceId -match 'ca-cmdemo1-pool-3' -and
+                @($_.properties) -contains 'properties.template.scale.rules' -and
+                @($_.properties) -contains 'properties.template.scale.maxReplicas'
+            }).Count -eq 1
+    )
+)
+Test-True 'tdd-ui minReplicas is NOT dropped' (
+    @($filtered | Where-Object { $_.resourceId -match 'ca-cmdemo1-tdd-ui' -and @($_.properties) -contains 'properties.template.scale.minReplicas' }).Count -eq 1
+)
+Test-True 'prod-ui scale.rules is NOT dropped' (
+    @($filtered | Where-Object { $_.resourceId -match 'ca-cmdemo1-prod-ui' -and @($_.properties) -contains 'properties.template.scale.rules' }).Count -eq 1
 )
 Test-True 'create is never dropped as scale' (
     @($filtered | Where-Object { $_.changeType -eq 'Create' }).Count -eq 1

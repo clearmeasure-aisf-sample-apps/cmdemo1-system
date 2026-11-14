@@ -28,7 +28,7 @@ Every change to an environment is a pull request here:
 |---|---|---|
 | `env-checks` | Every pull request | Required check: `system.json` rules, Bicep build, Terraform format and validate. A what-if preview per environment appears in the job summary, but doesn't block |
 | `system` | Every merge to `main`, except what a deployment records (a pin, an application's nodes) | Publishes the acceptance-test worker image (`images/test-runner`: Playwright + .NET 10 SDK) to GHCR, configures Octopus from `octopus/`, packages the commit, then creates a release of `<slug>-system`. Octopus deploys it to the first environment automatically and to later ones on promotion |
-| `drift` | Nightly | What-if of `main` against every environment; the run turns red when an environment differs from Git. Pool scale (minReplicas / warm) changed at runtime by the pool manager is excluded from drift, like ui-auto-promote acting at runtime |
+| `drift` | Nightly | What-if of `main` against every environment; the run turns red when an environment differs from Git. Pool-slot warmth exclusion (`properties.template.scale.minReplicas` / `tags.warm` on `ca-*-pool-N` only) lives in `scripts/pool/common.ps1` for when the pool stack is what-if'd later; it is not wired into this workflow yet |
 | `pool-manager` | Every 5 minutes and on dispatch | Sweeper + warm/cool for pull-request slots (`system.json` `pool.warm`); DryRun until the lease store and pool stack exist (#652 / #653) |
 | `pool-reset` | Nightly and on dispatch | Reset every pool slot database from the template; DryRun until the pool stack exists |
 | `pool-template-refresh` | On dispatch | Migrate and seed `sqldb-<slug>-pool-template` after an app master merge; DryRun until the pool stack exists |

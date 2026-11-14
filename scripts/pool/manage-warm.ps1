@@ -9,7 +9,7 @@
     Issue #656: the pool manager runs every pool.warm.managerIntervalMinutes (5) and on dispatch. It warms more
     slots when a run has waited over pool.warm.waitToWarmMinutes (1) and cools them after
     pool.warm.idleToCoolMinutes (30) idle. All 8 slots stay defined in code; only warmth (minReplicas) changes.
-    Scale changes are excluded from drift (scripts/pool/common.ps1 Test-IsPoolScaleDriftProperty).
+    Pool-slot minReplicas / tags.warm may be ignored by Select-PoolDriftChanges when drift later what-ifs the pool stack.
 
 .PARAMETER LoadOnly
     Define functions and return.

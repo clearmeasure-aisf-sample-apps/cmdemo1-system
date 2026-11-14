@@ -5,10 +5,10 @@
 # The result is also an issue with label "drift": opened or updated while an environment differs, closed when the
 # next run is clean, so nobody has to read workflow logs to know.
 #
-# Pool scale (issue #656): the pool manager changes Container Apps minReplicas / warm tags at runtime the same way
-# ui-auto-promote acts at runtime. Those scale-only differences are excluded from drift
-# (scripts/pool/common.ps1 Test-IsPoolScaleDriftProperty / Select-PoolDriftChanges). stack-<slug>-pool is still not
-# applied or what-if'd by this workflow; when it is checked later, use that exclusion so warmth changes do not fail.
+# Pool warmth (issue #656): the pool manager changes pool-slot minReplicas / tags.warm at runtime. Helpers
+# Test-IsPoolScaleDriftProperty / Select-PoolDriftChanges ignore only those two paths on ca-*-pool-N apps (not
+# scale.rules, scale.maxReplicas, or tdd/uat/prod). stack-<slug>-pool is still not applied or what-if'd here; when
+# it is checked later, use that exclusion so warmth changes do not fail. Do not wire it until then.
 name: drift
 
 on:

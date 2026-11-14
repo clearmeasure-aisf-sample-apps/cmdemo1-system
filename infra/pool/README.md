@@ -45,7 +45,9 @@ Shadow defaults in `system.json` `pool`: 8 slots, `pool.warm.count` 2 (plus warm
 
 Scripts under `scripts/pool/` (lease/release/sweeper, reset, template refresh, warm/cool) and workflows
 `pool-manager`, `pool-reset`, `pool-template-refresh`. Decision rules are proven by `scripts/test-pool-manager.ps1`
-in `env-checks`. Warmth changes at runtime are excluded from drift (`Test-IsPoolScaleDriftProperty`).
+in `env-checks`. When the pool stack is later what-if'd, ignore only `properties.template.scale.minReplicas` and
+`tags.warm` on pool slot apps (`ca-*-pool-N`) via `Test-IsPoolScaleDriftProperty` / `Select-PoolDriftChanges` — not
+`scale.rules`, `scale.maxReplicas`, or scale on tdd/uat/prod. That filter is not wired into nightly `drift` yet.
 
 Live lease-store and Azure SQL / scale calls wait for Jeffrey's yes on #652 / #653; workflows stay on `-DryRun`
 until then.
