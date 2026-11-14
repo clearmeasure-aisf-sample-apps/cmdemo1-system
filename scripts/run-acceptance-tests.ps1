@@ -66,25 +66,8 @@ if ($absent.Count -gt 0) {
 $clock.Restart()
 $dotnetRoot = Join-Path ([IO.Path]::GetTempPath()) 'dotnet10'
 $installer = Join-Path ([IO.Path]::GetTempPath()) 'dotnet-install.sh'
-# The installer download and the SDK install both hit the network: retry with backoff and fall back to the second
-# official script URL, so one connection reset does not fail the deploy. Only every attempt failing throws.
-$installerUrls = @('https://dot.net/v1/dotnet-install.sh', 'https://builds.dotnet.microsoft.com/dotnet/scripts/v1/dotnet-install.sh')
-$maxAttempts = 5
-$installed = $false
-for ($attempt = 1; $attempt -le $maxAttempts -and -not $installed; $attempt++) {
-    $url = $installerUrls[($attempt - 1) % $installerUrls.Count]
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $installer -TimeoutSec 120
-        bash $installer --channel 10.0 --install-dir $dotnetRoot --no-path | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "dotnet-install.sh exited with $LASTEXITCODE" }
-        $installed = $true
-    }
-    catch {
-        Write-Warning "dotnet SDK install attempt $attempt of $maxAttempts from $url failed: $($_.Exception.Message)"
-        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds (5 * $attempt) }
-    }
-}
-if (-not $installed) { throw "The .NET 10 SDK install failed after $maxAttempts attempts." }
+Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.sh' -OutFile $installer
+bash $installer --channel 10.0 --install-dir $dotnetRoot --no-path | Out-Null
 $env:DOTNET_ROOT = $dotnetRoot
 $env:PATH = "${dotnetRoot}:$env:PATH"
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'

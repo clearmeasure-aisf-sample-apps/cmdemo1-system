@@ -11,10 +11,8 @@
     Prints PASS or FAIL per check and exits 1 when any check fails.
 
     - The slug, environment and deployable names follow the naming rules every template relies on.
-    - Each deployable's hosting is one the templates know: containerapp (the default), staticwebapp, storagewebsite
-      (the same static site on a storage account's static website) or own. This system keeps no App Service hosting
-      (the kit's appservice): infra/ and octopus/ have no module and no step for it, so it is refused, and so is a
-      standby region (environments[].standbyLocation), which only App Service apps had.
+    - Each deployable's hosting is one the templates know: containerapp (the default), appservice, staticwebapp,
+      storagewebsite (the same static site on a storage account's static website) or own.
     - With a container app among the deployables, azure.registry names the system's registry (the seed creates one
       only for a system that needs it).
     - Each environment has a tier (nonprod or prod), a runtime identity from the seed and a folder
@@ -27,8 +25,6 @@
       deployable with an acceptance-test package.
     - octopus.approvers, where present, lists each person who may sign off once, by Octopus username or email address,
       without the system's service account; octopus.operator, where present, is a username.
-    - system.pipelineSignOff, where present, is true or false. True lets the service account answer the system
-      project's Sign-off (decision 0048). The service account is still not an entry of octopus.approvers.
     - github.app, where present (the system's own GitHub App), holds its id, slug, clientId and installationId, and
       nothing else: never a key.
     - A container deployable's own keys, where present, have the shape infra/ and octopus/ read: environments (the
@@ -36,7 +32,7 @@
       (true or false), alwaysOnEnvironments (environments of the deployable, with alwaysOn true), cpu, settings and
       environmentSettings (environment variable to text), urlSetting, and secrets (name, env, generate; never a value).
     - azure.appEnvironment, where present (the system owns its Container Apps environment), has the seed's shape, and
-      then no environment chooses a placement of its own.
+      then no environment chooses a placement of its own and no deployable runs on App Service.
 #>
 [CmdletBinding()]
 param(
@@ -104,18 +100,15 @@ foreach ($name in $deployableNames) {
 Test-Rule 'deployable names unique' (@($deployableNames | Select-Object -Unique).Count -eq $deployableNames.Count)
 
 # deployables[].pipelineSignOff (decision 0048): true lets the system's service account <slug>-github answer that
-# deployable's Sign-off too, as a member of the team "<slug> pipeline sign-off" (octopus/approvers.tf); a
+# deployable's Sign-off too, as the only member of the team "<slug> pipeline sign-off" (octopus/approvers.tf); a
 # workflow of this repository then promotes it with a reason naming its run. Every other deployable keeps a person's
-# or the operator's sign-off. system.pipelineSignOff is the same switch for the system project, which is not a deployable.
+# or the operator's sign-off.
 foreach ($deployable in @($system.deployables | Where-Object { $_ -is [Collections.IDictionary] -and $_.ContainsKey('pipelineSignOff') })) {
     Test-Rule "deployable $($deployable.name) pipelineSignOff" ($deployable.pipelineSignOff -is [bool]) 'true or false: whether the service account may answer the Sign-off of this deployable (decision 0048)'
 }
-if ($system.system.ContainsKey('pipelineSignOff')) {
-    Test-Rule 'system.pipelineSignOff' ($system.system.pipelineSignOff -is [bool]) 'true or false: whether the service account may answer the Sign-off of the system project (decision 0048)'
-}
 # system.pipelineSignOffMembers (decision 0057): Octopus usernames of further service accounts that join the team
-# "<slug> pipeline sign-off" (octopus/approvers.tf), while the system project or a deployable has pipelineSignOff. A
-# person signs off through octopus.approvers; the system's own <slug>-github is a member already.
+# "<slug> pipeline sign-off" (octopus/approvers.tf), while a deployable has pipelineSignOff. A person signs off through
+# octopus.approvers; the system's own <slug>-github is a member already.
 if ($system.system.ContainsKey('pipelineSignOffMembers')) {
     $members = $system.system.pipelineSignOffMembers
     $valid = $members -is [array] -and $members.Count -ge 1 -and $members.Count -le 10 -and @($members | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' }).Count -eq 0
@@ -124,22 +117,7 @@ if ($system.system.ContainsKey('pipelineSignOffMembers')) {
         $names = @($members | ForEach-Object { $_.ToLowerInvariant() })
         Test-Rule 'system.pipelineSignOffMembers each once, without the system''s own account' (@($names | Select-Object -Unique).Count -eq $names.Count -and $names -notcontains "$slug-github") "an account appears twice, or is $slug-github, which is a member of the team already"
         Test-Rule 'system.pipelineSignOffMembers not among octopus.approvers' (@($names | Where-Object { @($system.octopus['approvers']) -contains $_ }).Count -eq 0) 'an account of the pipeline team is not also an approver of every project'
-        $pipelineAsked = (@($system.deployables | Where-Object { $_ -is [Collections.IDictionary] -and $_['pipelineSignOff'] -eq $true }).Count -gt 0) -or ($system.system['pipelineSignOff'] -eq $true)
-        Test-Rule 'system.pipelineSignOffMembers with pipelineSignOff' $pipelineAsked 'the team exists only while the system project or a deployable asks for pipelineSignOff'
-    }
-}
-# system.azureExcludeDeployables (#542): names of deployables infra/ omits from Azure while they stay in
-# system.json for Octopus (octopus/ does not read this key). Each name must be a deployable that is not retired.
-if ($system.system.ContainsKey('azureExcludeDeployables')) {
-    $excluded = $system.system.azureExcludeDeployables
-    $deployableNames = @($system.deployables | ForEach-Object { [string] $_.name })
-    $valid = $excluded -is [array] -and $excluded.Count -ge 1 -and $excluded.Count -le 50 -and
-        @($excluded | Where-Object { $_ -isnot [string] -or $deployableNames -cnotcontains $_ }).Count -eq 0 -and
-        @($excluded | Select-Object -Unique).Count -eq $excluded.Count
-    Test-Rule 'system.azureExcludeDeployables' $valid "a list of 1 to 50 deployable names from system.json, each once: $($deployableNames -join ', ')"
-    if ($valid) {
-        $retiredExcluded = @($system.deployables | Where-Object { $excluded -ccontains [string] $_.name -and $_['retired'] -eq $true } | ForEach-Object { [string] $_.name })
-        Test-Rule 'system.azureExcludeDeployables without retired' ($retiredExcluded.Count -eq 0) "retired already omits Azure ($($retiredExcluded -join ', ')); use one or the other"
+        Test-Rule 'system.pipelineSignOffMembers with a deployable that has pipelineSignOff' (@($system.deployables | Where-Object { $_ -is [Collections.IDictionary] -and $_['pipelineSignOff'] -eq $true }).Count -gt 0) 'the team exists only while a deployable asks for pipelineSignOff'
     }
 }
 foreach ($deployable in @($system.deployables)) {
@@ -160,7 +138,7 @@ foreach ($deployable in @($system.deployables)) {
 # templates read, and the environments then choose no placement of their own: no appLocation, no
 # sharesAppEnvironmentWith. Its apps run on Container Apps, the system's (containerapp) or the application's own
 # (own); the dashboard (staticwebapp) is a static site that needs no Container Apps environment and may stand next
-# to them.
+# to them. An App Service deployable is not combined with it.
 if ($system.azure.ContainsKey('appEnvironment')) {
     $appEnvironment = $system.azure.appEnvironment
     $shape = $appEnvironment -is [Collections.IDictionary] -and
@@ -184,9 +162,8 @@ if ($system.azure.ContainsKey('appEnvironment')) {
 
 # Where a deployable runs: infra/main.bicep and octopus/main.tf have a module and an "Update deployable" step per
 # hosting, and a value they do not know would get neither. "own": the application brings its runtime (infra/ has
-# nothing for it; its project runs the deploy.ps1 and verify.ps1 of its release's package). No "appservice": this
-# system's templates leave the kit's App Service hosting out.
-$hostings = @('containerapp', 'staticwebapp', 'storagewebsite', 'own')
+# nothing for it; its project runs the deploy.ps1 and verify.ps1 of its release's package).
+$hostings = @('containerapp', 'appservice', 'staticwebapp', 'storagewebsite', 'own')
 foreach ($deployable in @($system.deployables)) {
     if ($deployable.ContainsKey('hosting')) {
         Test-Rule "deployable $($deployable.name) hosting" ($hostings -ccontains [string] $deployable.hosting) "'$($deployable.hosting)' is not one of $($hostings -join ', ') (containerapp when left out)"
@@ -201,7 +178,6 @@ foreach ($deployable in @($system.deployables)) {
 #                        out: every environment the deployable exists in
 #   database             false: no SQL connection string
 #   cpu                  0.5, 1, 1.5 or 2 vCPU, with twice as many GiB (the environment's appCpu when left out)
-#   environmentCpu       { "<environment>": "<cpu>" }: the cpu of one environment, over cpu there (same values as cpu)
 #   settings             { "<environment variable>": "<text>" }, in every environment
 #   environmentSettings  { "<environment>": { "<environment variable>": "<text>" } }, on top of settings there
 #   urlSetting           the environment variable that gets the app's own public address
@@ -209,10 +185,10 @@ foreach ($deployable in @($system.deployables)) {
 #                        <deployable>-<name>. The operator writes its value to the vault (the kit's
 #                        set-demo-secret.ps1); with "generate": true the deployment generates it. Never a value here.
 $environmentNamesDeclared = @($system.environments | ForEach-Object { [string] $_.name })
-$containerKeys = @('environments', 'alwaysOn', 'alwaysOnEnvironments', 'database', 'cpu', 'environmentCpu', 'settings', 'environmentSettings', 'urlSetting', 'secrets', 'dashboardLink')
+$containerKeys = @('environments', 'alwaysOn', 'alwaysOnEnvironments', 'database', 'cpu', 'settings', 'environmentSettings', 'urlSetting', 'secrets', 'dashboardLink')
 $variableName = '^[A-Za-z_][A-Za-z0-9_]{0,254}$'
-# Set by the template itself, by Container Apps, or by Update deployable (the ui feature-toggle client identifier).
-$reservedVariables = @('ConnectionStrings__SqlConnectionString', 'OTEL_SERVICE_NAME', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'Octopus__FeatureFlags__ClientIdentifier')
+# Set by the template itself, or by Container Apps.
+$reservedVariables = @('ConnectionStrings__SqlConnectionString', 'OTEL_SERVICE_NAME', 'APPLICATIONINSIGHTS_CONNECTION_STRING')
 function Test-VariableName {
     param($Name)
     return $Name -is [string] -and $Name -cmatch $variableName -and $reservedVariables -cnotcontains $Name -and $Name -cnotmatch '^CONTAINER_APP_'
@@ -225,6 +201,10 @@ function Test-SettingMap {
 }
 # The vault's own secrets (infra/modules/keyvault.bicep): a deployable's secret may not take one of their names.
 $vaultSecretNames = [Collections.Generic.List[string]] @('sql-admin-password', 'sql-connection-string')
+foreach ($login in @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' })) {
+    $vaultSecretNames.Add("$($login.name)-sql-password")
+    $vaultSecretNames.Add("$($login.name)-sql-connection-string")
+}
 # deployables[].retired (decision 0058): true takes a container deployable out of every environment (infra/ makes
 # nothing for it, octopus/ keeps only its project, disabled, with its releases and deployments). The deployable stays
 # in this list for that project, needs no environments, secrets or port, and no environment pins a version of it.
@@ -275,11 +255,6 @@ foreach ($deployable in @($system.deployables)) {
     }
     if ($deployable.ContainsKey('cpu')) {
         Test-Rule "deployable $name cpu" ($deployable.cpu -is [string] -and @('0.5', '1', '1.5', '2') -ccontains $deployable.cpu) 'one of "0.5", "1", "1.5", "2" (vCPU, as text; the memory is twice as many GiB)'
-    }
-    if ($deployable.ContainsKey('environmentCpu')) {
-        $perEnvironment = $deployable.environmentCpu
-        $valid = $perEnvironment -is [Collections.IDictionary] -and $perEnvironment.Count -gt 0 -and @($perEnvironment.GetEnumerator() | Where-Object { $here -cnotcontains $_.Key -or $_.Value -isnot [string] -or @('0.5', '1', '1.5', '2') -cnotcontains $_.Value }).Count -eq 0
-        Test-Rule "deployable $name environmentCpu" $valid "an object of environment ($($here -join ', ')) to one of ""0.5"", ""1"", ""1.5"", ""2"" (vCPU, as text)"
     }
 
     # A page of this app that the system's dashboard leads to, in every environment the app exists in: the words of
@@ -336,7 +311,7 @@ foreach ($deployable in @($system.deployables)) {
 }
 
 # A container app's image comes from the system's registry (azure.registry { name, loginServer }, from the seed). A
-# system whose deployables all run on Static Web Apps has no registry, and no azure.registry.
+# system whose deployables all run on App Service or Static Web Apps has no registry, and no azure.registry.
 if (@($system.deployables | Where-Object { -not $_.ContainsKey('hosting') -or $_.hosting -ceq 'containerapp' }).Count -gt 0) {
     Test-Rule 'azure.registry' ($system.azure.ContainsKey('registry') -and $system.azure.registry -is [Collections.IDictionary] -and $system.azure.registry['name'] -and $system.azure.registry['loginServer']) 'a container app needs azure.registry { name, loginServer }: the seed creates the registry for a system with a container app (new-demo-seed.ps1)'
 }
@@ -376,9 +351,16 @@ foreach ($environment in $system.environments) {
         }
     }
 
-    # A standby region ran the App Service apps a second time: without App Service hosting there is nothing to put
-    # there. The capability "frontdoor" is an endpoint in the system's profile (azure.frontDoor).
-    Test-Rule "environment $name without standbyLocation" (-not $environment.ContainsKey('standbyLocation')) 'a standby region holds App Service apps, which this system does not have; remove standbyLocation'
+    # A standby region (the App Service apps a second time, behind the environment's Front Door endpoint) and the
+    # capability "frontdoor" (an endpoint in the system's profile, azure.frontDoor).
+    if ($environment.ContainsKey('standbyLocation')) {
+        $standby = [string] $environment.standbyLocation
+        $appServiceNames = @($system.deployables | Where-Object { $_['hosting'] -eq 'appservice' } | ForEach-Object { [string] $_.name })
+        Test-Rule "environment $name standby region" ($standby -cmatch '^[a-z0-9]+$' -and $standby -cne [string] $system.system.location -and $appServiceNames.Count -gt 0 -and @($environment.capabilities) -contains 'frontdoor') 'an Azure region other than system.location, with an App Service deployable and capability frontdoor (only the Front Door endpoint sends traffic to the standby)'
+        foreach ($deployableName in $appServiceNames) {
+            Test-Rule "environment $name standby app name length ($deployableName)" (("app-$slug-$name-$deployableName-$standby").Length -le 60) 'slug, environment, deployable and region too long for a web app name (60 characters)'
+        }
+    }
     if (@($environment.capabilities) -contains 'frontdoor') {
         Test-Rule "environment $name Front Door profile" ($system.azure.ContainsKey('frontDoor') -and $system.azure.frontDoor['profile'] -and $system.azure.frontDoor['resourceGroup']) 'capability frontdoor needs azure.frontDoor { resourceGroup, profile } (the seed creates the profile)'
     }
@@ -491,14 +473,3 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 Write-Host 'All system checks passed.'
-
-# ConvertTo-Topology container-app deployables (#556): env-checks already runs this file; keep the proof here so
-# workflows/ need not change. A failure calls exit and ends this process too.
-& (Join-Path $PSScriptRoot 'test-deploy-staticwebapp.ps1')
-
-# Select-DeliveryDeployable omits azureExcludeDeployables and retired (#577): same reason as above.
-& (Join-Path $PSScriptRoot 'test-write-delivery.ps1')
-
-# Deprecated prod aisf/fworker/fwrunner removal helpers (#575): env-checks already runs this file; keep the proof
-# here so workflows/ need not change.
-& (Join-Path $PSScriptRoot 'test-apply-environment.ps1')

@@ -10,9 +10,8 @@
     The workflow "delivery" runs it and publishes the file as the only file of branch "status", where the health
     dashboard reads it from the browser (https://raw.githubusercontent.com/<org>/<repository>/status/delivery.json).
 
-    Per environment of system.json and per deployable that still runs (the Octopus project <slug>-<deployable>, and
-    <slug>-system as deployable "system"). Deployables listed in system.azureExcludeDeployables (#542) and those marked
-    retired (decision 0058) are left out so the dashboard's Delivery cards do not show obsolete apps (#577):
+    Per environment of system.json and per deployable (the Octopus project <slug>-<deployable>, and <slug>-system as
+    deployable "system"):
       version, deployedAt, releaseUrl   the release of the last successful deployment and when it finished
       signedOffBy, reason               who answered that deployment's "Sign-off" with Proceed, and the note they gave
                                         (null in the first environment, which has no sign-off)
@@ -385,14 +384,6 @@ function Get-Health($Finished) {
     }
 }
 
-function Select-DeliveryDeployable([Collections.IDictionary] $System) {
-    # Deployables delivery.json lists under each environment (and that Get-ContainerApp asks of the health reports):
-    # omit system.azureExcludeDeployables (#542) and retired (decision 0058 / #577). The system project is added
-    # separately. Each remaining entry keeps the same shape.
-    $excluded = @(if ($System.system['azureExcludeDeployables']) { $System.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
-    @($System.deployables | Where-Object { $_['retired'] -ne $true -and $excluded -cnotcontains [string] $_.name })
-}
-
 function Get-ContainerApp([string] $Environment) {
     # The container apps the system creates in an environment, by deployable: runtime containerapps only (on runtime
     # aks-argocd a deployable without hosting is a Deployment in the cluster).
@@ -512,9 +503,6 @@ if (-not $env:OCTOPUS_API_KEY -and -not $env:OCTOPUS_ACCESS_TOKEN) {
 }
 
 # Everything every fact needs comes first: when Octopus does not answer here, the run fails and nothing is written.
-# azureExcludeDeployables and retired leave delivery.json (and the health reports' containerApps) before any Octopus
-# call, so the dashboard never draws Delivery cards for them (#577).
-$system.deployables = @(Select-DeliveryDeployable $system)
 $projects = [ordered] @{}
 foreach ($deployable in $system.deployables) {
     $projects[[string] $deployable.name] = @{ Project = "$slug-$($deployable.name)"; Repository = "$org/$($deployable.repository)"; IsSystem = $false }

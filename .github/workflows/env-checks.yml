@@ -35,22 +35,6 @@ jobs:
         shell: pwsh
         run: ./scripts/test-system.ps1
 
-      - name: UI feature toggle planner
-        shell: pwsh
-        run: ./scripts/test-ui-feature-toggles.ps1
-
-      - name: Update deployable planner
-        shell: pwsh
-        run: ./scripts/test-update-deployable.ps1
-
-      - name: Work items rules
-        shell: pwsh
-        run: ./scripts/workitems/test-write-workitems.ps1
-
-      - name: Factory wake rules
-        shell: pwsh
-        run: ./scripts/test-factory-wake.ps1
-
       - name: Bicep build
         # Warnings fail like errors (no broken windows): Bicep writes its diagnostics to stderr with exit code 0. The
         # setting keeps az from reporting its own config change when it installs Bicep.

@@ -13,11 +13,11 @@
     project's Operations overview, and its highlights name every node (region, role, status, time to answer, version)
     with a link to the health dashboard, the live view.
 
-    Nodes are what the environment's stack reports: every app and the static sites;
+    Nodes are what the environment's stack reports: every app, its standby in a second region, and the static sites;
     and the environment's public address when it has a Front Door endpoint. Apps are asked for /alive, not for the
     health check: the health check connects to the database, and an hourly question would keep a serverless free-offer
     database awake until its monthly allowance is used up. An app that has no release yet answers on / instead. A
-    container app that scaled to zero is given time to start (three attempts).
+    Free-plan app that idled is given time to start (three attempts).
 
     A deployable that brings its own runtime (system.json hosting "own"; the variable System.OwnDeployables names
     them) is no node of the stack: the system creates nothing for it and does not know what it runs on. The
@@ -331,6 +331,9 @@ function Read-NodeRecord {
 $nodes = [Collections.Generic.List[hashtable]]::new()
 foreach ($entry in @($outputs.deployables.value)) {
     $nodes.Add(@{ Name = [string] $entry.name; Where = "$($entry['region'] ?? 'home region'), primary"; Url = ([string] $entry.url).TrimEnd('/'); Static = $entry['hosting'] -in @('staticwebapp', 'storagewebsite'); Unreleased = $entry['hosting'] -eq 'storagewebsite' -and -not $entry['version'] })
+}
+foreach ($entry in @(if ($outputs.ContainsKey('standby')) { $outputs.standby.value })) {
+    $nodes.Add(@{ Name = [string] $entry.name; Where = "$($entry.region), standby"; Url = ([string] $entry.url).TrimEnd('/'); Static = $false })
 }
 if ($edgeGroup) {
     $PSNativeCommandUseErrorActionPreference = $false
