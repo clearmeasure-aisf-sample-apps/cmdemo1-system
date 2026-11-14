@@ -310,6 +310,56 @@ $rest404Result = Invoke-WithMockGh -ExitCode 1 -Stdout $rest404Json -Stderr 'gh:
 }
 Test-Case 'gh: REST HTTP 404 returns payload for skip' ([string] $rest404Result.status) '404'
 
+# --- Issue #725: REST list calls that pass -f must use --method GET (gh defaults to POST with -f) ---
+function Invoke-WithArgCapturingGh {
+    # Records every `gh api` argv line. Issues list returns one open issue so comments are also fetched.
+    param([scriptblock] $Script)
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('mock-gh-args-' + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $ghPath = Join-Path $dir 'gh'
+    $logPath = Join-Path $dir 'argv.log'
+    $issueJson = '[{"number":1,"created_at":"2026-11-12T17:00:00Z"}]'
+    $emptyJson = '[]'
+    @"
+#!/usr/bin/env bash
+printf '%s\n' "`$*" >> '$logPath'
+args="`$*"
+if [[ "`$args" == *'/comments'* ]]; then
+  printf '%s' '$emptyJson'
+elif [[ "`$args" == *'/issues'* ]]; then
+  printf '%s' '$issueJson'
+else
+  printf '%s' '$emptyJson'
+fi
+exit 0
+"@ | Set-Content -LiteralPath $ghPath -Encoding utf8NoBOM
+    & chmod +x $ghPath
+    $oldPath = $env:PATH
+    $env:PATH = "$dir$([IO.Path]::PathSeparator)$oldPath"
+    try {
+        & $Script
+        $lines = @()
+        if (Test-Path -LiteralPath $logPath) {
+            $lines = @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue)
+        }
+        return $lines
+    }
+    finally {
+        $env:PATH = $oldPath
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$listCallArgv = Invoke-WithArgCapturingGh -Script {
+    $null = @(Get-BotAssignedOpenIssues -Repository 'o/r' -BotLogin 'cm-ai-ops-bot')
+}
+$issuesListCalls = @($listCallArgv | Where-Object { $_ -match 'repos/.+/issues(\s|$)' -and $_ -notmatch '/comments' -and $_ -match '(^|\s)-f(\s|$|=)' })
+$commentsListCalls = @($listCallArgv | Where-Object { $_ -match 'repos/.+/issues/.+/comments' -and $_ -match '(^|\s)-f(\s|$|=)' })
+$listCallsMissingGet = @(@($issuesListCalls) + @($commentsListCalls) | Where-Object { $_ -notmatch '(^|\s)--method(\s|=)GET(\s|$)' })
+Test-Case 'gh: Get-BotAssignedOpenIssues list calls with -f use --method GET (#725)' `
+    @(($issuesListCalls.Count -ge 1), ($commentsListCalls.Count -ge 1), $listCallsMissingGet.Count) `
+    @($true, $true, 0)
+
 # --- Issue #707: post-merge startable-Todo pickup when WIP frees ---
 function New-AssignedIssue([int] $Number, [datetime] $CreatedAt, [object[]] $Comments, [string] $Repository = 'clearmeasure-aisf-sample-apps/cmdemo1-system') {
     [ordered] @{
