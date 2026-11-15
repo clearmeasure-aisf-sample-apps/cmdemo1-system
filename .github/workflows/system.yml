@@ -71,22 +71,9 @@ jobs:
           docker build --file images/test-runner/Dockerfile --tag "$IMAGE" images/test-runner
           docker push "$IMAGE"
           # Public so Octopus Cloud workers can pull without a GHCR credential on the ghcr feed.
-          # Indexing can lag the push: retry before failing the job (do not point Octopus at a private image).
-          package_api="/orgs/${{ github.repository_owner }}/packages/container/cmdemo1-test-runner"
-          ok=0
-          for attempt in 1 2 3 4 5 6; do
-            if gh api --method PUT -H "Accept: application/vnd.github+json" \
-              "$package_api/visibility" -f visibility=public; then
-              ok=1
-              break
-            fi
-            echo "visibility update attempt $attempt failed; waiting..."
-            sleep $((attempt * 5))
-          done
-          if [ "$ok" -ne 1 ]; then
-            echo "Could not make cmdemo1-test-runner public on GHCR" >&2
-            exit 1
-          fi
+          # GitHub has no REST API to change package visibility; verify anonymous pull and guide an org owner.
+          # Indexing can lag the push: the script retries before failing (do not point Octopus at a private image).
+          pwsh -NoProfile -File scripts/assert-ghcr-anonymous-pull.ps1 -Image "$IMAGE"
 
   octopus-apply:
     needs: publish-test-runner
