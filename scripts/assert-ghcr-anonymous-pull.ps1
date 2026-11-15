@@ -34,6 +34,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandArgumentPassing = 'Standard'
+$PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
 
 function ConvertTo-GhcrImageParts {
