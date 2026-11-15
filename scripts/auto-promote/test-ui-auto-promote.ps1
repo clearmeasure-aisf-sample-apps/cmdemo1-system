@@ -447,6 +447,73 @@ Test-Case '733: Waiting newer than an older Sign-off is not a queued candidate' 
     $null -eq (Get-QueuedCandidateBusyItem -Items @($older35, $waitingNewest) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat')
 ) $true
 
+# Stale Queued / not-running busy hold (#747): surface Queued blockers after 20 minutes; never hold a Running task.
+$now747 = [datetime]::Parse('2026-11-15T04:00:00Z', [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+$queuedUnder20 = @{
+    Kind = 'deployment'; ProjectId = 'Projects-1035'; EnvironmentId = 'E-prod'
+    TaskId = 'ServerTasks-12262326'; ReleaseVersion = '1.0.46'; State = 'Queued'
+    QueueTime = $now747.AddMinutes(-10)
+    Deployment = @{ Id = 'Deployments-58326'; Created = $now747.AddMinutes(-10) }
+}
+$queuedOver20 = @{
+    Kind = 'deployment'; ProjectId = 'Projects-1035'; EnvironmentId = 'E-prod'
+    TaskId = 'ServerTasks-12262326'; ReleaseVersion = '1.0.46'; State = 'Queued'
+    QueueTime = $now747.AddMinutes(-65)
+    Deployment = @{ Id = 'Deployments-58326'; Created = $now747.AddMinutes(-65) }
+}
+$runningLong = @{
+    Kind = 'deployment'; ProjectId = 'Projects-1035'; EnvironmentId = 'E-prod'
+    TaskId = 'ServerTasks-running'; ReleaseVersion = '1.0.46'; State = 'Executing'
+    QueueTime = $now747.AddMinutes(-90)
+}
+Test-Case '747: Queued is not-running' (Test-BusyItemNotRunning $queuedUnder20) $true
+Test-Case '747: Waiting is not-running' (Test-BusyItemNotRunning @{ State = 'Waiting' }) $true
+Test-Case '747: Executing is running' (Test-BusyItemNotRunning $runningLong) $false
+Test-Case '747: Cancelling is running' (Test-BusyItemNotRunning @{ State = 'Cancelling' }) $false
+Test-Case '747: Queued under 20 min does not need a hold' (Test-StaleQueuedHoldNeeded $queuedUnder20 $now747) $false
+Test-Case '747: Queued over 20 min needs a hold' (Test-StaleQueuedHoldNeeded $queuedOver20 $now747) $true
+Test-Case '747: Running task never needs a hold' (Test-StaleQueuedHoldNeeded $runningLong $now747) $false
+Test-Case '747: age minutes from QueueTime' (Get-BusyItemQueuedAgeMinutes $queuedOver20 $now747) 65.0
+
+$blocker747 = Get-BlockingBusyItem -Items @($queuedOver20) -TargetEnvironmentId 'E-prod' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-ui'
+Test-Case '747: blocking item is the Queued dashboard task' $blocker747.TaskId 'ServerTasks-12262326'
+Test-Case '747: behind summary with no peers names concurrency/worker stall' (
+    Format-QueuedBehindSummary -Items @($queuedOver20) -EnvironmentId 'E-prod' -ExcludeTaskId 'ServerTasks-12262326'
+) 'no other active task in this environment is visible (likely the per-environment concurrency tag or a worker/pool stall)'
+$peerRunning = @{
+    Kind = 'deployment'; ProjectId = 'P-ui'; EnvironmentId = 'E-prod'
+    TaskId = 'ServerTasks-peer'; ReleaseVersion = '2.4.1'; State = 'Executing'
+}
+Test-Case '747: behind summary names the other active task' (
+    (Format-QueuedBehindSummary -Items @($queuedOver20, $peerRunning) -EnvironmentId 'E-prod' -ExcludeTaskId 'ServerTasks-12262326') -like '*ServerTasks-peer*Executing*'
+) $true
+
+$staleEv747 = New-QueuedTaskStaleEvaluation -Sha 'abc' -ProjectName 'cmdemo1-dashboard' -ReleaseVersion '1.0.46' `
+    -EnvironmentName 'prod' -TaskId 'ServerTasks-12262326' -State 'Queued' -AgeMinutes 65 `
+    -BehindSummary 'no other active task in this environment is visible (likely the per-environment concurrency tag or a worker/pool stall)'
+Test-Case '747: hold names the Queued task flag' $staleEv747.Decision.Flags[0].Flag $QueuedTaskStaleFlag
+$staleBody747 = Format-HeldEvidence -Version '1.0.46' -Sha 'abc' -Target 'prod' -Flags $staleEv747.Decision.Flags -Name 'dashboard' `
+    -DeploymentNote 'The deployment Deployments-58326 is still Queued and blocks promotion.'
+Test-Case '747: hold issue text names the task' @(
+    ($staleBody747 -like '*ServerTasks-12262326*'),
+    ($staleBody747 -like '*1.0.46*'),
+    ($staleBody747 -like '*Queued*'),
+    (Test-QueuedTaskStaleHoldBody $staleBody747)
+) @($true, $true, $true, $true)
+
+Test-Case '747: same live version safely supersedes Queued' (
+    Test-QueuedBusySafelySupersededByLive -QueuedItem $queuedOver20 -LiveRelease @{ Version = '1.0.46' }
+) $true
+Test-Case '747: newer live version safely supersedes Queued' (
+    Test-QueuedBusySafelySupersededByLive -QueuedItem $queuedOver20 -LiveRelease @{ Version = '1.0.50' }
+) $true
+Test-Case '747: older live version does not supersede Queued' (
+    Test-QueuedBusySafelySupersededByLive -QueuedItem $queuedOver20 -LiveRelease @{ Version = '1.0.44' }
+) $false
+Test-Case '747: Executing is never safely superseded for cancel' (
+    Test-QueuedBusySafelySupersededByLive -QueuedItem $runningLong -LiveRelease @{ Version = '1.0.50' }
+) $false
+
 # Superseded Sign-off recovery when comparison is behind (#739): older release waits at Sign-off, newer already in
 # that environment (behind, 0 commits). Must not throw on missing Decision; cancel (or named TaskCancel hold).
 $behindSha739 = '76b668f100000000000000000000000000000000'
@@ -595,6 +662,7 @@ function Get-OctopusAll([string] $Path) {
             Id        = 'ServerTasks-dep'
             Name      = 'Deploy'
             State     = 'Waiting'
+            QueueTime = '2026-11-15T01:00:00.000Z'
             Arguments = @{ DeploymentId = 'Deployments-1' }
         })
 }
@@ -611,6 +679,7 @@ $listedDeploy = Get-ActiveBusyItems
 Test-Case 'Get-ActiveBusyItems: deploy item names task state and release' @(
     $listedDeploy.Items[0].Kind, $listedDeploy.Items[0].TaskId, $listedDeploy.Items[0].State, $listedDeploy.Items[0].ReleaseVersion
 ) @('deployment', 'ServerTasks-dep', 'Waiting', '1.0.211')
+Test-Case 'Get-ActiveBusyItems: copies QueueTime onto the busy item' $listedDeploy.Items[0].QueueTime '2026-11-15T01:00:00.000Z'
 Test-Case 'Get-ActiveBusyItems: deploy busy reason includes task release state' (
     Get-BusyReason -Items $listedDeploy.Items -TargetEnvironmentId 'E-prod' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-system' -Name 'system'
 ) 'a deployment of project Projects-981 to the target environment is not finished (task ServerTasks-dep, release 1.0.211, state Waiting)'
