@@ -218,6 +218,7 @@ Test-Case 'permission denied: Octopus team wording is refused' (Test-OctopusPerm
 Test-Case 'permission denied: not in any team wording is refused' (Test-OctopusPermissionDenied (New-DeniedError 'The current user is not in any team with permissions to perform this action.')) $true
 Test-Case 'permission denied: a 503 is not refused' (Test-OctopusPermissionDenied (New-DeniedError 'Response status code does not indicate success: 503 (Service Unavailable).')) $false
 Test-Case 'permission denied: a network error is not refused' (Test-OctopusPermissionDenied (New-DeniedError 'Unable to connect to the remote server')) $false
+Test-Case 'permission denied: do not have permission / TaskCancel wording is refused' (Test-OctopusPermissionDenied (New-DeniedError 'You do not have permission to perform this action. The TaskCancel permission is required.')) $true
 
 # Real Sign-off path (#589): Invoke-SignOffOctopusCalls calls script-scope Invoke-Octopus (not an injected
 # scriptblock). A GetNewClosure wrapper around those calls would hide the function when Actions runs the
@@ -296,6 +297,118 @@ $markHolds = @(@{ number = 12; title = 'dashboard 1.0.31 held before uat'; body 
 Set-SignOffRefusedOnBusyItems -Items $markItems -HeldIssues $markHolds -ProjectIdByDeployableName @{ dashboard = 'P-dash' } -EnvironmentIdByName @{ uat = 'E-uat' } -GetReleaseVersion { param($b) '1.0.31' }
 Test-Case 'open refused hold marks the busy deployment SignOffRefused' $markItems[0].SignOffRefused $true
 Test-Case 'marked refused hold no longer blocks ui to uat' ([bool] (Get-BusyReason $markItems 'E-uat' 'E-tdd' 'P-ui')) $false
+
+# Superseded Sign-off/MI cancel (#731): cancel older waiting tasks when a newer release is the candidate.
+$candidate35 = @{ Version = '1.0.40'; Assembled = [datetimeoffset]'2026-11-14T00:00:00Z' }
+$live38 = @{ Version = '1.0.38'; Assembled = [datetimeoffset]'2026-11-12T00:00:00Z' }
+$older35 = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-12244352'; ReleaseVersion = '1.0.35'; State = 'Waiting'
+    Deployment = @{ Id = 'Deployments-58090'; ReleaseId = 'R-35' }
+}
+$candidateBusy = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-12261451'; ReleaseVersion = '1.0.40'; State = 'Queued'
+    Deployment = @{ Id = 'Deployments-58286'; ReleaseId = 'R-40' }
+}
+$liveBusy = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-live'; ReleaseVersion = '1.0.38'; State = 'Waiting'
+    Deployment = @{ Id = 'Deployments-live'; ReleaseId = 'R-38' }
+}
+$waitsAlways = { param([string] $taskId) $true }.GetNewClosure()
+$waitsNever = { param([string] $taskId) $false }.GetNewClosure()
+$waitsOnly35 = { param([string] $taskId) $taskId -eq 'ServerTasks-12244352' }.GetNewClosure()
+
+Test-Case '731: pending ManualIntervention is detected' (
+    Test-PendingManualIntervention @(@{ Type = 'ManualIntervention'; TaskId = 'ServerTasks-1'; IsPending = $true; Title = 'Sign-off' }) 'ServerTasks-1'
+) $true
+Test-Case '731: GuidedFailure is not a pending MI' (
+    Test-PendingManualIntervention @(@{ Type = 'GuidedFailure'; TaskId = 'ServerTasks-1'; IsPending = $true; Title = 'Sign-off' }) 'ServerTasks-1'
+) $false
+Test-Case '731: answered MI is not pending' (
+    Test-PendingManualIntervention @(@{ Type = 'ManualIntervention'; TaskId = 'ServerTasks-1'; IsPending = $false; Title = 'Sign-off' }) 'ServerTasks-1'
+) $false
+
+$selected = @(Select-SupersededWaitingBusyItems -Items @($older35, $candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId 'ServerTasks-12261451' -TestWaitsAtManualIntervention $waitsOnly35)
+Test-Case '731: selects the older Sign-off task' @($selected.Count, $selected[0].TaskId) @(1, 'ServerTasks-12244352')
+
+$neverCandidate = @(Select-SupersededWaitingBusyItems -Items @($candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId 'ServerTasks-12261451' -TestWaitsAtManualIntervention $waitsAlways)
+Test-Case '731: never cancels the candidate own task' $neverCandidate.Count 0
+
+$neverLive = @(Select-SupersededWaitingBusyItems -Items @($liveBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId '' -TestWaitsAtManualIntervention $waitsAlways)
+Test-Case '731: never cancels the live release task' $neverLive.Count 0
+
+$notWaiting = @(Select-SupersededWaitingBusyItems -Items @($older35) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId '' -TestWaitsAtManualIntervention $waitsNever)
+Test-Case '731: skips an older task not waiting at MI' $notWaiting.Count 0
+
+$newerThanCandidate = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-newer'; ReleaseVersion = '1.0.42'; State = 'Waiting'
+}
+$notOlder = @(Select-SupersededWaitingBusyItems -Items @($newerThanCandidate) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId '' -TestWaitsAtManualIntervention $waitsAlways)
+Test-Case '731: skips a newer-than-candidate waiting task' $notOlder.Count 0
+
+Test-Case '731: cancel log names the superseded task' (
+    Format-SupersededCancelLog -TaskId 'ServerTasks-12244352' -ReleaseVersion '1.0.35' -EnvironmentName 'uat' -CandidateVersion '1.0.40' -Name 'dashboard' -InterruptionTitle 'Sign-off'
+) 'Cancelling superseded task ServerTasks-12244352 (dashboard 1.0.35 waits at its Sign-off in uat) so candidate 1.0.40 can run.'
+
+Test-Case '731: missing permission TaskCancel is extracted' (
+    Get-OctopusMissingPermission (New-DeniedError 'You do not have permission to perform this action. The TaskCancel permission is required.')
+) 'TaskCancel'
+Test-Case '731: missing permission with backticks is extracted' (
+    Get-OctopusMissingPermission (New-DeniedError 'The `TaskCancel` permission is required to perform this action.')
+) 'TaskCancel'
+Test-Case '731: no named permission yields null' (Get-OctopusMissingPermission (New-DeniedError 'Response status code does not indicate success: 403 (Forbidden).')) $null
+
+$script:cancelOctopusCalls = [System.Collections.Generic.List[hashtable]]::new()
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    $script:cancelOctopusCalls.Add(@{ Path = $Path; Method = $Method; Body = $Body })
+}
+$script:cancelOctopusCalls.Clear()
+$canceled = Invoke-CancelOctopusTask -Space 'Spaces-1' -TaskId 'ServerTasks-12244352'
+Test-Case '731: cancel calls script-scope Invoke-Octopus POST cancel' @(
+    $canceled.Outcome
+    $script:cancelOctopusCalls.Count
+    $script:cancelOctopusCalls[0].Method
+    $script:cancelOctopusCalls[0].Path
+) @('canceled', 1, 'Post', '/api/Spaces-1/tasks/ServerTasks-12244352/cancel')
+
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    throw (New-DeniedError 'You do not have permission to perform this action. The TaskCancel permission is required.')
+}
+$refusedCancel = Invoke-CancelOctopusTask -Space 'Spaces-1' -TaskId 'ServerTasks-12244352'
+Test-Case '731: refused cancel returns refused and TaskCancel' @($refusedCancel.Outcome, $refusedCancel.Permission) @('refused', 'TaskCancel')
+
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    throw (New-DeniedError 'Response status code does not indicate success: 500 (Internal Server Error).')
+}
+$cancelOther = try { Invoke-CancelOctopusTask -Space 'Spaces-1' -TaskId 'ServerTasks-1'; 'no throw' } catch { $_.Exception.Message }
+Test-Case '731: non-permission cancel error still throws' $cancelOther 'Response status code does not indicate success: 500 (Internal Server Error).'
+
+$cancelEv = New-TaskCancelRefusedEvaluation -Sha 'abc' -ProjectName 'cmdemo1-dashboard' -ReleaseVersion '1.0.35' -EnvironmentName 'uat' -TaskId 'ServerTasks-12244352' -Permission 'TaskCancel'
+Test-Case '731: refused cancel hold names the flag' $cancelEv.Decision.Flags[0].Flag $TaskCancelPermissionDeniedFlag
+Test-Case '731: refused cancel hold names TaskCancel and the task' @(
+    ($cancelEv.Decision.Flags[0].Evidence[0] -like '*TaskCancel*'),
+    ($cancelEv.Decision.Flags[0].Evidence[0] -like '*ServerTasks-12244352*'),
+    ($cancelEv.Decision.Flags[0].Evidence[0] -like '*1.0.35*'),
+    (Test-TaskCancelRefusedHoldBody (Format-HeldEvidence -Version '1.0.35' -Sha 'abc' -Target 'uat' -Flags $cancelEv.Decision.Flags -Name 'dashboard'))
+) @($true, $true, $true, $true)
+
+Test-Case '731: candidate busy task id is found' (
+    Get-CandidateBusyTaskId -Items @($older35, $candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' -CandidateVersion '1.0.40'
+) 'ServerTasks-12261451'
+Test-Case '731: candidate busy task id empty when absent' (
+    Get-CandidateBusyTaskId -Items @($older35) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' -CandidateVersion '1.0.40'
+) ''
+
+# Restore Invoke-Octopus stub used by later Sign-off-style cases (none) — leave a no-op that records nothing.
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) { }
 
 # Runbook wait-and-retry when the only busy reason is a short-lived runbook in the target (#583)
 Test-Case 'only a runbook to the target is waitable' (Test-BusyOnlyRunbookToTarget @(@{ Kind = 'runbook'; ProjectId = 'P-sys'; EnvironmentId = 'E-uat'; TaskId = 'T-rb' }) 'E-uat' 'E-tdd' 'P-ui') $true
