@@ -1,13 +1,16 @@
 // Private Azure storage for pull-request videos and traces. Lifecycle deletes blobs 14 days after last
 // modification. Code only until Jeffrey says yes to create the live account (issue #653).
+// Role assignments stay at container scope (videos, traces): Storage Blob Data Contributor for the pool app
+// identity and for the existing GitHub OIDC acr-push identity (workorders AZURE_CLIENT_ID_ACR_PUSH). No keys,
+// SAS, or account-scoped roles.
 targetScope = 'resourceGroup'
 
 param slug string
 param location string
 param tags object
 
-@description('Principal ID of the pool slot app identity: Storage Blob Data Contributor on each container.')
-param readerPrincipalId string
+@description('Principal IDs granted Storage Blob Data Contributor on each videos/traces container (not the account): pool app identity and existing id-<slug>-acr-push.')
+param contributorPrincipalIds array
 
 @description('Days after last modification before a blob is deleted.')
 @minValue(1)
@@ -20,6 +23,10 @@ var containers = [
   'videos'
   'traces'
 ]
+// One assignment per (container, principal). Flat index avoids nested for-expressions (BCP138).
+var containerCount = length(containers)
+var principalCount = length(contributorPrincipalIds)
+var assignmentCount = containerCount * principalCount
 
 resource account 'Microsoft.Storage/storageAccounts@2024-01-01' = {
   name: accountName
@@ -99,11 +106,15 @@ resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2024-01
 }
 
 resource access 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for (name, i) in containers: {
-    name: guid(artifactContainers[i].id, readerPrincipalId, blobDataContributor)
-    scope: artifactContainers[i]
+  for i in range(0, assignmentCount): {
+    name: guid(
+      artifactContainers[i % containerCount].id,
+      contributorPrincipalIds[int(i / containerCount)],
+      blobDataContributor
+    )
+    scope: artifactContainers[i % containerCount]
     properties: {
-      principalId: readerPrincipalId
+      principalId: contributorPrincipalIds[int(i / containerCount)]
       principalType: 'ServicePrincipal'
       roleDefinitionId: blobDataContributor
     }

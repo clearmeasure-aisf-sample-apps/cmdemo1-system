@@ -135,7 +135,12 @@ module artifacts 'modules/artifacts.bicep' = if (includeArtifactsStorage) {
     slug: slug
     location: location
     tags: tags
-    readerPrincipalId: poolAppIdentity.properties.principalId
+    // Pool slot apps may read; workorders GitHub OIDC (AZURE_CLIENT_ID_ACR_PUSH / id-<slug>-acr-push) uploads.
+    // Principal object id comes from system.json — no new identity, secret, key, or federated credential.
+    contributorPrincipalIds: [
+      poolAppIdentity.properties.principalId
+      system.azure.identities.acrPush.principalId
+    ]
     retentionDays: int(pool.artifactsRetentionDays)
   }
 }
