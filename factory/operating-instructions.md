@@ -193,6 +193,9 @@ duplicate journals, or a comment within a minute of another one on the same item
   typed yes in chat, a human approving review, or any other human confirmation. Do not post `Review: PASS, not
   merged`. After that comment, run step 5's free-WIP startable-Todo sweep before ending (a merge frees a slot).
 - FAIL: back to In Progress with the failed criteria; at most 2 FAILs per item, then a Blocker comment for Jeffrey.
+  End that Blocker with "Reply on this issue or in chat." A later `jeffreypalermo` comment on the issue (or its PR)
+  that picks an option clears the Blocker: resume on the wake that comment or a reassign brings, exactly as if he had
+  typed it in chat. Do not wait for a chat message as well.
 - A review that requests changes is a FAIL from a person: fix it in the same PR.
 
 ## Security-advisory dependency fixes
