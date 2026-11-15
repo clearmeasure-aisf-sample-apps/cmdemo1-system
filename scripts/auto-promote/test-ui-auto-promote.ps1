@@ -407,6 +407,46 @@ Test-Case '731: candidate busy task id empty when absent' (
     Get-CandidateBusyTaskId -Items @($older35) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' -CandidateVersion '1.0.40'
 ) ''
 
+# Queued candidate already deployed (#733): newest busy deployment is Queued; cancel older Sign-off behind it.
+Test-Case '733: newest busy deployment is the queued 1.0.40' (
+    (Get-NewestBusyDeploymentItem -Items @($older35, $candidateBusy, $liveBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat').TaskId
+) 'ServerTasks-12261451'
+Test-Case '733: queued candidate is returned when newest is Queued' (
+    (Get-QueuedCandidateBusyItem -Items @($older35, $candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat').TaskId
+) 'ServerTasks-12261451'
+Test-Case '733: no queued candidate when newest is Waiting at Sign-off' (
+    $null -eq (Get-QueuedCandidateBusyItem -Items @($older35) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat')
+) $true
+Test-Case '733: no queued candidate in another environment' (
+    $null -eq (Get-QueuedCandidateBusyItem -Items @($older35, $candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-prod')
+) $true
+Test-Case '733: no queued candidate for another project' (
+    $null -eq (Get-QueuedCandidateBusyItem -Items @($older35, $candidateBusy) -ProjectId 'P-ui' -TargetEnvironmentId 'E-uat')
+) $true
+
+$queuedSelected = @(Select-SupersededWaitingBusyItems -Items @($older35, $candidateBusy, $liveBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId 'ServerTasks-12261451' -TestWaitsAtManualIntervention $waitsOnly35)
+Test-Case '733: queued-candidate path selects only the older Sign-off' @($queuedSelected.Count, $queuedSelected[0].TaskId) @(1, 'ServerTasks-12244352')
+Test-Case '733: queued-candidate path never selects the queued newer task' (
+    @($queuedSelected | Where-Object { $_.TaskId -eq 'ServerTasks-12261451' }).Count
+) 0
+Test-Case '733: queued-candidate path never selects the live release task' (
+    @($queuedSelected | Where-Object { $_.TaskId -eq 'ServerTasks-live' }).Count
+) 0
+
+$onlyQueued = @(Select-SupersededWaitingBusyItems -Items @($candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId 'ServerTasks-12261451' -TestWaitsAtManualIntervention $waitsAlways)
+Test-Case '733: only a queued deployment yields nothing to cancel' $onlyQueued.Count 0
+
+$waitingNewest = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-waiting-new'; ReleaseVersion = '1.0.41'; State = 'Waiting'
+    Deployment = @{ Id = 'Deployments-waiting-new'; ReleaseId = 'R-41' }
+}
+Test-Case '733: Waiting newer than an older Sign-off is not a queued candidate' (
+    $null -eq (Get-QueuedCandidateBusyItem -Items @($older35, $waitingNewest) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat')
+) $true
+
 # Restore Invoke-Octopus stub used by later Sign-off-style cases (none) — leave a no-op that records nothing.
 function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) { }
 
