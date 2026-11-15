@@ -44,6 +44,9 @@
     release's task; never take a Sign-off; DryRun only logs the intended cancel.
     Recovery: a deployment this workflow created (its Comments start with "Promoted by workflow ui-auto-promote") that waits at
     its Sign-off is evaluated again; no flag: its Sign-off is answered; a flag: it stays waiting and the held issue says so.
+    Behind (issue #739): when that waiting release's commit is behind the release already running in the environment
+    (comparison behind, 0 commits), the superseded Sign-off task is cancelled (or a hold names a refused TaskCancel), not
+    left waiting and not crashed under StrictMode for a missing Decision. Every Get-Evaluation result includes Decision.
     Permission denied on take-responsibility or submit (HTTP 401/403, or Octopus "not in any team with permissions"): hold,
     warn, continue — do not fail the workflow.
 
@@ -873,6 +876,56 @@ function New-TaskCancelRefusedEvaluation {
             Passed   = @()
         }
     }
+}
+
+function New-BehindEvaluation {
+    <# Get-Evaluation result when the candidate commit is behind the running one (issue #739). Always includes Decision
+       so StrictMode callers never throw on a missing property; Waiting names both commits. #>
+    param(
+        [Parameter(Mandatory)] [string] $Sha,
+        [Parameter(Mandatory)] [string] $BaseSha
+    )
+    $waiting = "commit $Sha is behind the running $BaseSha"
+    @{
+        Behind   = $true
+        Sha      = $Sha
+        BaseSha  = $BaseSha
+        Decision = @{
+            Decision = 'wait'
+            Reason   = $null
+            Note     = $null
+            Flags    = @()
+            Waiting  = @($waiting)
+            Passed   = @()
+        }
+    }
+}
+
+function Get-RecoverySignOffAction {
+    <# Recovery disposition after Get-Evaluation for a waiting Sign-off (issue #739). Behind -> cancel the superseded
+       task (newer release already in the environment). promote -> answer; hold -> held issue; wait -> leave waiting.
+       Reads Behind and Decision via Get-BusyItemProperty (StrictMode-safe). Throws when not Behind and Decision is
+       missing — never catch-and-ignore. #>
+    param($Evaluation)
+    if ($null -eq $Evaluation) { throw 'Evaluation is required' }
+    if ([bool] (Get-BusyItemProperty $Evaluation 'Behind')) {
+        return @{ Action = 'cancel'; Waiting = @() }
+    }
+    $decision = Get-BusyItemProperty $Evaluation 'Decision'
+    if ($null -eq $decision) { throw 'Evaluation.Decision is required when not Behind' }
+    $d = [string] (Get-BusyItemProperty $decision 'Decision')
+    $waiting = @(Get-BusyItemProperty $decision 'Waiting')
+    if ($d -eq 'promote') { return @{ Action = 'answer'; Waiting = @() } }
+    if ($d -eq 'hold') { return @{ Action = 'hold'; Waiting = @() } }
+    @{ Action = 'wait'; Waiting = @($waiting) }
+}
+
+function Get-RecoveryBehindCandidateVersion {
+    # Version named in the cancel log when recovery cancels a behind Sign-off (#739).
+    param($RunningRelease)
+    $version = Get-BusyItemProperty $RunningRelease 'Version'
+    if ($version) { return [string] $version }
+    'the newer release already in this environment'
 }
 
 function Test-TaskCancelRefusedHoldBody([string] $Body) {
@@ -1834,7 +1887,7 @@ function Get-Evaluation {
             $merged = Get-AppComparison -AppRepo $appRepo -Directory $appClone -BaseSha $baseSha -Sha $sha
             $paths = $merged.Paths; $pathsKnown = $merged.Known; $pathsReason = $merged.Reason
             Say "Comparison $baseSha...${sha}: $($merged.Status), $(@($merged.Commits).Count) commits, $(@($paths).Count) paths."
-            if ($merged.Status -eq 'behind') { return @{ Behind = $true; Sha = $sha; BaseSha = $baseSha } }
+            if ($merged.Status -eq 'behind') { return (New-BehindEvaluation -Sha $sha -BaseSha $baseSha) }
             $commitPulls = Get-CommitPulls -AppRepo $appRepo -Shas @($merged.Commits | ForEach-Object sha)
             $closingRefs = @{}; foreach ($e in $commitPulls.Values) { foreach ($n in $e.Closing.Keys) { $closingRefs[$n] = $e.Closing[$n] } }
             $repoHeld = try { Get-RepoHeld -AppRepo $appRepo } catch { Say "The Hold items of $appRepo could not be listed ($($_.Exception.Message)): each is read."; $null }
@@ -2013,9 +2066,23 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
     $runningUnknown = ''
     $runningBefore = try { Get-RunningRelease -Target $target -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t } } catch { if (-not (Test-RunningLookupError $_)) { throw }; $runningUnknown = $_.Exception.Message; $null }
     $ev = Get-Evaluation -Release $rel -Target $target -Previous $previous -RunningRelease $runningBefore -RunningUnknown $runningUnknown
-    if ($ev.Behind -or $ev.Decision.Decision -ne 'promote') {
-        if (-not $ev.Behind -and $ev.Decision.Decision -eq 'hold') { Set-HeldIssue -Release $rel -Target $target -Evaluation $ev -DeploymentNote "The deployment $($b.Deployment.Id) was created earlier and waits at its Sign-off: a person decides." }
-        else { Say "Left waiting: $(@($ev.Decision.Waiting) -join '; ')" }
+    $recovery = Get-RecoverySignOffAction -Evaluation $ev
+    if ($recovery.Action -eq 'cancel') {
+        # Waiting release is older than what already runs here (behind, 0 commits): cancel the stale Sign-off (#739).
+        $newerVersion = Get-RecoveryBehindCandidateVersion -RunningRelease $runningBefore
+        Cancel-SupersededWaitingTasks -SupersededItems @($b) -Target $target -CandidateVersion $newerVersion | Out-Null
+        if (-not $DryRun) {
+            try {
+                $listed = Get-ActiveBusyItemsMarked
+                $busyItems = @($listed.Items)
+                $activeTaskIds = @($listed.ActiveTaskIds)
+            } catch { Say "Waiting: Octopus tasks could not be read whole after cancelling superseded tasks ($($_.Exception.Message))" }
+        }
+        continue
+    }
+    if ($recovery.Action -ne 'answer') {
+        if ($recovery.Action -eq 'hold') { Set-HeldIssue -Release $rel -Target $target -Evaluation $ev -DeploymentNote "The deployment $($b.Deployment.Id) was created earlier and waits at its Sign-off: a person decides." }
+        else { Say "Left waiting: $(@($recovery.Waiting) -join '; ')" }
         continue
     }
     if ($DryRun) { Say 'Dry run: would answer the Sign-off.'; continue }
