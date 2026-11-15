@@ -15,7 +15,7 @@
     does not apply when the wake reason is CI finished, so a green bot PR still gets a Review nudge even if the bot
     was just assigned for In Progress → Review.
     Post-merge path (#707): when a cm-ai-ops-bot pull request merges and the repository still has free WIP (under the
-    per-repo limit of 2), re-assign the oldest startable Todo assigned to the bot — including one with a prior
+    per-repo limit of 3), re-assign the oldest startable Todo assigned to the bot — including one with a prior
     `Queued: WIP is full` comment — so the issue-assigned listener picks it up without a human nudge. Posts no
     comments; uses only GITHUB_TOKEN.
 
@@ -47,7 +47,7 @@
 .PARAMETER Merged
     True when the pull request was merged (pr-merged path).
 .PARAMETER WipLimit
-    Per-repository WIP limit (In Progress + Review). Default 2; not loosened by this script.
+    Per-repository WIP limit (In Progress + Review). Default 3; not loosened by this script.
 .PARAMETER DryRun
     Decide and log; change no assignees.
 .PARAMETER LoadOnly
@@ -75,7 +75,7 @@ param(
     [int] $PullRequestNumber = 0,
     [string] $PullRequestAuthor = '',
     [switch] $Merged,
-    [int] $WipLimit = 2,
+    [int] $WipLimit = 3,
     [switch] $DryRun,
     [switch] $LoadOnly
 )
@@ -378,7 +378,7 @@ function Get-PostMergeTodoPickupPlan {
         [bool] $Merged,
         [string] $PullRequestAuthor,
         [string] $BotLogin,
-        [int] $WipLimit = 2,
+        [int] $WipLimit = 3,
         [object[]] $AssignedOpenIssues,
         [string] $DefaultRepository = ''
     )
