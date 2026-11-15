@@ -361,12 +361,13 @@ Test-Case 'gh: Get-BotAssignedOpenIssues list calls with -f use --method GET (#7
     @($true, $true, 0)
 
 # --- Issue #707: post-merge startable-Todo pickup when WIP frees ---
-function New-AssignedIssue([int] $Number, [datetime] $CreatedAt, [object[]] $Comments, [string] $Repository = 'clearmeasure-aisf-sample-apps/cmdemo1-system') {
+function New-AssignedIssue([int] $Number, [datetime] $CreatedAt, [object[]] $Comments, [string] $Repository = 'clearmeasure-aisf-sample-apps/cmdemo1-system', [string[]] $Labels = @()) {
     [ordered] @{
         number     = $Number
         repository = $Repository
         createdAt  = $CreatedAt
         comments   = @($Comments)
+        labels     = @($Labels)
     }
 }
 
@@ -459,6 +460,78 @@ $noTodo = Get-PostMergeTodoPickupPlan `
 Test-Case 'post-merge: bot merge with no startable Todo skips' `
     @($noTodo.Action, $noTodo.Reason) `
     @('skip', 'merge freed WIP (1/3); no startable Todo assigned')
+
+# --- Workorders Pi-lane reservation (Jeffrey, Nov 15 2026 9:13am CT: "You keep pi local working. Two at a time.") ---
+$woPiComment = [ordered] @{ body = "Todo → In Progress`nThe local Pi lane is taking this issue. Factory bot: please don't implement this"; createdAt = $headDate }
+$woBotWip = New-AssignedIssue 1805 $headDate.AddHours(-1) @(
+    [ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate.AddMinutes(-30) }
+) -Repository $workordersRepo
+$woPiWip = New-AssignedIssue 1829 $headDate.AddHours(-1) @($woPiComment) -Repository $workordersRepo -Labels @('local-pi')
+$woPiWipByComment = New-AssignedIssue 1773 $headDate.AddHours(-1) @($woPiComment) -Repository $workordersRepo
+$woTodo = New-AssignedIssue 1812 $headDate.AddMinutes(-10) @() -Repository $workordersRepo
+$woPiTodo = New-AssignedIssue 1831 $headDate.AddHours(-2) @(
+    [ordered] @{ body = "Local Pi lane: Factory bot: please don't implement this; review and merge the lane's PR."; createdAt = $headDate }
+) -Repository $workordersRepo -Labels @('local-pi')
+$woOlderTodo = New-AssignedIssue 1813 $headDate.AddHours(-3) @() -Repository $workordersRepo
+
+Test-Case 'pi-lane: local-pi label is detected' (Test-LocalPiLaneIssue $woPiWip) $true
+Test-Case 'pi-lane: comment without label is detected' (Test-LocalPiLaneIssue $woPiWipByComment) $true
+Test-Case 'pi-lane: ordinary bot item is not detected' (Test-LocalPiLaneIssue $woBotWip) $false
+Test-Case 'workorders repo: suffix matches' (Test-WorkordersRepository $workordersRepo) $true
+Test-Case 'workorders repo: other repos are unchanged' (Test-WorkordersRepository $systemRepo) $false
+
+$woBotHoldsOne = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
+    -AssignedOpenIssues @($woBotWip, $woTodo) -DefaultRepository $workordersRepo
+Test-Case 'post-merge workorders: bot already holding 1 does not pick up another' `
+    @($woBotHoldsOne.Action, $woBotHoldsOne.Reason) `
+    @('skip', 'workorders bot already holds 1 of his own (limit 1); Pi holds 0 of 2 reserved')
+
+$woRoomBesidePi = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
+    -AssignedOpenIssues @($woPiWip, $woTodo) -DefaultRepository $workordersRepo
+Test-Case 'post-merge workorders: bot holding 0 may take his 1 slot beside 1 Pi item' `
+    @($woRoomBesidePi.Action, $woRoomBesidePi.Issues[0].Issue, $woRoomBesidePi.Reason) `
+    @('nudge', 1812, "merge freed WIP (1/3); re-assign oldest startable Todo ${workordersRepo}#1812")
+
+$woTwoPiPlusBotTodo = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
+    -AssignedOpenIssues @(
+        $woPiWip,
+        (New-AssignedIssue 1830 $headDate.AddMinutes(-40) @($woPiComment) -Repository $workordersRepo -Labels @('local-pi')),
+        $woTodo
+    ) -DefaultRepository $workordersRepo
+Test-Case 'post-merge workorders: bot holding 0 may take the last slot when Pi already holds 2' `
+    @($woTwoPiPlusBotTodo.Action, $woTwoPiPlusBotTodo.Issues[0].Issue) `
+    @('nudge', 1812)
+
+$woSkipPiTodo = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
+    -AssignedOpenIssues @($woPiTodo, $woTodo) -DefaultRepository $workordersRepo
+Test-Case 'post-merge workorders: never re-assigns a Pi-lane Todo; picks next non-Pi' `
+    @($woSkipPiTodo.Action, $woSkipPiTodo.Issues[0].Issue) `
+    @('nudge', 1812)
+
+$woOnlyPiTodo = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
+    -AssignedOpenIssues @($woPiWip, $woPiTodo) -DefaultRepository $workordersRepo
+Test-Case 'post-merge workorders: skips when only Pi-lane Todos are assigned' `
+    @($woOnlyPiTodo.Action, $woOnlyPiTodo.Reason) `
+    @('skip', "merge freed WIP (1/3); no startable non-Pi Todo assigned")
+
+$woOldestNonPi = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
+    -AssignedOpenIssues @($woPiTodo, $woTodo, $woOlderTodo) -DefaultRepository $workordersRepo
+Test-Case 'post-merge workorders: oldest non-Pi Todo wins over an older Pi Todo' `
+    @($woOldestNonPi.Action, $woOldestNonPi.Issues[0].Issue) `
+    @('nudge', 1813)
+
+$woBotAndPiFull = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
+    -AssignedOpenIssues @($woBotWip, $woPiWip, $woTodo) -DefaultRepository $workordersRepo
+Test-Case 'post-merge workorders: 1 bot + 1 Pi still blocks a second bot pickup' `
+    @($woBotAndPiFull.Action, $woBotAndPiFull.Reason) `
+    @('skip', 'workorders bot already holds 1 of his own (limit 1); Pi holds 1 of 2 reserved')
 
 if ($failures -gt 0) {
     Write-Host "$failures FAIL(s)"

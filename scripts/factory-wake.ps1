@@ -16,8 +16,11 @@
     was just assigned for In Progress → Review.
     Post-merge path (#707): when a cm-ai-ops-bot pull request merges and the repository still has free WIP (under the
     per-repo limit of 3), re-assign the oldest startable Todo assigned to the bot — including one with a prior
-    `Queued: WIP is full` comment — so the issue-assigned listener picks it up without a human nudge. Posts no
-    comments; uses only GITHUB_TOKEN.
+    `Queued: WIP is full` comment — so the issue-assigned listener picks it up without a human nudge. In
+    cmdemo1-workorders, 2 of the 3 slots are reserved for the local Pi lane (Jeffrey, Nov 15 2026 9:13am CT:
+    "You keep pi local working. Two at a time."): never re-assign a Pi-lane item, and nudge a new bot-owned item
+    only when the bot holds 0 workorders items of his own and the pickup would not block those 2 reserved slots.
+    Posts no comments; uses only GITHUB_TOKEN.
 
 .PARAMETER Repository
     owner/name of this repository.
@@ -47,7 +50,8 @@
 .PARAMETER Merged
     True when the pull request was merged (pr-merged path).
 .PARAMETER WipLimit
-    Per-repository WIP limit (In Progress + Review). Default 3; not loosened by this script.
+    Per-repository WIP limit (In Progress + Review). Default 3; not loosened by this script. In cmdemo1-workorders,
+    2 of those 3 are reserved for the local Pi lane; the bot may hold at most 1.
 .PARAMETER DryRun
     Decide and log; change no assignees.
 .PARAMETER LoadOnly
@@ -371,9 +375,35 @@ function Get-IssueWorkPhase {
     return 'todo'
 }
 
+function Test-WorkordersRepository {
+    param([string] $Repository)
+    if (-not $Repository) { return $false }
+    return $Repository -match '(^|/)cmdemo1-workorders$'
+}
+
+function Test-LocalPiLaneIssue {
+    # True for a workorders Pi-lane item: label local-pi, or a comment from the local Pi lane telling the
+    # factory bot not to implement it.
+    param($Issue)
+    foreach ($label in @(Get-FactValue $Issue 'labels')) {
+        $name = if ($label -is [string]) { $label } else { [string] (Get-FactValue $label 'name') }
+        if ($name -ceq 'local-pi') { return $true }
+    }
+    foreach ($c in @(Get-FactValue $Issue 'comments')) {
+        $body = [string] (Get-FactValue $c 'body')
+        if (-not $body) { continue }
+        if ($body -match '(?i)local Pi lane' -or $body -match "(?i)Factory bot: please don't implement this") {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-PostMergeTodoPickupPlan {
     # After a bot PR merges: when WIP (open assigned issues in phase wip) is under the per-repo limit, nudge the
     # oldest startable Todo. A prior Queued: comment does not disqualify. WIP limit is not raised.
+    # cmdemo1-workorders: never re-assign a local-pi / Pi-lane item; the bot picks up a new item only when he holds
+    # 0 workorders items of his own, and the pickup must not block the 2 reserved Pi slots.
     param(
         [bool] $Merged,
         [string] $PullRequestAuthor,
@@ -408,6 +438,7 @@ function Get-PostMergeTodoPickupPlan {
                 repository = $repo
                 createdAt  = $created
                 phase      = $phase
+                piLane     = [bool] (Test-LocalPiLaneIssue $issue)
             })
     }
     $wipCount = @($classified | Where-Object { $_.phase -eq 'wip' }).Count
@@ -418,15 +449,44 @@ function Get-PostMergeTodoPickupPlan {
             Issues = @()
         }
     }
+    $isWorkorders = Test-WorkordersRepository $DefaultRepository
+    $piWip = @($classified | Where-Object { $_.phase -eq 'wip' -and $_.piLane }).Count
+    $botWip = $wipCount - $piWip
     $todos = @(
         $classified |
-            Where-Object { $_.phase -eq 'todo' } |
+            Where-Object {
+                $_.phase -eq 'todo' -and (-not $isWorkorders -or -not $_.piLane)
+            } |
             Sort-Object { $_.createdAt }, { $_.number }
     )
-    if ($todos.Count -eq 0) {
+    if ($isWorkorders -and $botWip -ge 1) {
         return [ordered] @{
             Action = 'skip'
-            Reason = "merge freed WIP ($wipCount/$WipLimit); no startable Todo assigned"
+            Reason = "workorders bot already holds $botWip of his own (limit 1); Pi holds $piWip of 2 reserved"
+            Issues = @()
+        }
+    }
+    if ($isWorkorders) {
+        $piNeed = [Math]::Max(0, 2 - $piWip)
+        $freeAfterPickup = $WipLimit - $wipCount - 1
+        if ($freeAfterPickup -lt $piNeed) {
+            return [ordered] @{
+                Action = 'skip'
+                Reason = "workorders pickup would block Pi reserved slots (WIP $wipCount/$WipLimit, Pi $piWip/2)"
+                Issues = @()
+            }
+        }
+    }
+    if ($todos.Count -eq 0) {
+        $todoReason = if ($isWorkorders) {
+            "merge freed WIP ($wipCount/$WipLimit); no startable non-Pi Todo assigned"
+        }
+        else {
+            "merge freed WIP ($wipCount/$WipLimit); no startable Todo assigned"
+        }
+        return [ordered] @{
+            Action = 'skip'
+            Reason = $todoReason
             Issues = @()
         }
     }
@@ -703,11 +763,18 @@ function Get-BotAssignedOpenIssues {
                     }
                 }
             )
+            $labels = @(
+                foreach ($l in @(Get-FactValue $item 'labels')) {
+                    if ($l -is [string]) { $l }
+                    else { [string] (Get-FactValue $l 'name') }
+                }
+            )
             $result.Add([ordered] @{
                     number     = $num
                     repository = $Repository
                     createdAt  = $created
                     comments   = $comments
+                    labels     = $labels
                 })
         }
         if ($batch.Count -lt 100) { break }
