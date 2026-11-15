@@ -447,6 +447,58 @@ Test-Case '733: Waiting newer than an older Sign-off is not a queued candidate' 
     $null -eq (Get-QueuedCandidateBusyItem -Items @($older35, $waitingNewest) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat')
 ) $true
 
+# Superseded Sign-off recovery when comparison is behind (#739): older release waits at Sign-off, newer already in
+# that environment (behind, 0 commits). Must not throw on missing Decision; cancel (or named TaskCancel hold).
+$behindSha739 = '76b668f100000000000000000000000000000000'
+$baseSha739 = '75ae843c00000000000000000000000000000000'
+$behindEv739 = New-BehindEvaluation -Sha $behindSha739 -BaseSha $baseSha739
+Test-Case '739: behind evaluation sets Behind' $behindEv739.Behind $true
+Test-Case '739: behind evaluation always sets Decision' @(
+    ($null -ne $behindEv739.Decision)
+    $behindEv739.Decision.Decision
+    ($behindEv739.Decision.Waiting[0] -like "*$behindSha739*behind*$baseSha739*")
+) @($true, 'wait', $true)
+Test-Case '739: StrictMode can read Decision on behind evaluation' @(
+    $behindEv739.Decision.Decision
+    @($behindEv739.Decision.Waiting).Count
+) @('wait', 1)
+
+# Exact production shape before the fix: Behind with no Decision (StrictMode threw in recovery).
+$legacyBehind739 = @{ Behind = $true; Sha = $behindSha739; BaseSha = $baseSha739 }
+Test-Case '739: Test-EvaluationBehind sees Behind without Decision' (Test-EvaluationBehind $legacyBehind739) $true
+Test-Case '739: Get-EvaluationDecision is null on the legacy shape' ($null -eq (Get-EvaluationDecision $legacyBehind739)) $true
+$legacyDisp739 = Get-RecoverySignOffDisposition -Evaluation $legacyBehind739
+Test-Case '739: behind without Decision: disposition is cancel-superseded (no throw)' $legacyDisp739.Action 'cancel-superseded'
+$behindDisp739 = Get-RecoverySignOffDisposition -Evaluation $behindEv739
+Test-Case '739: behind with Decision: disposition is cancel-superseded' $behindDisp739.Action 'cancel-superseded'
+
+Test-Case '739: promote disposition answers Sign-off' (
+    (Get-RecoverySignOffDisposition -Evaluation @{ Behind = $false; Decision = @{ Decision = 'promote'; Waiting = @() } }).Action
+) 'answer'
+Test-Case '739: hold disposition holds' (
+    (Get-RecoverySignOffDisposition -Evaluation @{ Behind = $false; Decision = @{ Decision = 'hold'; Waiting = @(); Flags = @() } }).Action
+) 'hold'
+$waitDisp739 = Get-RecoverySignOffDisposition -Evaluation @{ Behind = $false; Decision = @{ Decision = 'wait'; Waiting = @('pending check') } }
+Test-Case '739: wait disposition leaves waiting' @($waitDisp739.Action, $waitDisp739.Waiting[0]) @('wait', 'pending check')
+$missingDecision739 = try { Get-RecoverySignOffDisposition -Evaluation @{ Behind = $false }; 'no throw' } catch { 'threw' }
+Test-Case '739: missing Decision when not Behind fails closed' $missingDecision739 'threw'
+
+# Older 1.0.35 at Sign-off, newer 1.0.40 already live in uat (the run 43658626359 case): select for cancel.
+$live40 = @{ Version = '1.0.40'; Assembled = [datetimeoffset]'2026-11-14T18:00:00Z' }
+$selected739 = @(Select-SupersededWaitingBusyItems -Items @($older35) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $live40 -LiveRelease $live40 -CandidateTaskId '' -TestWaitsAtManualIntervention $waitsOnly35)
+Test-Case '739: older Sign-off selected against live newer release' @($selected739.Count, $selected739[0].TaskId) @(1, 'ServerTasks-12244352')
+Test-Case '739: cancel log names ServerTasks-12244352 for the behind recovery case' (
+    Format-SupersededCancelLog -TaskId 'ServerTasks-12244352' -ReleaseVersion '1.0.35' -EnvironmentName 'uat' -CandidateVersion '1.0.40' -Name 'dashboard' -InterruptionTitle 'Sign-off'
+) 'Cancelling superseded task ServerTasks-12244352 (dashboard 1.0.35 waits at its Sign-off in uat) so candidate 1.0.40 can run.'
+# Refused TaskCancel still yields a named hold (same path Cancel-SupersededWaitingTasks uses after disposition).
+$cancelHold739 = New-TaskCancelRefusedEvaluation -Sha 'abc' -ProjectName 'cmdemo1-dashboard' -ReleaseVersion '1.0.35' -EnvironmentName 'uat' -TaskId 'ServerTasks-12244352' -Permission 'TaskCancel'
+Test-Case '739: refused cancel hold names TaskCancel and the stale task' @(
+    ($cancelHold739.Decision.Flags[0].Evidence[0] -like '*TaskCancel*'),
+    ($cancelHold739.Decision.Flags[0].Evidence[0] -like '*ServerTasks-12244352*'),
+    (Test-TaskCancelRefusedHoldBody (Format-HeldEvidence -Version '1.0.35' -Sha 'abc' -Target 'uat' -Flags $cancelHold739.Decision.Flags -Name 'dashboard'))
+) @($true, $true, $true)
+
 # Restore Invoke-Octopus stub used by later Sign-off-style cases (none) — leave a no-op that records nothing.
 function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) { }
 
