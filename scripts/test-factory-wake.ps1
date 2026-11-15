@@ -400,53 +400,65 @@ $blockedTodo = New-AssignedIssue 1660 $headDate.AddHours(-3) @(
 )
 
 $mergePickup = Get-PostMergeTodoPickupPlan `
-    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
     -AssignedOpenIssues @($activeWip, $queuedTodo) -DefaultRepository $systemRepo
 Test-Case 'post-merge: nudges Queued Todo when WIP has room after bot merge (#707)' `
     @($mergePickup.Action, $mergePickup.Issues[0].Action, $mergePickup.Issues[0].Issue, $mergePickup.Issues[0].Reason) `
     @('nudge', 'nudge', 1753, "re-assign cm-ai-ops-bot on ${systemRepo}#1753 (post-merge Todo pickup)")
 
 $oldestWins = Get-PostMergeTodoPickupPlan `
-    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
     -AssignedOpenIssues @($queuedTodo, $olderTodo) -DefaultRepository $systemRepo
 Test-Case 'post-merge: oldest startable Todo wins' `
     @($oldestWins.Action, $oldestWins.Issues[0].Issue) `
     @('nudge', 1740)
 
 $skipBlocked = Get-PostMergeTodoPickupPlan `
-    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
     -AssignedOpenIssues @($blockedTodo, $queuedTodo) -DefaultRepository $systemRepo
 Test-Case 'post-merge: skips Blocker Todo and picks next startable' `
     @($skipBlocked.Action, $skipBlocked.Issues[0].Issue) `
     @('nudge', 1753)
 
-$wipFull = Get-PostMergeTodoPickupPlan `
-    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+$defaultHasRoom = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' `
     -AssignedOpenIssues @(
         (New-AssignedIssue 1 $headDate @([ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate })),
         (New-AssignedIssue 2 $headDate @([ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate })),
         $queuedTodo
     ) -DefaultRepository $systemRepo
-Test-Case 'post-merge: does not loosen WIP limit of 2' `
+Test-Case 'post-merge: default WIP limit is 3 (2/3 still has room)' `
+    @($defaultHasRoom.Action, $defaultHasRoom.Issues[0].Issue, $defaultHasRoom.Reason) `
+    @('nudge', 1753, "merge freed WIP (2/3); re-assign oldest startable Todo ${systemRepo}#1753")
+
+$wipFull = Get-PostMergeTodoPickupPlan `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
+    -AssignedOpenIssues @(
+        (New-AssignedIssue 1 $headDate @([ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate })),
+        (New-AssignedIssue 2 $headDate @([ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate })),
+        (New-AssignedIssue 3 $headDate @([ordered] @{ body = 'Todo → In Progress'; createdAt = $headDate })),
+        $queuedTodo
+    ) -DefaultRepository $systemRepo
+Test-Case 'post-merge: does not loosen WIP limit of 3' `
     @($wipFull.Action, $wipFull.Reason) `
-    @('skip', 'WIP is full (2/2)')
+    @('skip', 'WIP is full (3/3)')
 
 $notMerged = Get-PostMergeTodoPickupPlan `
-    -Merged $false -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -Merged $false -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
     -AssignedOpenIssues @($queuedTodo) -DefaultRepository $systemRepo
 Test-Case 'post-merge: closed-without-merge skips' @($notMerged.Action) @('skip')
 
 $nonBotMerge = Get-PostMergeTodoPickupPlan `
-    -Merged $true -PullRequestAuthor 'jeffreypalermo' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -Merged $true -PullRequestAuthor 'jeffreypalermo' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
     -AssignedOpenIssues @($queuedTodo) -DefaultRepository $systemRepo
 Test-Case 'post-merge: non-bot merge skips' @($nonBotMerge.Action) @('skip')
 
 $noTodo = Get-PostMergeTodoPickupPlan `
-    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 2 `
+    -Merged $true -PullRequestAuthor 'cm-ai-ops-bot' -BotLogin 'cm-ai-ops-bot' -WipLimit 3 `
     -AssignedOpenIssues @($activeWip) -DefaultRepository $systemRepo
 Test-Case 'post-merge: bot merge with no startable Todo skips' `
     @($noTodo.Action, $noTodo.Reason) `
-    @('skip', 'merge freed WIP (1/2); no startable Todo assigned')
+    @('skip', 'merge freed WIP (1/3); no startable Todo assigned')
 
 if ($failures -gt 0) {
     Write-Host "$failures FAIL(s)"

@@ -95,11 +95,11 @@ below). In order:
 
 Todo → In Progress → Review → Merged → TDD → UAT → Done.
 
-- WIP limit 2 per repository: items in In Progress and Review whose issue lives in that repository (e.g.
+- WIP limit 3 per repository: items in In Progress and Review whose issue lives in that repository (e.g.
   cmdemo1-workorders, cmdemo1-system, cmdemo1-dashboard). Merged, TDD and UAT do not count. There is no global
   WIP cap. Count from the one project query of this wake (group by `repo`; do not query per repo). When a repo is
   at its limit, leave its new items in Todo and take the next Todo item from a repo with room; post one
-  `Queued: WIP is full for <repo> (2).` comment on each skipped item once, never again (`<repo>` is the short
+  `Queued: WIP is full for <repo> (3).` comment on each skipped item once, never again (`<repo>` is the short
   repository name, e.g. `cmdemo1-system`).
 - Oldest assigned **startable** Todo item first (skip an item whose repo is at its limit, or one already marked
   `Blocker:` that still needs a reply the bot cannot provide, such as clarified acceptance criteria; do not skip
