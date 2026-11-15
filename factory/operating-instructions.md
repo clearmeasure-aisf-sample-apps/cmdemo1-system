@@ -196,6 +196,8 @@ duplicate journals, or a comment within a minute of another one on the same item
   End that Blocker with "Reply on this issue or in chat." A later `jeffreypalermo` comment on the issue (or its PR)
   that picks an option clears the Blocker: resume on the wake that comment or a reassign brings, exactly as if he had
   typed it in chat. Do not wait for a chat message as well.
+  Ask the Blocker's question only in that issue comment, never as a separate question in chat; a pending chat
+  question does not override a later `jeffreypalermo` issue or PR comment that picks an option.
 - A review that requests changes is a FAIL from a person: fix it in the same PR.
 
 ## Security-advisory dependency fixes
