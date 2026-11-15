@@ -44,8 +44,10 @@
     release's task; never take a Sign-off; DryRun only logs the intended cancel.
     Recovery: a deployment this workflow created (its Comments start with "Promoted by workflow ui-auto-promote") that waits at
     its Sign-off is evaluated again; no flag: its Sign-off is answered; a flag: it stays waiting and the held issue says so.
-    Permission denied on take-responsibility or submit (HTTP 401/403, or Octopus "not in any team with permissions"): hold,
-    warn, continue — do not fail the workflow.
+    When the comparison shows that waiting release is behind what already runs in the environment (issue #739), the superseded
+    Sign-off task is cancelled (same cancel / refused-TaskCancel hold as #731); every evaluation path sets Decision so StrictMode
+    never throws on a missing property. Permission denied on take-responsibility or submit (HTTP 401/403, or Octopus "not in any
+    team with permissions"): hold, warn, continue — do not fail the workflow.
 
     The four flags (Get-PromotionDecision), and what makes the run wait (nothing promoted, nothing flagged):
       1 checks   Flag: a check run of the release's commit in the application repository that ended failure, cancelled,
@@ -878,6 +880,76 @@ function New-TaskCancelRefusedEvaluation {
 function Test-TaskCancelRefusedHoldBody([string] $Body) {
     # True when a release-held issue body was written for a refused task cancel (#731).
     "$Body" -match [regex]::Escape($TaskCancelPermissionDeniedFlag)
+}
+
+function New-BehindEvaluation {
+    # Evaluation when the release's commit is behind what already runs in the target (#739). Always includes Decision
+    # so recovery/candidate callers under StrictMode never throw on a missing property.
+    param([string] $Sha, [string] $BaseSha)
+    $waiting = "commit $Sha is behind the running $BaseSha"
+    @{
+        Behind   = $true
+        Sha      = $Sha
+        BaseSha  = $BaseSha
+        Decision = @{
+            Decision = 'wait'
+            Reason   = 'behind'
+            Note     = ''
+            Flags    = @()
+            Waiting  = @($waiting)
+            Passed   = @()
+        }
+    }
+}
+
+function Test-EvaluationBehind($Evaluation) {
+    # StrictMode-safe: true when the evaluation says Behind (hashtable or object).
+    if ($null -eq $Evaluation) { return $false }
+    if ($Evaluation -is [System.Collections.IDictionary]) {
+        return [bool] ($Evaluation.Contains('Behind') -and $Evaluation['Behind'])
+    }
+    $property = $Evaluation.PSObject.Properties['Behind']
+    [bool] ($property -and $property.Value)
+}
+
+function Get-EvaluationDecision($Evaluation) {
+    # StrictMode-safe: the Decision object, or $null when absent.
+    if ($null -eq $Evaluation) { return $null }
+    if ($Evaluation -is [System.Collections.IDictionary]) {
+        if ($Evaluation.Contains('Decision')) { return $Evaluation['Decision'] }
+        return $null
+    }
+    $property = $Evaluation.PSObject.Properties['Decision']
+    if ($property) { $property.Value } else { $null }
+}
+
+function Get-RecoverySignOffDisposition {
+    <# What recovery does after evaluating a workflow-created Sign-off (issue #739).
+       Behind (waiting release older than what already runs): cancel-superseded — never read Decision first.
+       promote → answer; hold → hold; anything else → wait. Missing Decision when not Behind fails closed. #>
+    param($Evaluation)
+    if ($null -eq $Evaluation) { throw 'Recovery evaluation is required' }
+    if (Test-EvaluationBehind $Evaluation) {
+        return @{ Action = 'cancel-superseded'; Decision = (Get-EvaluationDecision $Evaluation) }
+    }
+    $decision = Get-EvaluationDecision $Evaluation
+    if ($null -eq $decision) {
+        throw 'Recovery evaluation is missing Decision (and is not Behind).'
+    }
+    switch ([string] $decision.Decision) {
+        'promote' { @{ Action = 'answer'; Decision = $decision } }
+        'hold' { @{ Action = 'hold'; Decision = $decision } }
+        default {
+            $waiting = @()
+            if ($decision -is [System.Collections.IDictionary]) {
+                if ($decision.Contains('Waiting')) { $waiting = @($decision['Waiting']) }
+            } else {
+                $w = $decision.PSObject.Properties['Waiting']
+                if ($w) { $waiting = @($w.Value) }
+            }
+            @{ Action = 'wait'; Decision = $decision; Waiting = $waiting }
+        }
+    }
 }
 
 function Test-PendingManualIntervention {
@@ -1834,7 +1906,7 @@ function Get-Evaluation {
             $merged = Get-AppComparison -AppRepo $appRepo -Directory $appClone -BaseSha $baseSha -Sha $sha
             $paths = $merged.Paths; $pathsKnown = $merged.Known; $pathsReason = $merged.Reason
             Say "Comparison $baseSha...${sha}: $($merged.Status), $(@($merged.Commits).Count) commits, $(@($paths).Count) paths."
-            if ($merged.Status -eq 'behind') { return @{ Behind = $true; Sha = $sha; BaseSha = $baseSha } }
+            if ($merged.Status -eq 'behind') { return (New-BehindEvaluation -Sha $sha -BaseSha $baseSha) }
             $commitPulls = Get-CommitPulls -AppRepo $appRepo -Shas @($merged.Commits | ForEach-Object sha)
             $closingRefs = @{}; foreach ($e in $commitPulls.Values) { foreach ($n in $e.Closing.Keys) { $closingRefs[$n] = $e.Closing[$n] } }
             $repoHeld = try { Get-RepoHeld -AppRepo $appRepo } catch { Say "The Hold items of $appRepo could not be listed ($($_.Exception.Message)): each is read."; $null }
@@ -2002,6 +2074,7 @@ $releaseVersionCache = @{}
 Set-BusyItemsSignOffRefused -Items $busyItems
 
 # 2. Recovery: a deployment this workflow created that waits at its Sign-off.
+$recoveryCanceled = $false
 foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.ProjectId -eq $project.Id -and $_.EnvironmentId -ne $first.Id -and "$($_.Deployment.Comments)".StartsWith($PromotionMarker) })) {
     $pending = Get-SignOffAction -Interruptions @((Invoke-Octopus "/api/$space/interruptions?regarding=$($b.TaskId)").Items) -TaskId $b.TaskId
     if ($pending.Action -ne 'answer') { continue }
@@ -2013,17 +2086,38 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
     $runningUnknown = ''
     $runningBefore = try { Get-RunningRelease -Target $target -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t } } catch { if (-not (Test-RunningLookupError $_)) { throw }; $runningUnknown = $_.Exception.Message; $null }
     $ev = Get-Evaluation -Release $rel -Target $target -Previous $previous -RunningRelease $runningBefore -RunningUnknown $runningUnknown
-    if ($ev.Behind -or $ev.Decision.Decision -ne 'promote') {
-        if (-not $ev.Behind -and $ev.Decision.Decision -eq 'hold') { Set-HeldIssue -Release $rel -Target $target -Evaluation $ev -DeploymentNote "The deployment $($b.Deployment.Id) was created earlier and waits at its Sign-off: a person decides." }
-        else { Say "Left waiting: $(@($ev.Decision.Waiting) -join '; ')" }
+    # Behind before Decision (#739): an older waiting Sign-off whose commit is behind what already runs is cancelled,
+    # never left waiting via a StrictMode throw on a missing Decision property.
+    $disp = Get-RecoverySignOffDisposition -Evaluation $ev
+    if ($disp.Action -eq 'cancel-superseded') {
+        $candidateVersion = if ($runningBefore -and "$($runningBefore.Version)") { [string] $runningBefore.Version } `
+            elseif ($ev.BaseSha) { "running $($ev.BaseSha.Substring(0, [Math]::Min(7, $ev.BaseSha.Length)))" } `
+            else { 'the newer release already in the environment' }
+        Cancel-SupersededWaitingTasks -SupersededItems @($b) -Target $target -CandidateVersion $candidateVersion | Out-Null
+        $recoveryCanceled = $true
+        continue
+    }
+    if ($disp.Action -eq 'hold') {
+        Set-HeldIssue -Release $rel -Target $target -Evaluation $ev -DeploymentNote "The deployment $($b.Deployment.Id) was created earlier and waits at its Sign-off: a person decides."
+        continue
+    }
+    if ($disp.Action -ne 'answer') {
+        Say "Left waiting: $(@($disp.Waiting) -join '; ')"
         continue
     }
     if ($DryRun) { Say 'Dry run: would answer the Sign-off.'; continue }
-    $signOff = Submit-SignOff -TaskId $b.TaskId -Reason (Format-PromotionReason -Decision $ev.Decision -Previous $previous.Name -RunUrl $RunUrl -Recovered) -WaitSeconds 0 -ProjectName $project.Name -ReleaseVersion $rel.Version -EnvironmentName $target.Name
+    $signOff = Submit-SignOff -TaskId $b.TaskId -Reason (Format-PromotionReason -Decision $disp.Decision -Previous $previous.Name -RunUrl $RunUrl -Recovered) -WaitSeconds 0 -ProjectName $project.Name -ReleaseVersion $rel.Version -EnvironmentName $target.Name
     if ($signOff -eq 'refused') {
         $b.SignOffRefused = $true
         Set-HeldIssue -Release $rel -Target $target -Evaluation (New-SignOffRefusedEvaluation -Sha (Get-Commit $rel) -ProjectName $project.Name -ReleaseVersion $rel.Version -EnvironmentName $target.Name) -DeploymentNote "The deployment $($b.Deployment.Id) waits at its Sign-off: the auto-promote account was refused permission to take it."
     }
+}
+if ($recoveryCanceled -and -not $DryRun) {
+    try {
+        $listed = Get-ActiveBusyItemsMarked
+        $busyItems = @($listed.Items)
+        $activeTaskIds = @($listed.ActiveTaskIds)
+    } catch { Say "Waiting: Octopus tasks could not be read whole after cancelling superseded recovery Sign-off ($($_.Exception.Message))"; Complete-AutoPromoteSuccess }
 }
 
 # 3. Candidate. Prefer an open pipeline-change hold so a newer tdd release does not restart its 60-minute clock (#688).
