@@ -442,7 +442,7 @@ output identities object = union(
         backup: cluster!.outputs.backupIdentity
       }
     : {},
-  poolApp: nonprod.outputs.poolApp
+  { poolApp: nonprod.outputs.poolApp }
 )
 output ingress object = hasCluster ? cluster!.outputs.ingress : {}
 output backup object = hasCluster ? cluster!.outputs.backup : {}
