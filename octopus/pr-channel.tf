@@ -71,19 +71,21 @@ resource "octopusdeploy_environment" "pr_slot" {
 # ---------------------------------------------------------------- Pull requests channel (ephemeral)
 
 resource "octopusdeploy_channel" "pr_channel" {
-  name                              = "Pull requests"
-  project_id                        = local.pr_channel_project_id
-  space_id                          = local.system.octopus.spaceId
-  description                       = "Ephemeral channel for pull request deployments. Releases carry a Slot custom field (1–8) that resolves to pool-1 … pool-8."
-  is_default                        = false
-  type                              = "EphemeralEnvironment"
+  name                                = "Pull requests"
+  project_id                          = local.pr_channel_project_id
+  space_id                            = local.system.octopus.spaceId
+  description                         = "Ephemeral channel for pull request deployments. Releases carry a Slot custom field (1–8) that resolves to pool-1 … pool-8."
+  is_default                          = false
+  type                                = "EphemeralEnvironment"
   ephemeral_environment_name_template = "pool-#{Octopus.Release.CustomFields[Slot]}"
-  parent_environment_id             = local.pr_parent_env_id
+  parent_environment_id               = local.pr_parent_env_id
 
-  custom_field_definitions {
-    field_name = "Slot"
-    description = "Slot number (1–8) for the ephemeral environment name (e.g., pool-3)."
-  }
+  custom_field_definitions = [
+    {
+      field_name  = "Slot"
+      description = "Slot number (1–8) for the ephemeral environment name (e.g., pool-3)."
+    }
+  ]
 }
 
 # ---------------------------------------------------------------- Combined slot step: migrate, swap, verify
@@ -170,7 +172,7 @@ resource "octopusdeploy_process_step" "pr_slot_verify" {
 # Step ordering: migrate → update → verify (no Sign-off, no pin, no records).
 resource "octopusdeploy_process_steps_order" "pr_slot" {
   process_id = octopusdeploy_process.pr_slot.id
-  steps      = [
+  steps = [
     octopusdeploy_process_step.pr_slot_migrate.id,
     octopusdeploy_process_step.pr_slot_update.id,
     octopusdeploy_process_step.pr_slot_verify.id,
