@@ -486,6 +486,13 @@ foreach ($folder in Get-ChildItem -Path (Join-Path $Root 'environments') -Direct
     Test-Rule "folder environments/$($folder.Name) is declared" ($environmentNames -contains $folder.Name) 'add it to system.json or remove the folder'
 }
 
+# CAP-014 (issue #786): every step script directly under scripts/ stops on errors. Same rule as the capability
+# check, on the working tree, so a missing preamble fails at pull-request time instead of after a merge.
+foreach ($stepScript in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File) {
+    $text = Get-Content -LiteralPath $stepScript.FullName -Raw
+    Test-Rule "step script $($stepScript.Name) stops on errors" ($text -match "ErrorActionPreference = 'Stop'" -and $text -match 'PSNativeCommandUseErrorActionPreference = \$true') "$($stepScript.Name) lacks the step-script preamble CAP-014 requires (`$ErrorActionPreference = 'Stop' and `$PSNativeCommandUseErrorActionPreference = `$true)"
+}
+
 if ($failures.Count -gt 0) {
     Write-Host "$($failures.Count) check(s) failed."
     exit 1
