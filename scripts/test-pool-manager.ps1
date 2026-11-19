@@ -23,6 +23,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+$ProgressPreference = 'SilentlyContinue'
 
 . (Join-Path $PSScriptRoot 'pool' 'common.ps1') -Root $Root -LoadOnly
 . (Join-Path $PSScriptRoot 'pool' 'lease.ps1') -Root $Root -LoadOnly
