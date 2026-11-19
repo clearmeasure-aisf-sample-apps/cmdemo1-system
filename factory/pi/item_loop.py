@@ -29,7 +29,13 @@ DELIVERY = f"https://raw.githubusercontent.com/{ORG}/cmdemo1-system/status/deliv
 NEVER_MERGE = {("cmdemo1-workorders", 1918)}
 DRIVER_MARK = "<!-- factory-pi-driver -->"
 # Existing limits (operating-instructions): 2 Review FAILs, 3 infrastructure reruns; then a Blocker.
-LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3}
+LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3}
+# Not required to merge, but a red one still stalls the PR: route to Pi instead of waiting on it (no-idle-stall).
+QUALITY_CHECKS = ("qodana", "refactoring rationale")
+HEARTBEAT_MIN = 30        # no progress for this long -> one short status comment
+BLOCKED_HEARTBEAT_MIN = 120
+RECHECK_S = 600           # a blocked driver re-reads its PR this often (no cron: the driver is its own timer)
+BLOCKED_HOLD_H = 24
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 
@@ -82,6 +88,19 @@ def checks_state(checks, required):
     if all(b in ("pass", "skipping") for b in rs): return "GREEN"
     return "PENDING"
 
+def quality_failures(checks):
+    """Names of failing Qodana / Refactoring-rationale checks (latest attempt of each name wins)."""
+    st = {}
+    for c in checks:
+        if any(q in c["name"].lower() for q in QUALITY_CHECKS): st[c["name"]] = c.get("bucket") or "pending"
+    return sorted(n for n, b in st.items() if b in ("fail", "cancel"))
+
+def heartbeat_due(progress_at, last_heartbeat, at, minutes=HEARTBEAT_MIN):
+    """True when nothing progressed for `minutes` and no heartbeat was posted in the last `minutes` (ISO strings)."""
+    def age(x): return (at - dt.datetime.fromisoformat(x)).total_seconds() / 60 if x else None
+    a, h = age(progress_at), age(last_heartbeat)
+    return a is not None and a >= minutes and (h is None or h >= minutes)
+
 def validate_plan(p):
     errs = []
     for k in ("repo", "issue", "branch", "files", "criteria", "tasks", "verify_cmd", "pr_title"):
@@ -133,6 +152,14 @@ class Driver:
     def save(self, **kw):
         self.s.update(kw); self.s["updated"] = iso(); self.s["pid"] = os.getpid()
         tmp = self.state_p + ".tmp"; json.dump(self.s, open(tmp, "w"), indent=1); os.replace(tmp, self.state_p)
+    def progress(self): self.save(progress_at=iso())
+    def heartbeat(self, minutes=HEARTBEAT_MIN):
+        """Short status comment when the item has made no progress for `minutes`; never silent, never spammy."""
+        if self.dry or not heartbeat_due(self.s.get("progress_at") or self.s.get("start"), self.s.get("heartbeat_at"), now(), minutes): return
+        self.save(heartbeat_at=iso())
+        self.comment(f"Status: no progress for {minutes}+ min. Stage `{self.s.get('stage')}`, status `{self.s.get('status')}`"
+                     + (f", PR #{self.s['pr']}" if self.s.get("pr") else "") + ". The driver is alive and re-checking on its own timer"
+                     + (f"; waiting on: {self.s['blocker']}" if self.s.get("blocker") else "") + ".")
     def log(self, msg):
         line = f"{iso()} {scrub(msg)}"
         print(line, flush=True)
@@ -186,7 +213,8 @@ class Driver:
     def blocker(self, what, who="Jeffrey"):
         self.comment(f"Blocker: {what} Needed from {who}. The Pi driver stopped (run `{self.s.get('run_id')}`). "
                      f"Reply on this issue or in chat.\n\n{self.usage()}")
-        self.save(stage="blocked", status="blocked", blocker=what); self.wake_bot("blocked")
+        self.save(resume_stage=self.s.get("stage") if self.s.get("stage") != "blocked" else self.s.get("resume_stage"),
+                  stage="blocked", status="blocked", blocker=what); self.wake_bot("blocked")
 
     def usage(self, final=False):
         a = [os.path.join(HERE, "usage-report"), "--run-dir", self.run_dir] + (["--final"] if final else [])
@@ -202,7 +230,7 @@ class Driver:
         open(pf, "w").write(scrub(prompt) + suffix)
         r = self.sh([os.path.join(HERE, "run-task"), "--run-dir", self.run_dir, "--cwd", self.s["wt"], "--task", name,
                      "--prompt-file", pf, "--timeout", str(timeout)], check=False)
-        self.log(f"pi {name}: " + (r.stdout.splitlines() or ["?"])[0][:300])
+        self.log(f"pi {name}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
         return r.returncode == 0
 
     def verify(self, name):
@@ -253,9 +281,11 @@ class Driver:
             state, cs = self.pr_checks()
             if cs and state != "PENDING": return state, cs
             if cs:
-                self.sh(["gh", "pr", "checks", str(self.s["pr"]), "-R", self.full, "--watch", "--interval", "60"]
-                        + (["--required"] if self.repo in REQUIRED else []), check=False, timeout=max_s)
-            time.sleep(60)
+                try:
+                    self.sh(["gh", "pr", "checks", str(self.s["pr"]), "-R", self.full, "--watch", "--interval", "60"]
+                            + (["--required"] if self.repo in REQUIRED else []), check=False, timeout=600)
+                except subprocess.TimeoutExpired: pass   # short slices so the heartbeat below runs
+            self.heartbeat(); time.sleep(60)
         return "PENDING", []
 
     def failed_logs(self, cs):
@@ -315,15 +345,36 @@ class Driver:
         meta.setdefault("pi_version", self.sh(["pi", "--version"], check=False).stdout.strip().splitlines()[-1:] and
                         self.sh(["pi", "--version"], check=False).stdout.strip().splitlines()[-1])
         json.dump(meta, open(meta_p, "w"), indent=1)
+        self.progress()
         try:
-            while self.s["stage"] not in ("done", "blocked", "dry-run-done"):
-                stage = self.s["stage"]; self.log(f"stage {stage}")
-                getattr(self, "st_" + stage.replace("-", "_"))()
+            while True:
+                while self.s["stage"] not in ("done", "blocked", "dry-run-done"):
+                    stage = self.s["stage"]; self.log(f"stage {stage}")
+                    getattr(self, "st_" + stage.replace("-", "_"))(); self.progress()
+                if self.s["stage"] != "blocked" or not self.hold_blocked(): break
         except Exception as e:  # unexpected: record, wake the bot once, never guess
             self.log(f"driver error: {e}")
             self.save(status="error", error=scrub(str(e))[-1500:]); self.wake_bot("driver error")
             raise
         self.save(status=self.s["stage"], end=iso())
+
+    def hold_blocked(self):
+        """After a Blocker the driver stays up (status stays `blocked`, the bot was woken) and re-checks the PR every
+        RECHECK_S for BLOCKED_HOLD_H. When the PR turns clean on its own (or Jeffrey's fix landed) it clears the
+        Blocker and resumes; otherwise it posts a heartbeat. Returns True when it resumed."""
+        if not self.s.get("pr") or self.s.get("resume_stage") not in ("ci", "review", "merge") or self.dry: return False
+        t_end = time.time() + BLOCKED_HOLD_H * 3600
+        while time.time() < t_end:
+            time.sleep(RECHECK_S)
+            state, cs = self.pr_checks()
+            if state == "GREEN" and not quality_failures(cs):
+                self.log("blocked PR is clean now; resuming")
+                self.comment("Status: checks are green now (including Qodana and Refactoring rationale); the driver cleared its "
+                             "Blocker and is resuming the Review.")
+                self.s["counts"] = {k: 0 for k in LIMITS}; self.s.pop("blocker", None)
+                self.save(stage="review", status="running"); self.progress(); return True
+            self.heartbeat(BLOCKED_HEARTBEAT_MIN)
+        return False
 
     def st_pickup(self):
         p = self.s["plan"]; self.setup_worktree()
@@ -371,7 +422,9 @@ class Driver:
     def st_ci(self):
         state, cs = self.wait_ci()
         self.log(f"required checks {state}")
-        if state == "GREEN": return self.save(stage="review")
+        bad = quality_failures(cs)
+        if state == "GREEN" and not bad: return self.save(stage="review")
+        if state == "GREEN": return self.fix_quality(bad, cs)
         if state == "PENDING": return self.blocker("required checks did not finish within 4 hours.")
         runs, logs = self.failed_logs(cs)
         if classify_failure(logs) == "infra":
@@ -393,6 +446,30 @@ class Driver:
         if not self.local_green(f"ci{n}"):
             return self.blocker(f"local verification red after CI fix pass {n}.")
         self.commit_push(f"Fix CI ({n})")
+
+    def fix_quality(self, bad, cs):
+        """Qodana / Refactoring-rationale red while required checks are green: hand the findings to Pi, never idle."""
+        if not self.bump("quality_fix"):
+            return self.blocker(f"{', '.join(bad)} still red after {LIMITS['quality_fix']} Pi fix passes.")
+        n = self.s["counts"]["quality_fix"]
+        links = "\n".join(f"- {c['name']}: {c.get('link') or 'no link'}" for c in cs if c["name"] in bad)
+        _, logs = self.failed_logs([c for c in cs if c["name"] in bad])
+        self.comment(f"Status: {', '.join(bad)} failed on PR #{self.s['pr']}; sending the findings to Pi (fix pass {n} of {LIMITS['quality_fix']}).")
+        self.pi(f"quality-fix-{n}", f"These non-required checks failed and block the PR: {', '.join(bad)}.\n{links}\n"
+                f"Findings (trimmed):\n```\n{logs or '(open the check link; no Actions log)'}\n```\n"
+                "Qodana: fix every new problem in the code, with no baseline entries. Refactoring rationale: the PR description "
+                "needs a `## Refactoring plan` section when a size-baselined file changes; write it to refactoring-plan.md in the "
+                "repo root of this tree (the driver pastes it into the PR body) and shrink the file when you can. Smallest change.")
+        if not self.local_green(f"quality{n}"): return self.blocker(f"local verification red after quality fix pass {n}.")
+        plan = os.path.join(self.s["wt"], "refactoring-plan.md")
+        if os.path.exists(plan):
+            body = os.path.join(self.run_dir, "logs", "pr-body-plan.md")
+            cur = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body").stdout
+            if "## Refactoring plan" not in cur:
+                open(body, "w").write(scrub(cur.rstrip() + "\n\n" + open(plan).read().strip() + "\n"))
+                self.gh("pr", "edit", str(self.s["pr"]), "-R", self.full, "--body-file", body, write=True)
+            os.remove(plan)
+        self.commit_push(f"Fix {', '.join(bad)} ({n})")
 
     def st_review(self):
         p = self.s["plan"]; ev, failed = [], []
@@ -420,7 +497,11 @@ class Driver:
         pr = int(self.s["pr"]); state, _ = self.pr_checks()
         info = json.loads(self.gh("pr", "view", str(pr), "-R", self.full, "--json", "author,headRefOid,state").stdout)
         if (self.repo, pr) in NEVER_MERGE or info["author"]["login"] != BOT or state != "GREEN" or info["headRefOid"] != self.s["head"]:
-            self.log(f"merge gate not met (checks {state}, head {info['headRefOid'][:8]})"); return self.save(stage="ci")
+            self.log(f"merge gate not met (checks {state}, head {info['headRefOid'][:8]})")
+            if not self.bump("merge_gate"):   # was an unbounded ci -> review -> merge spin
+                return self.blocker(f"merge gate not met after {LIMITS['merge_gate']} tries (checks {state}, PR head "
+                                    f"`{info['headRefOid'][:8]}` vs driver head `{str(self.s.get('head'))[:8]}`, author {info['author']['login']}).")
+            time.sleep(120); return self.save(stage="ci")
         if info["state"] != "MERGED":
             self.gh("pr", "merge", str(pr), "-R", self.full, "--squash", "--match-head-commit", self.s["head"], write=True)
         sha = self.gh("pr", "view", str(pr), "-R", self.full, "--json", "mergeCommit", "-q", ".mergeCommit.oid").stdout.strip()
@@ -471,7 +552,7 @@ class Driver:
                     if moves[-1] == "Done": return self.save(stage="done")
             except Exception as e:
                 self.log(f"deploy check error: {e}")
-            time.sleep(600)
+            self.heartbeat(); time.sleep(600)
         self.log("deploy follow-through window ended; the bot's Deployments sweep takes over")
         self.save(stage="done", deploy_handoff=True)
 

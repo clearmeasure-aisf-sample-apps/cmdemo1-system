@@ -64,6 +64,38 @@ class Rules(unittest.TestCase):
         self.assertTrue(c.startswith("Todo → In Progress\n\ncm-ai-ops-bot is taking this issue."))
         self.assertIn("`Docs-only: no`", c); self.assertIn("- [ ] A works", c); self.assertIn("~/factory-runs/x", c)
 
+class NoIdleStall(unittest.TestCase):
+    def test_quality_failures_route_qodana_and_refactoring_rationale(self):
+        cs = [{"name": "Build result", "bucket": "pass"}, {"name": "Qodana", "bucket": "fail"},
+              {"name": "Refactoring rationale", "bucket": "fail"}, {"name": "Qodana", "bucket": "pass"}]
+        self.assertEqual(L.quality_failures(cs), ["Refactoring rationale"])   # the later Qodana pass wins
+        self.assertEqual(L.quality_failures([{"name": "Build result", "bucket": "fail"}]), [])
+        self.assertEqual(L.quality_failures([{"name": "Qodana code quality", "bucket": "cancel"}]), ["Qodana code quality"])
+
+    def test_heartbeat_due_after_30_idle_minutes_once(self):
+        t = L.now(); ago = lambda m: (t - L.dt.timedelta(minutes=m)).isoformat()
+        self.assertFalse(L.heartbeat_due(ago(10), None, t))
+        self.assertTrue(L.heartbeat_due(ago(31), None, t))
+        self.assertFalse(L.heartbeat_due(ago(90), ago(5), t))      # one heartbeat per 30 min
+        self.assertTrue(L.heartbeat_due(ago(90), ago(31), t))
+        self.assertFalse(L.heartbeat_due(ago(90), None, t, minutes=120))
+        self.assertFalse(L.heartbeat_due(None, None, t))
+
+    def test_new_limits_are_bounded(self):
+        self.assertEqual((L.LIMITS["quality_fix"], L.LIMITS["merge_gate"]), (3, 3))
+
+    def test_blocker_records_resume_stage_and_dry_run_never_comments(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 8, dry_run=True); d.s.update(stage="ci", pr=5, start=L.iso())
+                d.blocker("required checks still red."); self.assertEqual((d.s["resume_stage"], d.s["stage"]), ("ci", "blocked"))
+                d.s["progress_at"] = (L.now() - L.dt.timedelta(minutes=45)).isoformat(); d.heartbeat()
+                self.assertNotIn("heartbeat_at", d.s)   # dry-run posts nothing
+                d.dry = False; d.sh = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, "", ""); d.comment = lambda b, pr=False: setattr(d, "hb", b)
+                d.heartbeat(); self.assertIn("no progress for 30+ min", d.hb); self.assertIn("required checks still red", d.hb)
+            finally: L.HOME = old
+
 class DryRunDriver(unittest.TestCase):
     def test_writes_are_skipped_in_dry_run(self):
         with tempfile.TemporaryDirectory() as h:
