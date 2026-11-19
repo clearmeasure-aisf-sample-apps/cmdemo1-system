@@ -39,6 +39,8 @@ below). In order:
    **Pi driver items** (a run dir `~/factory-runs/<repo>-<issue>/state.json` exists on this box): run
    `factory-pi-item-loop status --repo <repo> --issue <n>` first and decide from its one line, without reading CI,
    logs or the PR:
+   - Read `status` before `alive`: a driver in `blocked` stays alive (it re-checks the PR every 10 minutes and posts a status
+     heartbeat when idle 30+ minutes), but the blocker is still yours to report; only `running` + `alive: true` means leave it.
    - `alive: true`: the driver owns the item. Do nothing for it (no Review, merge, fix, column move or comment) and
      continue with the sweep only.
    - `status: blocked` or `error` (the driver re-assigned the issue to wake you): read `blocker` / `error`, report
