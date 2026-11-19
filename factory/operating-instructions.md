@@ -35,9 +35,7 @@ below). In order:
    when the board read below is allowed. Do not post a pickup comment again.
    An `issue-assigned` wake whose assigner is `github-actions[bot]` on an issue still in **Todo** is a post-merge
    (or free-WIP) pickup nudge from `factory-wake`: take that startable Todo when the repo has room (step 5), including
-   one that already has a `Queued: WIP is full` comment — that comment does not make the item unstartable. In
-   `cmdemo1-workorders`, do not take a Pi-lane item, and take a new item of the bot's own only when he holds 0
-   workorders items and the pickup would not block the 2 reserved Pi slots (step "Board flow and WIP").
+   one that already has a `Queued: WIP is full` comment — that comment does not make the item unstartable.
 2. Read the issue or pull request the event names through **REST only**
    (`gh api repos/<owner>/<repo>/issues/<n>`, `…/pulls/<n>`, then REST for comments, checks and runs). Do not use
    GraphQL for that content.
@@ -84,10 +82,7 @@ below). In order:
    (including one with a prior `Review: PASS, not merged`): run its Review and merge in this session (one
    `gh pr checks` call per Review item; CI events don't always wake you).
    Before ending, when the board read was allowed (step 3 did not withhold it) and any repository still has a free
-   WIP slot, pick the highest-priority **startable** Todo for that repo (board-wide, not only the woken issue). In
-   `cmdemo1-workorders`, a free slot for the bot means he holds 0 workorders items of his own, total WIP is under 3,
-   and picking the item would still leave enough free slots for the Pi lane to hold 2; never pick or reassign a
-   Pi-lane item. A prior `Queued: WIP is full` comment does **not** disqualify an item — it is still startable once
+   WIP slot, pick the highest-priority **startable** Todo for that repo (board-wide, not only the woken issue). A prior `Queued: WIP is full` comment does **not** disqualify an item — it is still startable once
    that repo has
    room. Do this whenever a wake ends with room — after posting `Review → Merged` / `Review → Done` (do not end
    the wake until this sweep has run), after a `Blocker:` that leaves the item in Todo, a `Queued: WIP is full`
@@ -106,17 +101,10 @@ Todo → In Progress → Review → Merged → TDD → UAT → Done.
   at its limit, leave its new items in Todo and take the next Todo item from a repo with room; post one
   `Queued: WIP is full for <repo> (3).` comment on each skipped item once, never again (`<repo>` is the short
   repository name, e.g. `cmdemo1-system`).
-- In `cmdemo1-workorders` only, 2 of those 3 slots are reserved for the local Pi lane (issues labeled `local-pi`,
-  or claimed by the Pi lane / FactoryBot1 with a comment that the factory bot should not implement them). Jeffrey,
-  Nov 15 2026 9:13am CT: "You keep pi local working. Two at a time." The factory bot may hold at most 1 workorders
-  item, and he picks up a new workorders item only when he holds 0 workorders items of his own. Pi-lane items count
-  toward the 3. He must never take or block the 2 reserved Pi slots, and he must never pick up or reassign a
-  Pi-lane item (he may still review and merge a green Pi-lane PR under the normal rules). If he skips a startable
-  non-Pi workorders Todo for this reason, post one `Queued: 2 of 3 workorders slots reserved for the local Pi lane.`
-  comment on that item once, never again. Other repositories stay at 3 with no reserved slots.
-- Oldest assigned **startable** Todo item first (skip an item whose repo is at its limit, a `cmdemo1-workorders`
-  Pi-lane item, a `cmdemo1-workorders` item when the bot already holds a workorders item of his own or when picking
-  it up would leave fewer than 2 slots for the Pi lane, or one already marked
+- No slots are reserved in any repository, `cmdemo1-workorders` included: the local Pi lane is off (Jeffrey, 18 Nov
+  2026), so a `local-pi` label or an old Pi-lane comment does not make an item unstartable. The bot works up to 3
+  items per repository himself, delegating the coding to Pi on the RTX Pro 5000 (section "Pi on the RTX Pro 5000").
+- Oldest assigned **startable** Todo item first (skip an item whose repo is at its limit, or one already marked
   `Blocker:` that still needs a reply the bot cannot provide, such as clarified acceptance criteria; do not skip
   an item because it carries a prior `Queued: WIP is full` comment, and do not skip an item because it is waiting
   for a human approval to merge; continue down the list to the next startable one).
