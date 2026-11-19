@@ -8,7 +8,7 @@
 #   LOCAL_LLM_PRO5000_TOKEN  bearer token of the proxy
 #
 # Installs: Pi into ~/.local (npm prefix), the wrapper ~/.local/bin/pi-pro5000, factory/pi/run-task and
-# factory/pi/usage-report into ~/.local/bin, and the Pi agent dir ~/.config/local-llm/pi-pro5000. Ends with the
+# factory/pi/usage-report into ~/.local/bin, the item driver link factory-pi-item-loop, and the Pi agent dir ~/.config/local-llm/pi-pro5000. Ends with the
 # health check (a models list only).
 #
 # Exit codes: 0 ready, 3 a secret is missing (ask Jeffrey), 4 proxy unreachable or refused (ask Jeffrey), 1 other.
@@ -65,6 +65,8 @@ install -m 755 "$HERE/pi-pro5000" "$BIN/pi-pro5000"
 install -m 755 "$HERE/run-task" "$BIN/factory-pi-run-task"
 install -m 755 "$HERE/usage-report" "$BIN/factory-pi-usage-report"
 install -m 755 "$HERE/health.sh" "$BIN/pi-pro5000-health"
+# The driver runs from this clone (it calls run-task and usage-report next to it), so link rather than copy.
+ln -sfn "$HERE/item-loop" "$BIN/factory-pi-item-loop"
 
 echo "Pi $(pi --version | tail -1) installed; wrapper $BIN/pi-pro5000"
 exec "$HERE/health.sh"

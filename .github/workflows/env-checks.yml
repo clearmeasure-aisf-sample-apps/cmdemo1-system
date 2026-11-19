@@ -63,6 +63,9 @@ jobs:
         shell: pwsh
         run: ./scripts/test-factory-wake.ps1
 
+      - name: Factory Pi driver rules
+        run: python3 -m unittest factory/pi/test_item_loop.py
+
       - name: Acceptance-test worker image rules
         shell: pwsh
         run: ./scripts/test-test-runner.ps1

@@ -144,6 +144,11 @@ function Get-PullRequestGate {
     if ($author -cne $BotLogin) {
         return [ordered] @{ Action = 'skip'; Reason = "pull request #${number} author is '$author', not $BotLogin" }
     }
+    # The factory bot's Pi driver (factory/pi/item_loop.py) watches CI, fixes and merges this PR itself; a nudge would
+    # only spend a Grok wake.
+    if ([string] (Get-FactValue $PullRequest 'body') -match '<!-- factory-pi-driver -->') {
+        return [ordered] @{ Action = 'skip'; Reason = "pull request #${number} is owned by the Pi driver" }
+    }
     return [ordered] @{ Action = 'consider'; Reason = "open bot pull request #${number}" }
 }
 
