@@ -12,10 +12,10 @@
     stack (an environment release, or the nightly drift check) agrees with what runs. The deploy identity is excluded
     from the stack's deny settings, so it may make this change. It then waits until the new revision is ready, and fails
     at once, with the container's last console lines, when the revision cannot start. When the deployable is ui and
-    Octopus.FeatureFlags.ClientIdentifier (or the deprecated alias Octopus.FeatureToggles.ClientIdentifier) has text,
-    that same update sets the container app environment variable Octopus__FeatureFlags__ClientIdentifier. A container
-    app has no package transform. Both variables empty, or any other deployable, leaves the update as it was. The
-    value is never logged.
+    Octopus's per-environment Octopus.FeatureFlags.ClientIdentifier (or the deprecated alias
+    Octopus.FeatureToggles.ClientIdentifier) has text, that same update sets the container app environment variable
+    Octopus__FeatureFlags__ClientIdentifier. A container app has no package transform. Both variables empty, or any
+    other deployable, leaves the update as it was. The value is never logged.
 
     The same script is also step "Revert deployable" of a container deployable (condition Failure, before "Revert
     pin"): it points the app at the version "Pin version" recorded in PreviousVersion, so a failed acceptance or
@@ -59,7 +59,8 @@ function Resolve-ContainerDeployVersion {
 }
 
 function Resolve-FeatureFlagClientIdentifier {
-    # Prefer the current Octopus name; fall back to the deprecated alias. Never log the value (a JWT).
+    # Prefer Octopus's built-in per-environment FeatureFlags name; fall back to the deprecated alias.
+    # Never log the value (a JWT). Do not use one unscoped project variable or repo secret for all environments.
     param($Parameters)
     if ($null -eq $Parameters) { return '' }
     $preferred = [string] $Parameters['Octopus.FeatureFlags.ClientIdentifier']
@@ -68,10 +69,11 @@ function Resolve-FeatureFlagClientIdentifier {
 }
 
 function Get-FeatureFlagClientInject {
-    # Octopus feature flags: the client identifier is Octopus.FeatureFlags.ClientIdentifier (current), or
-    # Octopus.FeatureToggles.ClientIdentifier (deprecated alias). A container app has no package transform, so the
-    # ui deploy writes it as the environment variable the OpenFeature provider reads. Empty, missing, or any
-    # deployable other than ui: nothing is added, and the container app update is the one it was. Never log the value.
+    # Octopus feature flags: the client identifier is the built-in per-environment
+    # Octopus.FeatureFlags.ClientIdentifier (current), or Octopus.FeatureToggles.ClientIdentifier (deprecated alias).
+    # A container app has no package transform, so the ui deploy writes it as the environment variable the
+    # OpenFeature provider reads. Empty, missing, or any deployable other than ui: nothing is added, and the
+    # container app update is the one it was. Never log the value.
     param(
         [Parameter(Mandatory)] [string] $Deployable,
         [AllowEmptyString()] [string] $ClientIdentifier
