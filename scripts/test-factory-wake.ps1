@@ -75,6 +75,9 @@ Test-Case 'pr: non-bot author is skipped' `
 Test-Case 'pr: closed bot PR is skipped' `
     ((Get-PullRequestGate -PullRequest ([ordered] @{ number = 1; state = 'CLOSED'; author = 'cm-ai-ops-bot'; body = ''; headCommitDate = $headDate }) -BotLogin 'cm-ai-ops-bot').Action) `
     'skip'
+Test-Case 'pr: bot PR owned by the Pi driver is skipped (driver watches CI, no Grok wake)' `
+    ((Get-PullRequestGate -PullRequest ([ordered] @{ number = 1; state = 'OPEN'; author = 'cm-ai-ops-bot'; body = "Closes #1`n`n<!-- factory-pi-driver -->"; headCommitDate = $headDate }) -BotLogin 'cm-ai-ops-bot').Action) `
+    'skip'
 Test-Case 'pr: missing pull request is skipped' `
     ((Get-PullRequestGate -PullRequest $null -BotLogin 'cm-ai-ops-bot').Action) `
     'skip'

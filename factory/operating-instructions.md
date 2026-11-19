@@ -36,6 +36,16 @@ below). In order:
    An `issue-assigned` wake whose assigner is `github-actions[bot]` on an issue still in **Todo** is a post-merge
    (or free-WIP) pickup nudge from `factory-wake`: take that startable Todo when the repo has room (step 5), including
    one that already has a `Queued: WIP is full` comment — that comment does not make the item unstartable.
+   **Pi driver items** (a run dir `~/factory-runs/<repo>-<issue>/state.json` exists on this box): run
+   `factory-pi-item-loop status --repo <repo> --issue <n>` first and decide from its one line, without reading CI,
+   logs or the PR:
+   - `alive: true`: the driver owns the item. Do nothing for it (no Review, merge, fix, column move or comment) and
+     continue with the sweep only.
+   - `status: blocked` or `error` (the driver re-assigned the issue to wake you): read `blocker` / `error`, report
+     it to Jeffrey when "Reporting to Jeffrey" lists it, and end. When a later `jeffreypalermo` comment answers it,
+     fix `plan.json` if needed and run `factory-pi-item-loop start --repo <repo> --issue <n> --resume --top-session <id>`.
+   - `stage: done` (or `deploy` and not alive): the item is finished; only the sweep remains.
+   - Not alive and not finished (box restarted): `factory-pi-item-loop start … --resume --top-session <id>`, end.
 2. Read the issue or pull request the event names through **REST only**
    (`gh api repos/<owner>/<repo>/issues/<n>`, `…/pulls/<n>`, then REST for comments, checks and runs). Do not use
    GraphQL for that content.
@@ -165,23 +175,25 @@ duplicate journals, or a comment within a minute of another one on the same item
   branch and ONE PR (`Closes #A, closes #B`). Each issue still gets its own pickup comment, verdict and usage table.
 - **Code**: the bot owns the plan and the implementation, and delegates **every** code-editing and test-writing task
   to Pi on the RTX Pro 5000 (section "Pi on the RTX Pro 5000"). He does not write product code or tests himself and
-  does not use a Cursor cloud agent for them. The bot, not Pi, writes every issue comment, commits, pushes and opens
-  the PR.
+  does not use a Cursor cloud agent for them. The Pi driver (section "Pi on the RTX Pro 5000") runs the whole
+  item loop with deterministic shell steps: comments, commits, pushes, the PR, CI watching, fix passes, review
+  evidence, the merge, the default-branch build and the deploy column moves. Pi only edits files and reads logs.
 - Required checks must be green before the Review verdict: `Build result` and `secret-scan` in `cmdemo1-workorders`,
-  `env-checks` in `cmdemo1-system`; elsewhere every check on the PR. Fix a red check in the same PR (hand the failing
-  log to a Pi fix task); never disable, skip or re-baseline a gate to get green.
-- Infrastructure failures (the failing step never reached the code, e.g. apt/DNS, runner provisioning, a package
-  or container registry timeout, while build and unit tests pass): do not push empty or retrigger commits, because they
+  `env-checks` in `cmdemo1-system`; elsewhere every check on the PR. The driver fixes a red check in the same PR (it
+  hands the trimmed failing log to a Pi fix task, at most 3 passes, then a Blocker); never disable, skip or
+  re-baseline a gate to get green.
+- Infrastructure failures (the driver applies this rule itself; the failing step never reached the code, e.g.
+  apt/DNS, runner provisioning, a package or container registry timeout, while build and unit tests pass): do not push
+  empty or retrigger commits, because they
   rerun every job. Wait about 10 minutes, then `gh run rerun <run-id> --failed` so only the failed jobs run again. If
   the same infrastructure step fails 3 times, post a Blocker comment naming the outage and stop retrying.
   If the rerun is refused (`Resource not accessible`), or the run is stuck `queued` with no jobs after GitHub
   reports Actions operational again, push one empty commit instead. Don't raise a Blocker for that alone.
 - When the PR opens: move to Review (`In Progress → Review`) in the same comment as the PR link, or as soon as the
   open is known.
-- Waiting on checks: if they finish in a few minutes, wait in the session. If not, create a PR-scoped routine on that
-  PR (events `ci-passed`, `ci-failed`, `review-changes-requested`, `pr-merged`, `pr-closed`; it deletes itself when the
-  PR merges or closes) whose prompt is `Read factory/operating-instructions.md from cmdemo1-system main and handle
-  PR #<P> in <repo>.`, then end the session.
+- Waiting on checks: never in a Grok turn. The driver waits with `gh pr checks --watch` / `gh run watch` (no LLM
+  call while waiting). Do not create PR-scoped routines for driver PRs; their PR body carries
+  `<!-- factory-pi-driver -->`, so `factory-wake` does not nudge you for their CI either.
 
 ## Pi on the RTX Pro 5000 (coding tasks)
 
@@ -191,7 +203,7 @@ top-level session and the Pi sessions. Tools are in `factory/pi/` of this reposi
 
 **Setup (first wake, and any wake where `pi-pro5000-health` is not on the PATH):** clone or update
 `cmdemo1-system` on the box and run `bash factory/pi/setup.sh`. It is idempotent: installs Pi (pinned version), the
-`pi-pro5000` wrapper, `factory-pi-run-task`, `factory-pi-usage-report` and `pi-pro5000-health` into `~/.local/bin`.
+`pi-pro5000` wrapper, `factory-pi-run-task`, `factory-pi-usage-report`, `factory-pi-item-loop` and `pi-pro5000-health` into `~/.local/bin`. Re-run it after `git pull` of this repository when `factory/pi/` changed.
 
 - Exit 3 (`MISSING_SECRETS`): the account lacks `LOCAL_LLM_PRO5000_URL` and/or `LOCAL_LLM_PRO5000_TOKEN`. Ask
   Jeffrey for them with the Grok Bot secret request form (those exact names; never ask for the values in chat or a
@@ -201,30 +213,62 @@ top-level session and the Pi sessions. Tools are in `factory/pi/` of this reposi
   guess or search for a URL, and never start, stop, restart or warm the model server or switch its model.
 - At the start of every implementation wake run `pi-pro5000-health` once (a models list only; no warm-up).
 
-**Working an item:**
+**Working an item: the loop is Pi, not Grok** (Jeffrey, 18 Nov 2026 11:41pm CT: "If there is build monitoring or
+processing logs or polling tool calls, delegate those to pi also. Let the loop be pi."):
 
-1. The bot writes the plan (pickup comment), creates the branch and a worktree, and splits the work into small
-   Pi tasks: one test or one code change each, with the files, the acceptance criterion it serves, the repository's
-   AGENTS.md / CLAUDE.md rules that apply, and "Do not run git commit or push. End your reply with PASS or FAIL."
-2. Run each task with
-   `factory-pi-run-task --run-dir ~/factory-runs/<repo>-<issue> --cwd <worktree> --task <name> --prompt-file <file> --top-session <id>`.
+1. On the pickup wake, run `factory-pi-item-loop draft-plan --repo <repo> --issue <n> --top-session <id>`. Pi reads
+   the issue and repository and writes `~/factory-runs/<repo>-<issue>/plan.draft.json`: branch, files, constraints,
+   one criterion per acceptance criterion with an `evidence_cmd` (a command that exits 0 only when the criterion
+   holds: a filtered test run, an HTTP probe), small ordered Pi `tasks` (tests first), `verify_cmd` (the repository's
+   real build and tests, narrowed to what the item touches), `pr_title`, `pr_summary`.
+2. Read the draft once, fix anything wrong (the plan is the bot's: Design rules above, acceptance criteria literal,
+   no shared-enumeration change the issue did not ask for), save it as `plan.json`, then run
+   `factory-pi-item-loop start --repo <repo> --issue <n> --top-session <id>` and **end the turn**. `start` validates
+   the plan and launches the driver with `nohup`; it returns at once.
    `<id>` is the bot's own top-level grok.com session / run identifier for this wake (the routine run or chat
-   session id; if none is visible, the GitHub event's delivery id). Keep the same run dir for the whole item across
-   wakes. Stdin is closed for Pi; its session JSONL is kept under the run dir. At most **2** Pi tasks at once (the
-   tool enforces it).
-3. The bot verifies every Pi result himself with the real build and tests (the repository's PrivateBuild / test
-   command), reads the diff, and sends failures back to a new Pi fix task with the failing output. A Pi `PASS` is
-   not evidence.
-4. The bot alone does git commit / push, the PR, board moves, comments, merges, and anything touching secrets or
-   credentials; none of these is ever delegated to Pi, and Pi never sees a secret.
-5. Usage: `factory-pi-usage-report --run-dir ~/factory-runs/<repo>-<issue>` (progress, in the `In Progress → Review`
-   comment) and `… --final` (in the merge verdict). It lists each Pi session id, task, result, tokens in / out and
-   wall time, totals, and the top-level session id and wall time. Post it as produced; it holds no URL or token.
-   If Pi was never reachable for an item, say so in the Blocker instead of a table.
+   session id; if none is visible, the GitHub event's delivery id).
+3. The driver (`factory/pi/item_loop.py`), with no Grok turn: posts the pickup comment and moves the board, runs each
+   Pi task through `run-task` (at most **2** Pi tasks at once on the RTX Pro 5000, stdin closed, session JSONL kept),
+   runs `verify_cmd` and hands failures back to Pi (3 passes), commits and pushes as `cm-ai-ops-bot`, opens the PR
+   (`Closes #N`, the driver marker) with `In Progress → Review`, watches the required checks, triages red logs
+   (infrastructure: wait 10 minutes and rerun failed jobs, 3 times; code: Pi summarizes and fixes, 3 passes), runs
+   every `evidence_cmd` on the PR head as the Review (FAIL: `Review → In Progress` and a Pi fix, at most 2), squash-merges
+   on PASS with required checks green (never PR 1918, only its own PRs, `--match-head-commit`), posts
+   `Review → Merged` (or `Review → Done` for docs-only after the default-branch run is green) with the evidence and
+   the usage table, watches the default-branch runs of the merge, then follows delivery.json and moves Merged → TDD →
+   UAT → Done (48 hours; after that the Deployments sweep takes over). Any limit reached: one `Blocker:` comment,
+   then it re-assigns the issue to wake you once.
+4. The bot alone decides the plan; the driver's shell steps alone push, merge, comment and move the board under the
+   gates of this file; Pi never pushes, merges, comments, calls `gh` or sees a secret (`validate_plan` refuses
+   prompts that ask for it; every log and comment is scrubbed).
+5. Usage: every driver comment from `In Progress → Review` on ends with the `usage-report` table: the Grok
+   session id(s) that touched the item, the Pi driver run id, each Pi session id, task, result, tokens in / out and
+   wall time, totals, and the item's wall time. On any later wake about the item, first run
+   `factory-pi-item-loop note-wake --repo <repo> --issue <n> --top-session <id>` so the table lists that session too.
+6. Trivial docs-only edits you make yourself (a few Markdown lines) need no driver; everything else uses it.
+   The driver applies from the next item a wake picks up; an item already in flight finishes the way it started.
+
+## Saving Grok usage
+
+Grok turns are the expensive part; Pi on the RTX Pro 5000 is free. Measured from Nov 10–18 (287 bot PRs, 1,530 bot
+comments): a workorders PR waits a median 8 minutes per Build and 2.1 CI heads per PR, 47 of 147 merged workorders
+PRs had a red Build (106 red runs), and before the driver the bot waited for every one of those in a Grok turn.
+
+- One Grok wake per item to plan (draft by Pi, approve, `start`, end), one when it merges or blocks, nothing between.
+- Never poll CI, sleep, `gh run watch`, `gh pr checks --watch` or wait for a deploy in a Grok turn.
+- Never read raw CI or build logs in a Grok turn; the driver hands them to Pi. Read only `item-loop status` and, for
+  a Blocker, the one line it names.
+- No exploration beyond the plan: no re-reading files, re-checking boards or confirming "nothing changed".
+- Prefer one shell call that does several steps over many small tool calls; keep tool output short (`--jq`, `-q`).
+- Batch small items in one plan and one driver run (one PR, `Closes #A, closes #B`).
+- A wake for a driver-owned item with `alive: true` ends after the sweep, with no comment and no message.
+- When the proxy is down, do not retry Pi in the turn: one report to Jeffrey (see Pi setup above), then end.
 
 ## Review
 
-- Check out the PR head read-only. Exercise every acceptance criterion literally:
+- The driver runs the Review: each criterion's `evidence_cmd` on the PR head, so write evidence commands that meet
+  the bullets below (a test or probe of the exact page or state). For an item without the driver, check out the PR
+  head read-only. Exercise every acceptance criterion literally:
   - docs-only: check each criterion against the diff text; do not build or run the app;
   - otherwise: run the app (or the tests the criterion names) and take evidence from the running app: a screenshot,
     an HTTP probe or a test result for the exact page or state the criterion names. Reading the code is not evidence.
@@ -263,6 +307,11 @@ workflow in `cmdemo1-system` promotes tdd → uat → prod on its own for every 
 `<deployable> <version> held before <env>` issue (label `release-held`) when it holds a release. The bot does not
 drive Octopus deployments; it only checks the result and moves columns.
 
+For an item whose Pi driver is alive (`factory-pi-item-loop status` says `stage: deploy`, `alive: true`), the driver
+reads delivery.json every 10 minutes and makes these moves itself: skip that item in the sweep below. On the prod
+webhook wake, still send the one Done-in-prod message per release, listing the items the driver (or you) moved to
+Done for that release.
+
 An Octopus webhook wake for a prod deployment (routine `Prod deploy (Octopus webhook)`) is a trigger to run this
 follow-through immediately. The same rules apply when any wake finds items in Merged, TDD or UAT: a successful
 deploy to tdd, uat or prod moves every item whose commits are in that release to **TDD**, **UAT** or **Done**.
@@ -280,8 +329,8 @@ On any wake with items in Merged, TDD or UAT, check them all at once:
    - change runs in **uat** and the item is in Merged or TDD: `… → UAT`;
    - change runs in **prod** and the item is in Merged, TDD or UAT: `… → Done`, with the prod version and `/_build`
      commit. Confirm prod `/_healthcheck/detailed` is Healthy once for the whole release.
-4. **Docs-only** items (Docs-only: yes in the design): no release is built for them. Right after the merge, wait in
-   the same session for the master Build of the merge commit (a few minutes); green: `Review → Done` in one comment
+4. **Docs-only** items (Docs-only: yes in the design): no release is built for them. Right after the merge, the driver
+   waits (never a Grok turn) for the master Build of the merge commit (a few minutes); green: `Review → Done` in one comment
    (skip Merged / TDD / UAT).
 5. Master Build of the merge red, a deployment failed, or a `release-held` issue names the release: one Blocker comment
    on the affected items and report to Jeffrey. Never re-run, re-pin or promote by hand.
@@ -300,6 +349,8 @@ On any wake with items in Merged, TDD or UAT, check them all at once:
   approves himself.").
 - Work an issue not assigned to `cm-ai-ops-bot`.
 - Write product code or tests yourself, or hand a push, merge, comment or secret to Pi.
+- Poll CI, sleep, watch a run or a deploy, or read raw CI logs in a Grok turn (the Pi driver does it).
+- Touch a driver-owned item while its driver is alive.
 - Add a cron schedule. The bot is woken by GitHub events and the Octopus prod-deploy webhook only.
 
 ## Credentials

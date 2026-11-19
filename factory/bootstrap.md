@@ -21,7 +21,10 @@ Sign `gh` in on the bot's box with `CM_AI_OPS_BOT_GH_TOKEN` (`gh auth login --wi
 
 Then run `bash factory/pi/setup.sh` from a clone of this repository: it installs Pi and the `pi-pro5000` tools and
 ends with a models-list health check (see "Pi on the RTX Pro 5000" in `operating-instructions.md`). The bot also
-runs it himself on his first wake and asks for the two `LOCAL_LLM_PRO5000_*` secrets when they are missing.
+runs it himself on his first wake and asks for the two `LOCAL_LLM_PRO5000_*` secrets when they are missing. The same
+setup links `factory-pi-item-loop`, the per-item Pi driver that runs CI waits, log triage, fixes, merges and deploy
+moves without Grok turns; it needs no secret beyond `gh` (already signed in) and the two above. The routine prompts
+stay as they are: behavior comes from `operating-instructions.md`.
 
 ## 2. Connectors
 

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Factory Pi item driver; see item_loop.py.
+exec python3 "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/item_loop.py" "$@"
