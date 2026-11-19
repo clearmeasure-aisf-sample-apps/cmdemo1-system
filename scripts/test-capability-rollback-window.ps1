@@ -17,6 +17,9 @@
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandArgumentPassing = 'Standard'
+$PSNativeCommandUseErrorActionPreference = $true
+$ProgressPreference = 'SilentlyContinue'
 
 # Load the one function under test, not the whole capability script.
 $scriptPath = Join-Path $PSScriptRoot 'test-capabilities.ps1'
