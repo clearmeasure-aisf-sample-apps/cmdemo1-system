@@ -1,6 +1,6 @@
 # cmdemo1-ui feature toggles
 
-Building management, vendor management, and priority badges are Octopus feature toggles on project **cmdemo1-ui** (`Projects-981`) in space **cmdemo1-demo** (`Spaces-355`). The API is `/api/Spaces-355/projects/Projects-981/featuretoggles`. The project UI may label that screen **Feature Flags**. This runbook calls them toggles.
+Building management, vendor management, and priority badges are Octopus feature toggles on project **cmdemo1-ui** (`Projects-981`) in space **cmdemo1-demo** (`Spaces-355`). The API is the rule-based (V2) feature flag API: `{base}/feature-flags/v2` (list/create) and `{base}/feature-flags/{id}/v2` (get/modify), where `{base}` is `{instance}/api/{space}/projects/{project}`. The project is upgraded to rule-based flags, and the legacy feature toggles API returns 400. The project UI may label that screen **Feature Flags**. This runbook calls them toggles.
 
 Targeting uses the **rules** model ([feature flags](https://octopus.com/docs/feature-flags), [rules](https://octopus.com/docs/feature-flags/rules), [upgrading to rules](https://octopus.com/docs/feature-flags/upgrading-to-rules)). Each environment has an on/off switch and optional phases of rules. An environment that is on with no rules is on for everyone. An environment that is off is off for everyone, whatever its rules say. An environment with no row uses the flag default.
 
@@ -38,7 +38,7 @@ Acceptance is a live flip in `tdd`: after the identifier reaches the tdd ui cont
 
 No API key is stored in this repository. The script reads `OCTOPUS_API_KEY`, or `OCTOPUS_ACCESS_TOKEN` from `OctopusDeploy/login`. Put the key in the environment. Do not pass it as an argument (shell history and process listings keep arguments).
 
-`scripts/ensure-ui-feature-toggles.ps1` speaks the rules payload only ([API](https://octopus.com/docs/api/feature-flags)): each environment is `DeploymentEnvironmentId`, `IsEnabled`, and `Phases` (empty for the defaults above). It does not send `RolloutPercentage` or other legacy targeting fields. It does not run the project upgrade. If a stored toggle still has legacy targeting, a write is refused until the project is upgraded in Octopus.
+`scripts/ensure-ui-feature-toggles.ps1` speaks the rule-based (V2) API only ([API](https://octopus.com/docs/api/feature-flags)): `{base}/feature-flags/v2` (list/create) and `{base}/feature-flags/{id}/v2` (get/modify). Each environment in the payload is `DeploymentEnvironmentId`, `IsEnabled`, and `Phases` (empty for the defaults above). It does not send `RolloutPercentage` or other legacy targeting fields. It does not run the project upgrade. If a stored toggle still has legacy targeting, a write is refused until the project is upgraded in Octopus.
 
 From a checkout of this repository, with no credential, this prints the create and does not call Octopus:
 
@@ -58,7 +58,7 @@ Ensure creates a missing toggle at that flag's defaults above (rules shape). Run
 pwsh -NoProfile -File scripts/ensure-ui-feature-toggles.ps1 -ResetDefaults
 ```
 
-After this workflow is on `main`, Actions → **ui-feature-toggles** → Run workflow runs that same Ensure as the system's Octopus service account (`OctopusDeploy/login`, GitHub environment `octopus`). It does not run on push, so a merge does not reset a demo flip. If the run stops with 403, that account can read the project and cannot edit feature toggles: run the script as a user who can. If Octopus answers 404, the instance is not serving `/featuretoggles` on this project. Create the three toggles in the UI instead (next section) with the same names and the same on/off values, leave each toggle default off, and leave rules empty on environments that should be on.
+After this workflow is on `main`, Actions → **ui-feature-toggles** → Run workflow runs that same Ensure as the system's Octopus service account (`OctopusDeploy/login`, GitHub environment `octopus`). It is a `workflow_dispatch` run only (it does not run on push, so a merge does not reset a demo flip), and it runs Ensure without `-ResetDefaults`, so it keeps existing values. If the run stops with 403, that account can read the project and cannot edit feature toggles: run the script as a user who can. If Octopus answers 404, the instance is not serving the feature-flags API on this project. Create the three toggles in the UI instead (next section) with the same names and the same on/off values, leave each toggle default off, and leave rules empty on environments that should be on.
 
 Read what is stored:
 
