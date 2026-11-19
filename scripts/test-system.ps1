@@ -493,6 +493,19 @@ foreach ($stepScript in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1'
     Test-Rule "step script $($stepScript.Name) stops on errors" ($text -match "ErrorActionPreference = 'Stop'" -and $text -match 'PSNativeCommandUseErrorActionPreference = \$true') "$($stepScript.Name) lacks the step-script preamble CAP-014 requires (`$ErrorActionPreference = 'Stop' and `$PSNativeCommandUseErrorActionPreference = `$true)"
 }
 
+# Issue #789: every step script directly under scripts/ opens with the standard header, so the shell picks pwsh, the
+# engine refuses to run under an older version, and every variable miss and null member is an error from line one.
+foreach ($stepScript in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File) {
+    $head = @(Get-Content -LiteralPath $stepScript.FullName -TotalCount 5)
+    $full = Get-Content -LiteralPath $stepScript.FullName -Raw
+    $missing = @(
+        if (@(Get-Content -LiteralPath $stepScript.FullName -TotalCount 1)[0] -cne '#!/usr/bin/env pwsh') { 'the #!/usr/bin/env pwsh first line' }
+        if ($head -cnotcontains '#Requires -Version 7.4') { 'a #Requires -Version 7.4 line in the first 5 lines' }
+        if ($full -notmatch 'Set-StrictMode -Version Latest') { 'Set-StrictMode -Version Latest' }
+    )
+    Test-Rule "step script $($stepScript.Name) has the standard header" ($missing.Count -eq 0) "$($stepScript.Name) is missing $($missing -join ', ')"
+}
+
 if ($failures.Count -gt 0) {
     Write-Host "$($failures.Count) check(s) failed."
     exit 1
