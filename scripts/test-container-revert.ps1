@@ -16,6 +16,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+$ProgressPreference = 'SilentlyContinue'
 
 $failures = 0
 function Test-Case([string] $Name, $Actual, $Expected) {
