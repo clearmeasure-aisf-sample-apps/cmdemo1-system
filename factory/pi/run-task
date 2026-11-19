@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Run ONE Pi task on the RTX Pro 5000 and record its usage.
+
+    run-task --run-dir DIR --cwd WORKTREE --task NAME --prompt-file FILE [--timeout SEC] [--top-session ID]
+
+- Runs `pi-pro5000 -p <prompt>` in WORKTREE with stdin closed (Pi waits forever on an open stdin), no context files,
+  skills or MCP, and its own session dir DIR/pi-sessions/NAME, so the session JSONL is kept.
+- At most 2 Pi tasks run at once on this box (the server's slot count): it waits for one of two slot locks.
+- Appends one record to DIR/tasks.jsonl: Pi session id, task, result, turns, input / cached / output tokens, wall
+  time. The first call creates DIR/run.json with the top-level session id (--top-session or $FACTORY_TOP_SESSION)
+  and the start time, which usage-report reads.
+- Result is PASS / FAIL when the reply's last line says so (ask Pi to end with PASS or FAIL), timeout, or exit N.
+  Exit code: 0 PASS, 1 otherwise. Pi's reply tail is printed with secrets scrubbed.
+"""
+import argparse, datetime as dt, fcntl, glob, json, os, re, subprocess, sys, time
+
+SECRET_RE = re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|https?://[^\s'\"]*trycloudflare\.com[^\s'\"]*|Bearer\s+\S+)")
+SLOTS = 2
+
+def scrub(s):
+    s = SECRET_RE.sub("[redacted]", s)
+    for name in ("LOCAL_LLM_PRO5000_URL", "LOCAL_LLM_PRO5000_TOKEN"):
+        v = os.environ.get(name)
+        if v: s = s.replace(v, "[redacted]")
+    return s
+
+def now(): return dt.datetime.now(dt.timezone.utc)
+
+def session_usage(path):
+    tot = {"input": 0, "output": 0, "cacheRead": 0, "turns": 0}; sid = None
+    for line in open(path):
+        try: e = json.loads(line)
+        except Exception: continue
+        if e.get("type") == "session": sid = e.get("id")
+        m = e.get("message")
+        u = m.get("usage") if isinstance(m, dict) else None
+        if u:
+            tot["turns"] += 1
+            for k in ("input", "output", "cacheRead"): tot[k] += int(u.get(k) or 0)
+    return sid, tot
+
+def take_slot():
+    while True:
+        for i in range(SLOTS):
+            f = open(f"/tmp/factory-pi-pro5000-slot-{i}.lock", "w")
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); return f
+            except BlockingIOError:
+                f.close()
+        time.sleep(5)
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--run-dir", required=True); p.add_argument("--cwd", required=True)
+    p.add_argument("--task", required=True); p.add_argument("--prompt-file", required=True)
+    p.add_argument("--timeout", type=int, default=1500); p.add_argument("--top-session")
+    a = p.parse_args()
+    run = os.path.abspath(a.run_dir); os.makedirs(os.path.join(run, "logs"), exist_ok=True)
+    meta = os.path.join(run, "run.json")
+    if not os.path.exists(meta):
+        json.dump({"top_session": a.top_session or os.environ.get("FACTORY_TOP_SESSION") or "unnamed",
+                   "start": now().isoformat(timespec="seconds"),
+                   "pi_version": subprocess.run(["pi", "--version"], capture_output=True, text=True).stdout.strip()},
+                  open(meta, "w"), indent=1)
+    task = re.sub(r"[^A-Za-z0-9._-]", "-", a.task)
+    sdir = os.path.join(run, "pi-sessions", task); os.makedirs(sdir, exist_ok=True)
+    prompt = open(a.prompt_file).read()
+    open(os.path.join(run, "logs", f"{task}.prompt.md"), "w").write(prompt)
+    slot = take_slot(); t0 = now()
+    try:
+        r = subprocess.run(["pi-pro5000", "--session-dir", sdir, "--no-context-files", "--no-skills", "--no-mcp",
+                            "--approve", "-p", prompt], cwd=a.cwd, stdin=subprocess.DEVNULL, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=a.timeout)
+        rc, text = r.returncode, r.stdout or ""
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout or ""
+        rc, text = 124, out.decode(errors="replace") if isinstance(out, bytes) else out
+    finally:
+        t1 = now(); slot.close()
+    text = scrub(text)
+    open(os.path.join(run, "logs", f"{task}.out"), "w").write(text)
+    files = sorted(glob.glob(os.path.join(sdir, "**", "*.jsonl"), recursive=True), key=os.path.getmtime)
+    sid, u = session_usage(files[-1]) if files else (None, {"input": 0, "output": 0, "cacheRead": 0, "turns": 0})
+    last = ([l for l in text.strip().splitlines() if l.strip()][-1:] or [""])[0]
+    result = "timeout" if rc == 124 else ("PASS" if "PASS" in last else ("FAIL" if "FAIL" in last else f"exit {rc}"))
+    rec = {"task": task, "session_id": sid, "session_file": files[-1] if files else None,
+           "start": t0.isoformat(timespec="seconds"), "end": t1.isoformat(timespec="seconds"),
+           "wall_s": round((t1 - t0).total_seconds(), 1), "rc": rc, "result": result, **u}
+    with open(os.path.join(run, "tasks.jsonl"), "a") as f: f.write(json.dumps(rec) + "\n")
+    print(json.dumps(rec)); print("--- pi tail ---"); print(text[-1500:])
+    sys.exit(0 if result == "PASS" else 1)
+
+if __name__ == "__main__": main()

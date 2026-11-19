@@ -24,6 +24,7 @@ on:
       - "environments/*/database.json"
       - "**/*.md"
       - "docs/**"
+      - "factory/**"
   workflow_dispatch:
 
 permissions:
