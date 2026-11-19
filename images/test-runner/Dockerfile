@@ -7,8 +7,9 @@ FROM mcr.microsoft.com/playwright/dotnet:v1.61.0-noble
 USER root
 # The noble tag may already include SDK 10; install only when missing so deploys never need
 # dotnet-install.sh. Same install-dir as the Microsoft .NET images (/usr/share/dotnet).
-RUN set -euo pipefail; \
-    if ! dotnet --list-sdks | grep -qE '^10\.'; then \
+# Default /bin/sh (dash) rejects -o pipefail; bash is present on this noble base.
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN if ! dotnet --list-sdks | grep -qE '^10\.'; then \
       curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh; \
       bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/share/dotnet --no-path; \
       rm -f /tmp/dotnet-install.sh; \

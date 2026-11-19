@@ -15,9 +15,11 @@
     does not apply when the wake reason is CI finished, so a green bot PR still gets a Review nudge even if the bot
     was just assigned for In Progress → Review.
     Post-merge path (#707): when a cm-ai-ops-bot pull request merges and the repository still has free WIP (under the
-    per-repo limit of 2), re-assign the oldest startable Todo assigned to the bot — including one with a prior
-    `Queued: WIP is full` comment — so the issue-assigned listener picks it up without a human nudge. Posts no
-    comments; uses only GITHUB_TOKEN.
+    per-repo limit of 3), re-assign the oldest startable Todo assigned to the bot — including one with a prior
+    `Queued: WIP is full` comment — so the issue-assigned listener picks it up without a human nudge. Every
+    repository, cmdemo1-workorders included, has the same limit of 3 and no reserved slots: the local Pi lane is off
+    (Jeffrey, 18 Nov 2026), so a local-pi label or comment no longer makes an item unstartable.
+    Posts no comments; uses only GITHUB_TOKEN.
 
 .PARAMETER Repository
     owner/name of this repository.
@@ -47,7 +49,7 @@
 .PARAMETER Merged
     True when the pull request was merged (pr-merged path).
 .PARAMETER WipLimit
-    Per-repository WIP limit (In Progress + Review). Default 2; not loosened by this script.
+    Per-repository WIP limit (In Progress + Review). Default 3; not loosened by this script. No reserved slots.
 .PARAMETER DryRun
     Decide and log; change no assignees.
 .PARAMETER LoadOnly
@@ -75,7 +77,7 @@ param(
     [int] $PullRequestNumber = 0,
     [string] $PullRequestAuthor = '',
     [switch] $Merged,
-    [int] $WipLimit = 2,
+    [int] $WipLimit = 3,
     [switch] $DryRun,
     [switch] $LoadOnly
 )
@@ -141,6 +143,11 @@ function Get-PullRequestGate {
     }
     if ($author -cne $BotLogin) {
         return [ordered] @{ Action = 'skip'; Reason = "pull request #${number} author is '$author', not $BotLogin" }
+    }
+    # The factory bot's Pi driver (factory/pi/item_loop.py) watches CI, fixes and merges this PR itself; a nudge would
+    # only spend a Grok wake.
+    if ([string] (Get-FactValue $PullRequest 'body') -match '<!-- factory-pi-driver -->') {
+        return [ordered] @{ Action = 'skip'; Reason = "pull request #${number} is owned by the Pi driver" }
     }
     return [ordered] @{ Action = 'consider'; Reason = "open bot pull request #${number}" }
 }
@@ -373,12 +380,13 @@ function Get-IssueWorkPhase {
 
 function Get-PostMergeTodoPickupPlan {
     # After a bot PR merges: when WIP (open assigned issues in phase wip) is under the per-repo limit, nudge the
-    # oldest startable Todo. A prior Queued: comment does not disqualify. WIP limit is not raised.
+    # oldest startable Todo. A prior Queued: comment does not disqualify. WIP limit is not raised. Same rule in every
+    # repository; no slots are reserved (local Pi lane off, 18 Nov 2026).
     param(
         [bool] $Merged,
         [string] $PullRequestAuthor,
         [string] $BotLogin,
-        [int] $WipLimit = 2,
+        [int] $WipLimit = 3,
         [object[]] $AssignedOpenIssues,
         [string] $DefaultRepository = ''
     )
@@ -703,11 +711,18 @@ function Get-BotAssignedOpenIssues {
                     }
                 }
             )
+            $labels = @(
+                foreach ($l in @(Get-FactValue $item 'labels')) {
+                    if ($l -is [string]) { $l }
+                    else { [string] (Get-FactValue $l 'name') }
+                }
+            )
             $result.Add([ordered] @{
                     number     = $num
                     repository = $Repository
                     createdAt  = $created
                     comments   = $comments
+                    labels     = $labels
                 })
         }
         if ($batch.Count -lt 100) { break }

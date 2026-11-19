@@ -33,10 +33,28 @@
     three minutes before giving up (issue #583); an unfinished deployment in the target still blocks at once. A
     deployment waiting only because Octopus refused this account permission to take its Sign-off (issue #569) is
     recorded as a hold and does not count as busy for other deployables.
+    Superseded Sign-off (issue #731): when a newer release of the same project is the candidate for an environment and an
+    older release's deployment there waits at a manual intervention or Sign-off, that older task is cancelled (with a log
+    line naming it) so the newer deployment can run. The candidate's own task and the task for the release currently live
+    in that environment are never cancelled. If Octopus refuses the cancel (HTTP 401/403 or permission wording), a hold
+    names the exact missing permission; the run continues.
+    Queued candidate (issue #733): the same cancel also runs when no release waits for a next environment yet the
+    environment's newest busy deployment of this project is already Queued behind an older release waiting at a manual
+    intervention or Sign-off (the candidate's existing deployment). Never cancel that queued newer task or the live
+    release's task; never take a Sign-off; DryRun only logs the intended cancel.
+    Stale Queued / not-running busy task (issue #747): when a task that blocks promotion has been Queued or Waiting
+    (not Executing or Cancelling) for $QueuedTaskStaleMinutes minutes or more, open or update one release-held issue that
+    names the task, its release, what other active tasks in that environment it waits on, and how long it has been
+    queued. The "not finished" wait still blocks (the run stays green and does not promote). When the blocked task is a
+    Queued deployment of this project and the release already live in that environment is the same version or newer,
+    cancel it as safely superseded (same cancel / refused-TaskCancel hold as #731); never cancel an Executing task and
+    never take a person's Sign-off.
     Recovery: a deployment this workflow created (its Comments start with "Promoted by workflow ui-auto-promote") that waits at
     its Sign-off is evaluated again; no flag: its Sign-off is answered; a flag: it stays waiting and the held issue says so.
-    Permission denied on take-responsibility or submit (HTTP 401/403, or Octopus "not in any team with permissions"): hold,
-    warn, continue — do not fail the workflow.
+    When the comparison shows that waiting release is behind what already runs in the environment (issue #739), the superseded
+    Sign-off task is cancelled (same cancel / refused-TaskCancel hold as #731); every evaluation path sets Decision so StrictMode
+    never throws on a missing property. Permission denied on take-responsibility or submit (HTTP 401/403, or Octopus "not in any
+    team with permissions"): hold, warn, continue — do not fail the workflow.
 
     The four flags (Get-PromotionDecision), and what makes the run wait (nothing promoted, nothing flagged):
       1 checks   Flag: a check run of the release's commit in the application repository that ended failure, cancelled,
@@ -193,6 +211,9 @@ $PromotionMarker = 'Promoted by workflow ui-auto-promote'
 $RunbookBusyRetrySeconds = 40
 $RunbookBusyRetryLimit = 4
 $RunbookBusyPause = { param([int] $Seconds) Start-Sleep -Seconds $Seconds }
+# When a Queued or Waiting (not Executing) task blocks promotion for this many minutes, open or update one release-held
+# issue naming it (issue #747). Shorter stalls only log "Nothing to do"; the wait itself is never suppressed.
+$QueuedTaskStaleMinutes = 20
 # When master's head has only pending checks (none failed), wait in the same run and re-read check runs and statuses
 # this often, for at most this long, before holding (issue #697). $MasterPendingPause is replaced by the harness so
 # tests do not really sleep; PollSeconds, TimeoutSeconds, Deadline and GetNow are injectable for the same reason.
@@ -728,6 +749,9 @@ function Test-OctopusPermissionDenied {
     }
     if ($status -eq 401 -or $status -eq 403) { return $true }
     if ($msg -match 'You must be in a team that has permissions|not in any team with permissions') { return $true }
+    # Octopus cancel / other actions: "You do not have permission to perform this action. The TaskCancel permission is required."
+    if ($msg -match '(?i)do not have permission to perform this action') { return $true }
+    if ($msg -match '(?i)\b\w+\s+permission\s+is\s+required\b') { return $true }
     $false
 }
 
@@ -814,6 +838,390 @@ function Test-NoCommitHoldFlags([object[]] $Flags) {
 
 function Get-NoCommitHeldTitle([string] $Version, [string] $Name = $Deployable) {
     "$Name $Version held: release notes name no commit"
+}
+
+# Flag text when Octopus refused permission to cancel a superseded task waiting at Sign-off/MI (#731).
+$TaskCancelPermissionDeniedFlag = 'Task cancel permission denied'
+
+function Get-OctopusMissingPermission {
+    # Exact permission name from an Octopus refusal message (e.g. TaskCancel), or $null when none is named.
+    param($ErrorRecord)
+    $msg = ''
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        $parts = [Collections.Generic.List[string]]::new()
+        if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) { $parts.Add([string] $ErrorRecord.ErrorDetails.Message) }
+        if ($ErrorRecord.Exception) { $parts.Add([string] $ErrorRecord.Exception.Message) }
+        $msg = $parts -join ' '
+    } else {
+        $msg = [string] $ErrorRecord
+    }
+    if ($msg -match '(?i)(?:the\s+)?[`''"]?(\w+)[`''"]?\s+permission\s+is\s+required') { return $Matches[1] }
+    $null
+}
+
+function New-TaskCancelRefusedEvaluation {
+    # Evaluation shape for Set-HeldIssue when Octopus refused cancel of a superseded waiting task (#731).
+    param(
+        [string] $Sha,
+        [string] $ProjectName,
+        [string] $ReleaseVersion,
+        [string] $EnvironmentName,
+        [string] $TaskId,
+        [string] $Permission = '',
+        [string] $Detail = ''
+    )
+    $evidence = [Collections.Generic.List[string]]::new()
+    $permPart = if ($Permission) { " The missing permission is $Permission." } else { '' }
+    $evidence.Add("Octopus refused the auto-promote account permission to cancel superseded task $TaskId ($ProjectName $ReleaseVersion in $EnvironmentName).$permPart")
+    if ($Detail) { $evidence.Add($Detail) }
+    @{
+        Sha      = $(if ($Sha) { $Sha } else { 'unknown' })
+        Decision = @{
+            Decision = 'hold'
+            Reason   = $null
+            Note     = ''
+            Flags    = @(@{ Flag = $TaskCancelPermissionDeniedFlag; Evidence = @($evidence) })
+            Waiting  = @()
+            Passed   = @()
+        }
+    }
+}
+
+function Test-TaskCancelRefusedHoldBody([string] $Body) {
+    # True when a release-held issue body was written for a refused task cancel (#731).
+    "$Body" -match [regex]::Escape($TaskCancelPermissionDeniedFlag)
+}
+
+function New-BehindEvaluation {
+    # Evaluation when the release's commit is behind what already runs in the target (#739). Always includes Decision
+    # so recovery/candidate callers under StrictMode never throw on a missing property.
+    param([string] $Sha, [string] $BaseSha)
+    $waiting = "commit $Sha is behind the running $BaseSha"
+    @{
+        Behind   = $true
+        Sha      = $Sha
+        BaseSha  = $BaseSha
+        Decision = @{
+            Decision = 'wait'
+            Reason   = 'behind'
+            Note     = ''
+            Flags    = @()
+            Waiting  = @($waiting)
+            Passed   = @()
+        }
+    }
+}
+
+function Test-EvaluationBehind($Evaluation) {
+    # StrictMode-safe: true when the evaluation says Behind (hashtable or object).
+    if ($null -eq $Evaluation) { return $false }
+    if ($Evaluation -is [System.Collections.IDictionary]) {
+        return [bool] ($Evaluation.Contains('Behind') -and $Evaluation['Behind'])
+    }
+    $property = $Evaluation.PSObject.Properties['Behind']
+    [bool] ($property -and $property.Value)
+}
+
+function Get-EvaluationDecision($Evaluation) {
+    # StrictMode-safe: the Decision object, or $null when absent.
+    if ($null -eq $Evaluation) { return $null }
+    if ($Evaluation -is [System.Collections.IDictionary]) {
+        if ($Evaluation.Contains('Decision')) { return $Evaluation['Decision'] }
+        return $null
+    }
+    $property = $Evaluation.PSObject.Properties['Decision']
+    if ($property) { $property.Value } else { $null }
+}
+
+function Get-RecoverySignOffDisposition {
+    <# What recovery does after evaluating a workflow-created Sign-off (issue #739).
+       Behind (waiting release older than what already runs): cancel-superseded — never read Decision first.
+       promote → answer; hold → hold; anything else → wait. Missing Decision when not Behind fails closed. #>
+    param($Evaluation)
+    if ($null -eq $Evaluation) { throw 'Recovery evaluation is required' }
+    if (Test-EvaluationBehind $Evaluation) {
+        return @{ Action = 'cancel-superseded'; Decision = (Get-EvaluationDecision $Evaluation) }
+    }
+    $decision = Get-EvaluationDecision $Evaluation
+    if ($null -eq $decision) {
+        throw 'Recovery evaluation is missing Decision (and is not Behind).'
+    }
+    switch ([string] $decision.Decision) {
+        'promote' { @{ Action = 'answer'; Decision = $decision } }
+        'hold' { @{ Action = 'hold'; Decision = $decision } }
+        default {
+            $waiting = @()
+            if ($decision -is [System.Collections.IDictionary]) {
+                if ($decision.Contains('Waiting')) { $waiting = @($decision['Waiting']) }
+            } else {
+                $w = $decision.PSObject.Properties['Waiting']
+                if ($w) { $waiting = @($w.Value) }
+            }
+            @{ Action = 'wait'; Decision = $decision; Waiting = $waiting }
+        }
+    }
+}
+
+function Test-PendingManualIntervention {
+    # True when interruptions include a pending ManualIntervention (Sign-off or other) for the task (#731).
+    param([object[]] $Interruptions, [string] $TaskId)
+    @($Interruptions | Where-Object {
+            $_.Type -eq 'ManualIntervention' -and $_.IsPending -and (-not $TaskId -or $_.TaskId -eq $TaskId)
+        }).Count -gt 0
+}
+
+function Select-SupersededWaitingBusyItems {
+    <# Busy deployments of this project in the candidate's target that wait at a manual intervention/Sign-off and are
+       older than the candidate. Never returns the candidate's own task or a task for the live release in that
+       environment (issue #731). TestWaitsAtManualIntervention {param($taskId)} -> bool. #>
+    param(
+        [object[]] $Items,
+        [string] $ProjectId,
+        [string] $TargetEnvironmentId,
+        $CandidateRelease,
+        $LiveRelease = $null,
+        [string] $CandidateTaskId = '',
+        [scriptblock] $TestWaitsAtManualIntervention
+    )
+    if (-not $CandidateRelease) { return @() }
+    $liveVersion = if ($LiveRelease) { [string] $LiveRelease.Version } else { '' }
+    $out = [Collections.Generic.List[object]]::new()
+    foreach ($b in @($Items)) {
+        if ($null -eq $b -or $b.Kind -ne 'deployment') { continue }
+        if ($b.ProjectId -ne $ProjectId -or $b.EnvironmentId -ne $TargetEnvironmentId) { continue }
+        $taskId = [string] (Get-BusyItemProperty $b 'TaskId')
+        if (-not $taskId) { continue }
+        if ($CandidateTaskId -and $taskId -eq $CandidateTaskId) { continue }
+        $version = [string] (Get-BusyItemProperty $b 'ReleaseVersion')
+        if (-not $version) { continue }
+        if ($liveVersion -and $version -eq $liveVersion) { continue }
+        $asRelease = @{ Version = $version; Assembled = [datetimeoffset]'2000-01-01T00:00:00Z' }
+        if ((Compare-Release $CandidateRelease $asRelease) -le 0) { continue }
+        if (-not (& $TestWaitsAtManualIntervention $taskId)) { continue }
+        $out.Add($b)
+    }
+    @($out)
+}
+
+function Format-SupersededCancelLog {
+    # Log line naming the superseded task being cancelled (#731).
+    param(
+        [string] $TaskId,
+        [string] $ReleaseVersion,
+        [string] $EnvironmentName,
+        [string] $CandidateVersion,
+        [string] $Name = $Deployable,
+        [string] $InterruptionTitle = 'manual intervention'
+    )
+    $waitLabel = if ($InterruptionTitle -eq 'Sign-off') { 'its Sign-off' } else { "a $InterruptionTitle" }
+    "Cancelling superseded task $TaskId ($Name $ReleaseVersion waits at $waitLabel in $EnvironmentName) so candidate $CandidateVersion can run."
+}
+
+function Invoke-CancelOctopusTask {
+    # POST cancel. Returns @{ Outcome = canceled|refused; Permission?; Message? }. Rethrows every other error.
+    # Calls script-scope Invoke-Octopus (same rule as Invoke-SignOffOctopusCalls / #589).
+    param(
+        [Parameter(Mandatory)] [string] $Space,
+        [Parameter(Mandatory)] [string] $TaskId
+    )
+    try {
+        Invoke-Octopus "/api/$Space/tasks/$TaskId/cancel" 'Post' | Out-Null
+        @{ Outcome = 'canceled'; Permission = $null; Message = '' }
+    } catch {
+        if (Test-OctopusPermissionDenied $_) {
+            @{
+                Outcome    = 'refused'
+                Permission = (Get-OctopusMissingPermission $_)
+                Message    = [string] $_.Exception.Message
+            }
+        } else {
+            throw
+        }
+    }
+}
+
+function Get-CandidateBusyTaskId {
+    # TaskId of the candidate release's busy deployment in the target, if any.
+    param([object[]] $Items, [string] $ProjectId, [string] $TargetEnvironmentId, [string] $CandidateVersion)
+    foreach ($b in @($Items)) {
+        if ($null -eq $b -or $b.Kind -ne 'deployment') { continue }
+        if ($b.ProjectId -ne $ProjectId -or $b.EnvironmentId -ne $TargetEnvironmentId) { continue }
+        if ([string] (Get-BusyItemProperty $b 'ReleaseVersion') -ne $CandidateVersion) { continue }
+        return [string] (Get-BusyItemProperty $b 'TaskId')
+    }
+    ''
+}
+
+function Get-NewestBusyDeploymentItem {
+    <# Newest busy deployment of ProjectId in TargetEnvironmentId by Compare-Release on ReleaseVersion (issue #733).
+       Assembled uses Deployment.Created when present so equal versions still order. $null when none. #>
+    param([object[]] $Items, [string] $ProjectId, [string] $TargetEnvironmentId)
+    $best = $null
+    $bestAsRelease = $null
+    foreach ($b in @($Items)) {
+        if ($null -eq $b -or $b.Kind -ne 'deployment') { continue }
+        if ($b.ProjectId -ne $ProjectId -or $b.EnvironmentId -ne $TargetEnvironmentId) { continue }
+        $version = [string] (Get-BusyItemProperty $b 'ReleaseVersion')
+        if (-not $version) { continue }
+        $assembled = [datetimeoffset]'2000-01-01T00:00:00Z'
+        $dep = Get-BusyItemProperty $b 'Deployment'
+        if ($null -ne $dep) {
+            $created = Get-BusyItemProperty $dep 'Created'
+            if ($created) { $assembled = [datetimeoffset] $created }
+        }
+        $asRelease = @{ Version = $version; Assembled = $assembled }
+        if ($null -eq $bestAsRelease -or (Compare-Release $asRelease $bestAsRelease) -gt 0) {
+            $best = $b
+            $bestAsRelease = $asRelease
+        }
+    }
+    $best
+}
+
+function Get-QueuedCandidateBusyItem {
+    <# When the newest busy deployment of this project in the target is Queued, return it (issue #733). That queued
+       deployment is the candidate's existing deployment, blocked behind an older Sign-off or manual intervention.
+       Otherwise $null (newest Waiting alone is not this path). #>
+    param([object[]] $Items, [string] $ProjectId, [string] $TargetEnvironmentId)
+    $newest = Get-NewestBusyDeploymentItem -Items $Items -ProjectId $ProjectId -TargetEnvironmentId $TargetEnvironmentId
+    if ($null -eq $newest) { return $null }
+    if ([string] (Get-BusyItemProperty $newest 'State') -ne 'Queued') { return $null }
+    $newest
+}
+
+# Flag text when a Queued/Waiting task has blocked promotion for $QueuedTaskStaleMinutes or more (#747).
+$QueuedTaskStaleFlag = 'Queued task stalled'
+
+function Test-BusyItemNotRunning($Item) {
+    # True when the busy task is Queued or Waiting. Never true for Executing/Cancelling (issue #747: never hold or
+    # cancel those as "stale queued"). Unknown states fail closed (not treated as not-running).
+    $state = [string] (Get-BusyItemProperty $Item 'State')
+    if (-not $state) { return $false }
+    switch -Regex ($state) {
+        '^(?i)Executing|Cancelling|Canceling$' { return $false }
+        '^(?i)Queued|Waiting$' { return $true }
+        default { return $false }
+    }
+}
+
+function Get-BusyItemQueueTimeUtc($Item) {
+    # QueueTime from the Octopus task when present; else Deployment.Created. $null when neither is known.
+    $raw = Get-BusyItemProperty $Item 'QueueTime'
+    if (-not $raw) {
+        $dep = Get-BusyItemProperty $Item 'Deployment'
+        if ($null -ne $dep) { $raw = Get-BusyItemProperty $dep 'Created' }
+    }
+    if (-not $raw) { return $null }
+    if ($raw -is [datetimeoffset]) { return $raw.UtcDateTime }
+    if ($raw -is [datetime]) { return $raw.ToUniversalTime() }
+    try {
+        return [datetimeoffset]::Parse([string] $raw, [cultureinfo]::InvariantCulture).UtcDateTime
+    } catch { return $null }
+}
+
+function Get-BusyItemQueuedAgeMinutes($Item, [datetime] $Now) {
+    # Minutes since QueueTime (or Deployment.Created). $null when the time is unknown.
+    $queuedAt = Get-BusyItemQueueTimeUtc $Item
+    if ($null -eq $queuedAt) { return $null }
+    [math]::Round(($Now.ToUniversalTime() - $queuedAt).TotalMinutes, 1)
+}
+
+function Test-StaleQueuedHoldNeeded($Item, [datetime] $Now, [int] $StaleMinutes = $QueuedTaskStaleMinutes) {
+    # True when the item is Queued/Waiting and has been so for at least StaleMinutes (#747).
+    if (-not (Test-BusyItemNotRunning $Item)) { return $false }
+    $age = Get-BusyItemQueuedAgeMinutes $Item $Now
+    if ($null -eq $age) { return $false }
+    $age -ge $StaleMinutes
+}
+
+function Get-BlockingBusyItem {
+    # The busy item Get-BusyReason would name first (same skip of refused Sign-offs). $null when nothing blocks.
+    param([object[]] $Items, [string] $TargetEnvironmentId, [string] $FirstEnvironmentId, [string] $ProjectId)
+    foreach ($i in @($Items)) {
+        if (Test-BusyItemSignOffRefused $i) { continue }
+        if ($i.EnvironmentId -eq $TargetEnvironmentId) { return $i }
+        if ($i.Kind -eq 'deployment' -and $i.ProjectId -eq $ProjectId -and $i.EnvironmentId -ne $FirstEnvironmentId) { return $i }
+    }
+    $null
+}
+
+function Format-QueuedBehindSummary {
+    <# What a Queued/Waiting task appears to wait on: other unfinished tasks in the same environment (#747). #>
+    param([object[]] $Items, [string] $EnvironmentId, [string] $ExcludeTaskId = '')
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($i in @($Items)) {
+        if ($null -eq $i) { continue }
+        if ($i.EnvironmentId -ne $EnvironmentId) { continue }
+        $tid = [string] (Get-BusyItemProperty $i 'TaskId')
+        if ($ExcludeTaskId -and $tid -eq $ExcludeTaskId) { continue }
+        $state = [string] (Get-BusyItemProperty $i 'State')
+        $ver = [string] (Get-BusyItemProperty $i 'ReleaseVersion')
+        $label = "$($i.Kind) of project $($i.ProjectId)"
+        if ($ver) { $label += " release $ver" }
+        $detail = @()
+        if ($tid) { $detail += $tid }
+        if ($state) { $detail += "state $state" }
+        if ($detail.Count -gt 0) { $label += " ($($detail -join ', '))" }
+        $parts.Add($label)
+    }
+    if ($parts.Count -eq 0) {
+        return 'no other active task in this environment is visible (likely the per-environment concurrency tag or a worker/pool stall)'
+    }
+    ($parts -join '; ')
+}
+
+function New-QueuedTaskStaleEvaluation {
+    # Evaluation shape for Set-HeldIssue when a Queued/Waiting task has blocked promotion too long (#747).
+    param(
+        [string] $Sha,
+        [string] $ProjectName,
+        [string] $ReleaseVersion,
+        [string] $EnvironmentName,
+        [string] $TaskId,
+        [string] $State,
+        [double] $AgeMinutes,
+        [string] $BehindSummary,
+        [int] $StaleMinutes = $QueuedTaskStaleMinutes
+    )
+    $evidence = [Collections.Generic.List[string]]::new()
+    $ageText = if ($AgeMinutes -ge 60) {
+        '{0:N0} minutes (~{1:N1} hours)' -f $AgeMinutes, ($AgeMinutes / 60.0)
+    } else {
+        '{0:N0} minutes' -f $AgeMinutes
+    }
+    $evidence.Add("Task $TaskId ($ProjectName $ReleaseVersion in $EnvironmentName) has been $State for $ageText (threshold ${StaleMinutes} minutes) and is blocking automatic promotion.")
+    if ($BehindSummary) { $evidence.Add("It appears to wait on: $BehindSummary.") }
+    $evidence.Add('The "not finished" wait still blocks promotion; this hold only makes the stall visible. Never cancel an Executing task; never take a person''s Sign-off.')
+    @{
+        Sha      = $(if ($Sha) { $Sha } else { 'unknown' })
+        Decision = @{
+            Decision = 'hold'
+            Reason   = $null
+            Note     = ''
+            Flags    = @(@{ Flag = $QueuedTaskStaleFlag; Evidence = @($evidence) })
+            Waiting  = @()
+            Passed   = @()
+        }
+    }
+}
+
+function Test-QueuedTaskStaleHoldBody([string] $Body) {
+    # True when a release-held issue body was written for a stale Queued/Waiting blocker (#747).
+    "$Body" -match [regex]::Escape($QueuedTaskStaleFlag)
+}
+
+function Test-QueuedBusySafelySupersededByLive {
+    <# True when a Queued/Waiting deployment of this project may be cancelled: the live release in that environment is
+       the same version or newer (issue #747). Never true without a live release or for a newer queued version. #>
+    param($QueuedItem, $LiveRelease)
+    if ($null -eq $QueuedItem -or $null -eq $LiveRelease) { return $false }
+    if (-not (Test-BusyItemNotRunning $QueuedItem)) { return $false }
+    $queuedVersion = [string] (Get-BusyItemProperty $QueuedItem 'ReleaseVersion')
+    $liveVersion = [string] $LiveRelease.Version
+    if (-not $queuedVersion -or -not $liveVersion) { return $false }
+    $queuedAs = @{ Version = $queuedVersion; Assembled = [datetimeoffset]'2000-01-01T00:00:00Z' }
+    $liveAs = @{ Version = $liveVersion; Assembled = [datetimeoffset]'2000-01-01T00:00:00Z' }
+    (Compare-Release $liveAs $queuedAs) -ge 0
 }
 
 function Get-EvaluationCommitOrHold {
@@ -1310,16 +1718,17 @@ function Get-ActiveBusyItems {
     foreach ($t in @($active | Sort-Object Id -Unique)) {
         $ids.Add([string] $t.Id)
         $state = [string] (Get-BusyItemProperty $t 'State')
+        $queueTime = Get-BusyItemProperty $t 'QueueTime'
         if ($t.Name -eq 'Deploy') {
             $d = Invoke-Octopus "/api/$space/deployments/$($t.Arguments.DeploymentId)"
             $version = $null
             if ($d.ReleaseId) {
                 $version = (Invoke-Octopus "/api/$space/releases/$($d.ReleaseId)").Version
             }
-            $items.Add(@{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id; State = $state; ReleaseVersion = $version; SignOffRefused = $false })
+            $items.Add(@{ Kind = 'deployment'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; Deployment = $d; TaskId = $t.Id; State = $state; QueueTime = $queueTime; ReleaseVersion = $version; SignOffRefused = $false })
         } elseif ($t.Name -eq 'RunbookRun') {
             $d = Invoke-Octopus "/api/$space/runbookRuns/$($t.Arguments.RunbookRunId)"
-            $items.Add(@{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id; State = $state; SignOffRefused = $false })
+            $items.Add(@{ Kind = 'runbook'; ProjectId = $d.ProjectId; EnvironmentId = $d.EnvironmentId; TaskId = $t.Id; State = $state; QueueTime = $queueTime; SignOffRefused = $false })
         }
     }
     @{ Items = @($items); ActiveTaskIds = @($ids) }
@@ -1643,7 +2052,7 @@ function Get-Evaluation {
             $merged = Get-AppComparison -AppRepo $appRepo -Directory $appClone -BaseSha $baseSha -Sha $sha
             $paths = $merged.Paths; $pathsKnown = $merged.Known; $pathsReason = $merged.Reason
             Say "Comparison $baseSha...${sha}: $($merged.Status), $(@($merged.Commits).Count) commits, $(@($paths).Count) paths."
-            if ($merged.Status -eq 'behind') { return @{ Behind = $true; Sha = $sha; BaseSha = $baseSha } }
+            if ($merged.Status -eq 'behind') { return (New-BehindEvaluation -Sha $sha -BaseSha $baseSha) }
             $commitPulls = Get-CommitPulls -AppRepo $appRepo -Shas @($merged.Commits | ForEach-Object sha)
             $closingRefs = @{}; foreach ($e in $commitPulls.Values) { foreach ($n in $e.Closing.Keys) { $closingRefs[$n] = $e.Closing[$n] } }
             $repoHeld = try { Get-RepoHeld -AppRepo $appRepo } catch { Say "The Hold items of $appRepo could not be listed ($($_.Exception.Message)): each is read."; $null }
@@ -1713,9 +2122,11 @@ function Get-Evaluation {
 }
 
 function Set-HeldIssue {
-    param($Release, $Target, $Evaluation, [string] $DeploymentNote = '')
-    $title = Get-HeldIssueTitle -Version $Release.Version -Environment $Target.Name -Flags @($Evaluation.Decision.Flags)
-    $evidence = Format-HeldEvidence -Version $Release.Version -Sha $Evaluation.Sha -Target $Target.Name -Flags $Evaluation.Decision.Flags -DeploymentNote $DeploymentNote -OverrideNote ([string] $Evaluation.Decision.Note)
+    # -Name: deployable name for the hold title/body (defaults to $Deployable). Used when the hold is about another
+    # project's stalled Queued task that blocks this run (issue #747).
+    param($Release, $Target, $Evaluation, [string] $DeploymentNote = '', [string] $Name = $Deployable)
+    $title = Get-HeldIssueTitle -Version $Release.Version -Environment $Target.Name -Flags @($Evaluation.Decision.Flags) -Name $Name
+    $evidence = Format-HeldEvidence -Version $Release.Version -Sha $Evaluation.Sha -Target $Target.Name -Flags $Evaluation.Decision.Flags -DeploymentNote $DeploymentNote -OverrideNote ([string] $Evaluation.Decision.Note) -Name $Name
     $hash = Get-EvidenceHash $evidence
     $body = "$evidence`n`nRun $RunUrl`n<!-- evidence:$hash -->"
     Say $evidence
@@ -1748,6 +2159,52 @@ function Close-HeldIssues {
     }
 }
 
+function Cancel-SupersededWaitingTasks {
+    <# Cancel each superseded busy item waiting at MI/Sign-off so CandidateVersion can run (#731 / #733).
+       DryRun only logs. Refused cancel opens or updates the hold naming the missing permission. Returns the count of
+       items considered. Uses script-scope Invoke-Octopus / $space / $releases / $project / $Deployable / $DryRun. #>
+    param(
+        [object[]] $SupersededItems,
+        $Target,
+        [string] $CandidateVersion
+    )
+    $count = 0
+    foreach ($old in @($SupersededItems)) {
+        $count++
+        $oldVersion = [string] (Get-BusyItemProperty $old 'ReleaseVersion')
+        $oldTaskId = [string] (Get-BusyItemProperty $old 'TaskId')
+        $miTitle = 'manual intervention'
+        try {
+            $pendingMi = (Invoke-Octopus "/api/$space/interruptions?regarding=$oldTaskId").Items | Where-Object { $_.IsPending -and $_.Type -eq 'ManualIntervention' } | Select-Object -First 1
+            if ($null -ne $pendingMi) {
+                $titleProp = $pendingMi.PSObject.Properties['Title']
+                if ($titleProp -and $titleProp.Value) { $miTitle = [string] $titleProp.Value }
+            }
+        } catch { }
+        Say (Format-SupersededCancelLog -TaskId $oldTaskId -ReleaseVersion $oldVersion -EnvironmentName $Target.Name -CandidateVersion $CandidateVersion -Name $Deployable -InterruptionTitle $miTitle)
+        if ($DryRun) { continue }
+        $cancel = Invoke-CancelOctopusTask -Space $space -TaskId $oldTaskId
+        if ($cancel.Outcome -eq 'refused') {
+            $perm = [string] $cancel.Permission
+            Say "WARNING: Octopus refused cancel of superseded task $oldTaskId ($Deployable $oldVersion in $($Target.Name))$(if ($perm) { ": missing permission $perm" } else { '' })."
+            $oldRel = (@($releases | Where-Object Version -eq $oldVersion) | Select-Object -First 1)
+            if (-not $oldRel) { $oldRel = @{ Version = $oldVersion; ReleaseNotes = '' } }
+            $sha = try { Get-Commit $oldRel } catch { '' }
+            $dep = Get-BusyItemProperty $old 'Deployment'
+            $depId = if ($null -ne $dep) { [string] (Get-BusyItemProperty $dep 'Id') } else { '' }
+            Set-HeldIssue -Release $oldRel -Target $Target -Evaluation (New-TaskCancelRefusedEvaluation -Sha $sha -ProjectName $project.Name -ReleaseVersion $oldVersion -EnvironmentName $Target.Name -TaskId $oldTaskId -Permission $perm -Detail ([string] $cancel.Message)) `
+                -DeploymentNote "The deployment $depId waits at a manual intervention: the auto-promote account was refused permission to cancel the superseded task."
+        }
+    }
+    $count
+}
+
+function Test-WaitsAtPendingManualIntervention([string] $TaskId) {
+    # Script-scope helper for Select-SupersededWaitingBusyItems (no GetNewClosure: Invoke-Octopus must resolve #589).
+    $ints = @((Invoke-Octopus "/api/$space/interruptions?regarding=$TaskId").Items)
+    Test-PendingManualIntervention -Interruptions $ints -TaskId $TaskId
+}
+
 # 1. What is not finished: any project, deployments and runbook runs. A failed call or an incomplete listing stops the run.
 try {
     $listed = Get-ActiveBusyItems
@@ -1765,6 +2222,7 @@ $releaseVersionCache = @{}
 Set-BusyItemsSignOffRefused -Items $busyItems
 
 # 2. Recovery: a deployment this workflow created that waits at its Sign-off.
+$recoveryCanceled = $false
 foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.ProjectId -eq $project.Id -and $_.EnvironmentId -ne $first.Id -and "$($_.Deployment.Comments)".StartsWith($PromotionMarker) })) {
     $pending = Get-SignOffAction -Interruptions @((Invoke-Octopus "/api/$space/interruptions?regarding=$($b.TaskId)").Items) -TaskId $b.TaskId
     if ($pending.Action -ne 'answer') { continue }
@@ -1776,26 +2234,102 @@ foreach ($b in @($busyItems | Where-Object { $_.Kind -eq 'deployment' -and $_.Pr
     $runningUnknown = ''
     $runningBefore = try { Get-RunningRelease -Target $target -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t } } catch { if (-not (Test-RunningLookupError $_)) { throw }; $runningUnknown = $_.Exception.Message; $null }
     $ev = Get-Evaluation -Release $rel -Target $target -Previous $previous -RunningRelease $runningBefore -RunningUnknown $runningUnknown
-    if ($ev.Behind -or $ev.Decision.Decision -ne 'promote') {
-        if (-not $ev.Behind -and $ev.Decision.Decision -eq 'hold') { Set-HeldIssue -Release $rel -Target $target -Evaluation $ev -DeploymentNote "The deployment $($b.Deployment.Id) was created earlier and waits at its Sign-off: a person decides." }
-        else { Say "Left waiting: $(@($ev.Decision.Waiting) -join '; ')" }
+    # Behind before Decision (#739): an older waiting Sign-off whose commit is behind what already runs is cancelled,
+    # never left waiting via a StrictMode throw on a missing Decision property.
+    $disp = Get-RecoverySignOffDisposition -Evaluation $ev
+    if ($disp.Action -eq 'cancel-superseded') {
+        $candidateVersion = if ($runningBefore -and "$($runningBefore.Version)") { [string] $runningBefore.Version } `
+            elseif ($ev.BaseSha) { "running $($ev.BaseSha.Substring(0, [Math]::Min(7, $ev.BaseSha.Length)))" } `
+            else { 'the newer release already in the environment' }
+        Cancel-SupersededWaitingTasks -SupersededItems @($b) -Target $target -CandidateVersion $candidateVersion | Out-Null
+        $recoveryCanceled = $true
+        continue
+    }
+    if ($disp.Action -eq 'hold') {
+        Set-HeldIssue -Release $rel -Target $target -Evaluation $ev -DeploymentNote "The deployment $($b.Deployment.Id) was created earlier and waits at its Sign-off: a person decides."
+        continue
+    }
+    if ($disp.Action -ne 'answer') {
+        Say "Left waiting: $(@($disp.Waiting) -join '; ')"
         continue
     }
     if ($DryRun) { Say 'Dry run: would answer the Sign-off.'; continue }
-    $signOff = Submit-SignOff -TaskId $b.TaskId -Reason (Format-PromotionReason -Decision $ev.Decision -Previous $previous.Name -RunUrl $RunUrl -Recovered) -WaitSeconds 0 -ProjectName $project.Name -ReleaseVersion $rel.Version -EnvironmentName $target.Name
+    $signOff = Submit-SignOff -TaskId $b.TaskId -Reason (Format-PromotionReason -Decision $disp.Decision -Previous $previous.Name -RunUrl $RunUrl -Recovered) -WaitSeconds 0 -ProjectName $project.Name -ReleaseVersion $rel.Version -EnvironmentName $target.Name
     if ($signOff -eq 'refused') {
         $b.SignOffRefused = $true
         Set-HeldIssue -Release $rel -Target $target -Evaluation (New-SignOffRefusedEvaluation -Sha (Get-Commit $rel) -ProjectName $project.Name -ReleaseVersion $rel.Version -EnvironmentName $target.Name) -DeploymentNote "The deployment $($b.Deployment.Id) waits at its Sign-off: the auto-promote account was refused permission to take it."
     }
+}
+if ($recoveryCanceled -and -not $DryRun) {
+    try {
+        $listed = Get-ActiveBusyItemsMarked
+        $busyItems = @($listed.Items)
+        $activeTaskIds = @($listed.ActiveTaskIds)
+    } catch { Say "Waiting: Octopus tasks could not be read whole after cancelling superseded recovery Sign-off ($($_.Exception.Message))"; Complete-AutoPromoteSuccess }
 }
 
 # 3. Candidate. Prefer an open pipeline-change hold so a newer tdd release does not restart its 60-minute clock (#688).
 $preferHeld = @(Get-HeldPipelinePrefer -HeldIssues $heldIssues)
 $candidate = Select-Candidate -Environments $envs -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t } -PreferHeld $preferHeld
 $candidate.Notes | ForEach-Object { Say $_ }
-if (-not $candidate.Release) { Say "No $Deployable release waits for a next environment."; Close-HeldIssues $candidate $activeTaskIds; Complete-AutoPromoteSuccess }
+if (-not $candidate.Release) {
+    # No new promotion candidate: still cancel an older Sign-off/MI when a newer deployment is already Queued (#733).
+    $queuedCancelCount = 0
+    for ($ei = 1; $ei -lt @($envs).Count; $ei++) {
+        $queuedTarget = $envs[$ei]
+        $queuedBusy = Get-QueuedCandidateBusyItem -Items $busyItems -ProjectId $project.Id -TargetEnvironmentId $queuedTarget.Id
+        if ($null -eq $queuedBusy) { continue }
+        $queuedVersion = [string] (Get-BusyItemProperty $queuedBusy 'ReleaseVersion')
+        $queuedTaskId = [string] (Get-BusyItemProperty $queuedBusy 'TaskId')
+        if (-not $queuedVersion -or -not $queuedTaskId) { continue }
+        $queuedRelease = (@($releases | Where-Object Version -eq $queuedVersion) | Select-Object -First 1)
+        if (-not $queuedRelease) {
+            $queuedRelease = @{ Version = $queuedVersion; Assembled = [datetimeoffset]'2000-01-01T00:00:00Z'; ReleaseNotes = '' }
+        }
+        $queuedLive = $null
+        try {
+            $queuedLive = Get-RunningRelease -Target $queuedTarget -Releases $releases `
+                -GetDeployments { param($id) Get-ReleaseDeployments $id } `
+                -GetTaskState { param($d) Get-TaskState $d } `
+                -GetRunningOutside { param($t) Get-RunningOutsideList $t }
+        } catch {
+            if (-not (Test-RunningLookupError $_)) { throw }
+            Say "The release running in $($queuedTarget.Name) is unknown while cancelling superseded tasks: $($_.Exception.Message)"
+        }
+        $queuedSuperseded = @(Select-SupersededWaitingBusyItems -Items $busyItems -ProjectId $project.Id -TargetEnvironmentId $queuedTarget.Id `
+                -CandidateRelease $queuedRelease -LiveRelease $queuedLive -CandidateTaskId $queuedTaskId `
+                -TestWaitsAtManualIntervention { param([string] $taskId) Test-WaitsAtPendingManualIntervention $taskId })
+        if ($queuedSuperseded.Count -eq 0) { continue }
+        $queuedCancelCount += [int] (Cancel-SupersededWaitingTasks -SupersededItems $queuedSuperseded -Target $queuedTarget -CandidateVersion $queuedVersion)
+    }
+    if ($queuedCancelCount -gt 0 -and -not $DryRun) {
+        try {
+            $listed = Get-ActiveBusyItemsMarked
+            $busyItems = @($listed.Items)
+            $activeTaskIds = @($listed.ActiveTaskIds)
+        } catch { Say "Waiting: Octopus tasks could not be read whole after cancelling superseded tasks ($($_.Exception.Message))" }
+    }
+    Say "No $Deployable release waits for a next environment."
+    Close-HeldIssues $candidate $activeTaskIds
+    Complete-AutoPromoteSuccess
+}
 $release = $candidate.Release; $target = $candidate.Target; $previous = $candidate.Previous
 Close-HeldIssues $candidate $activeTaskIds
+
+# Cancel older releases waiting at a manual intervention/Sign-off so this candidate can run (#731).
+$candidateTaskId = Get-CandidateBusyTaskId -Items $busyItems -ProjectId $project.Id -TargetEnvironmentId $target.Id -CandidateVersion $release.Version
+$supersededWaiting = @(Select-SupersededWaitingBusyItems -Items $busyItems -ProjectId $project.Id -TargetEnvironmentId $target.Id `
+        -CandidateRelease $release -LiveRelease $candidate.Running -CandidateTaskId $candidateTaskId `
+        -TestWaitsAtManualIntervention { param([string] $taskId) Test-WaitsAtPendingManualIntervention $taskId })
+Cancel-SupersededWaitingTasks -SupersededItems $supersededWaiting -Target $target -CandidateVersion $release.Version | Out-Null
+if (@($supersededWaiting).Count -gt 0 -and -not $DryRun) {
+    try {
+        $listed = Get-ActiveBusyItemsMarked
+        $busyItems = @($listed.Items)
+        $activeTaskIds = @($listed.ActiveTaskIds)
+    } catch { Say "Waiting: Octopus tasks could not be read whole after cancelling superseded tasks ($($_.Exception.Message))"; Complete-AutoPromoteSuccess }
+}
+
 $busy = Get-BusyReason -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id
 # A short-lived runbook in the target (Hourly health report) is waited out in this run (#583); a deployment still blocks at once.
 # GetBusyItems is a plain scriptblock (no GetNewClosure): Get-ActiveBusyItemsMarked must resolve script-scope Octopus helpers (#589).
@@ -1807,7 +2341,68 @@ if ($busy -and (Test-BusyOnlyRunbookToTarget -Items $busyItems -TargetEnvironmen
     $busyItems = @($wait.Items)
     $busy = $wait.Busy
 }
-if ($busy) { Say "Nothing to do: $busy."; Complete-AutoPromoteSuccess }
+if ($busy) {
+    Say "Nothing to do: $busy."
+    # Stale Queued/Waiting blocker (#747): still blocks, but open one hold when age >= threshold; safely cancel a
+    # Queued deployment of this project when the live release in that environment is the same or newer.
+    $blocker = Get-BlockingBusyItem -Items $busyItems -TargetEnvironmentId $target.Id -FirstEnvironmentId $first.Id -ProjectId $project.Id
+    if ($blocker -and (Test-StaleQueuedHoldNeeded $blocker ([datetime]::UtcNow))) {
+        $blockerTaskId = [string] (Get-BusyItemProperty $blocker 'TaskId')
+        $blockerVersion = [string] (Get-BusyItemProperty $blocker 'ReleaseVersion')
+        $blockerState = [string] (Get-BusyItemProperty $blocker 'State')
+        $blockerAge = Get-BusyItemQueuedAgeMinutes $blocker ([datetime]::UtcNow)
+        $blockerEnv = (@($envs | Where-Object Id -eq $blocker.EnvironmentId) | Select-Object -First 1)
+        $blockerDepName = $Deployable
+        foreach ($dn in @($projectIdByDeployable.Keys)) {
+            if ($projectIdByDeployable[$dn] -eq $blocker.ProjectId) { $blockerDepName = $dn; break }
+        }
+        $blockerProjectName = if ($blockerDepName -and $slug) { "$slug-$blockerDepName" } else { [string] $blocker.ProjectId }
+        $behindSummary = Format-QueuedBehindSummary -Items $busyItems -EnvironmentId $blocker.EnvironmentId -ExcludeTaskId $blockerTaskId
+        if ($blocker.Kind -eq 'deployment' -and $blocker.ProjectId -eq $project.Id -and $blockerEnv) {
+            $blockerLive = $null
+            try {
+                $blockerLive = Get-RunningRelease -Target $blockerEnv -Releases $releases `
+                    -GetDeployments { param($id) Get-ReleaseDeployments $id } `
+                    -GetTaskState { param($d) Get-TaskState $d } `
+                    -GetRunningOutside { param($t) Get-RunningOutsideList $t }
+            } catch {
+                if (-not (Test-RunningLookupError $_)) { throw }
+                Say "The release running in $($blockerEnv.Name) is unknown while considering a stale Queued cancel: $($_.Exception.Message)"
+            }
+            if (Test-QueuedBusySafelySupersededByLive -QueuedItem $blocker -LiveRelease $blockerLive) {
+                $liveVer = [string] $blockerLive.Version
+                Say "Cancelling stale Queued task $blockerTaskId ($Deployable $blockerVersion in $($blockerEnv.Name), queued ${blockerAge}m) superseded by live $liveVer."
+                if (-not $DryRun) {
+                    $cancel = Invoke-CancelOctopusTask -Space $space -TaskId $blockerTaskId
+                    if ($cancel.Outcome -eq 'refused') {
+                        $perm = [string] $cancel.Permission
+                        Say "WARNING: Octopus refused cancel of stale Queued task $blockerTaskId ($Deployable $blockerVersion in $($blockerEnv.Name))$(if ($perm) { ": missing permission $perm" } else { '' })."
+                        $oldRel = (@($releases | Where-Object Version -eq $blockerVersion) | Select-Object -First 1)
+                        if (-not $oldRel) { $oldRel = @{ Version = $blockerVersion; ReleaseNotes = '' } }
+                        $sha = try { Get-Commit $oldRel } catch { '' }
+                        $dep = Get-BusyItemProperty $blocker 'Deployment'
+                        $depId = if ($null -ne $dep) { [string] (Get-BusyItemProperty $dep 'Id') } else { '' }
+                        Set-HeldIssue -Release $oldRel -Target $blockerEnv -Evaluation (New-TaskCancelRefusedEvaluation -Sha $sha -ProjectName $project.Name -ReleaseVersion $blockerVersion -EnvironmentName $blockerEnv.Name -TaskId $blockerTaskId -Permission $perm -Detail ([string] $cancel.Message)) `
+                            -DeploymentNote "The deployment $depId is Queued and superseded by live ${liveVer}: the auto-promote account was refused permission to cancel it."
+                    }
+                }
+                Complete-AutoPromoteSuccess
+            }
+        }
+        if (-not $blockerEnv) { $blockerEnv = @{ Name = [string] $blocker.EnvironmentId } }
+        if (-not $blockerVersion) { $blockerVersion = 'unknown' }
+        $blockerRel = (@($releases | Where-Object Version -eq $blockerVersion) | Select-Object -First 1)
+        if (-not $blockerRel) { $blockerRel = @{ Version = $blockerVersion; ReleaseNotes = '' } }
+        $blockerSha = try { Get-Commit $blockerRel } catch { '' }
+        $dep = Get-BusyItemProperty $blocker 'Deployment'
+        $depId = if ($null -ne $dep) { [string] (Get-BusyItemProperty $dep 'Id') } else { '' }
+        Set-HeldIssue -Release $blockerRel -Target $blockerEnv -Name $blockerDepName `
+            -Evaluation (New-QueuedTaskStaleEvaluation -Sha $blockerSha -ProjectName $blockerProjectName -ReleaseVersion $blockerVersion `
+                -EnvironmentName $blockerEnv.Name -TaskId $blockerTaskId -State $blockerState -AgeMinutes ([double] $blockerAge) -BehindSummary $behindSummary) `
+            -DeploymentNote $(if ($depId) { "The deployment $depId is still $blockerState and blocks promotion of every deployable into or past $($blockerEnv.Name)." } else { "Task $blockerTaskId is still $blockerState and blocks promotion." })
+    }
+    Complete-AutoPromoteSuccess
+}
 Say "Candidate: $Deployable $($release.Version) to $($target.Name) (commit $(Get-Commit $release))"
 
 $running = $candidate.Running

@@ -36,6 +36,18 @@ Until then, validation is local and in `env-checks` only: `az bicep build` of th
 | `modules/sql.bicep` | SQL server, elastic pool, template DB, slot DBs |
 | `modules/slots.bicep` | Container Apps environment and slot apps |
 | `modules/vault.bicep` | Pool vault (SQL secrets) |
-| `modules/artifacts.bicep` | Private videos/traces storage, 14-day lifecycle |
+| `modules/artifacts.bicep` | Private videos/traces storage, 14-day lifecycle; Storage Blob Data Contributor on each container for the pool app identity and existing `id-<slug>-acr-push` (workorders `AZURE_CLIENT_ID_ACR_PUSH`) |
 
-Shadow defaults in `system.json` `pool`: 8 slots, 2 warm, 50 eDTU, 1 vCPU / 2 GiB, maxReplicas 3 on HTTP concurrency.
+Shadow defaults in `system.json` `pool`: 8 slots, `pool.warm.count` 2 (plus warm/cool schedule), 50 eDTU, 1 vCPU /
+2 GiB, maxReplicas 3 on HTTP concurrency, and `pool.lease` caps (30 minutes / hold-env 24 hours).
+
+## Pool manager (issue #656)
+
+Scripts under `scripts/pool/` (lease/release/sweeper, reset, template refresh, warm/cool) and workflows
+`pool-manager`, `pool-reset`, `pool-template-refresh`. Decision rules are proven by `scripts/test-pool-manager.ps1`
+in `env-checks`. When the pool stack is later what-if'd, ignore only `properties.template.scale.minReplicas` and
+`tags.warm` on pool slot apps (`ca-*-pool-N`) via `Test-IsPoolScaleDriftProperty` / `Select-PoolDriftChanges` — not
+`scale.rules`, `scale.maxReplicas`, or scale on tdd/uat/prod. That filter is not wired into nightly `drift` yet.
+
+Live lease-store and Azure SQL / scale calls wait for Jeffrey's yes on #652 / #653; workflows stay on `-DryRun`
+until then.

@@ -63,6 +63,9 @@ jobs:
         shell: pwsh
         run: ./scripts/test-factory-wake.ps1
 
+      - name: Factory Pi driver rules
+        run: python3 -m unittest factory/pi/test_item_loop.py
+
       - name: Acceptance-test worker image rules
         shell: pwsh
         run: ./scripts/test-test-runner.ps1
@@ -84,6 +87,10 @@ jobs:
       - name: Pool stack (code only, no apply)
         shell: pwsh
         run: ./scripts/test-pool.ps1
+
+      - name: Pool manager (lease, reset, warm, drift exclusion)
+        shell: pwsh
+        run: ./scripts/test-pool-manager.ps1
 
       - uses: hashicorp/setup-terraform@v4
         with:

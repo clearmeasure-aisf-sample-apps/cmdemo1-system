@@ -12,15 +12,24 @@ review is PASS and required checks are green; he does not wait for a human yes i
 | `CM_AI_OPS_BOT_GH_TOKEN` | GitHub token of user `cm-ai-ops-bot`: repo contents, pull requests, issues, Actions read on the `cmdemo1-*` repositories | Jeffrey creates it as `cm-ai-ops-bot` |
 | `GH_PROJECT_TOKEN` | Token that can edit organization project 679 (fallback when the first cannot) | Jeffrey |
 | Azure service principal `cm-ai-ops-bot` (client id, tenant id, client secret) | Contributor on `rg-cmdemo1-nonprod` and `rg-cmdemo1-prod`; the bot uses it read-only (health, logs) | Entra ID app registration `cm-ai-ops-bot` |
+| `LOCAL_LLM_PRO5000_URL` | OpenAI-compatible base URL (ending in `/v1`) of the proxy to the RTX Pro 5000; a temporary tunnel, so it changes when the tunnel restarts | Jeffrey: `C:\pi-delegate\llm-proxy\tunnel-url.txt` on the machine that runs the proxy |
+| `LOCAL_LLM_PRO5000_TOKEN` | Bearer token of that proxy | Jeffrey: the proxy's `.token` file next to it |
 | Octopus API key (optional) | Octopus user Users-922, team Teams-423, space `Spaces-355`; read-only use. Not needed for the normal flow, which reads `status/delivery.json` | The system's Key Vault; Octopus lets no AI identity mint its own key, so a person makes it |
 
 Sign `gh` in on the bot's box with `CM_AI_OPS_BOT_GH_TOKEN` (`gh auth login --with-token`), and use
 `cm-ai-ops-bot <jeffrey+ai-ops@clear-measure.com>` as the git author.
 
+Then run `bash factory/pi/setup.sh` from a clone of this repository: it installs Pi and the `pi-pro5000` tools and
+ends with a models-list health check (see "Pi on the RTX Pro 5000" in `operating-instructions.md`). The bot also
+runs it himself on his first wake and asks for the two `LOCAL_LLM_PRO5000_*` secrets when they are missing. The same
+setup links `factory-pi-item-loop`, the per-item Pi driver that runs CI waits, log triage, fixes, merges and deploy
+moves without Grok turns; it needs no secret beyond `gh` (already signed in) and the two above. The routine prompts
+stay as they are: behavior comes from `operating-instructions.md`.
+
 ## 2. Connectors
 
 - GitHub (the account's Cursor connection): routine listeners fire through it.
-- Cursor cloud agents: for coding work in the application repositories.
+- Coding work is done by Pi on the RTX Pro 5000 (`factory/pi/`), not by Cursor cloud agents.
 
 ## 3. Routines
 
@@ -76,11 +85,19 @@ nothing.
 To add a repository: add a listener with the same three events to a routine with room (or another GitHub-event
 routine with the same prompt).
 
+### Restarting after a pause
+
+The routine prompts above do not change for Pi delegation; behavior comes from `operating-instructions.md`. To restart
+the board after a pause: make sure the routines are enabled, add the two `LOCAL_LLM_PRO5000_*` secrets, then
+re-assign a Todo issue to `cm-ai-ops-bot` (unassign and assign) so `issue-assigned` wakes him; he runs setup, the
+health check, and picks up work under the normal WIP rules.
+
 ## 4. Check it works
 
 1. Assign a small docs-only test issue in `cmdemo1-workorders` to `cm-ai-ops-bot`.
 2. Expect: one pickup comment with the move `Todo → In Progress`, a PR with `In Progress → Review`, then a
-   single `Review → Done` comment (docs-only), and the board item in Done.
+   single `Review → Done` comment (docs-only), and the board item in Done. For a small code issue, expect the
+   `In Progress → Review` and merge comments to carry the tokens-and-time table with at least one Pi session.
 3. Assign an issue to someone else: the bot wakes, posts nothing and ends.
 
 ## 5. Routine 3: `Prod deploy (Octopus webhook)`

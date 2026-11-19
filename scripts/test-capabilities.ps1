@@ -181,8 +181,16 @@ function Get-SuccessfulVersion([string] $ProjectId, [string] $EnvironmentId, [in
         $items = @($page.Items)
         foreach ($deployment in $items) {
             if (([datetime] $deployment.Created).ToUniversalTime() -lt $since -or -not $succeeded.Contains([string] $deployment.Id)) { continue }
-            if (-not $releases.ContainsKey($deployment.ReleaseId)) { $releases[$deployment.ReleaseId] = [version] (Invoke-Octopus "/api/$space/releases/$($deployment.ReleaseId)").Version }
-            $versions.Add($releases[$deployment.ReleaseId])
+            if (-not $releases.ContainsKey($deployment.ReleaseId)) {
+                # A pull-request prerelease build (2.4.387-pr.1911.aot2) is not a mainline release, so it neither
+                # proves nor disproves a rollback: read its version once, keep $null for the ones that do not parse,
+                # and skip those, which keeps CAP-037 from throwing (cmdemo1-system #774).
+                $raw = [string] (Invoke-Octopus "/api/$space/releases/$($deployment.ReleaseId)").Version
+                $parsed = $null
+                $null = [version]::TryParse($raw, [ref] $parsed)
+                $releases[$deployment.ReleaseId] = $parsed
+            }
+            if ($null -ne $releases[$deployment.ReleaseId]) { $versions.Add($releases[$deployment.ReleaseId]) }
         }
         if ($items.Count -lt 100 -or ([datetime] $items[-1].Created).ToUniversalTime() -lt $since) { break }
     }

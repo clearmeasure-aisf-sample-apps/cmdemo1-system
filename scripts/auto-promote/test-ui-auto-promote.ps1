@@ -218,6 +218,7 @@ Test-Case 'permission denied: Octopus team wording is refused' (Test-OctopusPerm
 Test-Case 'permission denied: not in any team wording is refused' (Test-OctopusPermissionDenied (New-DeniedError 'The current user is not in any team with permissions to perform this action.')) $true
 Test-Case 'permission denied: a 503 is not refused' (Test-OctopusPermissionDenied (New-DeniedError 'Response status code does not indicate success: 503 (Service Unavailable).')) $false
 Test-Case 'permission denied: a network error is not refused' (Test-OctopusPermissionDenied (New-DeniedError 'Unable to connect to the remote server')) $false
+Test-Case 'permission denied: do not have permission / TaskCancel wording is refused' (Test-OctopusPermissionDenied (New-DeniedError 'You do not have permission to perform this action. The TaskCancel permission is required.')) $true
 
 # Real Sign-off path (#589): Invoke-SignOffOctopusCalls calls script-scope Invoke-Octopus (not an injected
 # scriptblock). A GetNewClosure wrapper around those calls would hide the function when Actions runs the
@@ -296,6 +297,277 @@ $markHolds = @(@{ number = 12; title = 'dashboard 1.0.31 held before uat'; body 
 Set-SignOffRefusedOnBusyItems -Items $markItems -HeldIssues $markHolds -ProjectIdByDeployableName @{ dashboard = 'P-dash' } -EnvironmentIdByName @{ uat = 'E-uat' } -GetReleaseVersion { param($b) '1.0.31' }
 Test-Case 'open refused hold marks the busy deployment SignOffRefused' $markItems[0].SignOffRefused $true
 Test-Case 'marked refused hold no longer blocks ui to uat' ([bool] (Get-BusyReason $markItems 'E-uat' 'E-tdd' 'P-ui')) $false
+
+# Superseded Sign-off/MI cancel (#731): cancel older waiting tasks when a newer release is the candidate.
+$candidate35 = @{ Version = '1.0.40'; Assembled = [datetimeoffset]'2026-11-14T00:00:00Z' }
+$live38 = @{ Version = '1.0.38'; Assembled = [datetimeoffset]'2026-11-12T00:00:00Z' }
+$older35 = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-12244352'; ReleaseVersion = '1.0.35'; State = 'Waiting'
+    Deployment = @{ Id = 'Deployments-58090'; ReleaseId = 'R-35' }
+}
+$candidateBusy = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-12261451'; ReleaseVersion = '1.0.40'; State = 'Queued'
+    Deployment = @{ Id = 'Deployments-58286'; ReleaseId = 'R-40' }
+}
+$liveBusy = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-live'; ReleaseVersion = '1.0.38'; State = 'Waiting'
+    Deployment = @{ Id = 'Deployments-live'; ReleaseId = 'R-38' }
+}
+$waitsAlways = { param([string] $taskId) $true }.GetNewClosure()
+$waitsNever = { param([string] $taskId) $false }.GetNewClosure()
+$waitsOnly35 = { param([string] $taskId) $taskId -eq 'ServerTasks-12244352' }.GetNewClosure()
+
+Test-Case '731: pending ManualIntervention is detected' (
+    Test-PendingManualIntervention @(@{ Type = 'ManualIntervention'; TaskId = 'ServerTasks-1'; IsPending = $true; Title = 'Sign-off' }) 'ServerTasks-1'
+) $true
+Test-Case '731: GuidedFailure is not a pending MI' (
+    Test-PendingManualIntervention @(@{ Type = 'GuidedFailure'; TaskId = 'ServerTasks-1'; IsPending = $true; Title = 'Sign-off' }) 'ServerTasks-1'
+) $false
+Test-Case '731: answered MI is not pending' (
+    Test-PendingManualIntervention @(@{ Type = 'ManualIntervention'; TaskId = 'ServerTasks-1'; IsPending = $false; Title = 'Sign-off' }) 'ServerTasks-1'
+) $false
+
+$selected = @(Select-SupersededWaitingBusyItems -Items @($older35, $candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId 'ServerTasks-12261451' -TestWaitsAtManualIntervention $waitsOnly35)
+Test-Case '731: selects the older Sign-off task' @($selected.Count, $selected[0].TaskId) @(1, 'ServerTasks-12244352')
+
+$neverCandidate = @(Select-SupersededWaitingBusyItems -Items @($candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId 'ServerTasks-12261451' -TestWaitsAtManualIntervention $waitsAlways)
+Test-Case '731: never cancels the candidate own task' $neverCandidate.Count 0
+
+$neverLive = @(Select-SupersededWaitingBusyItems -Items @($liveBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId '' -TestWaitsAtManualIntervention $waitsAlways)
+Test-Case '731: never cancels the live release task' $neverLive.Count 0
+
+$notWaiting = @(Select-SupersededWaitingBusyItems -Items @($older35) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId '' -TestWaitsAtManualIntervention $waitsNever)
+Test-Case '731: skips an older task not waiting at MI' $notWaiting.Count 0
+
+$newerThanCandidate = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-newer'; ReleaseVersion = '1.0.42'; State = 'Waiting'
+}
+$notOlder = @(Select-SupersededWaitingBusyItems -Items @($newerThanCandidate) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId '' -TestWaitsAtManualIntervention $waitsAlways)
+Test-Case '731: skips a newer-than-candidate waiting task' $notOlder.Count 0
+
+Test-Case '731: cancel log names the superseded task' (
+    Format-SupersededCancelLog -TaskId 'ServerTasks-12244352' -ReleaseVersion '1.0.35' -EnvironmentName 'uat' -CandidateVersion '1.0.40' -Name 'dashboard' -InterruptionTitle 'Sign-off'
+) 'Cancelling superseded task ServerTasks-12244352 (dashboard 1.0.35 waits at its Sign-off in uat) so candidate 1.0.40 can run.'
+
+Test-Case '731: missing permission TaskCancel is extracted' (
+    Get-OctopusMissingPermission (New-DeniedError 'You do not have permission to perform this action. The TaskCancel permission is required.')
+) 'TaskCancel'
+Test-Case '731: missing permission with backticks is extracted' (
+    Get-OctopusMissingPermission (New-DeniedError 'The `TaskCancel` permission is required to perform this action.')
+) 'TaskCancel'
+Test-Case '731: no named permission yields null' (Get-OctopusMissingPermission (New-DeniedError 'Response status code does not indicate success: 403 (Forbidden).')) $null
+
+$script:cancelOctopusCalls = [System.Collections.Generic.List[hashtable]]::new()
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    $script:cancelOctopusCalls.Add(@{ Path = $Path; Method = $Method; Body = $Body })
+}
+$script:cancelOctopusCalls.Clear()
+$canceled = Invoke-CancelOctopusTask -Space 'Spaces-1' -TaskId 'ServerTasks-12244352'
+Test-Case '731: cancel calls script-scope Invoke-Octopus POST cancel' @(
+    $canceled.Outcome
+    $script:cancelOctopusCalls.Count
+    $script:cancelOctopusCalls[0].Method
+    $script:cancelOctopusCalls[0].Path
+) @('canceled', 1, 'Post', '/api/Spaces-1/tasks/ServerTasks-12244352/cancel')
+
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    throw (New-DeniedError 'You do not have permission to perform this action. The TaskCancel permission is required.')
+}
+$refusedCancel = Invoke-CancelOctopusTask -Space 'Spaces-1' -TaskId 'ServerTasks-12244352'
+Test-Case '731: refused cancel returns refused and TaskCancel' @($refusedCancel.Outcome, $refusedCancel.Permission) @('refused', 'TaskCancel')
+
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) {
+    throw (New-DeniedError 'Response status code does not indicate success: 500 (Internal Server Error).')
+}
+$cancelOther = try { Invoke-CancelOctopusTask -Space 'Spaces-1' -TaskId 'ServerTasks-1'; 'no throw' } catch { $_.Exception.Message }
+Test-Case '731: non-permission cancel error still throws' $cancelOther 'Response status code does not indicate success: 500 (Internal Server Error).'
+
+$cancelEv = New-TaskCancelRefusedEvaluation -Sha 'abc' -ProjectName 'cmdemo1-dashboard' -ReleaseVersion '1.0.35' -EnvironmentName 'uat' -TaskId 'ServerTasks-12244352' -Permission 'TaskCancel'
+Test-Case '731: refused cancel hold names the flag' $cancelEv.Decision.Flags[0].Flag $TaskCancelPermissionDeniedFlag
+Test-Case '731: refused cancel hold names TaskCancel and the task' @(
+    ($cancelEv.Decision.Flags[0].Evidence[0] -like '*TaskCancel*'),
+    ($cancelEv.Decision.Flags[0].Evidence[0] -like '*ServerTasks-12244352*'),
+    ($cancelEv.Decision.Flags[0].Evidence[0] -like '*1.0.35*'),
+    (Test-TaskCancelRefusedHoldBody (Format-HeldEvidence -Version '1.0.35' -Sha 'abc' -Target 'uat' -Flags $cancelEv.Decision.Flags -Name 'dashboard'))
+) @($true, $true, $true, $true)
+
+Test-Case '731: candidate busy task id is found' (
+    Get-CandidateBusyTaskId -Items @($older35, $candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' -CandidateVersion '1.0.40'
+) 'ServerTasks-12261451'
+Test-Case '731: candidate busy task id empty when absent' (
+    Get-CandidateBusyTaskId -Items @($older35) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' -CandidateVersion '1.0.40'
+) ''
+
+# Queued candidate already deployed (#733): newest busy deployment is Queued; cancel older Sign-off behind it.
+Test-Case '733: newest busy deployment is the queued 1.0.40' (
+    (Get-NewestBusyDeploymentItem -Items @($older35, $candidateBusy, $liveBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat').TaskId
+) 'ServerTasks-12261451'
+Test-Case '733: queued candidate is returned when newest is Queued' (
+    (Get-QueuedCandidateBusyItem -Items @($older35, $candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat').TaskId
+) 'ServerTasks-12261451'
+Test-Case '733: no queued candidate when newest is Waiting at Sign-off' (
+    $null -eq (Get-QueuedCandidateBusyItem -Items @($older35) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat')
+) $true
+Test-Case '733: no queued candidate in another environment' (
+    $null -eq (Get-QueuedCandidateBusyItem -Items @($older35, $candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-prod')
+) $true
+Test-Case '733: no queued candidate for another project' (
+    $null -eq (Get-QueuedCandidateBusyItem -Items @($older35, $candidateBusy) -ProjectId 'P-ui' -TargetEnvironmentId 'E-uat')
+) $true
+
+$queuedSelected = @(Select-SupersededWaitingBusyItems -Items @($older35, $candidateBusy, $liveBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId 'ServerTasks-12261451' -TestWaitsAtManualIntervention $waitsOnly35)
+Test-Case '733: queued-candidate path selects only the older Sign-off' @($queuedSelected.Count, $queuedSelected[0].TaskId) @(1, 'ServerTasks-12244352')
+Test-Case '733: queued-candidate path never selects the queued newer task' (
+    @($queuedSelected | Where-Object { $_.TaskId -eq 'ServerTasks-12261451' }).Count
+) 0
+Test-Case '733: queued-candidate path never selects the live release task' (
+    @($queuedSelected | Where-Object { $_.TaskId -eq 'ServerTasks-live' }).Count
+) 0
+
+$onlyQueued = @(Select-SupersededWaitingBusyItems -Items @($candidateBusy) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $candidate35 -LiveRelease $live38 -CandidateTaskId 'ServerTasks-12261451' -TestWaitsAtManualIntervention $waitsAlways)
+Test-Case '733: only a queued deployment yields nothing to cancel' $onlyQueued.Count 0
+
+$waitingNewest = @{
+    Kind = 'deployment'; ProjectId = 'P-dash'; EnvironmentId = 'E-uat'
+    TaskId = 'ServerTasks-waiting-new'; ReleaseVersion = '1.0.41'; State = 'Waiting'
+    Deployment = @{ Id = 'Deployments-waiting-new'; ReleaseId = 'R-41' }
+}
+Test-Case '733: Waiting newer than an older Sign-off is not a queued candidate' (
+    $null -eq (Get-QueuedCandidateBusyItem -Items @($older35, $waitingNewest) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat')
+) $true
+
+# Stale Queued / not-running busy hold (#747): surface Queued blockers after 20 minutes; never hold a Running task.
+$now747 = [datetime]::Parse('2026-11-15T04:00:00Z', [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+$queuedUnder20 = @{
+    Kind = 'deployment'; ProjectId = 'Projects-1035'; EnvironmentId = 'E-prod'
+    TaskId = 'ServerTasks-12262326'; ReleaseVersion = '1.0.46'; State = 'Queued'
+    QueueTime = $now747.AddMinutes(-10)
+    Deployment = @{ Id = 'Deployments-58326'; Created = $now747.AddMinutes(-10) }
+}
+$queuedOver20 = @{
+    Kind = 'deployment'; ProjectId = 'Projects-1035'; EnvironmentId = 'E-prod'
+    TaskId = 'ServerTasks-12262326'; ReleaseVersion = '1.0.46'; State = 'Queued'
+    QueueTime = $now747.AddMinutes(-65)
+    Deployment = @{ Id = 'Deployments-58326'; Created = $now747.AddMinutes(-65) }
+}
+$runningLong = @{
+    Kind = 'deployment'; ProjectId = 'Projects-1035'; EnvironmentId = 'E-prod'
+    TaskId = 'ServerTasks-running'; ReleaseVersion = '1.0.46'; State = 'Executing'
+    QueueTime = $now747.AddMinutes(-90)
+}
+Test-Case '747: Queued is not-running' (Test-BusyItemNotRunning $queuedUnder20) $true
+Test-Case '747: Waiting is not-running' (Test-BusyItemNotRunning @{ State = 'Waiting' }) $true
+Test-Case '747: Executing is running' (Test-BusyItemNotRunning $runningLong) $false
+Test-Case '747: Cancelling is running' (Test-BusyItemNotRunning @{ State = 'Cancelling' }) $false
+Test-Case '747: Queued under 20 min does not need a hold' (Test-StaleQueuedHoldNeeded $queuedUnder20 $now747) $false
+Test-Case '747: Queued over 20 min needs a hold' (Test-StaleQueuedHoldNeeded $queuedOver20 $now747) $true
+Test-Case '747: Running task never needs a hold' (Test-StaleQueuedHoldNeeded $runningLong $now747) $false
+Test-Case '747: age minutes from QueueTime' (Get-BusyItemQueuedAgeMinutes $queuedOver20 $now747) 65.0
+
+$blocker747 = Get-BlockingBusyItem -Items @($queuedOver20) -TargetEnvironmentId 'E-prod' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-ui'
+Test-Case '747: blocking item is the Queued dashboard task' $blocker747.TaskId 'ServerTasks-12262326'
+Test-Case '747: behind summary with no peers names concurrency/worker stall' (
+    Format-QueuedBehindSummary -Items @($queuedOver20) -EnvironmentId 'E-prod' -ExcludeTaskId 'ServerTasks-12262326'
+) 'no other active task in this environment is visible (likely the per-environment concurrency tag or a worker/pool stall)'
+$peerRunning = @{
+    Kind = 'deployment'; ProjectId = 'P-ui'; EnvironmentId = 'E-prod'
+    TaskId = 'ServerTasks-peer'; ReleaseVersion = '2.4.1'; State = 'Executing'
+}
+Test-Case '747: behind summary names the other active task' (
+    (Format-QueuedBehindSummary -Items @($queuedOver20, $peerRunning) -EnvironmentId 'E-prod' -ExcludeTaskId 'ServerTasks-12262326') -like '*ServerTasks-peer*Executing*'
+) $true
+
+$staleEv747 = New-QueuedTaskStaleEvaluation -Sha 'abc' -ProjectName 'cmdemo1-dashboard' -ReleaseVersion '1.0.46' `
+    -EnvironmentName 'prod' -TaskId 'ServerTasks-12262326' -State 'Queued' -AgeMinutes 65 `
+    -BehindSummary 'no other active task in this environment is visible (likely the per-environment concurrency tag or a worker/pool stall)'
+Test-Case '747: hold names the Queued task flag' $staleEv747.Decision.Flags[0].Flag $QueuedTaskStaleFlag
+$staleBody747 = Format-HeldEvidence -Version '1.0.46' -Sha 'abc' -Target 'prod' -Flags $staleEv747.Decision.Flags -Name 'dashboard' `
+    -DeploymentNote 'The deployment Deployments-58326 is still Queued and blocks promotion.'
+Test-Case '747: hold issue text names the task' @(
+    ($staleBody747 -like '*ServerTasks-12262326*'),
+    ($staleBody747 -like '*1.0.46*'),
+    ($staleBody747 -like '*Queued*'),
+    (Test-QueuedTaskStaleHoldBody $staleBody747)
+) @($true, $true, $true, $true)
+
+Test-Case '747: same live version safely supersedes Queued' (
+    Test-QueuedBusySafelySupersededByLive -QueuedItem $queuedOver20 -LiveRelease @{ Version = '1.0.46' }
+) $true
+Test-Case '747: newer live version safely supersedes Queued' (
+    Test-QueuedBusySafelySupersededByLive -QueuedItem $queuedOver20 -LiveRelease @{ Version = '1.0.50' }
+) $true
+Test-Case '747: older live version does not supersede Queued' (
+    Test-QueuedBusySafelySupersededByLive -QueuedItem $queuedOver20 -LiveRelease @{ Version = '1.0.44' }
+) $false
+Test-Case '747: Executing is never safely superseded for cancel' (
+    Test-QueuedBusySafelySupersededByLive -QueuedItem $runningLong -LiveRelease @{ Version = '1.0.50' }
+) $false
+
+# Superseded Sign-off recovery when comparison is behind (#739): older release waits at Sign-off, newer already in
+# that environment (behind, 0 commits). Must not throw on missing Decision; cancel (or named TaskCancel hold).
+$behindSha739 = '76b668f100000000000000000000000000000000'
+$baseSha739 = '75ae843c00000000000000000000000000000000'
+$behindEv739 = New-BehindEvaluation -Sha $behindSha739 -BaseSha $baseSha739
+Test-Case '739: behind evaluation sets Behind' $behindEv739.Behind $true
+Test-Case '739: behind evaluation always sets Decision' @(
+    ($null -ne $behindEv739.Decision)
+    $behindEv739.Decision.Decision
+    ($behindEv739.Decision.Waiting[0] -like "*$behindSha739*behind*$baseSha739*")
+) @($true, 'wait', $true)
+Test-Case '739: StrictMode can read Decision on behind evaluation' @(
+    $behindEv739.Decision.Decision
+    @($behindEv739.Decision.Waiting).Count
+) @('wait', 1)
+
+# Exact production shape before the fix: Behind with no Decision (StrictMode threw in recovery).
+$legacyBehind739 = @{ Behind = $true; Sha = $behindSha739; BaseSha = $baseSha739 }
+Test-Case '739: Test-EvaluationBehind sees Behind without Decision' (Test-EvaluationBehind $legacyBehind739) $true
+Test-Case '739: Get-EvaluationDecision is null on the legacy shape' ($null -eq (Get-EvaluationDecision $legacyBehind739)) $true
+$legacyDisp739 = Get-RecoverySignOffDisposition -Evaluation $legacyBehind739
+Test-Case '739: behind without Decision: disposition is cancel-superseded (no throw)' $legacyDisp739.Action 'cancel-superseded'
+$behindDisp739 = Get-RecoverySignOffDisposition -Evaluation $behindEv739
+Test-Case '739: behind with Decision: disposition is cancel-superseded' $behindDisp739.Action 'cancel-superseded'
+
+Test-Case '739: promote disposition answers Sign-off' (
+    (Get-RecoverySignOffDisposition -Evaluation @{ Behind = $false; Decision = @{ Decision = 'promote'; Waiting = @() } }).Action
+) 'answer'
+Test-Case '739: hold disposition holds' (
+    (Get-RecoverySignOffDisposition -Evaluation @{ Behind = $false; Decision = @{ Decision = 'hold'; Waiting = @(); Flags = @() } }).Action
+) 'hold'
+$waitDisp739 = Get-RecoverySignOffDisposition -Evaluation @{ Behind = $false; Decision = @{ Decision = 'wait'; Waiting = @('pending check') } }
+Test-Case '739: wait disposition leaves waiting' @($waitDisp739.Action, $waitDisp739.Waiting[0]) @('wait', 'pending check')
+$missingDecision739 = try { Get-RecoverySignOffDisposition -Evaluation @{ Behind = $false }; 'no throw' } catch { 'threw' }
+Test-Case '739: missing Decision when not Behind fails closed' $missingDecision739 'threw'
+
+# Older 1.0.35 at Sign-off, newer 1.0.40 already live in uat (the run 43658626359 case): select for cancel.
+$live40 = @{ Version = '1.0.40'; Assembled = [datetimeoffset]'2026-11-14T18:00:00Z' }
+$selected739 = @(Select-SupersededWaitingBusyItems -Items @($older35) -ProjectId 'P-dash' -TargetEnvironmentId 'E-uat' `
+        -CandidateRelease $live40 -LiveRelease $live40 -CandidateTaskId '' -TestWaitsAtManualIntervention $waitsOnly35)
+Test-Case '739: older Sign-off selected against live newer release' @($selected739.Count, $selected739[0].TaskId) @(1, 'ServerTasks-12244352')
+Test-Case '739: cancel log names ServerTasks-12244352 for the behind recovery case' (
+    Format-SupersededCancelLog -TaskId 'ServerTasks-12244352' -ReleaseVersion '1.0.35' -EnvironmentName 'uat' -CandidateVersion '1.0.40' -Name 'dashboard' -InterruptionTitle 'Sign-off'
+) 'Cancelling superseded task ServerTasks-12244352 (dashboard 1.0.35 waits at its Sign-off in uat) so candidate 1.0.40 can run.'
+# Refused TaskCancel still yields a named hold (same path Cancel-SupersededWaitingTasks uses after disposition).
+$cancelHold739 = New-TaskCancelRefusedEvaluation -Sha 'abc' -ProjectName 'cmdemo1-dashboard' -ReleaseVersion '1.0.35' -EnvironmentName 'uat' -TaskId 'ServerTasks-12244352' -Permission 'TaskCancel'
+Test-Case '739: refused cancel hold names TaskCancel and the stale task' @(
+    ($cancelHold739.Decision.Flags[0].Evidence[0] -like '*TaskCancel*'),
+    ($cancelHold739.Decision.Flags[0].Evidence[0] -like '*ServerTasks-12244352*'),
+    (Test-TaskCancelRefusedHoldBody (Format-HeldEvidence -Version '1.0.35' -Sha 'abc' -Target 'uat' -Flags $cancelHold739.Decision.Flags -Name 'dashboard'))
+) @($true, $true, $true)
+
+# Restore Invoke-Octopus stub used by later Sign-off-style cases (none) — leave a no-op that records nothing.
+function Invoke-Octopus([string] $Path, [string] $Method = 'Get', $Body = $null) { }
 
 # Runbook wait-and-retry when the only busy reason is a short-lived runbook in the target (#583)
 Test-Case 'only a runbook to the target is waitable' (Test-BusyOnlyRunbookToTarget @(@{ Kind = 'runbook'; ProjectId = 'P-sys'; EnvironmentId = 'E-uat'; TaskId = 'T-rb' }) 'E-uat' 'E-tdd' 'P-ui') $true
@@ -390,6 +662,7 @@ function Get-OctopusAll([string] $Path) {
             Id        = 'ServerTasks-dep'
             Name      = 'Deploy'
             State     = 'Waiting'
+            QueueTime = '2026-11-15T01:00:00.000Z'
             Arguments = @{ DeploymentId = 'Deployments-1' }
         })
 }
@@ -406,6 +679,7 @@ $listedDeploy = Get-ActiveBusyItems
 Test-Case 'Get-ActiveBusyItems: deploy item names task state and release' @(
     $listedDeploy.Items[0].Kind, $listedDeploy.Items[0].TaskId, $listedDeploy.Items[0].State, $listedDeploy.Items[0].ReleaseVersion
 ) @('deployment', 'ServerTasks-dep', 'Waiting', '1.0.211')
+Test-Case 'Get-ActiveBusyItems: copies QueueTime onto the busy item' $listedDeploy.Items[0].QueueTime '2026-11-15T01:00:00.000Z'
 Test-Case 'Get-ActiveBusyItems: deploy busy reason includes task release state' (
     Get-BusyReason -Items $listedDeploy.Items -TargetEnvironmentId 'E-prod' -FirstEnvironmentId 'E-tdd' -ProjectId 'P-system' -Name 'system'
 ) 'a deployment of project Projects-981 to the target environment is not finished (task ServerTasks-dep, release 1.0.211, state Waiting)'

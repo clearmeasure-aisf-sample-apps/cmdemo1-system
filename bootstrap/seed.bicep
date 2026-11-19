@@ -55,6 +55,12 @@ param frontDoor bool = false
 @description('True once a deployable takes secrets the operator supplies (system.json deployables[].secrets): the identity that applies this seed then gets a role on the two tier groups that may set a secret in the environments\' vaults and list secret names, but not read a value (the skill\'s set-demo-secret.ps1).')
 param operatorSecretWriter bool = false
 
+@description('GitHub OIDC subject of the pool-manager workflow (environment "pool-manager"); the pool app identity signs in as this identity.')
+param poolManagerSubject string = ''
+
+@description('True when the pool lease store (blob storage for slot-N leases) is created in the seed; the pool stack then references it.')
+param poolLeaseStore bool = false
+
 @description('With azure.appEnvironment "system": the resource group of the system\'s one Container Apps environment (cae-<slug>), which every environment of both tiers runs its apps in. Empty: each environment owns its Container Apps environment.')
 param appsResourceGroupName string = ''
 
@@ -168,7 +174,7 @@ module edge 'modules/seed-edge.bicep' = if (frontDoor) {
 }
 
 // Nonprod group: the registry (with containerRegistry), the state account, the identities of the pipelines and of tdd
-// and uat.
+// and uat, the pool app identity, and the lease store.
 module nonprod 'modules/seed-nonprod.bicep' = {
   name: 'seed-${slug}-nonprod'
   scope: nonprodGroup
@@ -187,6 +193,8 @@ module nonprod 'modules/seed-nonprod.bicep' = {
     deploySubjects: flatten(map(nonprodEnvironments, e => map(octopusProjectSlugs, p => 'space:${octopusSpaceSlug}:project:${p}:environment:${e.name}')))
     appEnvironments: map(nonprodEnvironments, e => e.name)
     servedEnvironments: map(environments, e => e.name)
+    poolManagerSubject: poolManagerSubject
+    poolLeaseStore: poolLeaseStore
   }
 }
 
@@ -433,7 +441,10 @@ output identities object = union(
         feed: cluster!.outputs.feed
         backup: cluster!.outputs.backupIdentity
       }
-    : {}
+    : {},
+  { poolApp: nonprod.outputs.poolApp }
 )
 output ingress object = hasCluster ? cluster!.outputs.ingress : {}
 output backup object = hasCluster ? cluster!.outputs.backup : {}
+// Pool lease store: the storage account and container for slot-N leases. {} when poolLeaseStore is false.
+output leaseStore object = nonprod.outputs.leaseStore

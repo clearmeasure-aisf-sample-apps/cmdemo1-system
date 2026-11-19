@@ -486,6 +486,26 @@ foreach ($folder in Get-ChildItem -Path (Join-Path $Root 'environments') -Direct
     Test-Rule "folder environments/$($folder.Name) is declared" ($environmentNames -contains $folder.Name) 'add it to system.json or remove the folder'
 }
 
+# CAP-014 (issue #786): every step script directly under scripts/ stops on errors. Same rule as the capability
+# check, on the working tree, so a missing preamble fails at pull-request time instead of after a merge.
+foreach ($stepScript in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File) {
+    $text = Get-Content -LiteralPath $stepScript.FullName -Raw
+    Test-Rule "step script $($stepScript.Name) stops on errors" ($text -match "ErrorActionPreference = 'Stop'" -and $text -match 'PSNativeCommandUseErrorActionPreference = \$true') "$($stepScript.Name) lacks the step-script preamble CAP-014 requires (`$ErrorActionPreference = 'Stop' and `$PSNativeCommandUseErrorActionPreference = `$true)"
+}
+
+# Issue #789: every step script directly under scripts/ opens with the standard header, so the shell picks pwsh, the
+# engine refuses to run under an older version, and every variable miss and null member is an error from line one.
+foreach ($stepScript in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1' -File) {
+    $head = @(Get-Content -LiteralPath $stepScript.FullName -TotalCount 5)
+    $full = Get-Content -LiteralPath $stepScript.FullName -Raw
+    $missing = @(
+        if (@(Get-Content -LiteralPath $stepScript.FullName -TotalCount 1)[0] -cne '#!/usr/bin/env pwsh') { 'the #!/usr/bin/env pwsh first line' }
+        if ($head -cnotcontains '#Requires -Version 7.4') { 'a #Requires -Version 7.4 line in the first 5 lines' }
+        if ($full -notmatch 'Set-StrictMode -Version Latest') { 'Set-StrictMode -Version Latest' }
+    )
+    Test-Rule "step script $($stepScript.Name) has the standard header" ($missing.Count -eq 0) "$($stepScript.Name) is missing $($missing -join ', ')"
+}
+
 if ($failures.Count -gt 0) {
     Write-Host "$($failures.Count) check(s) failed."
     exit 1
@@ -493,12 +513,21 @@ if ($failures.Count -gt 0) {
 Write-Host 'All system checks passed.'
 
 # ConvertTo-Topology container-app deployables (#556): env-checks already runs this file; keep the proof here so
-# workflows/ need not change. A failure calls exit and ends this process too.
+# workflows/ need not change. Each child that fails only sets $LASTEXITCODE and ends the child, so this script
+# exits with it (#774). Set first: strict mode, and a child that passes without exit, leave it unset otherwise.
+$global:LASTEXITCODE = 0
 & (Join-Path $PSScriptRoot 'test-deploy-staticwebapp.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Select-DeliveryDeployable omits azureExcludeDeployables and retired (#577): same reason as above.
 & (Join-Path $PSScriptRoot 'test-write-delivery.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Deprecated aisf/fworker/fwrunner removal helpers (#575 compute, #578 leftovers): env-checks already runs this
 # file; keep the proof here so workflows/ need not change.
 & (Join-Path $PSScriptRoot 'test-apply-environment.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Get-SuccessfulVersion (CAP-037) skips pull-request prerelease versions (#774): same reason as above.
+& (Join-Path $PSScriptRoot 'test-capability-rollback-window.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

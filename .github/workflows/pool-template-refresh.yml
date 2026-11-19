@@ -1,0 +1,40 @@
+# Refresh sqldb-<slug>-pool-template after a merge to master of the app that owns migrations (issue #656).
+# Invoked by workflow_dispatch or repository_dispatch (type pool-template-refresh) from the app release path.
+# Live migrate/seed requires stack-cmdemo1-pool (#653) after Jeffrey's yes. Until then the job uses -DryRun.
+name: pool-template-refresh
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Decide and print; change no Azure state"
+        type: boolean
+        default: true
+  repository_dispatch:
+    types: [pool-template-refresh]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pool-template-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: Plan template refresh
+        shell: pwsh
+        run: ./scripts/pool/refresh-template.ps1 -Action plan
+
+      - name: Refresh template (DryRun until pool stack exists)
+        shell: pwsh
+        env:
+          # Schedule stays DryRun. workflow_dispatch honors inputs.dry_run; repository_dispatch stays DryRun until #653.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || github.event_name != 'workflow_dispatch' }}
+        run: |
+          $dry = $env:DRY_RUN -ne 'false'
+          ./scripts/pool/refresh-template.ps1 -Action refresh -DryRun:$dry
