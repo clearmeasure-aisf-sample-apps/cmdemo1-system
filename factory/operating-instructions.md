@@ -141,13 +141,15 @@ At most these comments per item:
      `docs/**`, and no code, build, workflow or test reads it).
    - Plan: one checklist line per acceptance criterion, naming how it is met.
    - Constraints: each Notes / Constraints / Out-of-scope sentence of the issue that the design must respect.
-   - The Cursor agent link, if one is used.
+   - `Pi run dir:` the run dir on the bot's box (see "Pi on the RTX Pro 5000"); no other Pi detail here.
    For anything larger than a small change, append the design to the issue body under `## Design` instead
    and link it from the comment.
-2. **In Progress → Review**: the PR link, required checks result, one line on what changed. Opening the PR moves the
-   item to Review.
+2. **In Progress → Review**: the PR link, required checks result, one line on what changed, then the
+   `usage-report` table (progress: Pi sessions so far, top-level wall time as of now). Opening the PR moves the item
+   to Review.
 3. **Review verdict**: one line per acceptance criterion with its evidence. PASS and required checks green: merge
-   first, then post it as `Review → Merged`, with the merge commit — or `Review → Done` when Docs-only is yes.
+   first, then post it as `Review → Merged`, with the merge commit — or `Review → Done` when Docs-only is yes —
+   and the final `usage-report --final` table (every Pi session of the item, totals, top-level wall time).
    Do not post `Review: PASS, not merged` and do not wait for a human yes. FAIL: `Review → In Progress` and what
    to fix.
 4. **Done**: `UAT → Done` (or `TDD → Done` / `Merged → Done` when that is the column the prod deploy advances from),
@@ -170,18 +172,16 @@ duplicate journals, or a comment within a minute of another one on the same item
 ## In Progress (code and PR)
 
 - Branch `cm-ai-ops-bot/<short-description>`. The PR body says `Closes #N` (or `Closes owner/repo#N`). Squash merge.
-- **Trivial docs-only change** (a few lines of Markdown): edit it yourself with `git`/`gh` on the box. No cloud agent.
+- **Trivial docs-only change** (a few lines of Markdown): edit it yourself with `git`/`gh` on the box. No Pi task.
 - **Batch small items**: docs-only or tiny items assigned around the same time in the same repository go in ONE
-  branch and ONE PR (`Closes #A, closes #B`), and one cloud agent if one is needed. Each issue still gets its own
-  pickup comment and verdict.
-- **Code**: one Cursor cloud agent per item (or per batch) in the issue's repository. Its prompt has: the issue
-  number, title and acceptance criteria, the design from the pickup comment, the branch name, and these rules:
-  "Follow the repository's AGENTS.md and CLAUDE.md, including the build, Qodana and size-ratchet rules, before you
-  push. Open the PR when the build passes locally. Do not comment on the issue or the PR, and do not touch the project
-  board." The bot, not the agent, writes every issue comment.
+  branch and ONE PR (`Closes #A, closes #B`). Each issue still gets its own pickup comment, verdict and usage table.
+- **Code**: the bot owns the plan and the implementation, and delegates **every** code-editing and test-writing task
+  to Pi on the RTX Pro 5000 (section "Pi on the RTX Pro 5000"). He does not write product code or tests himself and
+  does not use a Cursor cloud agent for them. The bot, not Pi, writes every issue comment, commits, pushes and opens
+  the PR.
 - Required checks must be green before the Review verdict: `Build result` and `secret-scan` in `cmdemo1-workorders`,
-  `env-checks` in `cmdemo1-system`; elsewhere every check on the PR. Fix a red check in the same PR (send the failing
-  log to the same cloud agent); never disable, skip or re-baseline a gate to get green.
+  `env-checks` in `cmdemo1-system`; elsewhere every check on the PR. Fix a red check in the same PR (hand the failing
+  log to a Pi fix task); never disable, skip or re-baseline a gate to get green.
 - Infrastructure failures (the failing step never reached the code, e.g. apt/DNS, runner provisioning, a package
   or container registry timeout, while build and unit tests pass): do not push empty or retrigger commits, because they
   rerun every job. Wait about 10 minutes, then `gh run rerun <run-id> --failed` so only the failed jobs run again. If
@@ -194,6 +194,45 @@ duplicate journals, or a comment within a minute of another one on the same item
   PR (events `ci-passed`, `ci-failed`, `review-changes-requested`, `pr-merged`, `pr-closed`; it deletes itself when the
   PR merges or closes) whose prompt is `Read factory/operating-instructions.md from cmdemo1-system main and handle
   PR #<P> in <repo>.`, then end the session.
+
+## Pi on the RTX Pro 5000 (coding tasks)
+
+Jeffrey, 18 Nov 2026: the bot takes the work item and owns the plan and implementation, but delegates every task to Pi
+through the proxy to the RTX Pro 5000, and every implemented item gets comments with tokens and time used, the
+top-level session and the Pi sessions. Tools are in `factory/pi/` of this repository.
+
+**Setup (first wake, and any wake where `pi-pro5000-health` is not on the PATH):** clone or update
+`cmdemo1-system` on the box and run `bash factory/pi/setup.sh`. It is idempotent: installs Pi (pinned version), the
+`pi-pro5000` wrapper, `factory-pi-run-task`, `factory-pi-usage-report` and `pi-pro5000-health` into `~/.local/bin`.
+
+- Exit 3 (`MISSING_SECRETS`): the account lacks `LOCAL_LLM_PRO5000_URL` and/or `LOCAL_LLM_PRO5000_TOKEN`. Ask
+  Jeffrey for them with the Grok Bot secret request form (those exact names; never ask for the values in chat or a
+  comment), leave the item in Todo with one `Blocker: Pi secrets missing` comment, and end.
+- Exit 4 (`UNREACHABLE` / `TUNNEL_DOWN` / `REFUSED` / `UNHEALTHY`): the proxy is a temporary tunnel, so a 502,
+  530 or unknown host usually means the tunnel URL changed. Report it to Jeffrey and ask for the new value; never
+  guess or search for a URL, and never start, stop, restart or warm the model server or switch its model.
+- At the start of every implementation wake run `pi-pro5000-health` once (a models list only; no warm-up).
+
+**Working an item:**
+
+1. The bot writes the plan (pickup comment), creates the branch and a worktree, and splits the work into small
+   Pi tasks: one test or one code change each, with the files, the acceptance criterion it serves, the repository's
+   AGENTS.md / CLAUDE.md rules that apply, and "Do not run git commit or push. End your reply with PASS or FAIL."
+2. Run each task with
+   `factory-pi-run-task --run-dir ~/factory-runs/<repo>-<issue> --cwd <worktree> --task <name> --prompt-file <file> --top-session <id>`.
+   `<id>` is the bot's own top-level grok.com session / run identifier for this wake (the routine run or chat
+   session id; if none is visible, the GitHub event's delivery id). Keep the same run dir for the whole item across
+   wakes. Stdin is closed for Pi; its session JSONL is kept under the run dir. At most **2** Pi tasks at once (the
+   tool enforces it).
+3. The bot verifies every Pi result himself with the real build and tests (the repository's PrivateBuild / test
+   command), reads the diff, and sends failures back to a new Pi fix task with the failing output. A Pi `PASS` is
+   not evidence.
+4. The bot alone does git commit / push, the PR, board moves, comments, merges, and anything touching secrets or
+   credentials; none of these is ever delegated to Pi, and Pi never sees a secret.
+5. Usage: `factory-pi-usage-report --run-dir ~/factory-runs/<repo>-<issue>` (progress, in the `In Progress → Review`
+   comment) and `… --final` (in the merge verdict). It lists each Pi session id, task, result, tokens in / out and
+   wall time, totals, and the top-level session id and wall time. Post it as produced; it holds no URL or token.
+   If Pi was never reachable for an item, say so in the Blocker instead of a table.
 
 ## Review
 
@@ -272,13 +311,15 @@ On any wake with items in Merged, TDD or UAT, check them all at once:
   8:14pm CT: "Modify what needs to be modified so that the factory bot does not wait for approvals and auto
   approves himself.").
 - Work an issue not assigned to `cm-ai-ops-bot`.
+- Write product code or tests yourself, or hand a push, merge, comment or secret to Pi.
 - Add a cron schedule. The bot is woken by GitHub events and the Octopus prod-deploy webhook only.
 
 ## Credentials
 
 Secrets of the Grok Bot account (names only; see `factory/bootstrap.md`): `CM_AI_OPS_BOT_GH_TOKEN` for GitHub,
 `GH_PROJECT_TOKEN` for project 679 when the first cannot edit it, and the Azure service principal `cm-ai-ops-bot`
-(read-only use: health and logs). Use them through environment variables only.
+(read-only use: health and logs), plus `LOCAL_LLM_PRO5000_URL` and `LOCAL_LLM_PRO5000_TOKEN` for Pi on the RTX Pro
+5000 (read only by `factory/pi/`). Use them through environment variables only.
 
 ## Reporting to Jeffrey
 
@@ -286,7 +327,9 @@ Message Jeffrey in Grok Bot only for:
 
 - items that reached Done in prod (one message per release, listing the items);
 - a failure that needs him (red master, failed or held deployment);
-- an item that is newly blocked.
+- an item that is newly blocked;
+- the Pi secrets are missing (ask with the secret request form) or the RTX Pro 5000 proxy is unreachable (ask for the
+  new tunnel URL); once per outage, not per item.
 
 Nothing for pickups, PRs opened, checks, merges or Merged / TDD / UAT column moves. A wake with nothing to report
 sends nothing.

@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Markdown tokens-and-time table for one work item, from a run-task run dir. Prints to stdout (post it with
+`gh issue comment N --body-file -`); it never contains a URL, token or other secret.
+
+    usage-report --run-dir DIR [--final] [--top-session ID] [--top-tokens TEXT]
+
+- One row per Pi session: Pi session id, task, result, turns, input tokens (new + cached), output tokens, wall time;
+  a totals row.
+- Top-level section: the bot's grok.com session / run id (from run.json, or --top-session), start, end (--final
+  records the end time once) or "as of", and wall time. --top-tokens adds the top-level token count when the bot
+  knows it; otherwise it says the top-level session's tokens are not exposed per session.
+"""
+import argparse, datetime as dt, json, os
+from zoneinfo import ZoneInfo
+
+def fmt(s):
+    s = int(round(s)); return f"{s//3600}h{(s%3600)//60:02d}m{s%60:02d}s" if s >= 3600 else f"{s//60}m{s%60:02d}s"
+
+def ct(t): return t.astimezone(ZoneInfo("America/Chicago")).strftime("%-I:%M%p CT %b %-d").replace("AM", "am").replace("PM", "pm")
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--run-dir", required=True); p.add_argument("--final", action="store_true")
+    p.add_argument("--top-session"); p.add_argument("--top-tokens")
+    a = p.parse_args()
+    meta_p = os.path.join(a.run_dir, "run.json")
+    meta = json.load(open(meta_p)) if os.path.exists(meta_p) else {"start": dt.datetime.now(dt.timezone.utc).isoformat()}
+    if a.top_session: meta["top_session"] = a.top_session
+    if a.final and not meta.get("end"): meta["end"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    json.dump(meta, open(meta_p, "w"), indent=1)
+    tp = os.path.join(a.run_dir, "tasks.jsonl")
+    ts = [json.loads(l) for l in open(tp) if l.strip()] if os.path.exists(tp) else []
+    start = dt.datetime.fromisoformat(meta["start"])
+    end = dt.datetime.fromisoformat(meta["end"]) if meta.get("end") else dt.datetime.now(dt.timezone.utc)
+    out = [f"### Tokens and time{'' if meta.get('end') else ' (progress)'}", "",
+           "**Top-level session** (the factory bot: plan, design, verification, git / PR / merge):", "",
+           f"- Session: `{meta.get('top_session', 'unnamed')}`",
+           f"- Started {ct(start)}; {'ended' if meta.get('end') else 'as of'} {ct(end)}; wall time {fmt((end - start).total_seconds())}",
+           f"- Top-level tokens: {a.top_tokens or 'not exposed per session by Grok Bot (metered per account)'}",
+           f"- Pi: {meta.get('pi_version', '?')} on the RTX Pro 5000 (model the server has loaded)", "",
+           "**Pi sessions** (every code edit and test was written by Pi):", "",
+           "| # | Pi session | Task | Result | Turns | Tokens in (new + cached) | Tokens out | Wall time |",
+           "|---|---|---|---|---|---|---|---|"]
+    ti = tc = to = tw = 0
+    for i, t in enumerate(ts, 1):
+        out.append(f"| {i} | `{t.get('session_id') or 'n/a'}` | {t['task']} | {t['result']} | {t.get('turns', 0)} | "
+                   f"{t['input']:,} + {t['cacheRead']:,} | {t['output']:,} | {fmt(t['wall_s'])} |")
+        ti += t["input"]; tc += t["cacheRead"]; to += t["output"]; tw += t["wall_s"]
+    out.append(f"| | **Total ({len(ts)} Pi session{'' if len(ts) == 1 else 's'})** | | | | **{ti:,} + {tc:,}** | **{to:,}** | **{fmt(tw)}** |")
+    print("\n".join(out))
+
+if __name__ == "__main__": main()
