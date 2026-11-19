@@ -10,7 +10,7 @@
 
       pwsh -NoProfile -File scripts/test-pool.ps1
 
-    Proves issue #653 / #656 pool stack shape as code only:
+    Proves, as code only, the pool stack (#653/#656) and the seed pool identity and lease store (#652):
 
       1. system.json pool declares 8 slots, pool.warm.count 2 (plus warm/cool schedule), Standard 50 eDTU, 1 vCPU,
          maxReplicas 3, 14-day artifacts, and pool.lease caps.
@@ -187,6 +187,89 @@ Test-Rule 'preview-environment.ps1 stays on environment templates' (
     ($preview -notmatch 'infra/pool') -and
     ($preview -match 'infra/main\.bicep' -or $preview -match 'main\.bicep')
 )
+
+# Seed: pool identities and the lease store (#652)
+$seed = Get-Content -LiteralPath (Join-Path $Root 'bootstrap' 'seed.bicep') -Raw
+$seedNonprod = Get-Content -LiteralPath (Join-Path $Root 'bootstrap' 'modules' 'seed-nonprod.bicep') -Raw
+Test-Rule 'seed pool params default off' (
+    ($seed -match "param\s+poolManagerSubject\s+string\s*=\s*''") -and
+    ($seed -match "param\s+poolLeaseStore\s+bool\s*=\s*false") -and
+    ($seed -match 'poolManagerSubject:\s*poolManagerSubject') -and
+    ($seed -match 'poolLeaseStore:\s*poolLeaseStore')
+) 'no pool-manager credential and no lease store unless the operator opts in'
+
+Test-Rule 'seed pool app identity' (
+    ($seedNonprod -match "resource\s+poolApp\s+'Microsoft\.ManagedIdentity/userAssignedIdentities@2023-01-31'") -and
+    ($seedNonprod -match "name:\s*'id-\$\{slug\}-pool-app'")
+)
+
+Test-Rule 'seed pool-manager federated credential' (
+    ($seedNonprod -match "resource\s+poolAppCredential\s+'Microsoft\.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31'\s*=\s*if\s*\(\s*!empty\(poolManagerSubject\)\s*\)") -and
+    ($seedNonprod -match "name:\s*'github-pool-manager'") -and
+    ($seedNonprod -match 'issuer:\s*githubIssuer') -and
+    ($seedNonprod -match 'subject:\s*poolManagerSubject') -and
+    ($seedNonprod -match 'audiences:\s*\[audience\]')
+) 'github-pool-manager, only with a poolManagerSubject'
+
+Test-Rule 'seed lease store' (
+    ($seedNonprod -match "resource\s+leaseStore\s+'Microsoft\.Storage/storageAccounts@2023-05-01'\s*=\s*if\s*\(\s*poolLeaseStore\s*\)") -and
+    ($seedNonprod -match "name:\s*'st\$\{slug\}pool\$\{suffix\}'") -and
+    ($seedNonprod -match "name:\s*'leases'")
+) 'st<slug>pool<suffix> account with a leases container'
+
+Test-Rule 'seed lease store RBAC' (
+    ($seedNonprod -match "resource\s+leaseStoreContributor\s+'Microsoft\.Authorization/roleAssignments@2022-04-01'\s*=\s*if\s*\(\s*poolLeaseStore\s*\)") -and
+    ($seedNonprod -match 'scope:\s*leaseStore') -and
+    ($seedNonprod -match 'principalId:\s*poolApp\.properties\.principalId') -and
+    ($seedNonprod -match [regex]::Escape('ba92f5b4-2d11-453d-a403-e96b0029c9fe'))
+) 'Storage Blob Data Contributor on the lease store for the pool app identity'
+
+Test-Rule 'seed pool outputs' (
+    ($seed -match "(?s)output\s+identities\s+object\s*=.*?poolApp:\s*nonprod\.outputs\.poolApp") -and
+    ($seed -match 'output\s+leaseStore\s+object\s*=\s*nonprod\.outputs\.leaseStore')
+) 'identities.poolApp and the leaseStore output from the nonprod module'
+
+$seedApplyingWorkflow = @(
+    Get-ChildItem -LiteralPath (Join-Path $Root '.github' 'workflows') -Filter '*.yml' |
+        Where-Object {
+            $workflow = Get-Content -LiteralPath $_.FullName -Raw
+            ($workflow -match 'bootstrap/seed') -and (($workflow -match 'az deployment') -or ($workflow -match 'az stack group create'))
+        }
+)
+Test-Rule 'no workflow applies the seed' (($seedApplyingWorkflow.Count -eq 0) -and ($apply -notmatch 'bootstrap/seed')) $(
+    if ($seedApplyingWorkflow.Count -gt 0) { "applying workflow(s): $(@($seedApplyingWorkflow | ForEach-Object Name) -join ', ')" } else { 'apply-environment.ps1 references bootstrap/seed' }
+)
+
+$poolManager = Get-Content -LiteralPath (Join-Path $Root '.github' 'workflows' 'pool-manager.yml') -Raw
+Test-Rule 'pool-manager runs dry by default' (
+    ($poolManager -match 'lease\.ps1\s+-Action\s+sweep\s+-DryRun:') -and
+    ($poolManager -match 'manage-warm\.ps1\s+-Action\s+apply\s+-DryRun:') -and
+    ($poolManager -notmatch 'az stack group create')
+) 'lease sweep and warm/cool run with -DryRun until the lease store and the pool stack exist'
+
+# Bicep build of the seed: the pool app identity and the lease store compile. Bicep writes its diagnostics to stderr
+# with exit code 0, so any stderr or a non-zero exit fails. Needs az + Bicep; skip only when az is absent (local without the CLI).
+$seedFile = Join-Path $Root 'bootstrap' 'seed.bicep'
+$seedBuild = "seed-bicep-$([Guid]::NewGuid().ToString('N'))"
+$seedCompiled = Join-Path ([IO.Path]::GetTempPath()) "$seedBuild.json"
+$seedStderr = Join-Path ([IO.Path]::GetTempPath()) "$seedBuild.err"
+if ($az) {
+    $env:BICEP_CLI_DIAGNOSTICS = 'warn'
+    $env:BICEP_OUT = $seedCompiled
+    $previousErrorAction = $PSNativeCommandUseErrorActionPreference
+    $PSNativeCommandUseErrorActionPreference = $false
+    $null = & az bicep build --file $seedFile --stdout > $env:BICEP_OUT 2> $seedStderr
+    $code = $LASTEXITCODE
+    $PSNativeCommandUseErrorActionPreference = $previousErrorAction
+    $env:BICEP_CLI_DIAGNOSTICS = $null
+    $env:BICEP_OUT = $null
+    $stderr = [string] (Get-Content -LiteralPath $seedStderr -Raw -ErrorAction SilentlyContinue)
+    Test-Rule 'bicep build bootstrap/seed.bicep' ($code -eq 0 -and [string]::IsNullOrWhiteSpace($stderr)) $stderr
+    Remove-Item -LiteralPath $seedCompiled, $seedStderr -Force -ErrorAction SilentlyContinue
+}
+else {
+    Write-Host 'SKIP bicep build bootstrap/seed.bicep: az is not on PATH (env-checks installs it)'
+}
 
 if ($failures.Count -gt 0) {
     Write-Host "$($failures.Count) pool check(s) failed."
