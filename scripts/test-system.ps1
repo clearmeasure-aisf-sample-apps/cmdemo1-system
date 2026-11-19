@@ -493,12 +493,21 @@ if ($failures.Count -gt 0) {
 Write-Host 'All system checks passed.'
 
 # ConvertTo-Topology container-app deployables (#556): env-checks already runs this file; keep the proof here so
-# workflows/ need not change. A failure calls exit and ends this process too.
+# workflows/ need not change. Each child that fails only sets $LASTEXITCODE and ends the child, so this script
+# exits with it (#774). Set first: strict mode, and a child that passes without exit, leave it unset otherwise.
+$global:LASTEXITCODE = 0
 & (Join-Path $PSScriptRoot 'test-deploy-staticwebapp.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Select-DeliveryDeployable omits azureExcludeDeployables and retired (#577): same reason as above.
 & (Join-Path $PSScriptRoot 'test-write-delivery.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Deprecated aisf/fworker/fwrunner removal helpers (#575 compute, #578 leftovers): env-checks already runs this
 # file; keep the proof here so workflows/ need not change.
 & (Join-Path $PSScriptRoot 'test-apply-environment.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Get-SuccessfulVersion (CAP-037) skips pull-request prerelease versions (#774): same reason as above.
+& (Join-Path $PSScriptRoot 'test-capability-rollback-window.ps1')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
