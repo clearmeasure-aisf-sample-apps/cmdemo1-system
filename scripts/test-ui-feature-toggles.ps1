@@ -237,7 +237,7 @@ try {
 } catch { $legacyBodyRefused = $true }
 # Plan strips RolloutPercentage, so body build succeeds; assert the payload has no legacy field.
 $rulesBodyFromLegacyPlan = ConvertTo-OctopusJson (New-FeatureToggleBody 'Projects-981' 'Spaces-355' $building $legacyPlan ([pscustomobject]@{
-            Id               = 'FeatureToggles-1'
+            Id               = 'FeatureFlags-1'
             Name             = 'BuildingManagement'
             Slug             = 'BuildingManagement'
             DefaultIsEnabled = $false
@@ -282,15 +282,15 @@ Test-Case 'repo system accepted' $true $true
 $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ensure-ui-feature-toggles.ps1') -Raw
 Test-Case 'script has no api key literal' ($source -match 'API-[A-Za-z0-9]{8,}') $false
 Test-Case 'script does not say fleet' ($source -match '(?i)fleet') $false
-Test-Case 'script calls featuretoggles' ($source -match '/featuretoggles') $true
-Test-Case 'script uri helpers use featuretoggles' ((Get-UiFeatureToggleCollectionUri 'https://example/p') -eq 'https://example/p/featuretoggles') $true
-Test-Case 'script uri helpers omit feature-flags path' ((Get-UiFeatureToggleCollectionUri 'https://example/p') -match '/feature-flags') $false
+Test-Case 'script has no featuretoggles path' ($source -match '/featuretoggles') $false
+Test-Case 'script uri helpers use feature-flags v2' ((Get-UiFeatureToggleCollectionUri 'https://example/p') -eq 'https://example/p/feature-flags/v2') $true
+Test-Case 'script uri helpers use the v2 feature-flags path' ((Get-UiFeatureToggleCollectionUri 'https://example/p') -match '/feature-flags/v2') $true
 Test-Case 'script has no upgrade endpoint helper' ($source -match 'function\s+.*Upgrade|featuretoggles/upgrade|/feature-flags/.*/upgrade') $false
 
 $projectBase = 'https://example.test/api/Spaces-355/projects/Projects-981'
-Test-Case 'list uri' (Get-UiFeatureToggleListUri $projectBase 0 100) "$projectBase/featuretoggles?skip=0&take=100"
-Test-Case 'create uri' (Get-UiFeatureToggleCollectionUri $projectBase) "$projectBase/featuretoggles"
-Test-Case 'item uri' (Get-UiFeatureToggleItemUri $projectBase 'FeatureToggles-1') "$projectBase/featuretoggles/FeatureToggles-1"
+Test-Case 'list uri' (Get-UiFeatureToggleListUri $projectBase 0 100) "$projectBase/feature-flags/v2?skip=0&take=100"
+Test-Case 'create uri' (Get-UiFeatureToggleCollectionUri $projectBase) "$projectBase/feature-flags/v2"
+Test-Case 'item uri' (Get-UiFeatureToggleItemUri $projectBase 'FeatureFlags-1') "$projectBase/feature-flags/FeatureFlags-1/v2"
 
 $savedKey = $env:OCTOPUS_API_KEY
 $env:OCTOPUS_API_KEY = 'test-only'
@@ -318,7 +318,7 @@ function Invoke-RestMethod {
         return
     }
     return [pscustomobject]@{
-        Items        = @([pscustomobject]@{ Id = 'FeatureToggles-1'; Name = 'BuildingManagement'; Slug = 'BuildingManagement' })
+        Items        = @([pscustomobject]@{ Id = 'FeatureFlags-1'; Name = 'BuildingManagement'; Slug = 'BuildingManagement' })
         TotalResults = 1
     }
 }
@@ -329,12 +329,12 @@ try {
     Test-Case 'get omits body' $script:octopusCalls[0].BodySent $false
     $script:octopusCalls.Clear()
     $listed = @(Get-UiFeatureToggleList -ProjectBase $projectBase)
-    Test-Case 'list calls featuretoggles' $script:octopusCalls[0].Uri "$projectBase/featuretoggles?skip=0&take=100"
+    Test-Case 'list calls feature-flags v2' $script:octopusCalls[0].Uri "$projectBase/feature-flags/v2?skip=0&take=100"
     Test-Case 'list reads the toggle' $listed[0].Name 'BuildingManagement'
     $script:octopusCalls.Clear()
     $null = Invoke-Octopus -Method Post -Uri (Get-UiFeatureToggleCollectionUri $projectBase) -Body '{"Name":"BuildingManagement"}'
     Test-Case 'post sends body' $script:octopusCalls[0].BodySent $true
-    Test-Case 'post uri' $script:octopusCalls[0].Uri "$projectBase/featuretoggles"
+    Test-Case 'post uri' $script:octopusCalls[0].Uri "$projectBase/feature-flags/v2"
 } finally {
     if ($null -eq $savedKey) { Remove-Item Env:OCTOPUS_API_KEY -ErrorAction SilentlyContinue }
     else { $env:OCTOPUS_API_KEY = $savedKey }
@@ -398,7 +398,7 @@ foreach ($fence in [regex]::Matches($runbook, '(?s)```[a-z]*\r?\n(.*?)```')) {
 Test-Case 'runbook commands omit dollar bools' $fencesHaveDollarBool $false
 
 $script:toggleState = @{
-    'FeatureToggles-1' = @{
+    'FeatureFlags-1' = @{
         Name             = 'BuildingManagement'
         Slug             = 'BuildingManagement'
         Description      = 'buildings'
@@ -409,7 +409,7 @@ $script:toggleState = @{
             'Environments-3' = @{ Enabled = $false; Phases = @() }
         }
     }
-    'FeatureToggles-2' = @{
+    'FeatureFlags-2' = @{
         Name             = 'VendorManagement'
         Slug             = 'VendorManagement'
         Description      = 'vendors'
@@ -420,7 +420,7 @@ $script:toggleState = @{
             'Environments-3' = @{ Enabled = $false; Phases = @() }
         }
     }
-    'FeatureToggles-3' = @{
+    'FeatureFlags-3' = @{
         Name             = 'ShowPriorityBadges'
         Slug             = 'showprioritybadges'
         Description      = 'badges'
@@ -484,17 +484,17 @@ function Invoke-Octopus {
             [pscustomobject]@{ Name = 'prod'; Id = 'Environments-3' }
         )
     }
-    if ($Uri -match '/featuretoggles\?' -and $Method -eq 'Get') {
+    if ($Uri -match '/feature-flags/v2\?' -and $Method -eq 'Get') {
         $items = foreach ($id in @($script:toggleState.Keys)) {
             $entry = $script:toggleState[$id]
             [pscustomobject]@{ Id = $id; Name = [string]$entry.Name; Slug = [string]$entry.Slug }
         }
         return [pscustomobject]@{ Items = @($items); TotalResults = @($items).Count }
     }
-    if ($Uri -match '/featuretoggles/(FeatureToggles-\d+)$' -and $Method -eq 'Get') {
+    if ($Uri -match '/feature-flags/(FeatureFlags-\d+)/v2$' -and $Method -eq 'Get') {
         return New-FakeToggle $Matches[1]
     }
-    if ($Uri -match '/featuretoggles/(FeatureToggles-\d+)$' -and $Method -eq 'Put') {
+    if ($Uri -match '/feature-flags/(FeatureFlags-\d+)/v2$' -and $Method -eq 'Put') {
         $id = $Matches[1]
         $parsed = $bodyText | ConvertFrom-Json
         if ($bodyText -match 'RolloutPercentage') { throw 'put carried RolloutPercentage' }
@@ -616,7 +616,7 @@ $uatProdStayOff = $true
 $putsHavePhases = $true
 $putsHaveLegacy = $false
 foreach ($put in $puts) {
-    if ($put.Uri -notmatch '/featuretoggles/FeatureToggles-1$') { $putTargetsOk = $false }
+    if ($put.Uri -notmatch '/feature-flags/FeatureFlags-1/v2$') { $putTargetsOk = $false }
     if ($put.Body -notmatch '"Phases"') { $putsHavePhases = $false }
     if ($put.Body -match 'RolloutPercentage') { $putsHaveLegacy = $true }
     $parsed = $put.Body | ConvertFrom-Json

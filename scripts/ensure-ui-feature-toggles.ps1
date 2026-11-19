@@ -6,8 +6,9 @@
     Creates BuildingManagement, VendorManagement, and ShowPriorityBadges on Octopus project cmdemo1-ui, or flips one environment.
 
 .DESCRIPTION
-    The toggles live on project cmdemo1-ui (Projects-981) in space cmdemo1-demo (Spaces-355). The API is
-    /featuretoggles. The project UI may label the same screen Feature Flags. Provider 1.20.0 has no feature-toggle
+    The toggles live on project cmdemo1-ui (Projects-981) in space cmdemo1-demo (Spaces-355). The API is the
+    rule-based feature flag API: /feature-flags/v2 for list and create, /feature-flags/{id}/v2 for read and
+    modify. The project UI may label the same screen Feature Flags. Provider 1.20.0 has no feature-toggle
     resource, so octopus-apply does not create them and does not put a flipped environment back. This script is the create.
 
     This script speaks the rules targeting model only (see https://octopus.com/docs/feature-flags/upgrading-to-rules
@@ -540,11 +541,11 @@ function Find-UiFeatureToggle($Items, [string] $ToggleName, [string] $Slug) {
 }
 
 function Get-UiFeatureToggleCollectionUri([string] $ProjectBase) {
-    return "$ProjectBase/featuretoggles"
+    return "$ProjectBase/feature-flags/v2"
 }
 
 function Get-UiFeatureToggleItemUri([string] $ProjectBase, [string] $ToggleId) {
-    return "$ProjectBase/featuretoggles/$ToggleId"
+    return "$ProjectBase/feature-flags/$ToggleId/v2"
 }
 
 function Get-UiFeatureToggleListUri([string] $ProjectBase, [int] $Skip, [int] $Take) {
@@ -682,8 +683,11 @@ function New-FeatureToggleEnvironmentWires($Environments) {
 }
 
 function New-FeatureToggleBody($ProjectId, $SpaceId, $Spec, $Plan, $Existing) {
-    # Rules create: Name, ProjectId, SpaceId, Environments (DeploymentEnvironmentId, IsEnabled, Phases).
-    # Rules modify also sends DefaultIsEnabled and Slug. Map plan DefaultEnabled → DefaultIsEnabled here only.
+    # V2 rules create: Name, ProjectId, SpaceId, Description, Environments (DeploymentEnvironmentId,
+    # IsEnabled, Phases). V2 modify (PUT) is the full flag: Id, Name, Slug, ProjectId, SpaceId,
+    # DefaultIsEnabled, Environments, plus Description, Tags, and RolloutGroupId copied from the
+    # fetched flag. Map plan DefaultEnabled → DefaultIsEnabled here only. RolloutPercentage and the
+    # other legacy targeting fields are never sent.
     $environments = New-FeatureToggleEnvironmentWires $Plan.Environments
     if ($null -eq $Existing) {
         $create = [ordered]@{
@@ -692,6 +696,8 @@ function New-FeatureToggleBody($ProjectId, $SpaceId, $Spec, $Plan, $Existing) {
             SpaceId      = [string]$SpaceId
             Environments = $environments
         }
+        $createDescription = [string]$Spec.Description
+        if (-not [string]::IsNullOrWhiteSpace($createDescription)) { $create['Description'] = $createDescription }
         Assert-UiFeatureToggleRulesPayload $create
         return $create
     }
@@ -710,8 +716,22 @@ function New-FeatureToggleBody($ProjectId, $SpaceId, $Spec, $Plan, $Existing) {
     }
     $slug = Get-NoteProperty $Existing 'Slug'
     if ($slug) { $body['Slug'] = [string]$slug }
+    # Description, Tags, and RolloutGroupId are copied from the fetched flag so a write never drops
+    # what Octopus already stores on the flag.
     $description = [string]$Plan.Description
     if (-not [string]::IsNullOrWhiteSpace($description)) { $body['Description'] = $description }
+    $tags = Get-NoteProperty $Existing 'Tags'
+    if ($null -ne $tags) {
+        if ($tags -is [System.Collections.IEnumerable] -and $tags -isnot [string] -and @($tags).Count -gt 0) {
+            $body['Tags'] = $tags
+        } elseif (-not [string]::IsNullOrWhiteSpace([string]$tags)) {
+            $body['Tags'] = [string]$tags
+        }
+    }
+    $rolloutGroupId = Get-NoteProperty $Existing 'RolloutGroupId'
+    if ($null -ne $rolloutGroupId -and -not [string]::IsNullOrWhiteSpace([string]$rolloutGroupId)) {
+        $body['RolloutGroupId'] = [string]$rolloutGroupId
+    }
     Assert-UiFeatureToggleRulesPayload $body
     return $body
 }
