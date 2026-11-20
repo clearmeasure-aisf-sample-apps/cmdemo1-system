@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Pi against one of the factory's local GPUs through the token-protected llm-proxy:
+#   pi-gpu <pro5000|obs|ts3> [pi args...]
+# Reads LOCAL_LLM_<GPU>_URL / LOCAL_LLM_<GPU>_TOKEN, checks the GPU with one models list (never a completion, never
+# a model load or warm-up), writes Pi's provider config for model `auto` (the only name the proxy accepts) and passes
+# every other argument through to pi. Never prints the URL or token.
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+GPU_PY="$HERE/gpu.py"; [[ -f "$GPU_PY" ]] || GPU_PY="$HOME/.local/bin/factory-pi-gpu.py"
+gpu="${1:-}"; shift || true
+case "$gpu" in pro5000|obs|ts3) ;; *) echo "usage: pi-gpu <pro5000|obs|ts3> [pi args...]" >&2; exit 2 ;; esac
+up="${gpu^^}"; url_var="LOCAL_LLM_${up}_URL"; tok_var="LOCAL_LLM_${up}_TOKEN"
+[[ -n "${!url_var:-}" && -n "${!tok_var:-}" ]] || { echo "MISSING_SECRETS: $url_var and/or $tok_var" >&2; exit 3; }
+python3 "$GPU_PY" health "$gpu" >/dev/null || { echo "pi-gpu: $gpu unavailable (run pi-gpu-health)" >&2; exit 4; }
+
+AGENT_DIR="$HOME/.config/local-llm/pi-$gpu"
+mkdir -p "$AGENT_DIR/sessions"
+[[ -f "$AGENT_DIR/auth.json" ]] || echo '{}' > "$AGENT_DIR/auth.json"
+umask 077
+python3 - "$AGENT_DIR" "$gpu" "$url_var" "$GPU_PY" <<'PY'
+import importlib.util, json, os, sys
+d, gpu, url_var, gpu_py = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("gpu", gpu_py); G = importlib.util.module_from_spec(spec); spec.loader.exec_module(G)
+m = G.MODEL
+cfg = {"providers": {"local": {
+    "baseUrl": os.environ[url_var].rstrip("/"), "api": "openai-completions", "apiKey": "$LLM_API_KEY",
+    "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
+    "models": [{"id": m, "name": f"{m} ({G.GPUS[gpu]['label']})", "reasoning": True, "input": ["text"],
+                "contextWindow": G.GPUS[gpu]["ctx"], "maxTokens": 16384,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}
+open(os.path.join(d, "models.json"), "w").write(json.dumps(cfg))
+open(os.path.join(d, "settings.json"), "w").write(json.dumps(
+    {"extensions": ["-builtin:llama.cpp"], "defaultProvider": "local", "defaultModel": m}))
+PY
+
+export LLM_API_KEY="${!tok_var}" PI_CODING_AGENT_DIR="$AGENT_DIR" PI_OFFLINE=1
+exec pi --provider local --model auto "$@"

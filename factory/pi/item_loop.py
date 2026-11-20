@@ -11,10 +11,17 @@ only on the plan and on the wake that follows the result.
 Run dir: ~/factory-runs/<repo>-<issue>/ (plan.json, state.json, driver.log, tasks.jsonl, pi-sessions/). Every
 decision that changes GitHub (push, PR, merge, board, comment, rerun) is a deterministic shell step under the gates of
 factory/operating-instructions.md; Pi only edits files and summarizes logs. Waiting on CI is `gh pr checks --watch`
-and `gh run watch` (no LLM call while waiting). Pi tasks go through run-task (at most 2 at once on the RTX Pro 5000).
-Secrets never reach a log, comment or Pi prompt (scrubbed).
+and `gh run watch` (no LLM call while waiting). Pi tasks go through run-task on the item's GPU (gpu.py: pro5000, obs,
+ts3; one active item per GPU, so up to 3 items at once). Every item starts with a refactoring-research pass, and its
+Review includes an independent Pi diff review on a different GPU than the one that wrote the code. While anything is
+red (a default-branch build or an environment), intake stops: only fix-forward items start. Secrets never reach a log,
+comment or Pi prompt (scrubbed).
+
+    item-loop red        status | set --key K --what TEXT | clear --key K      the intake-stop flags (~/factory-runs/red.json)
 """
 import argparse, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, time, urllib.request, uuid
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import gpu as G
 
 ORG = "clearmeasure-aisf-sample-apps"
 BOT = "cm-ai-ops-bot"
@@ -27,19 +34,35 @@ REQUIRED = {"cmdemo1-workorders": ["Build result", "secret-scan"], "cmdemo1-syst
 DEPLOYABLE = {"cmdemo1-workorders": "ui", "cmdemo1-dashboard": "dashboard", "cmdemo1-system": "system"}
 DELIVERY = f"https://raw.githubusercontent.com/{ORG}/cmdemo1-system/status/delivery.json"
 NEVER_MERGE = {("cmdemo1-workorders", 1918)}
+# Jeffrey: leave these alone (no plan, no driver, no comment).
+HANDS_OFF = {("cmdemo1-system", 654), ("cmdemo1-workorders", 1875), ("cmdemo1-workorders", 1876)}
+WIP_LIMIT = 3             # per repository: In Progress + Review
+# Stages in which an item holds its GPU (In Progress / Review). Waiting for a GPU, blocked, main, deploy and done do not.
+ACTIVE_STAGES = ("pickup", "research", "implement", "local-verify", "pr", "ci", "review", "merge")
+# Never changed by an enhancement PR: credentials, secrets and production setup.
+PROTECTED_RE = re.compile(r"(?i)(^|/)(\.github/workflows|environments/prod|infra|octopus)/|(^|/)\.env(\.|$)|secret|"
+                          r"credential|\.(pem|pfx|key)$|appsettings\.prod|keyvault|(^|/)nuget\.config$")
+FOLLOWUP_MAX = 5          # follow-up refactoring issues one item may file
+RESEARCH_MIN_CHARS = 300
 DRIVER_MARK = "<!-- factory-pi-driver -->"
 # Existing limits (operating-instructions): 2 Review FAILs, 3 infrastructure reruns; then a Blocker.
-LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3}
+LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3, "research": 2}
 # Not required to merge, but a red one still stalls the PR: route to Pi instead of waiting on it (no-idle-stall).
 QUALITY_CHECKS = ("qodana", "refactoring rationale")
 HEARTBEAT_MIN = 30        # no progress for this long -> one short status comment
 BLOCKED_HEARTBEAT_MIN = 120
 RECHECK_S = 600           # a blocked driver re-reads its PR this often (no cron: the driver is its own timer)
 BLOCKED_HOLD_H = 24
+GPU_WAIT_S = 300          # a driver waiting for a free GPU re-checks this often (health is a models list, cached)
+GPU_WAIT_H = 24
+QUALITY_WAIT_MIN = 120    # Qodana / Refactoring rationale still pending after required checks are green
+REVIEWER_WAIT_H = 2       # no second GPU up for the independent review
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 
+# Tokens, temporary and named tunnel hosts (the GPUs' clearmeasure.ai tunnels, with or without a scheme), bearer headers.
 SECRET_RE = re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|https?://[^\s'\"]*trycloudflare\.com[^\s'\"]*"
+                       r"|(?:https?://)?[A-Za-z0-9.-]*\b(?:pro5000|\d{4}ti)\.clearmeasure\.ai\b[^\s'\"]*"
                        r"|Bearer\s+\S+|(?i:(?:password|secret|token|apikey|api_key)\s*[=:]\s*)\S+)")
 INFRA_RE = re.compile(r"(?i)(could not resolve host|temporary failure in name resolution|tls handshake timeout|"
                       r"connection reset by peer|econnreset|etimedout|503 service unavailable|502 bad gateway|"
@@ -54,7 +77,7 @@ def iso(t=None): return (t or now()).isoformat(timespec="seconds")
 
 def scrub(s):
     s = SECRET_RE.sub("[redacted]", s or "")
-    for name in ("LOCAL_LLM_PRO5000_URL", "LOCAL_LLM_PRO5000_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "CM_AI_OPS_BOT_GH_TOKEN"):
+    for name in (*G.secret_env_names(), "GH_TOKEN", "GITHUB_TOKEN", "CM_AI_OPS_BOT_GH_TOKEN", "GH_PROJECT_TOKEN"):
         v = os.environ.get(name)
         if v and len(v) > 6: s = s.replace(v, "[redacted]")
     return s
@@ -111,11 +134,90 @@ def validate_plan(p):
     for i, t in enumerate(p.get("tasks") or []):
         if not t.get("name") or not t.get("prompt"): errs.append(f"tasks[{i}] needs name and prompt")
     if (p.get("repo"), p.get("issue")) in NEVER_MERGE: errs.append("this item's PR is never merged")
+    if (p.get("repo"), p.get("issue")) in HANDS_OFF: errs.append("this item is hands-off (Jeffrey); do not work it")
+    if p.get("size") not in (None, "large", "small"): errs.append("size must be large or small")
+    if p.get("kind") == "enhancement":
+        bad = protected_files(p.get("files") or [])
+        if bad: errs.append(f"an enhancement may not change credentials, secrets or production setup: {', '.join(bad)}")
     blob = json.dumps(p)
     if scrub(blob) != blob: errs.append("plan contains a secret-looking value")
     if re.search(r"git\s+(push|commit)|gh\s+(pr|issue|api)", " ".join(t.get("prompt", "") for t in p.get("tasks") or [])):
         errs.append("Pi task prompts must not ask Pi to commit, push or call gh")
     return errs
+
+def protected_files(files):
+    return [f for f in files if PROTECTED_RE.search(f)]
+
+def gate_state(checks, required):
+    """Merge gate: required checks GREEN and the quality checks (Qodana zero new problems, Refactoring rationale)
+    passed. RED when either is red, PENDING while either is still running, else GREEN."""
+    req = checks_state(checks, required)
+    if req == "RED" or quality_failures(checks): return "RED"
+    if req == "PENDING" or quality_pending(checks): return "PENDING"
+    return "GREEN"
+
+def quality_pending(checks):
+    st = {}
+    for c in checks:
+        if any(q in c["name"].lower() for q in QUALITY_CHECKS): st[c["name"]] = c.get("bucket") or "pending"
+    return sorted(n for n, b in st.items() if b not in ("pass", "skipping", "fail", "cancel"))
+
+def merge_args(full, pr, head):
+    """Squash merge pinned to the reviewed head. Never --delete-branch (the branch stays for the record)."""
+    return ["pr", "merge", str(pr), "-R", full, "--squash", "--match-head-commit", head]
+
+RESEARCH_HEAD = "## Refactoring research"
+
+def research_ok(text, files):
+    """The `## Refactoring research` section is present and substantive: long enough, names at least one file the
+    item touches, and names what it found (or why there is nothing) in at least two bullet lines."""
+    if not text or RESEARCH_HEAD not in text: return False
+    sec = text.split(RESEARCH_HEAD, 1)[1].split("\n## ", 1)[0]
+    bullets = [l for l in sec.splitlines() if l.strip().startswith(("-", "*", "|")) and len(l.strip()) > 10]
+    names = {f.rsplit("/", 1)[-1] for f in files or []} | set(files or [])
+    return len(sec.strip()) >= RESEARCH_MIN_CHARS and len(bullets) >= 2 and (not names or any(n in sec for n in names))
+
+def with_research(body, research):
+    """PR body with exactly one `## Refactoring research` section (replaced when present)."""
+    research = research.strip()
+    if not research.startswith(RESEARCH_HEAD): research = RESEARCH_HEAD + "\n\n" + research
+    if RESEARCH_HEAD in (body or ""):
+        pre, rest = body.split(RESEARCH_HEAD, 1)
+        tail = rest.split("\n## ", 1)
+        return pre + research + ("\n\n## " + tail[1] if len(tail) > 1 else "\n")
+    return (body or "").rstrip() + "\n\n" + research + "\n"
+
+def new_followups(items, existing_titles, limit=FOLLOWUP_MAX):
+    """Follow-up refactoring issues to file: valid ones (title + body), not already open by title, at most `limit`."""
+    seen = {t.strip().lower() for t in existing_titles}; out = []
+    for it in items or []:
+        t = str(it.get("title") or "").strip(); b = str(it.get("body") or "").strip()
+        if not t or not b or t.lower() in seen: continue
+        seen.add(t.lower()); out.append({"title": t[:120], "body": b})
+        if len(out) == limit: break
+    return out
+
+def busy_gpus(states, me=None, alive=lambda pid: False):
+    """GPUs held by other live items in an active stage. states: [(key, state dict)]."""
+    return {s.get("gpu") for k, s in states
+            if k != me and s.get("gpu") and s.get("stage") in ACTIVE_STAGES and alive(s.get("pid"))}
+
+def repo_wip(states, repo, me=None, alive=lambda pid: False):
+    """Driver items of `repo` in In Progress or Review (active stages) on this box, live or blocked mid-review."""
+    return sum(1 for k, s in states if k != me and s.get("repo") == repo and
+               ((s.get("stage") in ACTIVE_STAGES and s.get("stage") != "pickup" and alive(s.get("pid")))
+                or (s.get("stage") == "blocked" and s.get("resume_stage") in ACTIVE_STAGES)))
+
+def intake_open(red, plan):
+    """While anything is red only fix-forward items start."""
+    return not red or bool(plan.get("fix_forward"))
+
+def env_red(environment, dep):
+    """An environment is red for a deployable when its last health report is not healthy (system has no HTTP health)."""
+    if dep == "system": return False
+    for a in ((environment.get("health") or {}).get("containerApps") or []):
+        if a.get("name") == dep and (a.get("last") or {}).get("result") not in (None, "healthy"): return True
+    return False
 
 def docs_only(files):
     return bool(files) and all(f.endswith(".md") or f.startswith("docs/") for f in files)
@@ -134,6 +236,42 @@ def pickup_comment(p, run_id, run_dir):
             f"- `Files:` {', '.join('`' + f + '`' for f in p['files'])}. `Docs-only: {'yes' if docs_only(p['files']) else 'no'}`.\n"
             f"- Plan:\n{plan}\n- Constraints: {cons}\n"
             f"- `Pi driver:` run `{run_id}` (`{run_dir.replace(HOME, '~')}`); Pi tasks: {', '.join(t['name'] for t in p['tasks'])}.")
+
+# ---------------------------------------------------------------- box-wide state (red flags, other drivers)
+def _runs_dir(): return os.path.join(HOME, "factory-runs")
+
+def red_load():
+    try: return json.load(open(os.path.join(_runs_dir(), "red.json")))
+    except Exception: return {}
+
+def _red_write(fn):
+    os.makedirs(_runs_dir(), exist_ok=True)
+    with open(os.path.join(_runs_dir(), "red.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX); r = red_load(); fn(r)
+        tmp = os.path.join(_runs_dir(), "red.json.tmp"); json.dump(r, open(tmp, "w"), indent=1)
+        os.replace(tmp, os.path.join(_runs_dir(), "red.json"))
+
+def red_set(key, what): _red_write(lambda r: r.setdefault(key, {"what": scrub(what), "at": iso()}))
+def red_clear(key): _red_write(lambda r: r.pop(key, None))
+
+def pid_alive(pid):
+    try: os.kill(int(pid), 0); return True
+    except Exception: return False
+
+def all_states():
+    out = []
+    try: names = os.listdir(_runs_dir())
+    except FileNotFoundError: return out
+    for n in names:
+        sp = os.path.join(_runs_dir(), n, "state.json")
+        try: out.append((n, json.load(open(sp))))
+        except Exception: pass
+    return out
+
+_HEALTH = {"at": 0, "h": {}}
+def gpu_health(max_age=600):
+    if time.time() - _HEALTH["at"] > max_age: _HEALTH.update(at=time.time(), h=G.health())
+    return _HEALTH["h"]
 
 # ---------------------------------------------------------------- side-effect layer
 class Driver:
@@ -221,7 +359,10 @@ class Driver:
         return self.sh(a, check=False).stdout.strip()
 
     # Pi
-    def pi(self, name, prompt, timeout=1800):
+    def gpu(self): return self.s.get("gpu") or G.LARGE_GPU
+    def gpu_label(self, g=None): return G.GPUS[g or self.gpu()]["label"]
+
+    def pi(self, name, prompt, timeout=1800, gpu=None):
         pf = os.path.join(self.run_dir, "logs", f"{name}.prompt.md")
         suffix = ("\n\nRules: follow the repository's AGENTS.md and CLAUDE.md (read them if this task touches code, tests or "
                   "the build). Make only the change asked. Do not run git commit, git push or gh, and do not read or print "
@@ -229,7 +370,7 @@ class Driver:
                   "the last line.")
         open(pf, "w").write(scrub(prompt) + suffix)
         r = self.sh([os.path.join(HERE, "run-task"), "--run-dir", self.run_dir, "--cwd", self.s["wt"], "--task", name,
-                     "--prompt-file", pf, "--timeout", str(timeout)], check=False)
+                     "--prompt-file", pf, "--timeout", str(timeout), "--gpu", gpu or self.gpu()], check=False)
         self.log(f"pi {name}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
         return r.returncode == 0
 
@@ -261,7 +402,7 @@ class Driver:
         wt = self.s["wt"]
         self.sh(["git", "add", "-A"], cwd=wt)
         if self.sh(["git", "diff", "--cached", "--quiet"], cwd=wt, check=False).returncode:
-            self.sh(["git", *BOT_GIT, "commit", "-q", "-m", msg + f"\n\nCode by Pi (RTX Pro 5000); planned by the factory bot; "
+            self.sh(["git", *BOT_GIT, "commit", "-q", "-m", msg + f"\n\nCode by Pi ({self.gpu_label()}); planned by the factory bot; "
                      f"Pi driver run {self.s['run_id']}."], cwd=wt)
         self.sh(["git", "push", "-q", "origin", f"HEAD:refs/heads/{self.s['plan']['branch']}"], cwd=wt, write=True)
         head = self.sh(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip(); self.save(head=head)
@@ -273,6 +414,10 @@ class Driver:
         try: cs = json.loads(r.stdout or "[]")
         except Exception: cs = []
         return checks_state(cs, REQUIRED.get(self.repo)), cs
+
+    def changed_files(self):
+        r = self.sh(["git", "diff", "--name-only", f"origin/{self.s['default']}...HEAD"], cwd=self.s["wt"], check=False)
+        return [l for l in r.stdout.splitlines() if l.strip()]
 
     def wait_ci(self, max_s=4 * 3600):
         """Zero-LLM wait: gh's own watch; falls back to a sleep loop until checks exist."""
@@ -335,7 +480,7 @@ class Driver:
         try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError: print("driver already running for this item"); sys.exit(0)
         self.s.setdefault("run_id", now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6])
-        self.s.setdefault("start", iso()); self.s.setdefault("stage", "pickup")
+        self.s.setdefault("start", iso()); self.s.setdefault("stage", "gpu")
         self.s["plan"] = json.load(open(os.path.join(self.run_dir, "plan.json")))
         self.save(status="running")
         meta_p = os.path.join(self.run_dir, "run.json")
@@ -367,7 +512,7 @@ class Driver:
         while time.time() < t_end:
             time.sleep(RECHECK_S)
             state, cs = self.pr_checks()
-            if state == "GREEN" and not quality_failures(cs):
+            if gate_state(cs, REQUIRED.get(self.repo)) == "GREEN":
                 self.log("blocked PR is clean now; resuming")
                 self.comment("Status: checks are green now (including Qodana and Refactoring rationale); the driver cleared its "
                              "Blocker and is resuming the Review.")
@@ -376,12 +521,100 @@ class Driver:
             self.heartbeat(BLOCKED_HEARTBEAT_MIN)
         return False
 
+    def st_gpu(self):
+        """Wait (no Grok turn, no comment; the item stays in Todo) until intake is open, the repo has WIP room on this
+        box and a GPU of the right size is free; then take it. One active item per GPU, so up to 3 items at once."""
+        p = self.s["plan"]; size = G.classify_size(p); t_end = time.time() + GPU_WAIT_H * 3600; me = os.path.basename(self.run_dir)
+        while time.time() < t_end:
+            red = red_load()
+            if not intake_open(red, p): why = "intake stopped while red: " + "; ".join(f"{k}: {v['what']}" for k, v in red.items())
+            else:
+                with open(os.path.join(_runs_dir(), "gpu.lock"), "w") as lk:
+                    fcntl.flock(lk, fcntl.LOCK_EX); states = all_states()
+                    up = G.available(gpu_health())
+                    if repo_wip(states, self.repo, me, pid_alive) >= WIP_LIMIT: why = f"WIP is full for {self.repo} ({WIP_LIMIT})"
+                    else:
+                        g = self.s.get("gpu") if self.s.get("gpu") in up else G.pick_gpu(size, up, busy_gpus(states, me, pid_alive))
+                        if g:
+                            self.save(gpu=g, size=size, stage="pickup"); self.log(f"GPU {g} ({self.gpu_label(g)}) for a {size} item")
+                            return
+                        why = f"no free GPU for a {size} item (up: {', '.join(up) or 'none'})"
+            if self.dry: self.log(f"DRY-RUN: {why}; taking {G.LARGE_GPU}"); return self.save(gpu=G.LARGE_GPU, size=size, stage="pickup")
+            if self.s.get("wait_why") != why: self.save(wait_why=why); self.log(f"waiting: {why}")
+            time.sleep(GPU_WAIT_S)
+        self.blocker(f"waited {GPU_WAIT_H} hours to start ({self.s.get('wait_why')}).")
+
     def st_pickup(self):
         p = self.s["plan"]; self.setup_worktree()
         if not self.s.get("pickup_posted"):
-            self.move("In Progress"); self.comment(pickup_comment(p, self.s["run_id"], self.run_dir))
+            self.move("In Progress"); self.comment(pickup_comment(p, self.s["run_id"], self.run_dir) +
+                                                   f"\n- `GPU:` {self.gpu()} ({self.gpu_label()}), {self.s.get('size', 'large')} item.")
             self.save(pickup_posted=True)
+        self.save(stage="research")
+
+    def research_prompt(self):
+        p = self.s["plan"]; out = os.path.join(self.run_dir, "refactoring-research.md"); fu = os.path.join(self.run_dir, "refactoring-followups.json")
+        return out, fu, (
+            f"Refactoring research for {self.repo}#{self.issue} ({p['pr_title']}). Change NO files in this repository: this is "
+            "research before any code is written.\n\nRead the files this item will touch and their close collaborators "
+            "(callers, callees, tests, sibling classes):\n" + "\n".join(f"- {f}" for f in p["files"]) + "\n\n"
+            "Look for: duplication, long methods, primitive obsession, missing abstractions, and places where a known pattern "
+            "(strategy, specification, builder / ObjectMother, query / command objects, value objects, etc.) would make the "
+            "code clearer and easier to maintain.\n\n"
+            f"Write the findings as Markdown to {out}, starting with the line `{RESEARCH_HEAD}`, then one bullet per finding: "
+            "file and member, the smell, the proposed refactoring or pattern, and the verdict `in scope` (small, safe, inside "
+            "the files above: done in this PR) or `follow-up` (larger: filed as its own issue). When a file has nothing worth "
+            "refactoring, say so in a bullet naming the file and why. End with `In scope:` and `Follow-up:` summary lines.\n\n"
+            f"Write {fu} as JSON: {{\"in_scope\": [{{\"name\": \"refactor-<slug>\", \"prompt\": \"<one small refactoring Pi can do "
+            "with tests kept green>\"}}], \"followups\": [{\"title\": \"Refactor: <what>\", \"body\": \"<the smell, the files, the "
+            "proposed pattern, and acceptance criteria: behavior unchanged, tests green>\"}]}. Use empty lists when there is "
+            "none. End your reply with PASS when both files are written.")
+
+    def st_research(self):
+        """Mandatory on every item (Jeffrey, 20 Nov 2026): refactoring research before any code, findings in the issue
+        journal and the PR body, small in-scope refactors in this PR (tests green), larger ones filed as follow-ups."""
+        out, fu, prompt = self.research_prompt(); p = self.s["plan"]
+        text = open(out).read() if os.path.exists(out) else ""
+        while not research_ok(text, p["files"]):
+            if not self.bump("research"):
+                return self.blocker("the refactoring research is missing or not substantive after "
+                                    f"{LIMITS['research']} Pi passes (`{RESEARCH_HEAD}` with findings per touched file).")
+            self.pi(f"refactoring-research-{self.s['counts']['research']}", prompt, 1500)
+            self.sh(["git", "checkout", "--", "."], cwd=self.s["wt"], check=False); self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"], check=False)
+            text = open(out).read() if os.path.exists(out) else ""
+        try: extra = json.load(open(fu))
+        except Exception: extra = {}
+        if not self.s.get("research_posted"):
+            self.comment(f"Refactoring research (journal)\n\n{text.strip()}"); self.save(research_posted=True)
+        if not self.s.get("followups_filed"):
+            self.file_followups(extra.get("followups") or []); self.save(followups_filed=True)
+        refs = [t for t in (extra.get("in_scope") or []) if t.get("name") and t.get("prompt")][:3]
+        if refs and not self.s.get("refactors_done"):
+            for t in refs:
+                self.pi(re.sub(r"[^A-Za-z0-9._-]", "-", str(t["name"]))[:60], t["prompt"] + "\n\nBehavior must not change. Keep every "
+                        "test green; never skip, delete or weaken a test. If this refactoring turns out larger than a small, "
+                        "safe change inside the item's files, change nothing and end with FAIL.")
+            if not self.local_green("refactor"):
+                self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"]); self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"])
+                open(out, "a").write("\n- In-scope refactors were reverted: verification stayed red after the fix passes; "
+                                     "they are left to a follow-up.\n")
+                self.log("in-scope refactors reverted (red)")
+            self.save(refactors_done=True)
         self.save(stage="implement")
+
+    def file_followups(self, items):
+        r = self.gh("api", f"repos/{self.full}/issues?state=open&labels=enhancement&per_page=100", "--jq", "[.[].title]", check=False)
+        try: titles = json.loads(r.stdout or "[]")
+        except Exception: titles = []
+        made = []
+        for it in new_followups(items, titles):
+            body = os.path.join(self.run_dir, "logs", f"followup-{len(made)}.md")
+            open(body, "w").write(scrub(f"{it['body']}\n\nFound by the refactoring research of #{self.issue}. "
+                                        "Behavior unchanged; tests green; no test weakened.\n"))
+            x = self.gh("issue", "create", "-R", self.full, "--title", it["title"], "--body-file", body, "--label", "enhancement",
+                        "--assignee", BOT, write=True, check=False)
+            if x.returncode == 0 and x.stdout.strip(): made.append(x.stdout.strip().rsplit("/", 1)[-1])
+        if made: self.save(followups=made); self.log(f"follow-up refactoring issues: {', '.join(made)}")
 
     def st_implement(self):
         done = set(self.s.get("tasks_done", []))
@@ -402,15 +635,27 @@ class Driver:
             return self.save(stage="dry-run-done")
         self.save(stage="pr")
 
+    def research_text(self):
+        f = os.path.join(self.run_dir, "refactoring-research.md")
+        return open(f).read() if os.path.exists(f) else ""
+
     def st_pr(self):
-        p = self.s["plan"]; head = self.commit_push(p["pr_title"])
+        p = self.s["plan"]
+        if p.get("kind") == "enhancement":
+            self.sh(["git", "add", "-A"], cwd=self.s["wt"])
+            staged = self.sh(["git", "diff", "--cached", "--name-only", f"origin/{self.s['default']}"], cwd=self.s["wt"], check=False).stdout.split()
+            bad = protected_files(staged)
+            if bad: return self.blocker(f"the change touches credentials, secrets or production setup ({', '.join(bad)}); "
+                                        "an enhancement PR may not.")
+        head = self.commit_push(p["pr_title"])
         if not self.s.get("pr"):
             r = self.gh("pr", "list", "-R", self.full, "--head", p["branch"], "--state", "open", "--json", "number", "-q", ".[0].number", check=False)
             if r.stdout.strip(): self.save(pr=int(r.stdout.strip()))
         if not self.s.get("pr"):
             body = os.path.join(self.run_dir, "logs", "pr-body.md")
-            open(body, "w").write(scrub(f"Closes #{self.issue}\n\n{p.get('pr_summary', '')}\n\nCode by Pi on the RTX Pro 5000; "
-                                        f"planned, verified and merged by the factory bot's Pi driver (run `{self.s['run_id']}`).\n\n{DRIVER_MARK}\n"))
+            open(body, "w").write(scrub(with_research(f"Closes #{self.issue}\n\n{p.get('pr_summary', '')}\n\nCode by Pi on the {self.gpu_label()}; "
+                                        f"planned, verified and merged by the factory bot's Pi driver (run `{self.s['run_id']}`).\n\n{DRIVER_MARK}\n",
+                                        self.research_text())))
             r = self.gh("pr", "create", "-R", self.full, "--head", p["branch"], "--base", self.s["default"],
                         "--title", p["pr_title"], "--body-file", body, write=True)
             self.save(pr=int(r.stdout.strip().rstrip("/").split("/")[-1]))
@@ -423,7 +668,14 @@ class Driver:
         state, cs = self.wait_ci()
         self.log(f"required checks {state}")
         bad = quality_failures(cs)
-        if state == "GREEN" and not bad: return self.save(stage="review")
+        if state == "GREEN" and not bad:
+            if quality_pending(cs):   # hard gate: Qodana and Refactoring rationale must finish green, never skipped
+                since = self.s.setdefault("quality_wait_since", iso()); self.save()
+                if (now() - dt.datetime.fromisoformat(since)).total_seconds() > QUALITY_WAIT_MIN * 60:
+                    return self.blocker(f"{', '.join(quality_pending(cs))} did not finish within {QUALITY_WAIT_MIN} minutes.")
+                self.heartbeat(); time.sleep(120); return
+            self.s.pop("quality_wait_since", None)
+            return self.save(stage="review")
         if state == "GREEN": return self.fix_quality(bad, cs)
         if state == "PENDING": return self.blocker("required checks did not finish within 4 hours.")
         runs, logs = self.failed_logs(cs)
@@ -491,10 +743,82 @@ class Driver:
                 return self.blocker("local verification red after a review fix.")
             self.commit_push("Fix review findings"); self.move("Review")
             return self.save(stage="ci")
-        self.save(evidence=[[c["text"], c["evidence_cmd"], last] for c, last, _ in ev], stage="merge")
+        self.save(evidence=[[c["text"], c["evidence_cmd"], last] for c, last, _ in ev])
+        verdict = self.independent_review()
+        if verdict is None: return
+        ok, findings = verdict
+        if not ok:
+            if not self.bump("review_fail"):
+                return self.blocker("independent review FAIL twice: " + findings[:600])
+            n = self.s["counts"]["review_fail"]
+            self.move("In Progress")
+            self.comment(f"Review → In Progress\n\nReview: FAIL (independent review on the {self.gpu_label(self.s.get('reviewer_gpu'))}).\n\n"
+                         f"{findings[:3000]}\n\nSending the findings to Pi.")
+            if not self.s.get("research_in_body"):   # the section is the driver's to write: redo the research, fix the body
+                if not research_ok(self.research_text(), p["files"]):
+                    self.s["counts"]["research"] = 0; self.save(stage="research", refactors_done=True)
+                    self.st_research()
+                    if self.s.get("stage") == "blocked": return
+                    self.save(stage="review")
+                self.sync_pr_research()
+            else:
+                self.pi(f"review-fix-{n}", "An independent review of this branch failed. Findings:\n" + findings[:6000] +
+                        "\nFix each finding with the smallest change. Never skip, delete or weaken a test or gate.")
+                if not self.local_green(f"review{n}"): return self.blocker("local verification red after an independent-review fix.")
+                self.commit_push("Fix independent review findings")
+            self.move("Review")
+            return self.save(stage="ci")
+        self.save(stage="merge")
+
+    def sync_pr_research(self):
+        cur = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body", check=False).stdout
+        new = with_research(cur, self.research_text())
+        if new.strip() != (cur or "").strip():
+            body = os.path.join(self.run_dir, "logs", "pr-body-research.md"); open(body, "w").write(scrub(new))
+            self.gh("pr", "edit", str(self.s["pr"]), "-R", self.full, "--body-file", body, write=True)
+
+    def independent_review(self):
+        """Pi on a different GPU than the author reviews the diff, the issue's criteria and the `## Refactoring
+        research` section of the PR body (missing or not substantive = FAIL). Returns (ok, findings), or None after a
+        Blocker when no second GPU came up."""
+        p = self.s["plan"]
+        body = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body", check=False).stdout
+        if not research_ok(body, p["files"]):
+            self.save(research_in_body=False)
+            return False, (f"- The PR body has no substantive `{RESEARCH_HEAD}` section (findings per touched file, in-scope "
+                           "refactors done, follow-ups filed). Every item needs it.")
+        self.save(research_in_body=True)
+        t_end = time.time() + REVIEWER_WAIT_H * 3600
+        while True:
+            rv = G.reviewer_gpu(self.gpu(), G.available(gpu_health(0 if self.s.get("reviewer_waited") else 600)))
+            if rv or self.dry or time.time() > t_end: break
+            self.save(reviewer_waited=True); self.heartbeat(); time.sleep(RECHECK_S)
+        if not rv and not self.dry:
+            self.blocker(f"no second GPU is up for the independent review of code written on the {self.gpu_label()}."); return None
+        rv = rv or self.gpu(); self.save(reviewer_gpu=rv)
+        diff = self.sh(["git", "diff", f"origin/{self.s['default']}...HEAD"], cwd=self.s["wt"], check=False).stdout
+        limit = 60000 if rv == G.LARGE_GPU else 24000
+        out = os.path.join(self.run_dir, "independent-review.md")
+        if os.path.exists(out): os.remove(out)
+        crit = "\n".join(f"- {c['text']}" for c in p["criteria"])
+        ok = self.pi(f"independent-review-{self.s['counts'].get('review_fail', 0) + 1}",
+                     f"Independent code review of {self.repo}#{self.issue} ({p['pr_title']}). You did not write this code. Change NO "
+                     "files.\n\nAcceptance criteria:\n" + crit + "\n\nThe PR's refactoring research:\n" + body.split(RESEARCH_HEAD, 1)[1][:6000] +
+                     f"\n\nDiff against {self.s['default']} (read any file in this tree for context):\n```diff\n{scrub(diff)[:limit]}\n```\n\n"
+                     "Check: every criterion is met by the code and its tests; tests are real (none skipped, deleted or weakened); "
+                     "the repository's AGENTS.md / CLAUDE.md rules hold; the code is easy to read (names, small methods, no "
+                     "duplication) and the refactoring research is substantive and its in-scope items are done; no secret, "
+                     f"credential or production-setup change. Write one bullet per problem to {out} (or `- No findings.`). "
+                     "End your reply with PASS when there is no blocking problem, otherwise FAIL.", 1800, gpu=rv)
+        if self.sh(["git", "status", "--porcelain"], cwd=self.s["wt"], check=False).stdout.strip():
+            self.log("reviewer changed files; discarding them"); self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"])
+            self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"])
+        findings = scrub(open(out).read()) if os.path.exists(out) else "- (the reviewer wrote no findings file)"
+        self.log(f"independent review on {rv}: {'PASS' if ok else 'FAIL'}")
+        return ok, findings
 
     def st_merge(self):
-        pr = int(self.s["pr"]); state, _ = self.pr_checks()
+        pr = int(self.s["pr"]); _, cs = self.pr_checks(); state = gate_state(cs, REQUIRED.get(self.repo))
         info = json.loads(self.gh("pr", "view", str(pr), "-R", self.full, "--json", "author,headRefOid,state").stdout)
         if (self.repo, pr) in NEVER_MERGE or info["author"]["login"] != BOT or state != "GREEN" or info["headRefOid"] != self.s["head"]:
             self.log(f"merge gate not met (checks {state}, head {info['headRefOid'][:8]})")
@@ -503,7 +827,7 @@ class Driver:
                                     f"`{info['headRefOid'][:8]}` vs driver head `{str(self.s.get('head'))[:8]}`, author {info['author']['login']}).")
             time.sleep(120); return self.save(stage="ci")
         if info["state"] != "MERGED":
-            self.gh("pr", "merge", str(pr), "-R", self.full, "--squash", "--match-head-commit", self.s["head"], write=True)
+            self.gh(*merge_args(self.full, pr, self.s["head"]), write=True)
         sha = self.gh("pr", "view", str(pr), "-R", self.full, "--json", "mergeCommit", "-q", ".mergeCommit.oid").stdout.strip()
         self.save(merge_sha=sha, stage="main")
 
@@ -526,7 +850,13 @@ class Driver:
         self.move(col)
         self.comment(f"Review → {col}\n\nReview: PASS. Squash-merged PR #{self.s['pr']} (head `{self.s['head'][:8]}`) as `{sha}`. "
                      f"Required checks green.\n\n{ev}\n\n{self.usage(final=(col == 'Done'))}")
-        if red: return self.blocker(f"default-branch run(s) {', '.join(red)} of merge `{sha[:8]}` are red.")
+        key = f"{self.repo} main"
+        if red:
+            red_set(key, f"{', '.join(red)} red at `{sha[:8]}`")
+            self.fix_forward_issue(key, f"{', '.join(red)} of `{sha[:8]}` on the default branch")
+            return self.blocker(f"default-branch run(s) {', '.join(red)} of merge `{sha[:8]}` are red. Intake is stopped; a "
+                                "fix-forward issue is filed.", who="the factory bot (fix forward)")
+        if runs: red_clear(key)   # a green default-branch run of a newer commit: main is green again
         self.save(stage="done" if d_only or self.repo not in DEPLOYABLE else "deploy")
 
     def st_deploy(self, max_h=48):
@@ -540,6 +870,14 @@ class Driver:
                     if not x: continue
                     st = json.loads(self.gh("api", f"repos/{self.full}/compare/{sha}...{x['commit']}", "--jq", "{status:.status}", check=False).stdout or "{}").get("status")
                     healthy = any(a.get("name") == dep and (a.get("last") or {}).get("result") == "healthy" for a in (e.get("health") or {}).get("containerApps", [])) or dep == "system"
+                    rk = f"{dep} {e['name']}"
+                    if env_red(e, dep) and st in ("ahead", "identical"):
+                        if rk not in red_load():
+                            red_set(rk, f"{dep} {x.get('version')} unhealthy in {e['name']}")
+                            self.fix_forward_issue(rk, f"{dep} {x.get('version')} is not healthy in {e['name']} (delivery.json)", "cmdemo1-system")
+                            self.comment(f"Status: {dep} {x.get('version')} (contains merge `{sha[:8]}`) is not healthy in {e['name']}. "
+                                         "Intake is stopped and a fix-forward issue is filed; the driver keeps watching.")
+                    elif healthy and rk in red_load(): red_clear(rk)
                     in_env[e["name"]] = st in ("ahead", "identical") and healthy; ver[e["name"]] = (x.get("version"), x["commit"])
                 moves = deploy_moves(self.s.get("column", "Merged"), in_env)
                 if moves:
@@ -555,6 +893,23 @@ class Driver:
             self.heartbeat(); time.sleep(600)
         self.log("deploy follow-through window ended; the bot's Deployments sweep takes over")
         self.save(stage="done", deploy_handoff=True)
+
+    def fix_forward_issue(self, key, what, repo=None):
+        """One open `fix-forward` issue per red key, assigned to the factory bot so its issue-assigned wake works it
+        first (intake is stopped for everything else until it is green again)."""
+        full = f"{ORG}/{repo or self.repo}"; title = f"Fix forward: {key} is red"
+        r = self.gh("api", f"repos/{full}/issues?state=open&labels=fix-forward&per_page=100", "--jq", "[.[].title]", check=False)
+        try:
+            if title in json.loads(r.stdout or "[]"): return
+        except Exception: pass
+        self.gh("label", "create", "fix-forward", "-R", full, "--color", "B60205", "--description", "Red main or environment; fix forward",
+                write=True, check=False)
+        body = os.path.join(self.run_dir, "logs", f"fix-forward-{int(time.time())}.md")
+        open(body, "w").write(scrub(f"{what}.\n\nFound while following #{self.issue} (run `{self.s.get('run_id')}`). Fix forward with a "
+                                    "normal PR (plan `fix_forward: true`); never re-run, re-pin or promote by hand, and never "
+                                    "weaken a test or gate. Intake of other items stays stopped until this is green.\n"))
+        self.gh("issue", "create", "-R", full, "--title", title, "--body-file", body, "--label", "fix-forward", "--assignee", BOT,
+                write=True, check=False)
 
     def _col_before(self, moves):
         order = ["Merged", "TDD", "UAT", "Done"]
@@ -572,7 +927,8 @@ def cmd_draft_plan(a):
               f"('{BOT}/{a.issue}-<short-slug>'), files (every file to change), constraints (each Notes/Constraints/Out-of-scope "
               "sentence quoted), criteria (one per acceptance criterion: text, how, evidence_cmd = a shell command that exits 0 "
               "only when the criterion holds, e.g. a filtered test run or an HTTP probe), tasks (small ordered Pi tasks: name, "
-              "prompt; one test or one code change each; tests first), verify_cmd (the repo's real build+test command, "
+              "prompt; one test or one code change each; tests first), size ('large' for big or cross-cutting work, 'small' for a UI or "
+              "test-only change), verify_cmd (the repo's real build+test command, "
               "narrowed to the touched projects), pr_title, pr_summary (one line).")
     ok = d.pi("draft-plan", prompt, 1500)
     try:
@@ -585,8 +941,18 @@ def cmd_draft_plan(a):
 
 def cmd_start(a):
     d = Driver(a.repo, a.issue, top_session=a.top_session)
-    p = json.load(open(os.path.join(d.run_dir, "plan.json"))); errs = validate_plan(p)
+    plan_p = os.path.join(d.run_dir, "plan.json"); p = json.load(open(plan_p))
+    labels = d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "[.labels[].name]", check=False).stdout
+    try: labels = json.loads(labels or "[]")
+    except Exception: labels = []
+    if "enhancement" in labels and p.get("kind") != "enhancement": p["kind"] = "enhancement"
+    if "fix-forward" in labels: p["fix_forward"] = True
+    errs = validate_plan(p)
     if errs: print("plan.json invalid:\n- " + "\n- ".join(errs)); sys.exit(2)
+    json.dump(p, open(plan_p, "w"), indent=1)
+    red = red_load()
+    if not intake_open(red, p):
+        print("NOTE: intake is stopped while red (" + "; ".join(red) + "); the driver waits in Todo until it is green.")
     d.s.setdefault("top_sessions", [])
     if a.top_session and a.top_session not in d.s["top_sessions"]: d.s["top_sessions"].append(a.top_session)
     if d.s.get("status") in ("blocked", "error") and a.resume:
@@ -606,8 +972,9 @@ def cmd_status(a):
     if s.get("pid"):
         try: os.kill(int(s["pid"]), 0); alive = True
         except Exception: pass
-    print(json.dumps({k: s.get(k) for k in ("run_id", "stage", "status", "pr", "head", "merge_sha", "column", "counts",
-                                             "blocker", "error", "wake_reason", "updated")} | {"alive": alive}))
+    print(json.dumps({k: s.get(k) for k in ("run_id", "stage", "status", "gpu", "size", "reviewer_gpu", "wait_why", "pr", "head",
+                                             "merge_sha", "column", "counts", "blocker", "error", "wake_reason", "updated")}
+                     | {"alive": alive, "red": sorted(red_load())}))
 
 def cmd_note_wake(a):
     d = Driver(a.repo, a.issue); d.s.setdefault("top_sessions", [])
@@ -616,13 +983,23 @@ def cmd_note_wake(a):
     if os.path.exists(meta_p):
         m = json.load(open(meta_p)); m["top_sessions"] = d.s["top_sessions"]; json.dump(m, open(meta_p, "w"), indent=1)
 
+def cmd_red(a):
+    if a.action == "set": red_set(a.key, a.what or "red")
+    elif a.action == "clear": red_clear(a.key)
+    print(json.dumps(red_load(), indent=1))
+
 def main():
     ap = argparse.ArgumentParser(); sp = ap.add_subparsers(dest="c", required=True)
+    r = sp.add_parser("red"); r.add_argument("action", choices=("status", "set", "clear"))
+    r.add_argument("--key"); r.add_argument("--what")
     for name in ("draft-plan", "start", "run", "status", "note-wake"):
         x = sp.add_parser(name); x.add_argument("--repo", required=True); x.add_argument("--issue", type=int, required=True)
         x.add_argument("--top-session", required=(name == "note-wake"))
         x.add_argument("--dry-run", action="store_true"); x.add_argument("--resume", action="store_true")
     a = ap.parse_args()
+    if a.c == "red":
+        if a.action != "status" and not a.key: ap.error("--key is required")
+        return cmd_red(a)
     {"draft-plan": cmd_draft_plan, "start": cmd_start, "run": cmd_run, "status": cmd_status, "note-wake": cmd_note_wake}[a.c](a)
 
 if __name__ == "__main__": main()

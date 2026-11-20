@@ -1,32 +1,3 @@
 #!/usr/bin/env bash
-# Pi against the RTX Pro 5000 through the proxy. Uses only the model the server has loaded (read from the models
-# list on each start; never another one), writes Pi's provider config from the environment, and passes every
-# argument through to pi. Never prints the URL or token.
-set -euo pipefail
-: "${LOCAL_LLM_PRO5000_URL:?MISSING_SECRETS: LOCAL_LLM_PRO5000_URL}"
-: "${LOCAL_LLM_PRO5000_TOKEN:?MISSING_SECRETS: LOCAL_LLM_PRO5000_TOKEN}"
-AGENT_DIR="$HOME/.config/local-llm/pi-pro5000"
-mkdir -p "$AGENT_DIR"
-
-model="$(curl -sS -m 20 -H "Authorization: Bearer $LOCAL_LLM_PRO5000_TOKEN" "${LOCAL_LLM_PRO5000_URL%/}/models" 2>/dev/null \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("data") or [{}])[0].get("id",""))' 2>/dev/null || true)"
-[[ -n "$model" ]] || { echo "pi-pro5000: proxy unhealthy (run pi-pro5000-health)" >&2; exit 4; }
-
-umask 077
-python3 - "$AGENT_DIR" "$model" <<'PY'
-import json, os, sys
-d, model = sys.argv[1], sys.argv[2]
-url = os.environ["LOCAL_LLM_PRO5000_URL"].rstrip("/")
-cfg = {"providers": {"local": {
-    "baseUrl": url, "api": "openai-completions", "apiKey": "$LLM_API_KEY",
-    "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
-    "models": [{"id": model, "name": model, "reasoning": True, "input": ["text"],
-                "contextWindow": 65536, "maxTokens": 16384,
-                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}
-open(os.path.join(d, "models.json"), "w").write(json.dumps(cfg))
-open(os.path.join(d, "settings.json"), "w").write(json.dumps(
-    {"extensions": ["-builtin:llama.cpp"], "defaultProvider": "local", "defaultModel": model}))
-PY
-
-export LLM_API_KEY="$LOCAL_LLM_PRO5000_TOKEN" PI_CODING_AGENT_DIR="$AGENT_DIR" PI_OFFLINE=1
-exec pi --provider local --model "$model" "$@"
+# Kept for old callers: Pi on the RTX PRO 5000. Same as `pi-gpu pro5000 ...` (see pi-gpu).
+exec "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/pi-gpu" pro5000 "$@"
