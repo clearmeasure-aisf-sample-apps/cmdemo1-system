@@ -42,7 +42,8 @@ below). In order:
    - Read `status` before `alive`: a driver in `blocked` stays alive (it re-checks the PR every 10 minutes and posts a status
      heartbeat when idle 30+ minutes), but the blocker is still yours to report; only `running` + `alive: true` means leave it.
    - `alive: true`: the driver owns the item. Do nothing for it (no Review, merge, fix, column move or comment) and
-     continue with the sweep only.
+     continue with the sweep only. With `stage: gpu` the item is still in Todo, waiting for a free GPU, WIP room or a
+     green board (`wait_why`); it is not a startable Todo for the sweep, and it gets no `Queued` comment.
    - `status: blocked` or `error` (the driver re-assigned the issue to wake you): read `blocker` / `error`, report
      it to Jeffrey when "Reporting to Jeffrey" lists it, and end. When a later `jeffreypalermo` comment answers it,
      fix `plan.json` if needed and run `factory-pi-item-loop start --repo <repo> --issue <n> --resume --top-session <id>`.
@@ -115,7 +116,7 @@ Todo → In Progress → Review → Merged → TDD → UAT → Done.
   repository name, e.g. `cmdemo1-system`).
 - No slots are reserved in any repository, `cmdemo1-workorders` included: the local Pi lane is off (Jeffrey, 18 Nov
   2026), so a `local-pi` label or an old Pi-lane comment does not make an item unstartable. The bot works up to 3
-  items per repository himself, delegating the coding to Pi on the RTX Pro 5000 (section "Pi on the RTX Pro 5000").
+  items per repository himself, delegating the coding to Pi on the factory GPUs (section "Pi on the factory GPUs").
 - Oldest assigned **startable** Todo item first (skip an item whose repo is at its limit, or one already marked
   `Blocker:` that still needs a reply the bot cannot provide, such as clarified acceptance criteria; do not skip
   an item because it carries a prior `Queued: WIP is full` comment, and do not skip an item because it is waiting
@@ -141,9 +142,11 @@ At most these comments per item:
      `docs/**`, and no code, build, workflow or test reads it).
    - Plan: one checklist line per acceptance criterion, naming how it is met.
    - Constraints: each Notes / Constraints / Out-of-scope sentence of the issue that the design must respect.
-   - `Pi run dir:` the run dir on the bot's box (see "Pi on the RTX Pro 5000"); no other Pi detail here.
+   - `Pi run dir:` the run dir on the bot's box (see "Pi on the factory GPUs"); no other Pi detail here.
    For anything larger than a small change, append the design to the issue body under `## Design` instead
    and link it from the comment.
+   **Refactoring research (journal)**: the driver posts the research findings once, after pickup and before any
+   code (section "Pi on the factory GPUs"). It is the one comment allowed between pickup and Review.
 2. **In Progress → Review**: the PR link, required checks result, one line on what changed, then the
    `usage-report` table (progress: Pi sessions so far, top-level wall time as of now). Opening the PR moves the item
    to Review.
@@ -176,8 +179,8 @@ duplicate journals, or a comment within a minute of another one on the same item
 - **Batch small items**: docs-only or tiny items assigned around the same time in the same repository go in ONE
   branch and ONE PR (`Closes #A, closes #B`). Each issue still gets its own pickup comment, verdict and usage table.
 - **Code**: the bot owns the plan and the implementation, and delegates **every** code-editing and test-writing task
-  to Pi on the RTX Pro 5000 (section "Pi on the RTX Pro 5000"). He does not write product code or tests himself and
-  does not use a Cursor cloud agent for them. The Pi driver (section "Pi on the RTX Pro 5000") runs the whole
+  to Pi on the factory GPUs (section "Pi on the factory GPUs"). He does not write product code or tests himself and
+  does not use a Cursor cloud agent for them. The Pi driver (section "Pi on the factory GPUs") runs the whole
   item loop with deterministic shell steps: comments, commits, pushes, the PR, CI watching, fix passes, review
   evidence, the merge, the default-branch build and the deploy column moves. Pi only edits files and reads logs.
 - Required checks must be green before the Review verdict: `Build result` and `secret-scan` in `cmdemo1-workorders`,
@@ -197,23 +200,47 @@ duplicate journals, or a comment within a minute of another one on the same item
   call while waiting). Do not create PR-scoped routines for driver PRs; their PR body carries
   `<!-- factory-pi-driver -->`, so `factory-wake` does not nudge you for their CI either.
 
-## Pi on the RTX Pro 5000 (coding tasks)
+## Pi on the factory GPUs (coding tasks)
 
 Jeffrey, 18 Nov 2026: the bot takes the work item and owns the plan and implementation, but delegates every task to Pi
-through the proxy to the RTX Pro 5000, and every implemented item gets comments with tokens and time used, the
-top-level session and the Pi sessions. Tools are in `factory/pi/` of this repository.
+through the proxy, and every implemented item gets comments with tokens and time used, the top-level session and the
+Pi sessions. Jeffrey, 20 Nov 2026 3:49pm CT: "equip the cm ai ops bot ... with the 3 tunnel GPUs". Tools are in
+`factory/pi/` of this repository; the GPU table and the rules that choose one are in `factory/pi/gpu.py`.
 
-**Setup (first wake, and any wake where `pi-pro5000-health` is not on the PATH):** clone or update
-`cmdemo1-system` on the box and run `bash factory/pi/setup.sh`. It is idempotent: installs Pi (pinned version), the
-`pi-pro5000` wrapper, `factory-pi-run-task`, `factory-pi-usage-report`, `factory-pi-item-loop` and `pi-pro5000-health` into `~/.local/bin`. Re-run it after `git pull` of this repository when `factory/pi/` changed.
+| GPU | Card | Context | Use |
+|---|---|---|---|
+| `pro5000` | RTX PRO 5000, Qwen3.8 27B Q6 | 262K | strongest: big or cross-cutting items |
+| `obs` | RTX 5070 Ti | 64K | small UI or test items |
+| `ts3` | RTX 5060 Ti | 64K | small UI or test items; slowest |
 
-- Exit 3 (`MISSING_SECRETS`): the account lacks `LOCAL_LLM_PRO5000_URL` and/or `LOCAL_LLM_PRO5000_TOKEN`. Ask
-  Jeffrey for them with the Grok Bot secret request form (those exact names; never ask for the values in chat or a
-  comment), leave the item in Todo with one `Blocker: Pi secrets missing` comment, and end.
-- Exit 4 (`UNREACHABLE` / `TUNNEL_DOWN` / `REFUSED` / `UNHEALTHY`): the proxy is a temporary tunnel, so a 502,
-  530 or unknown host usually means the tunnel URL changed. Report it to Jeffrey and ask for the new value; never
-  guess or search for a URL, and never start, stop, restart or warm the model server or switch its model.
-- At the start of every implementation wake run `pi-pro5000-health` once (a models list only; no warm-up).
+Each is a named Cloudflare tunnel to a token-protected llm-proxy. Pi always asks for model `auto`; the proxy refuses
+any other name. Never ask the proxy to load or switch a model and never send a warm-up or test completion: the health
+check is a models list only. Never start, stop or restart anything behind a tunnel.
+
+**Setup (first wake, and any wake where `pi-gpu-health` is not on the PATH):** clone or update `cmdemo1-system` on
+the box and run `bash factory/pi/setup.sh`. It is idempotent: installs Pi (pinned version) and links `pi-gpu`
+(`pi-gpu <pro5000|obs|ts3> …`), `pi-pro5000` (kept as a shim for `pi-gpu pro5000`), `pi-gpu-health` (also linked
+as `pi-pro5000-health`), `factory-pi-run-task`, `factory-pi-usage-report` and `factory-pi-item-loop` into
+`~/.local/bin`. Re-run it after `git pull` of this repository when `factory/pi/` changed.
+
+- `pi-gpu-health` prints one line per GPU (`HEALTHY`, `MISSING_SECRETS`, `UNREACHABLE`, `REFUSED`, `TUNNEL_DOWN`,
+  `UNHEALTHY`) and `AVAILABLE: <list>`. A GPU with missing secrets or no answer is unavailable, not fatal: work
+  continues on the others.
+- Exit 0: at least one GPU is up. When one or two are not, report it to Jeffrey once per outage (section "Reporting
+  to Jeffrey") and keep working.
+- Exit 3 (`MISSING_SECRETS` on all three): ask Jeffrey for the secrets with the Grok Bot secret request form (names
+  in "Credentials"; never ask for the values in chat or a comment), leave the item in Todo with one
+  `Blocker: Pi secrets missing` comment, and end.
+- Exit 4 (no GPU answers): report it to Jeffrey and ask him; never guess or search for a URL.
+- At the start of every implementation wake run `pi-gpu-health` once.
+
+**Concurrency:** up to 3 items run at once, one active item per available GPU, and still at most WIP 3 per repository
+(In Progress + Review on board 679; section "Board flow and WIP"). Start a driver for every startable Todo the WIP
+rule allows; the driver itself waits, with no Grok turn and no comment, in Todo until a GPU of the right size is
+free, then takes it (`stage: gpu`, `wait_why` in `status`). Big or cross-cutting items (`size: large`: many files,
+several layers, database, build or infra files) go to `pro5000` and wait for it while it is up; small UI or test
+items (`size: small`) go to `obs`, then `ts3`, then a free `pro5000`. An item holds its GPU from pickup through the
+merge; Pi tasks run at most 2 at once on `pro5000` and 1 on `obs` / `ts3` from this box.
 
 **Working an item: the loop is Pi, not Grok** (Jeffrey, 18 Nov 2026 11:41pm CT: "If there is build monitoring or
 processing logs or polling tool calls, delegate those to pi also. Let the loop be pi."):
@@ -221,38 +248,96 @@ processing logs or polling tool calls, delegate those to pi also. Let the loop b
 1. On the pickup wake, run `factory-pi-item-loop draft-plan --repo <repo> --issue <n> --top-session <id>`. Pi reads
    the issue and repository and writes `~/factory-runs/<repo>-<issue>/plan.draft.json`: branch, files, constraints,
    one criterion per acceptance criterion with an `evidence_cmd` (a command that exits 0 only when the criterion
-   holds: a filtered test run, an HTTP probe), small ordered Pi `tasks` (tests first), `verify_cmd` (the repository's
-   real build and tests, narrowed to what the item touches), `pr_title`, `pr_summary`.
+   holds: a filtered test run, an HTTP probe), small ordered Pi `tasks` (tests first), `size` (`large` / `small`),
+   `verify_cmd` (the repository's real build and tests, narrowed to what the item touches), `pr_title`, `pr_summary`.
 2. Read the draft once, fix anything wrong (the plan is the bot's: Design rules above, acceptance criteria literal,
-   no shared-enumeration change the issue did not ask for), save it as `plan.json`, then run
+   no shared-enumeration change the issue did not ask for, `size` right), save it as `plan.json`, then run
    `factory-pi-item-loop start --repo <repo> --issue <n> --top-session <id>` and **end the turn**. `start` validates
-   the plan and launches the driver with `nohup`; it returns at once.
+   the plan (it marks an `enhancement` issue's plan `kind: enhancement` and a `fix-forward` issue's plan
+   `fix_forward: true`) and launches the driver with `nohup`; it returns at once.
    `<id>` is the bot's own top-level grok.com session / run identifier for this wake (the routine run or chat
    session id; if none is visible, the GitHub event's delivery id).
-3. The driver (`factory/pi/item_loop.py`), with no Grok turn: posts the pickup comment and moves the board, runs each
-   Pi task through `run-task` (at most **2** Pi tasks at once on the RTX Pro 5000, stdin closed, session JSONL kept),
-   runs `verify_cmd` and hands failures back to Pi (3 passes), commits and pushes as `cm-ai-ops-bot`, opens the PR
-   (`Closes #N`, the driver marker) with `In Progress → Review`, watches the required checks, triages red logs
-   (infrastructure: wait 10 minutes and rerun failed jobs, 3 times; code: Pi summarizes and fixes, 3 passes), runs
-   every `evidence_cmd` on the PR head as the Review (FAIL: `Review → In Progress` and a Pi fix, at most 2), squash-merges
-   on PASS with required checks green (never PR 1918, only its own PRs, `--match-head-commit`), posts
-   `Review → Merged` (or `Review → Done` for docs-only after the default-branch run is green) with the evidence and
-   the usage table, watches the default-branch runs of the merge, then follows delivery.json and moves Merged → TDD →
-   UAT → Done (48 hours; after that the Deployments sweep takes over). Any limit reached: one `Blocker:` comment,
-   then it re-assigns the issue to wake you once.
-4. The bot alone decides the plan; the driver's shell steps alone push, merge, comment and move the board under the
-   gates of this file; Pi never pushes, merges, comments, calls `gh` or sees a secret (`validate_plan` refuses
-   prompts that ask for it; every log and comment is scrubbed).
+3. The driver (`factory/pi/item_loop.py`), with no Grok turn: waits for a GPU (above), posts the pickup comment (with
+   the GPU) and moves the board, runs the **refactoring research** (below), then each Pi task through `run-task` on
+   the item's GPU (stdin closed, session JSONL kept), runs `verify_cmd` and hands failures back to Pi (3 passes),
+   commits and pushes as `cm-ai-ops-bot`, opens the PR (`Closes #N`, the `## Refactoring research` section, the driver
+   marker) with `In Progress → Review`, watches the required checks, triages red logs (infrastructure: wait 10
+   minutes and rerun failed jobs, 3 times; code: Pi summarizes and fixes, 3 passes), treats **Qodana (zero new
+   problems) and Refactoring rationale as hard gates** (red: Pi fixes, 3 passes; still running: it waits, 2 hours at
+   most), runs every `evidence_cmd` on the PR head, then the **independent review** (below; FAIL: `Review → In
+   Progress` and a Pi fix, at most 2 FAILs in all), squash-merges on PASS with required and quality checks green
+   (never PR 1918, only its own PRs, `--match-head-commit`, never `--delete-branch`), posts `Review → Merged` (or
+   `Review → Done` for docs-only after the default-branch run is green) with the evidence and the usage table, watches
+   the default-branch runs of the merge, then follows delivery.json and moves Merged → TDD → UAT → Done (48 hours;
+   after that the Deployments sweep takes over). Any limit reached: one `Blocker:` comment, then it re-assigns the
+   issue to wake you once.
+4. The bot alone decides the plan; the driver's shell steps alone push, merge, comment, file issues and move the board
+   under the gates of this file; Pi never pushes, merges, comments, calls `gh` or sees a secret (`validate_plan`
+   refuses prompts that ask for it; every log and comment is scrubbed, including the GPU tunnel hostnames and every
+   `LOCAL_LLM_*` value).
 5. Usage: every driver comment from `In Progress → Review` on ends with the `usage-report` table: the Grok
-   session id(s) that touched the item, the Pi driver run id, each Pi session id, task, result, tokens in / out and
-   wall time, totals, and the item's wall time. On any later wake about the item, first run
+   session id(s) that touched the item, the Pi driver run id, each Pi session id, task (with its GPU), result, tokens
+   in / out and wall time, totals, and the item's wall time. On any later wake about the item, first run
    `factory-pi-item-loop note-wake --repo <repo> --issue <n> --top-session <id>` so the table lists that session too.
-6. Trivial docs-only edits you make yourself (a few Markdown lines) need no driver; everything else uses it.
+6. Trivial docs-only edits you make yourself (a few Markdown lines) need no driver; everything else uses it. Their PR
+   still carries a short `## Refactoring research` section (what was looked at; usually "docs only, no code").
    The driver applies from the next item a wake picks up; an item already in flight finishes the way it started.
+
+**Refactoring research (mandatory on every item; Jeffrey, 20 Nov 2026 3:52pm CT: "make sure that research for
+possible refactorings is done so that we don't miss any opportunities to refactor to patterns and keep the code easy
+to read and maintainable"):**
+
+- Before any code is written, Pi reads the files the item will touch and their close collaborators (callers,
+  callees, tests, siblings) and looks for duplication, long methods, primitive obsession, missing abstractions, and
+  places where a known pattern (strategy, specification, builder / ObjectMother, query / command objects, value
+  objects) would make the code clearer.
+- The findings go in the issue journal (one `Refactoring research (journal)` comment) and in the PR body under
+  `## Refactoring research`: one bullet per finding (file and member, smell, proposed refactoring, verdict), or per
+  touched file why nothing is worth changing.
+- Small, in-scope refactors are done in the same PR first, with tests kept green and no test skipped, deleted or
+  weakened; if verification stays red they are reverted and left to a follow-up.
+- Larger ones are filed as follow-up issues labeled `enhancement` and assigned to `cm-ai-ops-bot` (at most 5 per item,
+  no duplicate titles), so none are lost; they enter the pipeline below like any enhancement.
+- The independent review checks that the section exists and is substantive; missing or thin is a Review FAIL.
+
+**Independent review:** after the evidence passes, Pi on a **different GPU** than the one that wrote the code
+(strongest available first) reviews the diff, the acceptance criteria, the `## Refactoring research` section and the
+repository's `AGENTS.md` / `CLAUDE.md` rules, changes no files, and ends PASS or FAIL. When no second GPU is up the
+driver waits up to 2 hours, then a Blocker; it never reviews on the author's GPU.
+
+## Continuous enhancement pipeline
+
+Jeffrey, 20 Nov 2026 3:49pm CT: "start feeding it enhancements to the software continually - having it auto merge and
+deploy all the way through prod ensuring all green and quality along the way."
+
+Open issues labeled `enhancement` and assigned to `cm-ai-ops-bot` (including the follow-ups the refactoring research
+files) are worked end to end, with no human step, through the same driver and the same rules as any item:
+
+1. Pickup under WIP 3 per repository and one active item per GPU (above).
+2. PR with every required check green, Qodana zero new problems and Refactoring rationale green (hard gates), the
+   evidence passing, and the independent review PASS on a second GPU. Then the driver squash-merges itself (never
+   `--delete-branch`).
+3. It watches the default-branch build of the merge, then the existing promotion (section "Deployments":
+   `ui-auto-promote` promotes tdd → uat → prod on its own, and the `Prod deploy (Octopus webhook)` routine wakes the
+   bot when prod deploys), confirms each environment is healthy, moves the card Merged → TDD → UAT → Done and
+   comments the version and commit per environment. Prod promotion is automatic unless `ui-auto-promote` flags the
+   release: then it opens `<deployable> <version> held before <env>` (label `release-held`) and **a person promotes
+   it in Octopus**; the bot never promotes, re-pins or re-runs a deployment by hand.
+4. **Red stops intake.** When a default-branch build of a merge is red, or an environment the change runs in is not
+   healthy, the driver records it (`factory-pi-item-loop red status`), files one `Fix forward: <what> is red` issue
+   (label `fix-forward`, assigned to `cm-ai-ops-bot`) and posts a Blocker on the item. While anything is red, no new
+   item starts (drivers wait in Todo; `start` says so) except fix-forward items, which you plan first with
+   `fix_forward: true`. Fix forward with a normal PR under every gate above; the flag clears when a later
+   default-branch run is green or the environment reports healthy again (or `factory-pi-item-loop red clear --key
+   <key>` once you have verified it is green).
+5. An enhancement PR never changes credentials, secrets or production setup (workflows, `infra/`, `octopus/`,
+   `environments/prod`, secret or key files): `validate_plan` and the driver refuse it, and the item gets a Blocker
+   for Jeffrey instead.
+6. The bot wakes on GitHub events (and the Octopus prod-deploy webhook) only. No cron; the drivers are their own timers.
 
 ## Saving Grok usage
 
-Grok turns are the expensive part; Pi on the RTX Pro 5000 is free. Measured from Nov 10–18 (287 bot PRs, 1,530 bot
+Grok turns are the expensive part; Pi on the factory GPUs is free. Measured from Nov 10–18 (287 bot PRs, 1,530 bot
 comments): a workorders PR waits a median 8 minutes per Build and 2.1 CI heads per PR, 47 of 147 merged workorders
 PRs had a red Build (106 red runs), and before the driver the bot waited for every one of those in a Grok turn.
 
@@ -264,7 +349,7 @@ PRs had a red Build (106 red runs), and before the driver the bot waited for eve
 - Prefer one shell call that does several steps over many small tool calls; keep tool output short (`--jq`, `-q`).
 - Batch small items in one plan and one driver run (one PR, `Closes #A, closes #B`).
 - A wake for a driver-owned item with `alive: true` ends after the sweep, with no comment and no message.
-- When the proxy is down, do not retry Pi in the turn: one report to Jeffrey (see Pi setup above), then end.
+- When no GPU is up, do not retry Pi in the turn: one report to Jeffrey (see Pi setup above), then end.
 
 ## Review
 
@@ -354,13 +439,22 @@ On any wake with items in Merged, TDD or UAT, check them all at once:
 - Poll CI, sleep, watch a run or a deploy, or read raw CI logs in a Grok turn (the Pi driver does it).
 - Touch a driver-owned item while its driver is alive.
 - Add a cron schedule. The bot is woken by GitHub events and the Octopus prod-deploy webhook only.
+- Merge PR 1918 in `cmdemo1-workorders`, ever. Touch `cmdemo1-system#654`, `cmdemo1-workorders#1875` or
+  `cmdemo1-workorders#1876` (no plan, driver, comment or column move; `validate_plan` refuses them).
+- Merge with `--delete-branch`, review a diff on the GPU that wrote it, or merge with Qodana or Refactoring
+  rationale red or still running.
+- Start a new item (other than a fix-forward) while main or an environment is red.
+- Change credentials, secrets or production setup in an enhancement PR.
+- Ask a GPU proxy for any model but `auto`, to load or switch a model, or send it a warm-up request.
 
 ## Credentials
 
 Secrets of the Grok Bot account (names only; see `factory/bootstrap.md`): `CM_AI_OPS_BOT_GH_TOKEN` for GitHub,
 `GH_PROJECT_TOKEN` for project 679 when the first cannot edit it, and the Azure service principal `cm-ai-ops-bot`
-(read-only use: health and logs), plus `LOCAL_LLM_PRO5000_URL` and `LOCAL_LLM_PRO5000_TOKEN` for Pi on the RTX Pro
-5000 (read only by `factory/pi/`). Use them through environment variables only.
+(read-only use: health and logs), plus two per GPU for Pi (read only by `factory/pi/`): `LOCAL_LLM_PRO5000_URL` /
+`LOCAL_LLM_PRO5000_TOKEN`, `LOCAL_LLM_OBS_URL` / `LOCAL_LLM_OBS_TOKEN`, `LOCAL_LLM_TS3_URL` / `LOCAL_LLM_TS3_TOKEN`
+(each URL is the proxy's base URL ending in `/v1`). Use them through environment variables only. Never change a
+credential, secret or the production setup in an enhancement PR.
 
 ## Reporting to Jeffrey
 
@@ -369,8 +463,10 @@ Message Jeffrey in Grok Bot only for:
 - items that reached Done in prod (one message per release, listing the items);
 - a failure that needs him (red master, failed or held deployment);
 - an item that is newly blocked;
-- the Pi secrets are missing (ask with the secret request form) or the RTX Pro 5000 proxy is unreachable (ask for the
-  new tunnel URL); once per outage, not per item.
+- Pi secrets are missing (ask with the secret request form) or a GPU is unavailable (`pi-gpu-health` names which);
+  once per outage, not per item;
+- intake stopped because main or an environment is red (once per red, with the fix-forward issue), and when it is
+  green again.
 
 Nothing for pickups, PRs opened, checks, merges or Merged / TDD / UAT column moves. A wake with nothing to report
 sends nothing.
