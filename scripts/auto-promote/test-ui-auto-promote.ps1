@@ -61,7 +61,7 @@ Test-Case 'a job named promote in another workflow is a real check' (Test-Promot
 Test-Case 'actions run id from a check url' (Get-ActionsRunId 'https://github.com/o/r/actions/runs/43240281337/job/131258510940') '43240281337'
 Test-Case 'no actions run id outside an actions url' (Get-ActionsRunId 'https://github.com/o/r/commit/abc') ''
 function Select-ReleaseChecks([object[]] $Runs) {
-    @($Runs | Where-Object { -not (Test-PromoterCheckRun -WorkflowName $_.Workflow -WorkflowPath $_.Path) } | ForEach-Object { @{ Name = $_.Name; State = $_.State; Url = $_.Url } })
+    @($Runs | Where-Object { -not (Test-PromoterCheckRun -WorkflowName $_.Workflow -WorkflowPath $_.Path) -and -not (Test-MonitorCheckRun -WorkflowPath $_.Path) } | ForEach-Object { @{ Name = $_.Name; State = $_.State; Url = $_.Url } })
 }
 $onlyPromoter = Select-ReleaseChecks @(
     @{ Name = 'promote'; State = 'failure'; Url = 'https://github.com/o/r/actions/runs/1/job/2'; Workflow = 'ui-auto-promote'; Path = '.github/workflows/ui-auto-promote.yml' }
@@ -73,7 +73,36 @@ $promoterAndCapabilities = Select-ReleaseChecks @(
     @{ Name = 'promote'; State = 'failure'; Url = 'p'; Workflow = 'ui-auto-promote'; Path = '.github/workflows/ui-auto-promote.yml' }
     @{ Name = 'capabilities / capabilities'; State = 'failure'; Url = 'c'; Workflow = 'capabilities'; Path = '.github/workflows/capabilities.yml' }
 )
-Test-Case 'failed promoter run does not hide a failed capabilities check' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @($promoterAndCapabilities) })).Decision 'hold'
+Test-Case 'failed scheduled capabilities run no longer holds (owner 2026-11-21)' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @($promoterAndCapabilities) })).Decision 'wait'
+$capabilitiesFromSystem = Select-ReleaseChecks @(
+    @{ Name = 'promote'; State = 'failure'; Url = 'p'; Workflow = 'ui-auto-promote'; Path = '.github/workflows/ui-auto-promote.yml' }
+    @{ Name = 'capabilities / capabilities'; State = 'failure'; Url = 'c'; Workflow = 'system'; Path = '.github/workflows/system.yml' }
+)
+Test-Case 'failed promoter run does not hide a failed capabilities check called from system.yml' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @($capabilitiesFromSystem) })).Decision 'hold'
+
+# Monitoring workflows are not a build or test (owner, Jeffrey Palermo 2026-11-21). By workflow file, never by job name.
+foreach ($wf in 'capabilities', 'deployments', 'delivery', 'workitems', 'drift', 'fleet-findings', 'kit-templates', 'pool-manager', 'pool-reset', 'factory-wake') {
+    Test-Case "monitor workflow $wf is not a build" (Test-MonitorCheckRun -WorkflowPath ".github/workflows/$wf.yml") $true
+}
+foreach ($wf in 'system', 'env-checks', 'build', 'release', 'refactoring-rationale', 'ui-auto-promote') {
+    Test-Case "workflow $wf is not a monitor" (Test-MonitorCheckRun -WorkflowPath ".github/workflows/$wf.yml") $false
+}
+Test-Case 'unreadable workflow is not a monitor' (Test-MonitorCheckRun -WorkflowPath '') $false
+Test-Case 'monitor file name outside .github/workflows is not a monitor' (Test-MonitorCheckRun -WorkflowPath 'other/deployments.yml') $false
+$monitorsRedAndPending = Select-ReleaseChecks @(
+    @{ Name = 'capabilities / report'; State = 'failure'; Url = 'c'; Workflow = 'capabilities'; Path = '.github/workflows/capabilities.yml' }
+    @{ Name = 'deployments'; State = 'pending'; Url = 'd'; Workflow = 'deployments'; Path = '.github/workflows/deployments.yml' }
+    @{ Name = 'workitems'; State = 'pending'; Url = 'w'; Workflow = 'workitems'; Path = '.github/workflows/workitems.yml' }
+    @{ Name = 'system-release'; State = 'success'; Url = 's'; Workflow = 'system'; Path = '.github/workflows/system.yml' }
+)
+Test-Case 'red and pending monitors with a green build: promote' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @($monitorsRedAndPending) })).Decision 'promote'
+Test-Case 'red and pending monitors with a green build: master green' (Get-MasterState -Checks @($monitorsRedAndPending)).State 'green'
+$monitorsAndRedBuild = Select-ReleaseChecks @(
+    @{ Name = 'deployments'; State = 'success'; Url = 'd'; Workflow = 'deployments'; Path = '.github/workflows/deployments.yml' }
+    @{ Name = 'Build result'; State = 'failure'; Url = 'b'; Workflow = 'Build'; Path = '.github/workflows/build.yml' }
+)
+Test-Case 'a real red build still holds next to green monitors' (Get-PromotionDecision -Facts (New-Facts @{ Checks = @($monitorsAndRedBuild) })).Decision 'hold'
+Test-Case 'a real red build still makes master red' (Get-MasterState -Checks @($monitorsAndRedBuild)).State 'red'
 $promoterAndSystem = Select-ReleaseChecks @(
     @{ Name = 'promote'; State = 'pending'; Url = 'p'; Workflow = 'ui-auto-promote'; Path = '.github/workflows/ui-auto-promote.yml' }
     @{ Name = 'system-release'; State = 'failure'; Url = 's'; Workflow = 'system'; Path = '.github/workflows/system.yml' }
@@ -122,6 +151,19 @@ Test-Case 'script outside src flags' (Flags (New-Facts @{ Paths = @('build.ps1',
 Test-Case 'csproj in src flags' (Flags (New-Facts @{ Paths = @('src/UI/Server/Server.csproj') })) @('Pipeline or infra change')
 Test-Case 'Directory.Build.props in src flags' (Flags (New-Facts @{ Paths = @('src/Directory.Build.props') })) @('Pipeline or infra change')
 Test-Case 'global.json flags' (Flags (New-Facts @{ Paths = @('global.json') })) @('Pipeline or infra change')
+# Test projects are not a pipeline change (owner, Jeffrey Palermo 2026-11-21)
+Test-Case 'test project file does not flag' (Flags (New-Facts @{ Paths = @('src/Dashboard.Tests/Dashboard.Tests.csproj') })) @()
+Test-Case 'unit test project file does not flag' (Flags (New-Facts @{ Paths = @('src/UnitTests/UnitTests.csproj') })) @()
+Test-Case 'test project props does not flag' (Flags (New-Facts @{ Paths = @('src/AcceptanceTests/Directory.Build.props') })) @()
+Test-Case 'test source does not flag' (Flags (New-Facts @{ Paths = @('src/IntegrationTests/Api/X.cs') })) @()
+Test-Case 'root tests folder does not flag' (Flags (New-Facts @{ Paths = @('tests/smoke/run.ps1') })) @()
+Test-Case 'nested *.Tests.* project does not flag' (Flags (New-Facts @{ Paths = @('src/Dashboard.Tests.Shared/Shared.csproj') })) @()
+Test-Case 'test project Dockerfile still flags' (Flags (New-Facts @{ Paths = @('src/AcceptanceTests/Dockerfile') })) @('Pipeline or infra change')
+Test-Case 'script test file still flags' (Flags (New-Facts @{ Paths = @('scripts/acceptance/Protect-PrAcceptanceArtifactBundle.Tests.ps1') })) @('Pipeline or infra change')
+Test-Case 'scripts tests folder still flags' (Flags (New-Facts @{ Paths = @('scripts/tests/x.ps1') })) @('Pipeline or infra change')
+Test-Case 'github workflow under a tests folder still flags' (Flags (New-Facts @{ Paths = @('.github/tests/x.yml') })) @('Pipeline or infra change')
+Test-Case 'product csproj next to a test project still flags' (Flags (New-Facts @{ Paths = @('src/Dashboard.Tests/X.cs', 'src/Dashboard/Dashboard.csproj') })) @('Pipeline or infra change')
+Test-Case 'a folder merely containing Test still flags' (Flags (New-Facts @{ Paths = @('src/Contest/Contest.csproj') })) @('Pipeline or infra change')
 Test-Case 'database migration does not flag' (Flags (New-Facts @{ Paths = @('src/Database/scripts/Update/033_Risks.sql') })) @()
 Test-Case 'database project file does not flag' (Flags (New-Facts @{ Paths = @('src/Database/Database.csproj') })) @()
 Test-Case 'kit private-build script does not flag' (Flags (New-Facts @{ Paths = @('.github/private-build/add-private-build.ps1') })) @()

@@ -62,8 +62,11 @@
                  error. skipped and neutral pass. Wait: a check run not completed, a status pending, no check yet, or a
                  listing that could not be read whole. The workflow ui-auto-promote's own check runs are left out: a crash
                  or an unfinished run of this promoter is not a build or test of the release. Every other workflow still
-                 counts, including one whose job happens to be named promote (system, capabilities, env-checks). A check
-                 run whose workflow cannot be read is counted.
+                 counts, including one whose job happens to be named promote (system, env-checks). A check
+                 run whose workflow cannot be read is counted. Monitoring workflows are left out too (owner, Jeffrey
+                 Palermo 2026-11-21, $MonitorWorkflowFiles: capabilities, delivery, deployments, drift, workitems, ...):
+                 they report on environments, not on the commit, for flag 1 and for master's state; capabilities
+                 called from system.yml still counts.
       2 deployment  Flag: the deployment to the previous environment is not Success; its task log is unreadable (under 20
                  lines or without its "Task ID:" header); the log has a line at Error, Warning or Fatal level or a step
                  SuccessWithWarning (the kit's test-deployment-logs.ps1 rule, plus Fatal, which a real failed ui task
@@ -78,6 +81,8 @@
                  the release running there), a changed path (a renamed file counts both names) outside the deployable's
                  ApplicationPaths (ui: src/), or a build or project file anywhere (BuildFiles list), unless it is documentation (DocumentationPaths list:
                  docs/**, arch/**, *.md anywhere, including .github/x.md). UnflaggedFolders never flag (ui: src/Database/ and .github/private-build/, owner 2026-10-14).
+                 Test-project files never flag (owner, Jeffrey Palermo 2026-11-21, $TestProjectFolders: a folder named
+                 *Tests, *.Tests, test or tests, project file included), except under .github/ or scripts/ or a Dockerfile*.
                  The comparison is read from a clone of the application repository without blobs (Get-AppComparison), so
                  it has no commit or file cap: GitHub's compare answers 250 commits and 300 files at most, and the jump
                  of ui from 2.4.1120 to 2.4.2060 is 405 commits and 687 files. A comparison that is unknown or incomplete
@@ -137,6 +142,17 @@ $DocumentationPaths = @('docs/**', 'arch/**', '*.md', '**/*.md')
 # Build and project files that flag wherever they are, also inside the application paths (file names, or *.ext).
 $BuildFiles = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props', 'global.json', 'nuget.config',
     '*.csproj', '*.sln', '*.slnx', '*.props', '*.targets', 'Dockerfile*')
+# Test projects (owner, Jeffrey Palermo 2026-11-21: "test-project files are not a pipeline change"): a path with a folder
+# named like a test project (src/UnitTests/..., src/Dashboard.Tests/Dashboard.Tests.csproj, tests/...) is not a pipeline
+# change, its project file included. Never under .github/ or scripts/ (those keep the hold), and a Dockerfile* still flags.
+$TestProjectFolders = @('*Tests', '*.Tests', '*.Tests.*', 'test', 'tests')
+$TestProjectNeverPrefixes = @('.github/', 'scripts/')
+# Monitoring workflows (owner, Jeffrey Palermo 2026-11-21: "scheduled monitoring runs don't count as red build"): their check
+# runs on a commit are reports about the environments or the factory, not a build or test of that commit, so they never
+# flag a release as red and never make master pending, like the promoter's own runs. Identified by the workflow file of
+# the Actions run, never by the job name: capabilities called from system.yml (workflow system) still counts.
+$MonitorWorkflowFiles = @('capabilities.yml', 'delivery.yml', 'deployments.yml', 'drift.yml', 'fleet-findings.yml', 'kit-templates.yml',
+    'pool-manager.yml', 'pool-reset.yml', 'pool-template-refresh.yml', 'workitems.yml', 'factory-wake.yml', 'ui-feature-toggles.yml')
 # The deployables this workflow promotes, keyed by deployable name (system.json deployables[].name). A deployable that is
 # not here is not promoted automatically (the script stops). Per deployable:
 #   ApplicationPaths  globs of the application repository: a change inside them is not a pipeline change, except a build
@@ -241,6 +257,16 @@ function Test-GlobMatch([string] $Path, [string[]] $Globs) {
     $false
 }
 
+function Test-TestProjectPath([string] $Path) {
+    # True when a folder of the path is named like a test project (owner 2026-11-21), outside .github/ and scripts/, and
+    # the file is not a Dockerfile.
+    if (@($TestProjectNeverPrefixes | Where-Object { $Path.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { return $false }
+    $parts = @($Path.Split('/'))
+    if ($parts[-1] -ilike 'Dockerfile*') { return $false }
+    foreach ($folder in @($parts | Select-Object -SkipLast 1)) { if (Test-GlobMatch $folder $TestProjectFolders) { return $true } }
+    $false
+}
+
 function Get-PipelineEvidence {
     param([string[]] $Paths, [string[]] $Documentation = $DocumentationPaths, [string[]] $Build = $BuildFiles,
         [string[]] $Unflagged = $Settings.UnflaggedFolders, [string[]] $Application = $Settings.ApplicationPaths)
@@ -248,6 +274,7 @@ function Get-PipelineEvidence {
     foreach ($p in @($Paths | Where-Object { $_ })) {
         if (Test-GlobMatch $p $Documentation) { continue }
         if (@($Unflagged | Where-Object { $_ -and $p.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { continue }
+        if (Test-TestProjectPath $p) { continue }
         if (-not (Test-GlobMatch $p $Application)) { "$p ($outside)"; continue }
         if (Test-GlobMatch ($p.Split('/')[-1]) $Build) { "$p (build or project file)" }
     }
@@ -369,6 +396,15 @@ function Test-PromoterCheckRun {
     ($WorkflowName -eq 'ui-auto-promote') -or ($WorkflowPath -eq '.github/workflows/ui-auto-promote.yml')
 }
 
+function Test-MonitorCheckRun {
+    # A check run of a monitoring workflow (owner 2026-11-21, $MonitorWorkflowFiles) is not a build or test of the commit:
+    # left out of flag 1 and of master's state, like the promoter's own runs. By workflow file only; an unreadable
+    # workflow (empty path) still counts.
+    param([string] $WorkflowPath)
+    if (-not $WorkflowPath) { return $false }
+    $file = $WorkflowPath.Split('/')[-1]
+    ($WorkflowPath -like '.github/workflows/*') -and ($MonitorWorkflowFiles -contains $file)
+}
 
 function Get-MasterState {
     # Checks of master's head commit (Name, State): green when every one passed, red when one failed, pending when one is not
@@ -1975,6 +2011,7 @@ function Get-CommitChecks([string] $Sha) {
                 $workflowPath = [string] $workflowByRun[$runId].Path
             }
             if (Test-PromoterCheckRun -WorkflowName $workflowName -WorkflowPath $workflowPath) { $ignored++; continue }
+            if (Test-MonitorCheckRun -WorkflowPath $workflowPath) { $ignored++; continue }
             $checks.Add(@{ Name = $c.name; State = ConvertTo-CheckState $c.status $c.conclusion; Url = $c.html_url })
         }
         $page++
