@@ -205,15 +205,33 @@ def busy_gpus(states, me=None, alive=lambda pid: False):
     return {s.get("gpu") for k, s in states
             if k != me and s.get("gpu") and s.get("stage") in ACTIVE_STAGES and alive(s.get("pid"))}
 
-def gpu_for_item(rec, size, up, busy):
+def gpu_for_item(rec, size, up, busy, excluded=None):
     """(gpu, wait_why) for the gpu stage. A resumed item keeps the GPU recorded in state: take it when it is up,
-    otherwise wait for that GPU (never re-pick, never fall back to the pro5000 default). A new item picks a free
-    GPU of the right size; gpu=None means wait, and wait_why says for what."""
+    otherwise wait for that GPU (never re-pick, never fall back to the pro5000 default). A record naming an
+    excluded GPU is ignored (the item picks fresh). A new item picks a free GPU of the right size; gpu=None
+    means wait, and wait_why says for what."""
+    ex = set(excluded or ())
+    if rec and rec in ex: rec = None
     if rec:
         if rec in up: return rec, None
         return None, f"waiting for the recorded GPU {rec} (up: {', '.join(up) or 'none'})"
-    g = G.pick_gpu(size, up, busy)
-    return g, None if g else f"no free GPU for a {size} item (up: {', '.join(up) or 'none'})"
+    g = G.pick_gpu(size, up, busy, ex)
+    if g: return g, None
+    if size == "large" and G.LARGE_GPU in ex:
+        return None, f"large item waits: {G.LARGE_GPU} is excluded from the GPU pool (split it to fit 64K)"
+    return None, f"no free GPU for a {size} item (up: {', '.join(up) or 'none'})"
+
+def drop_excluded(s, excluded):
+    """Resume with GPUs out of the pool: an excluded recorded GPU (reviewer or item) is dropped. A large item in
+    an active stage re-enters the gpu stage (it waits again); stages that hold no GPU keep their stage; a small
+    item mid-work keeps its record so Driver.gpu() reassigns it on first use. Mutates and returns s."""
+    ex = set(excluded or ())
+    if s.get("reviewer_gpu") in ex:
+        s.pop("reviewer_gpu", None); s.pop("reviewer_waited", None)
+    if s.get("gpu") in ex:
+        if s.get("size") == "large" and s.get("stage") in ACTIVE_STAGES: s["gpu"], s["stage"] = None, "gpu"
+        elif s.get("stage") not in ACTIVE_STAGES: s["gpu"] = None
+    return s
 
 def repo_wip(states, repo, me=None, alive=lambda pid: False):
     """Driver items of `repo` in In Progress or Review (active stages) on this box, live or blocked mid-review."""
@@ -375,6 +393,16 @@ class Driver:
         g = self.s.get("gpu")
         if not g:
             raise RuntimeError(f"no GPU is recorded for this item ({self.full}#{self.issue}); it must pass the gpu stage first")
+        ex = G.excluded()
+        if g in ex:
+            size = self.s.get("size") or G.classify_size(self.s.get("plan") or {})
+            if size != "small":
+                raise RuntimeError(f"GPU {g} is excluded from the pool; the large item waits for a split to fit 64K (see wait_why)")
+            new = G.pick_gpu("small", G.available(gpu_health()), set(), ex) or next((x for x in G.SMALL_GPUS if x not in ex), None)
+            if not new:
+                raise RuntimeError(f"GPU {g} is excluded from the pool and no small GPU is available to reassign to")
+            self.save(gpu=new); self.log(f"GPU {g} excluded; reassigned to {new}")
+            return new
         return g
     def gpu_label(self, g=None): return G.GPUS[g or self.gpu()]["label"]
 
@@ -557,12 +585,12 @@ class Driver:
                     up = G.available(gpu_health())
                     if repo_wip(states, self.repo, me, pid_alive) >= WIP_LIMIT: why = f"WIP is full for {self.repo} ({WIP_LIMIT})"
                     else:
-                        g, why = gpu_for_item(self.s.get("gpu"), size, up, busy_gpus(states, me, pid_alive))
+                        g, why = gpu_for_item(self.s.get("gpu"), size, up, busy_gpus(states, me, pid_alive), excluded=G.excluded())
                         if g:
                             self.save(gpu=g, size=size, stage="pickup"); self.log(f"GPU {g} ({self.gpu_label(g)}) for a {size} item")
                             return
             if self.dry:
-                g = self.s.get("gpu") or G.LARGE_GPU
+                g = self.s.get("gpu") or G.plan_gpu(list(G.GPUS), G.excluded()) or "obs"
                 self.log(f"DRY-RUN: {why}; taking {g}"); return self.save(gpu=g, size=size, stage="pickup")
             if self.s.get("wait_why") != why: self.save(wait_why=why); self.log(f"waiting: {why}")
             time.sleep(GPU_WAIT_S)
@@ -814,12 +842,14 @@ class Driver:
         self.save(research_in_body=True)
         t_end = time.time() + REVIEWER_WAIT_H * 3600
         while True:
-            rv = G.reviewer_gpu(self.gpu(), G.available(gpu_health(0 if self.s.get("reviewer_waited") else 600)))
+            rv = G.reviewer_gpu(self.gpu(), G.available(gpu_health(0 if self.s.get("reviewer_waited") else 600)), excluded=G.excluded())
             if rv or self.dry or time.time() > t_end: break
             self.save(reviewer_waited=True); self.heartbeat(); time.sleep(RECHECK_S)
         if not rv and not self.dry:
             self.blocker(f"no second GPU is up for the independent review of code written on the {self.gpu_label()}."); return None
-        rv = rv or self.gpu(); self.save(reviewer_gpu=rv)
+        rv = rv or self.gpu()
+        if rv in G.excluded(): rv = G.plan_gpu(G.available(gpu_health()), G.excluded()) or rv   # dry-run: never review on an excluded GPU
+        self.save(reviewer_gpu=rv)
         diff = self.sh(["git", "diff", f"origin/{self.s['default']}...HEAD"], cwd=self.s["wt"], check=False).stdout
         limit = 60000 if rv == G.LARGE_GPU else 24000
         out = os.path.join(self.run_dir, "independent-review.md")
@@ -957,7 +987,9 @@ def cmd_draft_plan(a):
               "prompt; one test or one code change each; tests first), size ('large' for big or cross-cutting work, 'small' for a UI or "
               "test-only change), verify_cmd (the repo's real build+test command, "
               "narrowed to the touched projects), pr_title, pr_summary (one line).")
-    ok = d.pi("draft-plan", prompt, 1500, gpu=G.LARGE_GPU)   # plan drafting runs before the gpu stage: no gpu recorded yet
+    g = G.plan_gpu(G.available(gpu_health()), G.excluded())   # plan drafting runs before the gpu stage: no gpu recorded yet
+    if not g: print("no healthy non-excluded GPU"); sys.exit(4)
+    ok = d.pi("draft-plan", prompt, 1500, gpu=g)
     try:
         p = json.load(open(out)); errs = validate_plan(p)
     except Exception as e:
@@ -985,6 +1017,7 @@ def cmd_start(a):
     if d.s.get("status") in ("blocked", "error") and a.resume:
         d.s["stage"] = d.s.get("resume_stage") or ("ci" if d.s.get("pr") else "implement"); d.s.pop("blocker", None)
         d.s["counts"] = {k: 0 for k in LIMITS}   # Jeffrey answered the Blocker: the limits start again
+        drop_excluded(d.s, G.excluded())           # an excluded recorded GPU is dropped: re-pick (large) or reassign (small)
     d.save()
     log = open(os.path.join(d.run_dir, "driver.out"), "a")
     cmd = [sys.executable, os.path.abspath(__file__), "run", "--repo", a.repo, "--issue", str(a.issue)] + (["--dry-run"] if a.dry_run else [])

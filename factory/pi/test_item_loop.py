@@ -405,4 +405,54 @@ class UsageReport(unittest.TestCase):
             for s in ("`grok-a`, `grok-b`", "`drv1`", "`pi-1`", "1,000 + 5,000", "1m01s", "Total (1 Pi session)"): self.assertIn(s, out)
             self.assertNotIn("(progress)", out)
 
+class GpuExclusion(unittest.TestCase):   # cmdemo1-system#816 (Jeffrey): a GPU may be excluded from the pool by
+    # FACTORY_GPU_EXCLUDE and the gpu-exclude file; every call here passes explicit env dicts / excluded sets
+    def test_excluded_reads_env_and_file(self):
+        self.assertEqual(G.excluded({"FACTORY_GPU_EXCLUDE": "PRO5000, bogus"}), {"pro5000"})
+        with tempfile.TemporaryDirectory() as h:
+            f = os.path.join(h, "gpu-exclude")
+            open(f, "w").write("# c\nts3\n")
+            self.assertEqual(G.excluded({"FACTORY_GPU_EXCLUDE_FILE": f, "FACTORY_GPU_EXCLUDE": "obs"}), {"obs", "ts3"})
+        self.assertEqual(G.excluded({}), set())
+
+    def test_probe_excluded_makes_no_network_call(self):
+        def opener(*a, **k): raise AssertionError("an excluded GPU must not be probed (no network call)")
+        status, _ = G.probe("pro5000", env={"FACTORY_GPU_EXCLUDE": "pro5000", "LOCAL_LLM_PRO5000_URL": "http://x/v1",
+                                            "LOCAL_LLM_PRO5000_TOKEN": "t"}, opener=opener)
+        self.assertEqual(status, "EXCLUDED")
+        self.assertEqual(G.available({"pro5000": ("EXCLUDED", "x"), "obs": ("HEALTHY", "")}), ["obs"])
+
+    def test_pick_gpu_skips_excluded_and_large_waits(self):
+        up = ["pro5000", "obs", "ts3"]
+        self.assertEqual(G.pick_gpu("small", up, set(), excluded={"pro5000"}), "obs")
+        self.assertIsNone(G.pick_gpu("small", up, {"obs", "ts3"}, excluded={"pro5000"}))
+        self.assertIsNone(G.pick_gpu("large", up, set(), excluded={"pro5000"}))   # large waits, never a 64K GPU
+        self.assertEqual(G.pick_gpu("large", ["obs", "ts3"], set()), "obs")          # down but not excluded: today's fallback stays
+        self.assertEqual(G.pick_gpu("small", up, set(), excluded={"obs"}), "ts3")
+
+    def test_reviewer_gpu_skips_excluded(self):
+        self.assertEqual(G.reviewer_gpu("obs", ["pro5000", "obs", "ts3"], excluded={"pro5000"}), "ts3")
+        self.assertEqual(G.reviewer_gpu("ts3", ["pro5000", "obs", "ts3"], excluded={"pro5000"}), "obs")
+        self.assertIsNone(G.reviewer_gpu("obs", ["pro5000", "obs"], excluded={"pro5000"}))
+
+    def test_plan_gpu(self):
+        self.assertEqual(G.plan_gpu(["pro5000", "obs", "ts3"], excluded={"pro5000"}), "obs")
+        self.assertEqual(G.plan_gpu(["pro5000", "obs"], excluded=set()), "pro5000")
+        self.assertIsNone(G.plan_gpu([], excluded=set()))
+
+    def test_gpu_for_item_reassigns_excluded_record(self):
+        self.assertEqual(L.gpu_for_item("pro5000", "small", ["obs", "ts3"], set(), excluded={"pro5000"}), ("obs", None))
+        g, why = L.gpu_for_item("pro5000", "large", ["obs", "ts3"], set(), excluded={"pro5000"})
+        self.assertIsNone(g); self.assertIn("excluded", why)   # it cannot wait for an excluded GPU: say why
+        self.assertEqual(L.gpu_for_item("obs", "small", ["obs", "ts3"], set(), excluded={"pro5000"}), ("obs", None))
+        self.assertIsNone(L.gpu_for_item(None, "large", ["obs", "ts3"], set(), excluded={"pro5000"})[0])
+
+    def test_resume_drops_excluded_gpus(self):
+        s = L.drop_excluded({"gpu": "pro5000", "reviewer_gpu": "pro5000", "stage": "research", "size": "large"}, {"pro5000"})
+        self.assertIsNone(s.get("gpu")); self.assertIsNone(s.get("reviewer_gpu")); self.assertEqual(s.get("stage"), "gpu")
+        s = L.drop_excluded({"gpu": "obs", "reviewer_gpu": "pro5000", "stage": "review"}, {"pro5000"})
+        self.assertEqual(s.get("gpu"), "obs"); self.assertIsNone(s.get("reviewer_gpu")); self.assertEqual(s.get("stage"), "review")
+        s = L.drop_excluded({"gpu": "pro5000", "stage": "deploy"}, {"pro5000"})
+        self.assertIsNone(s.get("gpu")); self.assertEqual(s.get("stage"), "deploy")   # stages after merge use no GPU
+
 if __name__ == "__main__": unittest.main()
