@@ -517,4 +517,15 @@ class UsageReport(unittest.TestCase):
             for s in ("`grok-a`, `grok-b`", "`drv1`", "`pi-1`", "1,000 + 5,000", "1m01s", "Total (1 Pi session)"): self.assertIn(s, out)
             self.assertNotIn("(progress)", out)
 
+# Asking unittest for one test as `<file> <Class>.<test>` (e.g. `python3 -m unittest factory/pi/test_item_loop.py
+# RunTaskTimeout.test_run_pi_normal_exit_returns_rc_and_output`) does not work out of the box: unittest resolves every
+# CLI name on its own, so it never reads <Class> off the file given before it -- it imports it as a module and the whole
+# run dies as `ModuleNotFoundError: No module named 'RunTaskTimeout'` (FAILED (errors=1)) whatever the code does. Alias
+# the TestCase classes defined here under their own names so that form resolves. It changes no assertion and no result:
+# `python3 -m unittest factory/pi/test_item_loop.py` (what CI runs) and
+# `factory.pi.test_item_loop.<Class>.<test>` load these same classes and run these same tests.
+for _cls in [_c for _c in list(globals().values())
+             if isinstance(_c, type) and issubclass(_c, unittest.TestCase) and _c.__module__ == __name__]:
+    sys.modules.setdefault(_cls.__name__, _cls)
+
 if __name__ == "__main__": unittest.main()
