@@ -23,9 +23,5 @@ terraform {
     }
   }
 
-  # Provider 1.20.0 has no feature-toggle resource. BuildingManagement and VendorManagement on cmdemo1-ui
-  # (Projects-981) are created by scripts/ensure-ui-feature-toggles.ps1, documented in
-  # docs/ops/ui-feature-toggles.md. This module does not create them and does not reset a flip.
-
   backend "azurerm" {}
 }

@@ -25,12 +25,6 @@ param appEnvironments array
 @description('Names of every environment of the system, of both tiers: those the resources of this module serve (the registry, the Terraform state, the plan, octopus-config and acr-push identities).')
 param servedEnvironments array = []
 
-@description('GitHub OIDC subject of the pool-manager workflow (environment "pool-manager"); it signs in as the pool app identity.')
-param poolManagerSubject string = ''
-
-@description('True when the pool lease store (blob storage for slot-N leases) is created here; the pool stack then references it.')
-param poolLeaseStore bool = false
-
 // What every environment shares is tagged with the list of them ("tdd,uat,prod"): the runtime diagram draws it in
 // each, and the cost report counts it as shared (decisions 0037 and 0039).
 var sharedTags = empty(servedEnvironments) ? tags : union(tags, { environment: join(servedEnvironments, ',') })
@@ -123,63 +117,6 @@ module planCostReader 'role-assignment.bicep' = {
     principalId: plan.properties.principalId
     roleDefinitionId: '72fafb9e-0641-4937-9268-a91bfd8191a3' // Cost Management Reader
     description: 'id-${slug}-plan: the cost of nonprod, for the health dashboard'
-  }
-}
-
-// The pool app identity: used by every pool slot Container App, the lease workflow, and the pool manager.
-// Federated credential for the pool-manager GitHub Actions workflow (issue #652).
-resource poolApp 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: 'id-${slug}-pool-app'
-  location: location
-  tags: sharedTags
-}
-
-resource poolAppCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2023-01-31' = if (!empty(poolManagerSubject)) {
-  parent: poolApp
-  name: 'github-pool-manager'
-  properties: {
-    issuer: githubIssuer
-    subject: poolManagerSubject
-    audiences: [audience]
-  }
-}
-
-// The pool lease store: Azure blob storage for slot-N leases. Containers are slot-1 .. slot-N (mapped from pool-N).
-// The pool app identity gets Storage Blob Data Contributor on the leases container.
-resource leaseStore 'Microsoft.Storage/storageAccounts@2023-05-01' = if (poolLeaseStore) {
-  name: 'st${slug}pool${suffix}'
-  location: location
-  tags: union(sharedTags, { purpose: 'pool-lease-store' })
-  kind: 'StorageV2'
-  sku: {
-    name: 'Standard_LRS'
-  }
-  properties: {
-    allowBlobPublicAccess: false
-    allowSharedKeyAccess: false
-    minimumTlsVersion: 'TLS1_2'
-    supportsHttpsTrafficOnly: true
-  }
-}
-
-resource leaseBlobs 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = if (poolLeaseStore) {
-  parent: leaseStore
-  name: 'default'
-}
-
-resource leaseContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = if (poolLeaseStore) {
-  parent: leaseBlobs
-  name: 'leases'
-}
-
-resource leaseStoreContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (poolLeaseStore) {
-  name: guid(leaseStore.id, poolApp.id, 'blob-contributor')
-  scope: leaseStore
-  properties: {
-    principalId: poolApp.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
-    description: 'id-${slug}-pool-app: Storage Blob Data Contributor on the lease store (slot-N leases)'
   }
 }
 
@@ -370,19 +307,3 @@ output acrPush object = containerRegistry
 
 output deploy object = tier.outputs.deploy
 output apps array = tier.outputs.apps
-
-// Pool identity: the identity every pool slot Container App, the lease workflow, and the pool manager use.
-output poolApp object = {
-  name: poolApp.name
-  clientId: poolApp.properties.clientId
-  principalId: poolApp.properties.principalId
-}
-
-// Pool lease store: the storage account and container for slot-N leases. {} when poolLeaseStore is false.
-output leaseStore object = poolLeaseStore
-  ? {
-      name: leaseStore.name
-      blobEndpoint: leaseStore!.properties.primaryEndpoints.blob
-      container: leaseContainer.name
-    }
-  : {}

@@ -14,9 +14,9 @@ variable "github_token" {
 }
 
 variable "test_runner_image" {
-  description = "Execution container of the acceptance-test steps (on ghcr.io): Playwright (Chromium, pwsh) plus the .NET 10 SDK, built from images/test-runner and published by job publish-test-runner of system.yml. Keep in sync with images/test-runner/image.txt. Match the Playwright version of the app's AcceptanceTests project (cmdemo1-workorders: Microsoft.Playwright.NUnit 1.61.0, Chromium 1228): an image without the suite's Chromium makes the step install it with a warning in every deployment log."
+  description = "Execution container of the acceptance-test steps (on mcr.microsoft.com): Chromium, pwsh and .NET; the step adds .NET 10. Match the Playwright version of the app's AcceptanceTests project."
   type        = string
-  default     = "clearmeasure-aisf-sample-apps/cmdemo1-test-runner:v1.61.0-dotnet10"
+  default     = "playwright/dotnet:v1.61.0-noble"
 }
 
 variable "worker_tools_image" {
@@ -38,12 +38,14 @@ locals {
   retired_deployables = { for name, d in local.all_deployables : name => d if try(d.retired, false) == true }
   deployables         = { for name, d in local.all_deployables : name => d if try(d.retired, false) != true }
 
-  # deployables[].hosting: "containerapp" (default) or "staticwebapp" (a site of static files on Azure Static Web Apps:
-  # the health dashboard); this system keeps no App Service hosting. Only deployables with a databasePackage own the
-  # database: they migrate it and, in the prod tier, record a restore point first; a static deployable has no database
-  # access at all.
-  container_deployables = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "containerapp" }
-  static_deployables    = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "staticwebapp" }
+  # deployables[].hosting: "containerapp" (default), "appservice" (a web app on the Free plan, zip deployed, with no
+  # database of its own) or "staticwebapp" (a site of static files on Azure Static Web Apps: the health dashboard).
+  # Only deployables with a databasePackage own the database: they migrate it and, in the prod tier, record a restore
+  # point first; an App Service deployable gets a login of its own (system step "Grant database access"); a static
+  # deployable has no database access at all.
+  container_deployables  = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "containerapp" }
+  appservice_deployables = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "appservice" }
+  static_deployables     = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "staticwebapp" }
   # "storagewebsite": the same site on a storage account's static website (opt-in; decision 0035).
   storage_deployables = { for name, d in local.deployables : name => d if try(d.hosting, "containerapp") == "storagewebsite" }
   # deployables[].hosting "own": the application brings its runtime (principle 007). infra/ creates nothing for it;
@@ -189,16 +191,6 @@ resource "octopusdeploy_docker_container_registry" "mcr" {
   download_retry_backoff_seconds = 10
 }
 
-# Public GHCR package of images/test-runner (Playwright + .NET 10 SDK). No credentials: the package is public so
-# Octopus Cloud workers can pull it the same way they pull mcr.microsoft.com images.
-resource "octopusdeploy_docker_container_registry" "ghcr" {
-  name                           = "ghcr"
-  feed_uri                       = "https://ghcr.io"
-  api_version                    = "v2"
-  download_attempts              = 3
-  download_retry_backoff_seconds = 10
-}
-
 data "octopusdeploy_worker_pools" "hosted_ubuntu" {
   partial_name = "Hosted Ubuntu"
   take         = 10
@@ -219,7 +211,7 @@ locals {
     image   = var.worker_tools_image
   }
   test_container = {
-    feed_id = octopusdeploy_docker_container_registry.ghcr.id
+    feed_id = octopusdeploy_docker_container_registry.mcr.id
     image   = var.test_runner_image
   }
 }

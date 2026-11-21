@@ -12,72 +12,19 @@
     Deployable.Name limits the check to one deployable. The deadline covers a scale-from-zero start and a SQL
     database resuming from auto-pause; a revision that cannot start (crash loop, image pull failure, failed
     provisioning) fails the step at once, with the container's last console lines. A static site (hosting
-    "staticwebapp" or "storagewebsite") has no revision to ask: only its URL is polled. A storage website
+    "staticwebapp" or "storagewebsite") has no revision and no plan to ask: only its URL is polled. A storage website
     serves nothing before its first release, so "Verify environment" passes over one the stack knows no version of.
 
     A deployable that brings its own runtime (hosting "own") is not in the stack and verifies itself, in its own
     project (scripts/invoke-application.ps1). "Verify environment" therefore passes over a stack that lists no
     deployable where the system has such an application (variable System.OwnDeployables) and the stack is to create
     none in this environment (System.StackDeployables); a stack that lists none anywhere else fails the step.
-
-    The same script is also step "Verify revert" of a container deployable (condition Failure, right after "Revert
-    deployable"): it asks whether the previous image serves again. It fails when "Revert deployable" did not set
-    Reverted, when the container app's image tag is not that previous version, or when the health path does not
-    answer 200. When the pin never ran or there was no previous version, there is no revert to verify and it says so.
-
-.PARAMETER LoadOnly
-    Defines the planner functions and stops, for scripts/test-verify-environment.ps1. Octopus runs this file with the
-    switch off.
 #>
 [CmdletBinding()]
-param(
-    [switch] $LoadOnly
-)
+param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-function Resolve-ContainerVerifyTarget {
-    # What "Verify revert" must ask of a container deployable. "Verify deployable" and "Verify environment" skip this
-    # path. Skip when nothing was put back; Fail when the revert step did not report success.
-    param(
-        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Step,
-        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Release,
-        $Parameters
-    )
-    if ($Step -ne 'Verify revert') {
-        return [pscustomobject]@{ AfterRevert = $false; Skip = $false; Fail = $false; Version = $Release; Reason = '' }
-    }
-    if ($null -eq $Parameters) { $Parameters = @{} }
-    $previous = [string] $Parameters['Octopus.Action[Pin version].Output.PreviousVersion']
-    if ([string] $Parameters['Octopus.Action[Pin version].Output.Pinned'] -ne 'True') {
-        return [pscustomobject]@{ AfterRevert = $true; Skip = $true; Fail = $false; Version = $Release; Reason = 'not-pinned' }
-    }
-    if ([string]::IsNullOrWhiteSpace($previous)) {
-        return [pscustomobject]@{ AfterRevert = $true; Skip = $true; Fail = $false; Version = $Release; Reason = 'no-previous' }
-    }
-    if ([string] $Parameters['Octopus.Action[Revert deployable].Output.Reverted'] -ne 'True') {
-        return [pscustomobject]@{ AfterRevert = $true; Skip = $false; Fail = $true; Version = $previous; Reason = 'not-reverted' }
-    }
-    return [pscustomobject]@{ AfterRevert = $true; Skip = $false; Fail = $false; Version = $previous; Reason = '' }
-}
-
-function Test-ContainerImageTag {
-    # Whether the container app's image is the version this verify asks for (<registry>/<slug>/<deployable>:<version>).
-    param(
-        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Image,
-        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Registry,
-        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Slug,
-        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Deployable,
-        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Version
-    )
-    if ([string]::IsNullOrWhiteSpace($Image) -or [string]::IsNullOrWhiteSpace($Version)) { return $false }
-    $want = "$Registry/$Slug/${Deployable}:$Version"
-    return $Image -ceq $want
-}
-
-if ($LoadOnly) { return }
-
 $PSNativeCommandArgumentPassing = 'Standard'
 $PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
@@ -101,32 +48,14 @@ $environmentName = [string] $OctopusParameters['Octopus.Environment.Name']
 $slug = [string] $OctopusParameters['System.Slug']
 $resourceGroup = [string] $OctopusParameters['Azure.ResourceGroup']
 $only = [string] $OctopusParameters['Deployable.Name']
-$release = [string] $OctopusParameters['Octopus.Release.Number']
-$step = [string] $OctopusParameters['Octopus.Step.Name']
-$registry = [string] $OctopusParameters['Azure.RegistryServer']
 $deadlineMinutes = 10
-$verifyTarget = Resolve-ContainerVerifyTarget -Step $step -Release $release -Parameters $OctopusParameters
-$differs = "The deployment of $release failed, and versions.json names $($verifyTarget.Version) once 'Revert pin' has run: what runs and what is recorded differ until a deployment succeeds."
-
-if ($verifyTarget.Skip) {
-    if ($verifyTarget.Reason -eq 'not-pinned') {
-        Write-Highlight "The deployment of $only $release to $environmentName failed, and it had not pinned the version (it failed before the pin, or the version was pinned already): nothing was put back, so there is no revert to verify. $environmentName keeps what the failed deployment left."
-    }
-    else {
-        Write-Highlight "The deployment of $only $release to $environmentName failed, and $environmentName ran no version before it: nothing was put back, so there is no revert to verify. $environmentName keeps what the failed deployment left."
-    }
-    exit 0
-}
-if ($verifyTarget.Fail) {
-    Write-Highlight "The deployment of $only $release to $environmentName failed, and the revert failed too: 'Revert deployable' did not put $($verifyTarget.Version) back. The revert is not verified."
-    Fail-Step "The revert is not verified: 'Revert deployable' did not put $only $($verifyTarget.Version) back in $environmentName (its step is above). $environmentName may be down, or still run what the failed deployment left. $differs"
-}
-if ($verifyTarget.AfterRevert) {
-    Write-Host "Asking whether $only $($verifyTarget.Version) runs in $environmentName again after the revert of $release."
-}
 
 $stack = az stack group show --name "stack-$slug-$environmentName" --resource-group $resourceGroup --output json | ConvertFrom-Json -AsHashtable
 $deployables = @($stack.outputs.deployables.value | Where-Object { -not $only -or $_.name -eq $only })
+# The same apps in the standby region (environments[].standbyLocation) are verified like the primary ones.
+if ($stack.outputs.ContainsKey('standby')) {
+    $deployables += @($stack.outputs.standby.value | Where-Object { -not $only -or $_.name -eq $only })
+}
 if ($deployables.Count -eq 0) {
     # A deployable that brings its own runtime (hosting "own") is not in the stack: infra/ creates nothing for it, and
     # it verifies itself in its own project. Only a system that has one has these two variables (octopus/variables.tf):
@@ -181,6 +110,22 @@ function Get-RevisionProblem {
     return $null
 }
 
+# An App Service site on a Free plan that exhausted a quota answers 403 until the quota resets (hourly or daily): say
+# so at once instead of waiting out the deadline. A crash-looping app on the tier's shared plan is the usual cause.
+function Get-SiteProblem {
+    param([Parameter(Mandatory)] [string] $WebApp)
+    $PSNativeCommandUseErrorActionPreference = $false
+    $siteId = ([string] (az resource show --resource-group $resourceGroup --name $WebApp --resource-type Microsoft.Web/sites --query id --output tsv 2>$null)).Trim()
+    $siteJson = if ($siteId) { az rest --method get --url "https://management.azure.com${siteId}?api-version=2024-04-01" --output json 2>$null } else { $null }
+    $PSNativeCommandUseErrorActionPreference = $true
+    if (-not $siteJson) { return $null }
+    $site = ($siteJson | ConvertFrom-Json -AsHashtable).properties
+    if ($site.usageState -eq 'Exceeded') {
+        return "site $WebApp is $($site.state): its Free plan exhausted a quota; an app crash-looping on the same plan is the usual cause"
+    }
+    return $null
+}
+
 function Write-RevisionLog {
     param([Parameter(Mandatory)] [string] $App)
     $PSNativeCommandUseErrorActionPreference = $false
@@ -196,7 +141,7 @@ foreach ($deployable in $deployables) {
         Write-Highlight "SKIP $($deployable.name) in ${environmentName}: no release of it here yet, and a storage website serves nothing before the first ($($deployable.url))"
         continue
     }
-    # Only a container app has one: empty for a static site.
+    # Only a container app has one: empty for App Service and for a static site.
     $app = [string] $deployable['containerApp']
     $path = if ($only -and $healthPath) { $healthPath } else { [string] $deployable.healthPath }
     $uri = "$($deployable.url.TrimEnd('/'))$path"
@@ -212,9 +157,10 @@ foreach ($deployable in $deployables) {
         if ($status -eq 200) {
             break
         }
-        # What the platform says about an app that does not answer: the revision for a container app. A static site
-        # (hosting "staticwebapp") has none: its URL is all there is to ask.
+        # What the platform says about an app that does not answer: the site for App Service, the revision for a
+        # container app. A static site (hosting "staticwebapp") has neither: its URL is all there is to ask.
         $problem = switch ([string] $deployable['hosting']) {
+            'appservice' { Get-SiteProblem -WebApp ([string] $deployable.webApp) }
             'staticwebapp' { $null }
             'storagewebsite' { $null }
             default { Get-RevisionProblem -App $app }
@@ -229,20 +175,7 @@ foreach ($deployable in $deployables) {
         Start-Sleep -Seconds 15
     }
     if ($status -eq 200) {
-        if ($verifyTarget.AfterRevert -and $app) {
-            # Health alone is not enough after a revert: the failed release can still answer. The image tag must be
-            # the version before.
-            $image = [string] (az containerapp show --name $app --resource-group $resourceGroup --query 'properties.template.containers[0].image' --output tsv)
-            if (-not (Test-ContainerImageTag -Image $image -Registry $registry -Slug $slug -Deployable ([string] $deployable.name) -Version $verifyTarget.Version)) {
-                Write-Warning "FAIL $($deployable.name) in ${environmentName}: image is $image, expected $registry/$slug/$($deployable.name):$($verifyTarget.Version) after the revert"
-                $failed++
-                continue
-            }
-            Write-Highlight "PASS $($deployable.name) in ${environmentName}: $uri serves, and the image is $($verifyTarget.Version)"
-        }
-        else {
-            Write-Highlight "PASS $($deployable.name) in ${environmentName}: $uri"
-        }
+        Write-Highlight "PASS $($deployable.name) in ${environmentName}$(if ($deployable['role'] -eq 'standby') { " (standby, $($deployable.region))" }): $uri"
     }
     elseif ($status -eq -1) {
         $failed++
@@ -257,9 +190,8 @@ foreach ($deployable in $deployables) {
 # Capability "frontdoor": the environment's public address answers too. The endpoints are in stack-<slug>-<env>-edge
 # in the Front Door profile's resource group (variable Azure.EdgeResourceGroup, empty without a profile). A new endpoint
 # or route takes Front Door several minutes to reach every edge location, so this waits longer than for an app.
-# After a revert, only the deployable's own health and image are asked: Front Door is unchanged by an image swap.
 $edgeGroup = [string] $OctopusParameters['Azure.EdgeResourceGroup']
-if ($edgeGroup -and -not $verifyTarget.AfterRevert) {
+if ($edgeGroup) {
     $PSNativeCommandUseErrorActionPreference = $false
     $edgeJson = az stack group show --name "stack-$slug-$environmentName-edge" --resource-group $edgeGroup --output json 2>$null
     $hasEdge = $LASTEXITCODE -eq 0
@@ -288,14 +220,7 @@ if ($edgeGroup -and -not $verifyTarget.AfterRevert) {
 }
 
 if ($failed -gt 0) {
-    if ($verifyTarget.AfterRevert) {
-        Fail-Step "The revert is not verified: $failed deployable(s) of $environmentName did not answer as $($verifyTarget.Version) after 'Revert deployable'. $differs"
-    }
     Fail-Step "$failed deployable(s) of $environmentName did not answer."
-}
-
-if ($verifyTarget.AfterRevert) {
-    Write-Highlight "The deployment of $only $release to $environmentName failed. The revert is verified: $($verifyTarget.Version) runs in $environmentName again."
 }
 
 # Said as an exit code: Octopus ends a step with the exit code of the last program its script ran, which may be one
