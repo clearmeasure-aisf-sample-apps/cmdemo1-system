@@ -23,7 +23,9 @@ MODEL = "auto"
 LARGE_GPU = "pro5000"
 SMALL_GPUS = ("obs", "ts3")
 PRIORITY = ("pro5000", "obs", "ts3")   # new work goes to the first GPU with a free slot; ts3 (slowest) only when the rest are full
-MIN_CLIENT_TIMEOUT_S = 300             # shortest client timeout for a Pi / model call (a long call hung up at less is a 499)
+# shortest client timeout for a Pi / model call (a long call hung up at less is a 499). Tests may lower the floor
+# with FACTORY_MIN_CLIENT_TIMEOUT_S; production leaves it unset, so the floor stays 300.
+MIN_CLIENT_TIMEOUT_S = int(os.environ.get("FACTORY_MIN_CLIENT_TIMEOUT_S", "300"))
 
 def env_names(g):
     u = g.upper(); return f"LOCAL_LLM_{u}_URL", f"LOCAL_LLM_{u}_TOKEN"

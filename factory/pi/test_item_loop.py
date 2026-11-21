@@ -1,5 +1,5 @@
 """Unit tests of the Pi item driver's decision rules (no network, no Pi). Run: python3 -m unittest factory/pi/test_item_loop.py"""
-import json, os, subprocess, sys, tempfile, unittest
+import fcntl, importlib.machinery, importlib.util, json, os, signal, subprocess, sys, tempfile, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import item_loop as L
 import gpu as G
@@ -562,6 +562,112 @@ class RefactoringResearch(unittest.TestCase):
                 self.assertTrue(out.startswith(d.run_dir) and fu.startswith(d.run_dir))   # outside the worktree
             finally: L.HOME = old
 
+class RunTaskTimeout(unittest.TestCase):   # cmdemo1-system#817: --timeout must die with Pi's whole process group
+    """run-task ran Pi with subprocess.run(stdout=PIPE, timeout=...) and killed only the direct child. Pi's own tool
+    subprocesses (`bash -c ...`) inherit that stdout pipe, so communicate() blocked until they exited: --timeout 1800
+    ran 4263 s, and the GPU slot lock was held the whole time. run_pi() must put Pi in its own process group and
+    SIGKILL the group. No real pi, no real pi-gpu, no real /tmp slot lock, no network, no secrets."""
+
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    RUN_TASK = os.path.join(HERE, "run-task")        # no .py suffix; its main() runs only under __main__
+
+    @classmethod
+    def setUpClass(cls):
+        loader = importlib.machinery.SourceFileLoader("run_task", cls.RUN_TASK)
+        spec = importlib.util.spec_from_loader("run_task", loader)
+        cls.rt = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.rt)
+
+    def _fake_pi(self, tmp):
+        """Stand-in for pi-gpu (takes and ignores any args): backgrounds a grandchild, records its pid, prints
+        'started', then hangs itself -- what a hung Pi tool call looks like from the driver's side."""
+        pidfile = os.path.join(tmp, "grandchild.pid")
+        script = os.path.join(tmp, "fake-pi")
+        with open(script, "w") as f:
+            f.write("#!/usr/bin/env bash\n"
+                    "sleep 300 &\n"
+                    f'echo $! > "{pidfile}"\n'
+                    "echo started\n"
+                    "sleep 300\n")
+        os.chmod(script, 0o755)
+        self.addCleanup(self._kill_pidfile, pidfile)   # never leave a sleep 300 behind, even when the test fails
+        return script, pidfile
+
+    def _kill_pidfile(self, pidfile):
+        try: pid = int(open(pidfile).read().strip())
+        except (OSError, ValueError): return
+        try: os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+
+    def _pid_gone(self, pidfile, within=3.0):
+        """True once the recorded pid is dead: no such process, gone from /proc, or a zombie (reaped by init)."""
+        try: pid = int(open(pidfile).read().strip())
+        except (OSError, ValueError): return False
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            try: os.kill(pid, 0)
+            except ProcessLookupError: return True
+            try:
+                with open(f"/proc/{pid}/status") as f:
+                    state = next((l.split()[1] for l in f if l.startswith("State:")), "?")
+            except OSError: return True
+            if state == "Z": return True
+            time.sleep(0.05)
+        return False
+
+    def test_run_pi_normal_exit_returns_rc_and_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, text = self.rt.run_pi(["bash", "-c", "echo hello; exit 3"], cwd=tmp, timeout=10)
+            self.assertEqual(rc, 3)
+            self.assertIn("hello", text)
+
+    def test_run_pi_kills_whole_process_group_on_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake, pidfile = self._fake_pi(tmp)
+            t0 = time.monotonic()
+            rc, text = self.rt.run_pi([fake], cwd=tmp, timeout=2)
+            elapsed = time.monotonic() - t0
+            self.assertEqual(rc, 124, "a timed-out Pi run must report 124")
+            self.assertIn("started", text)
+            self.assertLess(elapsed, 12, f"--timeout 2 took {elapsed:.1f}s: it waited for the grandchildren to exit")
+            self.assertTrue(self._pid_gone(pidfile), "the grandchild holding the stdout pipe must be killed too")
+
+    def test_run_task_timeout_releases_slot_and_leaves_no_grandchild(self):
+        # Safety first: without the two overrides below, running run-task end to end would take the real
+        # /tmp/factory-pi-<gpu>-slot-N.lock and exec the real pi-gpu. Fail here instead of doing either.
+        src = open(self.RUN_TASK).read()
+        missing = [v for v in ("FACTORY_PI_GPU_BIN", "FACTORY_PI_LOCK_DIR") if v not in src]
+        self.assertFalse(missing, "run-task must honour " + ", ".join("$" + v for v in missing) +
+                                  ": tests must never take the real /tmp slot locks or exec the real pi-gpu")
+        with tempfile.TemporaryDirectory() as tmp:
+            fake, pidfile = self._fake_pi(tmp)
+            run, cwd, lockdir = (os.path.join(tmp, x) for x in ("run", "work", "locks"))
+            for d in (run, cwd, lockdir): os.makedirs(d)
+            json.dump({"top_session": "t", "start": "2026-01-01T00:00:00+00:00", "pi_version": "0-test"},
+                      open(os.path.join(run, "run.json"), "w"))   # so run-task never calls `pi --version`
+            prompt = os.path.join(tmp, "prompt.md"); open(prompt, "w").write("do the task\n")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("LOCAL_LLM_")}   # no secrets to the child
+            # floor down MIN_CLIENT_TIMEOUT_S or `--timeout 2` would become 300 s and outlast this 15 s test
+            env.update({"FACTORY_PI_GPU_BIN": fake, "FACTORY_PI_LOCK_DIR": lockdir, "TMPDIR": tmp,
+                        "FACTORY_MIN_CLIENT_TIMEOUT_S": "1"})
+            try:
+                proc = subprocess.run([sys.executable, self.RUN_TASK, "--run-dir", run, "--cwd", cwd,
+                                       "--task", "t817", "--prompt-file", prompt, "--gpu", "obs", "--timeout", "2"],
+                                      env=env, capture_output=True, text=True, timeout=15)
+            except subprocess.TimeoutExpired:
+                self.fail("run-task did not exit within 15 s of a --timeout 2 run")
+            self.assertEqual(proc.returncode, 1, f"timeout is not PASS; stderr={proc.stderr[-500:]}")
+            rec = [json.loads(l) for l in open(os.path.join(run, "tasks.jsonl"))][-1]
+            self.assertEqual(rec["rc"], 124); self.assertEqual(rec["result"], "timeout")
+            self.assertTrue(self._pid_gone(pidfile), "the grandchild must be killed with the Pi process group")
+            f = open(os.path.join(lockdir, "factory-pi-obs-slot-0.lock"), "a")   # the slot must be free again
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.fail("the GPU slot lock is still held after the timeout")
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN); f.close()
+
 class Scrubbing(unittest.TestCase):
     def test_tunnel_hosts_and_every_gpu_secret_are_redacted(self):
         for host in ("pro5000", "5070ti", "5060ti"):
@@ -595,5 +701,16 @@ class UsageReport(unittest.TestCase):
                                  capture_output=True, text=True, check=True).stdout
             for s in ("`grok-a`, `grok-b`", "`drv1`", "`pi-1`", "1,000 + 5,000", "1m01s", "Total (1 Pi session)"): self.assertIn(s, out)
             self.assertNotIn("(progress)", out)
+
+# Asking unittest for one test as `<file> <Class>.<test>` (e.g. `python3 -m unittest factory/pi/test_item_loop.py
+# RunTaskTimeout.test_run_pi_normal_exit_returns_rc_and_output`) does not work out of the box: unittest resolves every
+# CLI name on its own, so it never reads <Class> off the file given before it -- it imports it as a module and the whole
+# run dies as `ModuleNotFoundError: No module named 'RunTaskTimeout'` (FAILED (errors=1)) whatever the code does. Alias
+# the TestCase classes defined here under their own names so that form resolves. It changes no assertion and no result:
+# `python3 -m unittest factory/pi/test_item_loop.py` (what CI runs) and
+# `factory.pi.test_item_loop.<Class>.<test>` load these same classes and run these same tests.
+for _cls in [_c for _c in list(globals().values())
+             if isinstance(_c, type) and issubclass(_c, unittest.TestCase) and _c.__module__ == __name__]:
+    sys.modules.setdefault(_cls.__name__, _cls)
 
 if __name__ == "__main__": unittest.main()
