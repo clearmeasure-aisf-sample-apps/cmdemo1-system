@@ -64,7 +64,12 @@ name: ui-auto-promote
 
 on:
   schedule:
-    - cron: "3-59/10 * * * *"
+    # Every 5 minutes (was every 10 until 2026-11-21, throughput review): each environment step waits for the next run
+    # after the health window closes, so the cadence is pure queue time. GitHub's shortest schedule is 5 minutes; a run
+    # that is still going holds the next one in the concurrency group below (one pending at most), and a public
+    # repository pays no Actions minutes. The health rule (two Healthy reads 5 minutes apart, the later one 10 minutes
+    # after the deployment finished) is unchanged; more frequent runs only take those reads sooner.
+    - cron: "1-59/5 * * * *"
   workflow_dispatch:
     inputs:
       deployable:
