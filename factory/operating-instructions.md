@@ -108,11 +108,11 @@ below). In order:
 
 Todo → In Progress → Review → Merged → TDD → UAT → Done.
 
-- WIP limit 3 per repository: items in In Progress and Review whose issue lives in that repository (e.g.
+- WIP limit 3 per repository, except `cmdemo1-dashboard` which is 5 (Jeffrey, 21 Nov 2026 8:30am CT): items in In Progress and Review whose issue lives in that repository (e.g.
   cmdemo1-workorders, cmdemo1-system, cmdemo1-dashboard). Merged, TDD and UAT do not count. There is no global
   WIP cap. Count from the one project query of this wake (group by `repo`; do not query per repo). When a repo is
   at its limit, leave its new items in Todo and take the next Todo item from a repo with room; post one
-  `Queued: WIP is full for <repo> (3).` comment on each skipped item once, never again (`<repo>` is the short
+  `Queued: WIP is full for <repo> (<limit>).` comment on each skipped item once, never again (`<repo>` is the short
   repository name, e.g. `cmdemo1-system`).
 - No slots are reserved in any repository, `cmdemo1-workorders` included: the local Pi lane is off (Jeffrey, 18 Nov
   2026), so a `local-pi` label or an old Pi-lane comment does not make an item unstartable. The bot works up to 3
@@ -234,7 +234,7 @@ as `pi-pro5000-health`), `factory-pi-run-task`, `factory-pi-usage-report` and `f
 - Exit 4 (no GPU answers): report it to Jeffrey and ask him; never guess or search for a URL.
 - At the start of every implementation wake run `pi-gpu-health` once.
 
-**Concurrency:** up to 3 items run at once, one active item per available GPU, and still at most WIP 3 per repository
+**Concurrency:** up to 3 items run at once, one active item per available GPU, and still at most WIP 3 per repository (5 for `cmdemo1-dashboard`)
 (In Progress + Review on board 679; section "Board flow and WIP"). Start a driver for every startable Todo the WIP
 rule allows; the driver itself waits, with no Grok turn and no comment, in Todo until a GPU of the right size is
 free, then takes it (`stage: gpu`, `wait_why` in `status`). Big or cross-cutting items (`size: large`: many files,
@@ -313,7 +313,7 @@ deploy all the way through prod ensuring all green and quality along the way."
 Open issues labeled `enhancement` and assigned to `cm-ai-ops-bot` (including the follow-ups the refactoring research
 files) are worked end to end, with no human step, through the same driver and the same rules as any item:
 
-1. Pickup under WIP 3 per repository and one active item per GPU (above).
+1. Pickup under WIP 3 per repository (5 for dashboard) and one active item per GPU (above).
 2. PR with every required check green, Qodana zero new problems and Refactoring rationale green (hard gates), the
    evidence passing, and the independent review PASS on a second GPU. Then the driver squash-merges itself (never
    `--delete-branch`).
