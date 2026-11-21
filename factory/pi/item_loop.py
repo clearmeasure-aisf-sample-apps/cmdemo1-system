@@ -61,6 +61,9 @@ GPU_WAIT_S = 300          # a driver waiting for a free GPU re-checks this often
 GPU_WAIT_H = 24
 QUALITY_WAIT_MIN = 120    # Qodana / Refactoring rationale still pending after required checks are green
 REVIEWER_WAIT_H = 2       # no second GPU up for the independent review
+# Waits for a rate-limited gh reply - backoff first, then a fixed wait until the limit resets.
+GH_RETRY_BACKOFF = (60, 120, 240)
+GH_RETRY_RESET_WAIT = 600
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 
@@ -87,6 +90,15 @@ def scrub(s):
     return s
 
 # ---------------------------------------------------------------- pure helpers (unit-tested)
+RATE_LIMIT_RE = re.compile(r"(?i)api rate limit|secondary rate limit|rate limit exceeded|toomanyrequests")
+def is_rate_limit(text):
+    """True for a GitHub rate-limit reply (primary, GraphQL or secondary)."""
+    return bool(RATE_LIMIT_RE.search(text or ""))
+
+def pr_number(text):
+    t = str(text or "").strip()
+    return int(t) if t.isdigit() else None
+
 def classify_failure(log_text):
     """'infra' when the failure never reached the code (network, registry, runner), else 'code'."""
     if CODE_RE.search(log_text or ""): return "code"
@@ -322,8 +334,17 @@ class Driver:
         shown = cmd if isinstance(cmd, str) else " ".join(shlex.quote(c) for c in cmd)
         if write and self.dry:
             self.log(f"DRY-RUN skip: {shown[:300]}"); return subprocess.CompletedProcess(cmd, 0, "", "")
-        r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        is_gh = (isinstance(cmd, list) and cmd and cmd[0] == "gh") or (isinstance(cmd, str) and cmd.startswith("gh "))
+        attempt = 0
+        while True:
+            r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if not (is_gh and r.returncode and is_rate_limit(r.stdout)):
+                break
+            wait = GH_RETRY_BACKOFF[attempt] if attempt < len(GH_RETRY_BACKOFF) else GH_RETRY_RESET_WAIT
+            self.log(f"gh rate-limited (exit {r.returncode}); retry {attempt + 1} in {wait}s")
+            time.sleep(wait)
+            attempt += 1
         if check and r.returncode:
             raise RuntimeError(f"failed ({r.returncode}): {shown[:300]}\n{scrub(r.stdout)[-2000:]}")
         return r
@@ -676,7 +697,8 @@ class Driver:
         head = self.commit_push(p["pr_title"])
         if not self.s.get("pr"):
             r = self.gh("pr", "list", "-R", self.full, "--head", p["branch"], "--state", "open", "--json", "number", "-q", ".[0].number", check=False)
-            if r.stdout.strip(): self.save(pr=int(r.stdout.strip()))
+            n = pr_number(r.stdout)
+            if n is not None: self.save(pr=n)
         if not self.s.get("pr"):
             body = os.path.join(self.run_dir, "logs", "pr-body.md")
             open(body, "w").write(scrub(with_research(f"Closes #{self.issue}\n\n{p.get('pr_summary', '')}\n\nCode by Pi on the {self.gpu_label()}; "

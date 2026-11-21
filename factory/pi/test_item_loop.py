@@ -334,6 +334,27 @@ class Gates(unittest.TestCase):
         self.assertEqual(L.protected_files(["src/UI/Board.razor", "infra/main.bicep", "src/appsettings.Production.json"]),
                          ["infra/main.bicep", "src/appsettings.Production.json"])
 
+class GhRateLimit(unittest.TestCase):
+    def test_non_rate_limit_failure_still_raises(self):
+        with tempfile.TemporaryDirectory() as h:
+            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
+            L.HOME = h
+            calls, sleeps = [0], []
+            try:
+                def fake_run(*a, **k):
+                    calls[0] += 1
+                    return L.subprocess.CompletedProcess(a, 1, "HTTP 404: Not Found", "")
+                def fake_sleep(s): sleeps.append(s)
+                L.subprocess.run = fake_run
+                L.time.sleep = fake_sleep
+                d = L.Driver("cmdemo1-workorders", 8)
+                with self.assertRaises(RuntimeError):
+                    d.gh("pr", "list")
+            finally:
+                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        self.assertEqual(calls[0], 1)   # non-rate-limit failures are never retried
+        self.assertEqual(sleeps, [])
+
 class RefactoringResearch(unittest.TestCase):
     GOOD = ("## Refactoring research\n\n- `src/A.cs` `Save()`: 80-line method with duplicated validation; extract a "
             "specification object (in scope).\n- `src/A.cs` `status` strings: primitive obsession; a value object would "
