@@ -209,6 +209,8 @@ $PromoteOrder = @('ui', 'dashboard', 'system')
 # skips this wait when every flag-3 path is a package-version-only dependency fix with a GHSA id in the source PR title
 # or body (see Test-SecurityAdvisoryExemption); master must still be green.
 $PipelineOverrideMinutes = 60
+# A ripe hold of another deployable is given the free slot first, but only while it is younger than this (no starvation).
+$RipeHoldYieldMaxMinutes = 240
 # GHSA id in a pull request title or body (GitHub Security Advisory).
 $GhsaIdPattern = 'GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}'
 # Build/project files whose package-version surfaces may qualify for the security-advisory exemption (Dockerfile* does not).
@@ -1719,6 +1721,30 @@ function Get-HeldPipelinePrefer {
     }
     @($out)
 }
+function Get-RipeHeldElsewhere {
+    <# The open pipeline-only hold of another deployable that has waited longest past its hold window ($PipelineOverrideMinutes),
+       or $null. Used to give that deployable the free slot before a newly queued release of this one: the order of $PromoteOrder
+       made system last in every run, so ui and dashboard kept taking the single prod slot first. Only pipeline-only holds count
+       (a hold that lists any other flag needs a person or a fix, so nobody waits for it), and only up to
+       $RipeHoldYieldMaxMinutes of age, so a hold that never clears cannot starve the other deployables. #>
+    param([object[]] $HeldIssues, [datetime] $Now, [string] $Name = $Deployable, [string[]] $Order = $PromoteOrder,
+          [int] $WindowMinutes = $PipelineOverrideMinutes, [int] $MaxMinutes = $RipeHoldYieldMaxMinutes)
+    $best = $null
+    foreach ($hi in @($HeldIssues)) {
+        if (-not $hi -or -not $hi.createdAt) { continue }
+        foreach ($other in @($Order | Where-Object { $_ -ne $Name })) {
+            $parts = Get-HeldTitleParts ([string] $hi.title) $other
+            if (-not $parts) { continue }
+            if (-not (Test-PipelineChangeHoldBody ([string] $hi.body))) { continue }
+            $age = ($Now - ([datetime] $hi.createdAt).ToUniversalTime()).TotalMinutes
+            if ($age -lt $WindowMinutes -or $age -gt $MaxMinutes) { continue }
+            if (-not $best -or $age -gt $best.AgeMinutes) {
+                $best = @{ Deployable = $other; Version = [string] $parts.Version; Environment = [string] $parts.Environment; Number = $hi.number; AgeMinutes = [int] $age }
+            }
+        }
+    }
+    $best
+}
 function Get-StateKey([string] $DeploymentId, [string] $Name = $Deployable) {
     # Health reads are kept per deployable and deployment ("dashboard/Deployments-12"); Read-StateReads also finds ui's
     # reads stored before the key named the deployable (bare "Deployments-12").
@@ -1969,7 +1995,7 @@ function Get-RunningOutsideList($target) {
         -GetTaskState { param($d) Get-TaskState $d } `
         -DefaultChannelIds $defaultChannelIds
 }
-$heldIssues = @(& gh issue list -R $ownRepo --label release-held --state open --json number,title,body --limit 50 | ConvertFrom-Json)
+$heldIssues = @(& gh issue list -R $ownRepo --label release-held --state open --json number,title,body,createdAt --limit 50 | ConvertFrom-Json)
 # Every run lists open holds (including refused Sign-offs) so they stay visible until cleared (#569).
 Say "Open holds: $(if ($heldIssues.Count -eq 0) { 'none' } else { $heldIssues.Count })"
 foreach ($hi in $heldIssues) { Say "  hold #$($hi.number): $($hi.title)" }
@@ -2441,6 +2467,16 @@ if ($busy) {
     Complete-AutoPromoteSuccess
 }
 Say "Candidate: $Deployable $($release.Version) to $($target.Name) (commit $(Get-Commit $release))"
+# A held candidate that has waited longest gets the free slot before a newly queued release of this deployable. A person's
+# hold is never bypassed: only pipeline-only holds count, and that deployable's own run still decides promote or hold.
+$ownHeld = @($preferHeld | Where-Object { $_.Version -eq [string] $release.Version -and $_.Environment -eq [string] $target.Name })
+if ($ownHeld.Count -eq 0) {
+    $ripe = Get-RipeHeldElsewhere -HeldIssues $heldIssues -Now ([datetime]::UtcNow)
+    if ($ripe) {
+        Say "Yielding the slot: $($ripe.Deployable) $($ripe.Version) (hold #$($ripe.Number), $($ripe.AgeMinutes) minutes) has waited longer than the new $Deployable $($release.Version); it is promoted first."
+        Complete-AutoPromoteSuccess
+    }
+}
 
 $running = $candidate.Running
 if ($candidate.RunningUnknown) { Say "The release running in $($target.Name) is unknown: $($candidate.RunningUnknown)" }
