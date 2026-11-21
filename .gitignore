@@ -5,5 +5,3 @@
 crash.log
 # Packages built by the system workflow
 *.zip
-# Python bytecode
-__pycache__/

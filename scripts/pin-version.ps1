@@ -53,8 +53,8 @@ function Invoke-GitHub {
     # or 408, 429, 500, 502, 503 or 504. Four attempts, 5, 10 and 15 seconds apart; each retry is one line of
     # information, not a warning. Any other failure, and the fourth of these, is thrown as it came. The write may be
     # sent again too: it names the version of the file it replaces (sha), so a write whose answer was lost and that is
-    # sent a second time is refused (409), and the loop below reads the file again (2026-10-30: one 500 on the write
-    # failed a deployment that nothing retried).
+    # sent a second time is refused (409), and the loop below reads the file again (cmdemo1-fworker, 2026-10-30: one
+    # 500 on the write failed a deployment that nothing retried).
     param([Parameter(Mandatory)] [hashtable] $Call, [Parameter(Mandatory)] [string] $What)
     for ($try = 1; $true; $try++) {
         try { return Invoke-RestMethod @Call }
@@ -112,10 +112,9 @@ for ($attempt = 1; $attempt -le 4; $attempt++) {
         return
     }
     catch {
-        # 409: another pin changed the file since it was read; read it again. A conflict the next attempt gets
-        # past is information, not a warning (health treats deployment warnings as failure: CAP-011/CAP-071).
+        # 409: another pin changed the file since it was read; read it again.
         if ((Get-HttpStatus -ErrorRecord $_) -eq 409 -and $attempt -lt 4) {
-            Write-Host "versions.json changed while pinning (attempt $attempt of 4); reading it again."
+            Write-Warning "versions.json changed while pinning (attempt $attempt of 4); reading it again."
             Start-Sleep -Seconds (5 * $attempt)
             continue
         }

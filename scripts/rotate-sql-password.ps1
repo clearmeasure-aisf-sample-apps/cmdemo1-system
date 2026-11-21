@@ -11,8 +11,12 @@
     through the ARM API from a private file (never in an argument), writes it and the connection string to the
     environment's Key Vault, restarts each container app's latest revision so it reads the new secret, and checks
     that each of them answers its health path. The next "Apply environment" reads the password from the vault, so Git
-    and the environment stay consistent. The container apps are the only apps that sign in to the database: this
-    system has no other database login to rotate.
+    and the environment stay consistent.
+
+    What it does not rotate: a deployable on App Service signs in to the database with a login of its own
+    (<name>-sql-password in the vault, made once by "Apply environment"), which this runbook leaves alone and nothing
+    else changes. In a system without container apps the runbook therefore restarts nothing, and its last line says
+    so.
 #>
 [CmdletBinding()]
 param()
@@ -99,7 +103,8 @@ finally {
 
 $failed = 0
 $restarted = 0
-# A static site has no database access at all: only container apps restart.
+# App Service deployables use logins of their own, not the administrator password, and a static site has no database
+# access at all: only container apps restart.
 foreach ($deployable in @($outputs.deployables.value | Where-Object { $_['containerApp'] })) {
     $app = [string] $deployable.containerApp
     $appId = ([string] (az containerapp show --name $app --resource-group $resourceGroup --query id --output tsv)).Trim()
