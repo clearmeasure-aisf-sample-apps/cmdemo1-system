@@ -1,0 +1,99 @@
+{
+  "generated": "2026-11-21T06:43:09Z",
+  "currency": "USD",
+  "asOf": "2026-11-20",
+  "system": {
+    "yesterday": 2.54,
+    "last7Days": 21.07,
+    "monthToDate": 216.73
+  },
+  "environments": [
+    {
+      "name": "tdd",
+      "yesterday": 0.71,
+      "last7Days": 6.96,
+      "monthToDate": 109.64,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 80.68
+        },
+        {
+          "name": "Azure Monitor",
+          "monthToDate": 16.29
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 8.06
+        }
+      ]
+    },
+    {
+      "name": "uat",
+      "yesterday": 0.48,
+      "last7Days": 4.77,
+      "monthToDate": 35.47,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 30.75
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 3.21
+        },
+        {
+          "name": "Log Analytics",
+          "monthToDate": 1.46
+        }
+      ]
+    },
+    {
+      "name": "prod",
+      "yesterday": 0.85,
+      "last7Days": 6.04,
+      "monthToDate": 63.21,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 54.74
+        },
+        {
+          "name": "Log Analytics",
+          "monthToDate": 5.17
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 3.21
+        }
+      ]
+    },
+    {
+      "name": "pool",
+      "yesterday": 0.0,
+      "last7Days": 0.0,
+      "monthToDate": 0.0,
+      "topServices": []
+    },
+    {
+      "name": "shared",
+      "yesterday": 0.5,
+      "last7Days": 3.3,
+      "monthToDate": 8.41,
+      "topServices": [
+        {
+          "name": "Container Registry",
+          "monthToDate": 7.81
+        },
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 0.39
+        },
+        {
+          "name": "Azure Monitor",
+          "monthToDate": 0.2
+        }
+      ]
+    }
+  ]
+}
