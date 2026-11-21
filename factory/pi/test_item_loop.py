@@ -339,6 +339,109 @@ class Gates(unittest.TestCase):
         self.assertEqual(L.protected_files(["src/UI/Board.razor", "infra/main.bicep", "src/appsettings.Production.json"]),
                          ["infra/main.bicep", "src/appsettings.Production.json"])
 
+class GhRateLimit(unittest.TestCase):
+    def test_non_rate_limit_failure_still_raises(self):
+        with tempfile.TemporaryDirectory() as h:
+            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
+            L.HOME = h
+            calls, sleeps = [0], []
+            try:
+                def fake_run(*a, **k):
+                    calls[0] += 1
+                    return L.subprocess.CompletedProcess(a, 1, "HTTP 404: Not Found", "")
+                def fake_sleep(s): sleeps.append(s)
+                L.subprocess.run = fake_run
+                L.time.sleep = fake_sleep
+                d = L.Driver("cmdemo1-workorders", 8)
+                with self.assertRaises(RuntimeError):
+                    d.gh("pr", "list")
+            finally:
+                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        self.assertEqual(calls[0], 1)   # non-rate-limit failures are never retried
+        self.assertEqual(sleeps, [])
+
+    def test_gh_retries_rate_limit_with_backoff_then_succeeds(self):
+        with tempfile.TemporaryDirectory() as h:
+            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
+            L.HOME = h
+            calls, sleeps = [0], []
+            try:
+                def fake_run(*a, **k):
+                    calls[0] += 1
+                    if calls[0] <= 2:
+                        return L.subprocess.CompletedProcess(a, 1, "HTTP 403: API rate limit exceeded", "")
+                    return L.subprocess.CompletedProcess(a, 0, "42", "")
+                def fake_sleep(s): sleeps.append(s)
+                L.subprocess.run = fake_run
+                L.time.sleep = fake_sleep
+                d = L.Driver("cmdemo1-workorders", 8)
+                self.assertEqual(d.gh("pr", "list").returncode, 0)   # a later try succeeds; no raise
+            finally:
+                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        self.assertEqual(calls[0], 3)             # two rate-limited tries, then the success
+        self.assertEqual(sleeps, [60, 120])       # backoff before each retry
+
+    def test_gh_waits_until_reset_after_backoff(self):
+        with tempfile.TemporaryDirectory() as h:
+            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
+            L.HOME = h
+            calls, sleeps = [0], []
+            try:
+                def fake_run(*a, **k):
+                    calls[0] += 1
+                    if calls[0] <= 5:
+                        return L.subprocess.CompletedProcess(a, 1, "HTTP 403: Secondary rate limit in effect. Please try again.", "")
+                    return L.subprocess.CompletedProcess(a, 0, "42", "")
+                def fake_sleep(s): sleeps.append(s)
+                L.subprocess.run = fake_run
+                L.time.sleep = fake_sleep
+                d = L.Driver("cmdemo1-workorders", 8)
+                self.assertEqual(d.gh("pr", "list").returncode, 0)
+            finally:
+                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        self.assertEqual(calls[0], 6)
+        self.assertEqual(sleeps, [60, 120, 240, 600, 600])   # backoff first, then 600s waits until the limit resets
+
+    def test_pr_number_ignores_non_numeric(self):
+        for bad in ("", "not a number", "HTTP 404: Not Found", "42abc", None):
+            self.assertIsNone(L.pr_number(bad))
+        self.assertEqual(L.pr_number("42"), 42)
+        self.assertEqual(L.pr_number(" 42 "), 42)
+
+    def test_st_pr_survives_non_numeric_pr_list_and_creates(self):
+        with tempfile.TemporaryDirectory() as h:
+            old_home = L.HOME
+            L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 30, dry_run=True)
+                d.s["plan"] = PLAN
+                d.s["wt"] = tempfile.mkdtemp(dir=h)
+                d.s["default"] = "main"
+                d.s["gpu"] = "obs"
+                d.s["run_id"] = "run30"
+                calls = []
+                def fake_sh(cmd, **k):
+                    calls.append(list(cmd))
+                    if cmd[0] == "gh":
+                        if "list" in cmd:   # gh pr list printed a non-numeric, non-rate-limit message
+                            return L.subprocess.CompletedProcess(cmd, 0, "no open PR for that head", "")
+                        if "create" in cmd:
+                            return L.subprocess.CompletedProcess(cmd, 0, "https://github.com/x/cmdemo1-workorders/pull/42", "")
+                        if "graphql" in cmd:
+                            return L.subprocess.CompletedProcess(cmd, 0, "{\"data\": null}", "")
+                    if cmd[0] == "git":
+                        return L.subprocess.CompletedProcess(cmd, 0, "abc123def" if "rev-parse" in cmd else "", "")
+                    return L.subprocess.CompletedProcess(cmd, 0, "", "")
+                d.sh = fake_sh
+                d.usage = lambda final=False: "usage"
+                d.st_pr()                       # no ValueError from the non-numeric list output
+                self.assertEqual(d.s["pr"], 42)  # it went on to creating the PR
+                self.assertEqual(d.s["stage"], "ci")
+            finally:
+                L.HOME = old_home
+        self.assertTrue(any("list" in c for c in calls))
+        self.assertTrue(any("create" in c for c in calls))
+
 class RefactoringResearch(unittest.TestCase):
     GOOD = ("## Refactoring research\n\n- `src/A.cs` `Save()`: 80-line method with duplicated validation; extract a "
             "specification object (in scope).\n- `src/A.cs` `status` strings: primitive obsession; a value object would "
