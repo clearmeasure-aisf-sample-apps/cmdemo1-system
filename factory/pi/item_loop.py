@@ -38,7 +38,9 @@ DELIVERY = f"https://raw.githubusercontent.com/{ORG}/cmdemo1-system/status/deliv
 NEVER_MERGE = {("cmdemo1-workorders", 1918)}
 # Jeffrey: leave these alone (no plan, no driver, no comment).
 HANDS_OFF = {("cmdemo1-system", 654), ("cmdemo1-workorders", 1875), ("cmdemo1-workorders", 1876)}
-WIP_LIMIT = 3             # per repository: In Progress + Review
+WIP_LIMIT = 3             # per repository: In Progress + Review (default)
+WIP_LIMITS = {"cmdemo1-dashboard": 5}   # Jeffrey, 21 Nov 2026 8:30am CT: dashboard 5, workorders and system stay 3
+def wip_limit(repo): return WIP_LIMITS.get(repo, WIP_LIMIT)
 # Stages in which an item holds its GPU (In Progress / Review). Waiting for a GPU, blocked, main, deploy and done do not.
 ACTIVE_STAGES = ("pickup", "research", "implement", "local-verify", "pr", "ci", "review", "merge")
 # Never changed by an enhancement PR: credentials, secrets and production setup.
@@ -555,7 +557,7 @@ class Driver:
                 with open(os.path.join(_runs_dir(), "gpu.lock"), "w") as lk:
                     fcntl.flock(lk, fcntl.LOCK_EX); states = all_states()
                     up = G.available(gpu_health())
-                    if repo_wip(states, self.repo, me, pid_alive) >= WIP_LIMIT: why = f"WIP is full for {self.repo} ({WIP_LIMIT})"
+                    if repo_wip(states, self.repo, me, pid_alive) >= wip_limit(self.repo): why = f"WIP is full for {self.repo} ({wip_limit(self.repo)})"
                     else:
                         g, why = gpu_for_item(self.s.get("gpu"), size, up, busy_gpus(states, me, pid_alive))
                         if g:
