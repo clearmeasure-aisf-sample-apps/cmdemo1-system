@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The factory's three local GPUs behind the token-protected llm-proxy (named Cloudflare tunnels), and the rules
-that choose one. Imported by item_loop.py and run-task; run by health.sh and pi-gpu.
+that choose one. A GPU excluded from the pool (FACTORY_GPU_EXCLUDE / ~/.config/factory/gpu-exclude) is EXCLUDED, not fatal.
+Imported by item_loop.py and run-task; run by health.sh and pi-gpu.
 
     gpu.py health [--json] [GPU ...]   one models list per GPU (never a completion, never a model load); per-GPU lines
     gpu.py env GPU                     shell-safe NAME=VALUE lines pi-gpu needs (url, model, context); never the token
@@ -22,6 +23,30 @@ GPUS = {
 MODEL = "auto"
 LARGE_GPU = "pro5000"
 SMALL_GPUS = ("obs", "ts3")
+EXCLUDE_FILE_DEFAULT = "~/.config/factory/gpu-exclude"
+
+def _parse_excluded(text):
+    """Lowercased GPUS names from comma/whitespace-separated tokens; '#' starts a comment."""
+    out = set()
+    for line in text.splitlines():
+        for t in re.split(r"[,\s]+", line.split("#", 1)[0]):
+            t = t.lower()
+            if t in GPUS: out.add(t)
+    return out
+
+def excluded(env=None):
+    """GPUs excluded from the pool: union of FACTORY_GPU_EXCLUDE (comma/whitespace separated) and the file at
+    FACTORY_GPU_EXCLUDE_FILE (or ~/.config/factory/gpu-exclude when env is None); one name per line or comma separated,
+    '#' comments. Only names in GPUS; a missing or unreadable file is empty."""
+    real = env is None
+    env = os.environ if real else env
+    out = _parse_excluded(env.get("FACTORY_GPU_EXCLUDE") or "")
+    path = env.get("FACTORY_GPU_EXCLUDE_FILE") or (EXCLUDE_FILE_DEFAULT if real else None)
+    if path:
+        try:
+            with open(os.path.expanduser(path), encoding="utf-8") as f: out |= _parse_excluded(f.read())
+        except OSError: pass
+    return out
 
 def env_names(g):
     u = g.upper(); return f"LOCAL_LLM_{u}_URL", f"LOCAL_LLM_{u}_TOKEN"
@@ -38,9 +63,10 @@ def configured(g, env=None):
     return all(env.get(n) for n in env_names(g))
 
 def probe(g, env=None, timeout=20, opener=urllib.request.urlopen):
-    """(status, detail). status: HEALTHY | MISSING_SECRETS | UNREACHABLE | REFUSED | TUNNEL_DOWN | UNHEALTHY.
-    One GET <url>/models; detail never contains the URL or token."""
+    """(status, detail). status: EXCLUDED | HEALTHY | MISSING_SECRETS | UNREACHABLE | REFUSED | TUNNEL_DOWN | UNHEALTHY.
+    One GET <url>/models (none when EXCLUDED); detail never contains the URL or token."""
     env = os.environ if env is None else env
+    if g in excluded(env): return "EXCLUDED", "excluded from the pool (FACTORY_GPU_EXCLUDE / ~/.config/factory/gpu-exclude)"
     un, tn = env_names(g)
     if not configured(g, env): return "MISSING_SECRETS", f"{un} and/or {tn} not set"
     req = urllib.request.Request(env[un].rstrip("/") + "/models", headers={"Authorization": f"Bearer {env[tn]}", "User-Agent": "factory-pi-health/1"})   # an explicit UA: the tunnel edge refuses urllib's default
@@ -82,19 +108,27 @@ def classify_size(plan):
     if files and all(SMALL_PATH_RE.search(f) for f in files): return "small"
     return "large" if len(files) > 3 else "small"
 
-def pick_gpu(size, up, busy):
-    """GPU for a new item, or None to wait. up: healthy GPUs; busy: GPUs that already have an active item.
-    Large items wait for pro5000 while it is up (fall back to obs / ts3 only when it is down). Small items take
-    obs, then ts3, then a free pro5000 (so a free GPU never idles while a small item waits)."""
+def pick_gpu(size, up, busy, excluded=None):
+    """GPU for a new item, or None to wait. up: healthy GPUs; busy: GPUs that already have an active item;
+    excluded: GPUs out of the pool, dropped from up first. Large items wait for pro5000 while it is up (fall back
+    to obs / ts3 only when it is down, never when it is excluded). Small items take obs, then ts3, then a free
+    pro5000 (so a free GPU never idles while a small item waits)."""
+    ex = excluded or set()
+    up = [g for g in up if g not in ex]
     free = [g for g in GPUS if g in up and g not in busy]
     if size == "large":
+        if LARGE_GPU in ex: return None
         if LARGE_GPU in up: return LARGE_GPU if LARGE_GPU in free else None
         return next((g for g in SMALL_GPUS if g in free), None)
     return next((g for g in (*SMALL_GPUS, LARGE_GPU) if g in free), None)
 
-def reviewer_gpu(author, up):
-    """A different healthy GPU for the independent diff review (strongest first), or None."""
-    return next((g for g in GPUS if g in up and g != author), None)
+def reviewer_gpu(author, up, excluded=None):
+    """A different healthy GPU for the independent diff review (strongest first, excluded dropped), or None."""
+    return next((g for g in GPUS if g in up and g not in (excluded or set()) and g != author), None)
+
+def plan_gpu(up, excluded=None):
+    """The strongest (GPUS order) GPU in up that is not excluded, or None."""
+    return next((g for g in GPUS if g in up and g not in (excluded or set())), None)
 
 def main():
     a = sys.argv[1:]
@@ -111,7 +145,9 @@ def main():
             print(f"AVAILABLE: {', '.join(up) or 'none'}" + ("" if up else " (ask Jeffrey; never restart or warm a server)"))
         sys.exit(health_exit(h))
     if a[0] == "env" and len(a) == 2 and a[1] in GPUS:
-        g = a[1]; un, _ = env_names(g)
+        g = a[1]
+        if g in excluded(): print(f"EXCLUDED: {g} is excluded from the pool", file=sys.stderr); sys.exit(3)
+        un, _ = env_names(g)
         if not configured(g): print(f"MISSING_SECRETS: {' and/or '.join(env_names(g))}", file=sys.stderr); sys.exit(3)
         print(f"GPU_MODEL={MODEL}\nGPU_CTX={GPUS[g]['ctx']}\nGPU_LABEL='{GPUS[g]['label']}'"); sys.exit(0)
     print(__doc__); sys.exit(2)

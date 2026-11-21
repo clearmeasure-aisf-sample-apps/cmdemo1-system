@@ -3,7 +3,8 @@
 
     run-task --run-dir DIR --cwd WORKTREE --task NAME --prompt-file FILE [--gpu pro5000|obs|ts3] [--timeout SEC] [--top-session ID]
 
-- Runs `pi-gpu <gpu> -p <prompt>` (default GPU: $FACTORY_PI_GPU, else pro5000) in WORKTREE with stdin closed (Pi waits forever on an open stdin), no context files,
+- Runs `pi-gpu <gpu> -p <prompt>` (default GPU: $FACTORY_PI_GPU, else the strongest pool GPU that is not excluded, else pro5000; a --gpu
+  or $FACTORY_PI_GPU that is excluded from the pool exits 4 before Pi starts) in WORKTREE with stdin closed (Pi waits forever on an open stdin), no context files,
   skills or MCP, and its own session dir DIR/pi-sessions/NAME, so the session JSONL is kept.
 - At most gpu.GPUS[<gpu>]['slots'] Pi tasks run at once per GPU from this box (2 on pro5000, 1 on obs and ts3): it
   waits for one of that GPU's slot locks.
@@ -49,8 +50,11 @@ def main():
     p.add_argument("--run-dir", required=True); p.add_argument("--cwd", required=True)
     p.add_argument("--task", required=True); p.add_argument("--prompt-file", required=True)
     p.add_argument("--timeout", type=int, default=1500); p.add_argument("--top-session")
-    p.add_argument("--gpu", choices=list(G.GPUS), default=os.environ.get("FACTORY_PI_GPU") or G.LARGE_GPU)
+    p.add_argument("--gpu", choices=list(G.GPUS), default=os.environ.get("FACTORY_PI_GPU") or G.plan_gpu(list(G.GPUS), G.excluded()) or G.LARGE_GPU)
     a = p.parse_args()
+    if a.gpu in G.excluded():
+        print(json.dumps({"task": re.sub(r"[^A-Za-z0-9._-]", "-", a.task), "gpu": a.gpu, "result": f"{a.gpu} is excluded from the pool (FACTORY_GPU_EXCLUDE / ~/.config/factory/gpu-exclude)"}))
+        sys.exit(4)
     run = os.path.abspath(a.run_dir); os.makedirs(os.path.join(run, "logs"), exist_ok=True)
     meta = os.path.join(run, "run.json")
     if not os.path.exists(meta):
