@@ -65,6 +65,9 @@ REVIEWER_WAIT_H = 2       # no second GPU up for the independent review
 # Waits for a rate-limited gh reply - backoff first, then a fixed wait until the limit resets.
 GH_RETRY_BACKOFF = (60, 120, 240)
 GH_RETRY_RESET_WAIT = 600
+GH_RETRY_MAX_ATTEMPTS = 8      # retries after the first try; then the gh call fails like any other
+GH_RETRY_MAX_WAIT_S = 3600     # total sleep across those retries; a retry that would pass this is not made
+GH_RETRY_TICK_S = 60           # while waiting, state.json is re-saved this often so the driver still looks alive
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 
@@ -91,10 +94,21 @@ def scrub(s):
     return s
 
 # ---------------------------------------------------------------- pure helpers (unit-tested)
-RATE_LIMIT_RE = re.compile(r"(?i)api rate limit|secondary rate limit|rate limit exceeded|toomanyrequests")
+# gh's own error line for a GitHub rate-limit reply, e.g. "GraphQL: API rate limit already exceeded for user ID 1.",
+# "HTTP 403: API rate limit exceeded for ...", "HTTP 403: You have exceeded a secondary rate limit ...". Anchored at a
+# line start and only looked for in the last lines gh printed, so a log dump that merely mentions a rate limit is not one.
+RATE_LIMIT_RE = re.compile(r"(?i)^(?:graphql|http 403|http 429)\b[^:\n]*:\s.*\b(?:api rate limit (?:already )?exceeded|secondary rate limit)")
+RATE_LIMIT_TAIL_LINES = 3
 def is_rate_limit(text):
-    """True for a GitHub rate-limit reply (primary, GraphQL or secondary)."""
-    return bool(RATE_LIMIT_RE.search(text or ""))
+    """True when gh's closing error line(s) are a GitHub rate-limit reply (primary, GraphQL or secondary)."""
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()][-RATE_LIMIT_TAIL_LINES:]
+    return any(RATE_LIMIT_RE.search(l) for l in lines)
+
+def gh_retry_wait(attempt, waited):
+    """Seconds to wait before retry number `attempt` (0-based) after `waited` seconds so far, or None to give up."""
+    if attempt >= GH_RETRY_MAX_ATTEMPTS: return None
+    wait = GH_RETRY_BACKOFF[attempt] if attempt < len(GH_RETRY_BACKOFF) else GH_RETRY_RESET_WAIT
+    return wait if waited + wait <= GH_RETRY_MAX_WAIT_S else None
 
 def pr_number(text):
     t = str(text or "").strip()
@@ -338,20 +352,32 @@ class Driver:
         if write and self.dry:
             self.log(f"DRY-RUN skip: {shown[:300]}"); return subprocess.CompletedProcess(cmd, 0, "", "")
         is_gh = (isinstance(cmd, list) and cmd and cmd[0] == "gh") or (isinstance(cmd, str) and cmd.startswith("gh "))
-        attempt = 0
+        attempt = waited = 0
         while True:
             r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if not (is_gh and r.returncode and is_rate_limit(r.stdout)):
                 break
-            wait = GH_RETRY_BACKOFF[attempt] if attempt < len(GH_RETRY_BACKOFF) else GH_RETRY_RESET_WAIT
+            wait = gh_retry_wait(attempt, waited)
+            if wait is None:
+                self.log(f"gh rate-limited (exit {r.returncode}); giving up after {attempt} retries / {waited}s")
+                break
             self.log(f"gh rate-limited (exit {r.returncode}); retry {attempt + 1} in {wait}s")
-            time.sleep(wait)
-            attempt += 1
+            self.wait_alive(wait, f"gh rate limit, retry {attempt + 1}")
+            waited += wait; attempt += 1
+        if is_gh and "gh_wait" in self.s: self.s.pop("gh_wait"); self.save()
         if check and r.returncode:
             raise RuntimeError(f"failed ({r.returncode}): {shown[:300]}\n{scrub(r.stdout)[-2000:]}")
         return r
     def gh(self, *a, write=False, check=True): return self.sh(["gh", *a], check=check, write=write)
+    def wait_alive(self, seconds, why):
+        """Sleep in GH_RETRY_TICK_S steps, re-saving state.json each step (pid, `updated`, `gh_wait`) so a driver waiting
+        out a rate limit stays visibly alive. No comment here: that would itself be a rate-limited gh call."""
+        left = seconds
+        while left > 0:
+            step = min(GH_RETRY_TICK_S, left)
+            self.save(gh_wait={"why": why, "until": iso(now() + dt.timedelta(seconds=left))})
+            time.sleep(step); left -= step
 
     # GitHub actions (all deterministic)
     def comment(self, body, pr=False):

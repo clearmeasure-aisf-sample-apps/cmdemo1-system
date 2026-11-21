@@ -340,6 +340,88 @@ class Gates(unittest.TestCase):
                          ["infra/main.bicep", "src/appsettings.Production.json"])
 
 class GhRateLimit(unittest.TestCase):
+    def setUp(self):   # whole waits per sleep() call unless a test sets the tick itself
+        self.saved = (L.GH_RETRY_TICK_S, L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S)
+        L.GH_RETRY_TICK_S = 10 ** 6
+    def tearDown(self):
+        L.GH_RETRY_TICK_S, L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S = self.saved
+
+    def run_gh(self, replies, issue=8):
+        """Call d.gh() with subprocess.run returning `replies` in order (last one repeats); returns (result|exc, calls, sleeps, driver)."""
+        with tempfile.TemporaryDirectory() as h:
+            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
+            L.HOME = h
+            calls, sleeps = [0], []
+            def fake_run(*a, **k):
+                rc, out = replies[min(calls[0], len(replies) - 1)]; calls[0] += 1
+                return L.subprocess.CompletedProcess(a, rc, out, "")
+            L.subprocess.run, L.time.sleep = fake_run, sleeps.append
+            try:
+                d = L.Driver("cmdemo1-workorders", issue)
+                try: res = d.gh("pr", "list")
+                except RuntimeError as e: res = e
+            finally:
+                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        return res, calls[0], sleeps, d
+
+    def test_is_rate_limit_matches_real_gh_errors_only(self):
+        for real in ("GraphQL: API rate limit already exceeded for user ID 337178629.",
+                     "GraphQL: API rate limit exceeded for user ID 1.",
+                     "HTTP 403: API rate limit exceeded for user ID 1. (https://api.github.com/repos/x/y/pulls)",
+                     "HTTP 403: You have exceeded a secondary rate limit and have been temporarily blocked.",
+                     "HTTP 429: Secondary rate limit in effect. Please try again.",
+                     "some progress\nGraphQL: API rate limit exceeded for user ID 1.\n"):
+            self.assertTrue(L.is_rate_limit(real), real)
+        dump = "\n".join(["build\t2026-11-21T19:00:00Z HTTP 403: API rate limit exceeded",
+                            "step\tGraphQL: API rate limit exceeded"] + ["noise"] * 10 + ["HTTP 404: Not Found"])
+        for fake in (dump, "Error response from daemon: toomanyrequests", "the api rate limit exceeded doc page",
+                     "test asserts 'secondary rate limit' handling", "", None):
+            self.assertFalse(L.is_rate_limit(fake), fake)
+
+    def test_log_dump_mentioning_rate_limit_is_not_retried(self):
+        dump = "\n".join(["job\tstep\tGraphQL: API rate limit exceeded for user ID 1."] + ["x"] * 20 + ["exit status 1"])
+        res, calls, sleeps, _ = self.run_gh([(1, dump)])
+        self.assertIsInstance(res, RuntimeError); self.assertEqual(calls, 1); self.assertEqual(sleeps, [])
+
+    def test_gh_retry_capped_by_max_attempts(self):
+        L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S = 4, 10 ** 6
+        res, calls, sleeps, _ = self.run_gh([(1, "GraphQL: API rate limit exceeded for user ID 1.")])
+        self.assertIsInstance(res, RuntimeError)   # gives up and fails like any other gh error
+        self.assertEqual(calls, 5); self.assertEqual(sleeps, [60, 120, 240, 600])
+
+    def test_gh_retry_capped_by_max_total_wait(self):
+        L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S = 100, 1000
+        res, calls, sleeps, _ = self.run_gh([(1, "HTTP 403: API rate limit exceeded for user ID 1.")])
+        self.assertIsInstance(res, RuntimeError)
+        self.assertEqual(sleeps, [60, 120, 240])   # a 4th wait (600) would pass 1000s in total
+        self.assertEqual(calls, 4)
+
+    def test_default_caps_bound_the_wait(self):
+        waits, a, w = [], 0, 0
+        while (x := L.gh_retry_wait(a, w)) is not None: waits.append(x); a += 1; w += x
+        self.assertLessEqual(len(waits), L.GH_RETRY_MAX_ATTEMPTS); self.assertLessEqual(sum(waits), L.GH_RETRY_MAX_WAIT_S)
+        self.assertGreater(len(waits), 0)
+
+    def test_state_stays_alive_while_waiting(self):
+        L.GH_RETRY_TICK_S = 50
+        seen = []
+        rl = (1, "GraphQL: API rate limit exceeded for user ID 1.")
+        res, calls, sleeps, d = self.run_gh([rl, rl, (0, "42")])
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(sleeps, [50, 10, 50, 50, 20])   # 60s and 120s waits, re-saving state every 50s
+        self.assertNotIn("gh_wait", d.s)                 # cleared once gh answered
+        with tempfile.TemporaryDirectory() as h:
+            old_home, old_sleep = L.HOME, L.time.sleep
+            L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 9)
+                L.time.sleep = lambda s: seen.append(json.load(open(d.state_p)))
+                d.wait_alive(120, "gh rate limit, retry 1")
+            finally: L.time.sleep, L.HOME = old_sleep, old_home
+        self.assertEqual(len(seen), 3)
+        self.assertTrue(all(x["gh_wait"]["why"] == "gh rate limit, retry 1" and x["pid"] == os.getpid() for x in seen))
+        self.assertTrue(seen[0]["gh_wait"]["until"] >= seen[-1]["gh_wait"]["until"])
+
     def test_non_rate_limit_failure_still_raises(self):
         with tempfile.TemporaryDirectory() as h:
             old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
