@@ -19,6 +19,7 @@ comment or Pi prompt (scrubbed).
 
     item-loop red        status | set --key K --what TEXT | clear --key K      the intake-stop flags (~/factory-runs/red.json)
 """
+from collections import Counter
 import argparse, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, time, urllib.request, uuid
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
@@ -203,9 +204,11 @@ def new_followups(items, existing_titles, limit=FOLLOWUP_MAX):
     return out
 
 def busy_gpus(states, me=None, alive=lambda pid: False):
-    """GPUs held by other live items in an active stage. states: [(key, state dict)]."""
-    return {s.get("gpu") for k, s in states
-            if k != me and s.get("gpu") and s.get("stage") in ACTIVE_STAGES and alive(s.get("pid"))}
+    """GPUs whose slots are all held by other live items in an active stage (pro5000 has 2, obs and ts3 have 1).
+    states: [(key, state dict)]."""
+    held = Counter(s.get("gpu") for k, s in states
+                   if k != me and s.get("gpu") and s.get("stage") in ACTIVE_STAGES and alive(s.get("pid")))
+    return {g for g, n in held.items() if n >= G.GPUS.get(g, {}).get("slots", 1)}
 
 def gpu_for_item(rec, size, up, busy):
     """(gpu, wait_why) for the gpu stage. A resumed item keeps the GPU recorded in state: take it when it is up,
@@ -387,6 +390,7 @@ class Driver:
                   "credentials. When done, run the narrowest relevant build/test, then end your reply with PASS or FAIL as "
                   "the last line.")
         open(pf, "w").write(scrub(prompt) + suffix)
+        timeout = max(int(timeout), G.MIN_CLIENT_TIMEOUT_S)
         r = self.sh([os.path.join(HERE, "run-task"), "--run-dir", self.run_dir, "--cwd", self.s["wt"], "--task", name,
                      "--prompt-file", pf, "--timeout", str(timeout), "--gpu", gpu or self.gpu()], check=False)
         self.log(f"pi {name}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
@@ -548,7 +552,7 @@ class Driver:
 
     def st_gpu(self):
         """Wait (no Grok turn, no comment; the item stays in Todo) until intake is open, the repo has WIP room on this
-        box and a GPU of the right size is free; then take it. One active item per GPU, so up to 3 items at once."""
+        box and a GPU of the right size is free; then take it. One active item per GPU slot (pro5000 has 2), so up to 4 items at once."""
         p = self.s["plan"]; size = G.classify_size(p); t_end = time.time() + GPU_WAIT_H * 3600; me = os.path.basename(self.run_dir)
         while time.time() < t_end:
             red = red_load()

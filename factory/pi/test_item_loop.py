@@ -126,16 +126,20 @@ class Gpus(unittest.TestCase):
         self.assertEqual(G.classify_size({"files": ["src/Core/A.cs", "src/UI/B.razor", "src/DataAccess/C.cs"]}), "large")
         self.assertEqual(G.classify_size({"files": ["src/Database/x.sql"], "size": "small"}), "small")
 
-    def test_pick_gpu_large_to_pro5000_small_to_obs_ts3(self):
+    def test_pick_gpu_pro5000_first_then_obs_then_ts3(self):
         up = ["pro5000", "obs", "ts3"]
-        self.assertEqual(G.pick_gpu("large", up, set()), "pro5000")
-        self.assertIsNone(G.pick_gpu("large", up, {"pro5000"}))             # waits for the strongest while it is up
-        self.assertEqual(G.pick_gpu("large", ["obs", "ts3"], set()), "obs")  # pro5000 down: fall back
-        self.assertEqual(G.pick_gpu("small", up, set()), "obs")
-        self.assertEqual(G.pick_gpu("small", up, {"obs"}), "ts3")
-        self.assertEqual(G.pick_gpu("small", up, {"obs", "ts3"}), "pro5000")  # never idle a free GPU
-        self.assertIsNone(G.pick_gpu("small", up, {"obs", "ts3", "pro5000"}))
+        self.assertEqual(G.PRIORITY, ("pro5000", "obs", "ts3"))
+        for size in ("small", "large"): self.assertEqual(G.pick_gpu(size, up, set()), "pro5000")
+        self.assertEqual(G.pick_gpu("small", up, {"pro5000"}), "obs")             # pro5000 slots full
+        self.assertEqual(G.pick_gpu("small", up, {"pro5000", "obs"}), "ts3")      # ts3 only when both are busy
+        self.assertIsNone(G.pick_gpu("small", up, {"pro5000", "obs", "ts3"}))
+        self.assertIsNone(G.pick_gpu("large", up, {"pro5000"}))                   # long context waits for pro5000
+        self.assertEqual(G.pick_gpu("large", ["obs", "ts3"], set()), "obs")       # pro5000 down: fall back
+        self.assertEqual(G.pick_gpu("small", ["obs", "ts3"], {"obs"}), "ts3")
         self.assertIsNone(G.pick_gpu("small", [], set()))
+
+    def test_client_timeout_floor_is_300s(self):
+        self.assertGreaterEqual(G.MIN_CLIENT_TIMEOUT_S, 300)
 
     def test_reviewer_is_a_different_gpu(self):
         self.assertEqual(G.reviewer_gpu("obs", ["pro5000", "obs", "ts3"]), "pro5000")
@@ -285,7 +289,8 @@ class Concurrency(unittest.TestCase):
               ("c", {"repo": "cmdemo1-workorders", "gpu": "ts3", "stage": "implement", "pid": 9}),     # dead driver
               ("d", {"repo": "cmdemo1-workorders", "gpu": "obs", "stage": "blocked", "resume_stage": "ci", "pid": 4}),
               ("e", {"repo": "cmdemo1-dashboard", "gpu": "ts3", "stage": "review", "pid": 5})]
-        self.assertEqual(L.busy_gpus(st, None, alive), {"pro5000", "ts3"})
+        self.assertEqual(L.busy_gpus(st, None, alive), {"ts3"})        # pro5000 has 2 slots, only 1 held
+        self.assertEqual(L.busy_gpus(st + [("f", {"gpu": "pro5000", "stage": "ci", "pid": 6})], None, alive), {"pro5000", "ts3"})
         self.assertEqual(L.busy_gpus(st, "a", alive), {"ts3"})
         self.assertEqual(L.repo_wip(st, "cmdemo1-workorders", None, alive), 2)   # a (ci) + d (blocked in review)
         self.assertEqual(L.repo_wip(st, "cmdemo1-dashboard", None, alive), 1)

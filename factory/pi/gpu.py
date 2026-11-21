@@ -22,6 +22,8 @@ GPUS = {
 MODEL = "auto"
 LARGE_GPU = "pro5000"
 SMALL_GPUS = ("obs", "ts3")
+PRIORITY = ("pro5000", "obs", "ts3")   # new work goes to the first GPU with a free slot; ts3 (slowest) only when the rest are full
+MIN_CLIENT_TIMEOUT_S = 300             # shortest client timeout for a Pi / model call (a long call hung up at less is a 499)
 
 def env_names(g):
     u = g.upper(); return f"LOCAL_LLM_{u}_URL", f"LOCAL_LLM_{u}_TOKEN"
@@ -73,7 +75,7 @@ LARGE_PATH_RE = re.compile(r"(?i)(^|/)(database|migrations?|infra|octopus|enviro
 SMALL_PATH_RE = re.compile(r"(?i)(test|spec)s?[/._]|\.(razor|cshtml|css|scss|html|js|ts|tsx|md)$|(^|/)(ui|wwwroot|docs)/")
 
 def classify_size(plan):
-    """'large' (big or cross-cutting: pro5000) or 'small' (UI or test items: obs / ts3). plan['size'] wins."""
+    """'large' (big, long-context or cross-cutting: pro5000 only) or 'small' (UI or test items: pro5000, then obs, then ts3). plan['size'] wins."""
     if plan.get("size") in ("large", "small"): return plan["size"]
     files = plan.get("files") or []
     areas = {"/".join(f.split("/")[:2]) for f in files}
@@ -83,14 +85,12 @@ def classify_size(plan):
     return "large" if len(files) > 3 else "small"
 
 def pick_gpu(size, up, busy):
-    """GPU for a new item, or None to wait. up: healthy GPUs; busy: GPUs that already have an active item.
-    Large items wait for pro5000 while it is up (fall back to obs / ts3 only when it is down). Small items take
-    obs, then ts3, then a free pro5000 (so a free GPU never idles while a small item waits)."""
-    free = [g for g in GPUS if g in up and g not in busy]
-    if size == "large":
-        if LARGE_GPU in up: return LARGE_GPU if LARGE_GPU in free else None
-        return next((g for g in SMALL_GPUS if g in free), None)
-    return next((g for g in (*SMALL_GPUS, LARGE_GPU) if g in free), None)
+    """GPU for a new item, or None to wait. up: healthy GPUs; busy: GPUs with every slot taken (busy_gpus).
+    pro5000 first (2 slots, 262K context), then obs, then ts3 only when pro5000 and obs are full. Large
+    (long-context) items wait for pro5000 while it is up and fall back to obs / ts3 only when it is down."""
+    free = [g for g in PRIORITY if g in up and g not in busy]
+    if size == "large" and LARGE_GPU in up: return LARGE_GPU if LARGE_GPU in free else None
+    return free[0] if free else None
 
 def reviewer_gpu(author, up):
     """A different healthy GPU for the independent diff review (strongest first), or None."""
