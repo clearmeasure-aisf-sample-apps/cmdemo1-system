@@ -164,6 +164,119 @@ class Gpus(unittest.TestCase):
         self.assertEqual(G.health_exit(G.health(env={}, opener=opener)), 3)
         self.assertEqual(G.health_exit({"pro5000": ("UNREACHABLE", ""), "obs": ("MISSING_SECRETS", ""), "ts3": ("REFUSED", "")}), 4)
 
+class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU recorded in state.json, never a silent pro5000 default
+    class _Clock:  # fake time module: one sleep() jumps past GPU_WAIT_H so st_gpu's wait loop exits after one iteration
+        def __init__(self, t=1e9): self.t = float(t)
+        def time(self): return self.t
+        def sleep(self, s): self.t += L.GPU_WAIT_H * 3600 + 1
+
+    def test_gpu_raises_when_unrecorded(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 21, dry_run=True)
+                self.assertNotIn("gpu", d.s)
+                self.assertRaises(RuntimeError, d.gpu)   # no gpu in state: raise, never default to pro5000
+                d.s["gpu"] = "obs"; d.save()
+                self.assertEqual(d.gpu(), "obs")
+            finally: L.HOME = old
+
+    def test_resumed_item_keeps_its_gpu_and_waits(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME, L.gpu_health, L.time
+            L.HOME = h; L.time = self._Clock()
+            try:
+                d = L.Driver("cmdemo1-workorders", 22)   # dry_run=False
+                d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"; d.s["stage"] = "gpu"; d.save()
+                L.gpu_health = lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}
+                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+                d.st_gpu()
+                self.assertEqual(d.s["gpu"], "obs")      # not re-picked to pro5000 or anything else
+                self.assertEqual(d.s["stage"], "blocked")
+                self.assertIn("obs", d.s["blocker"])     # it waited for its own GPU, bounded by GPU_WAIT_H
+            finally: L.HOME, L.gpu_health, L.time = old
+
+    def test_new_item_picks_and_persists_its_gpu(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME, L.gpu_health, L.time
+            L.HOME = h; L.time = self._Clock()
+            try:
+                d = L.Driver("cmdemo1-workorders", 23, dry_run=True)
+                d.s["plan"] = PLAN; d.save()              # no 'gpu' in state yet
+                L.gpu_health = lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}
+                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+                d.st_gpu()
+                self.assertEqual(d.s["stage"], "pickup")
+                self.assertEqual(d.s["gpu"], G.pick_gpu(G.classify_size(PLAN), ["pro5000", "obs", "ts3"], set()))
+            finally: L.HOME, L.gpu_health, L.time = old
+
+    def test_pi_targets_the_recorded_gpu(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 24, dry_run=True)
+                d.s["gpu"] = "ts3"; d.s["wt"] = tempfile.mkdtemp(dir=h)
+                capture = []
+                d.sh = lambda cmd, **k: (capture.append(list(cmd)), subprocess.CompletedProcess(cmd, 0, "PASS", ""))[1]
+                d.pi("t1", "do it")
+                self.assertIn("--gpu", capture[0])
+                self.assertEqual(capture[0][capture[0].index("--gpu") + 1], "ts3")
+            finally: L.HOME = old
+
+class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be marked done: retry it under distinct names, then a Blocker
+    def test_failed_pi_task_not_done_retried_then_blocked(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 25, dry_run=True)
+                d.s["plan"] = dict(PLAN, tasks=[{"name": "t1", "prompt": "p"}])
+                d.s["stage"] = "implement"
+                d.s["wt"] = tempfile.mkdtemp(dir=h)
+                calls = []
+                d.pi = lambda name, prompt, timeout=1800, gpu=None: (calls.append(name), False)[1]
+                d.st_implement()
+                self.assertEqual(d.s.get("tasks_done", []), [])   # a failed task is never recorded done
+                self.assertEqual(len(calls), L.LIMITS["local_fix"] + 1)   # retried up to the limit
+                self.assertEqual(d.s["stage"], "blocked")
+                self.assertNotEqual(d.s["stage"], "local-verify")
+                self.assertIn("t1", d.s["blocker"])
+                self.assertEqual(calls[0], "t1")
+                self.assertTrue(all(n != "t1" for n in calls[1:]) and any("retry" in n.lower() for n in calls[1:]),
+                                "retries run under distinct retry names")
+            finally: L.HOME = old
+
+    def test_passing_pi_task_done_and_advances(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 26, dry_run=True)
+                d.s["plan"] = dict(PLAN, tasks=[{"name": "t1", "prompt": "p"}])
+                d.s["stage"] = "implement"
+                d.s["wt"] = tempfile.mkdtemp(dir=h)
+                d.pi = lambda name, prompt, timeout=1800, gpu=None: True
+                d.st_implement()
+                self.assertEqual(d.s["tasks_done"], ["t1"])   # a passing task lands in tasks_done
+                self.assertEqual(d.s["stage"], "local-verify")   # and the stage advances as before
+            finally: L.HOME = old
+
+    def test_pi_task_retried_until_pass(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 27, dry_run=True)
+                d.s["plan"] = dict(PLAN, tasks=[{"name": "t1", "prompt": "p"}])
+                d.s["stage"] = "implement"
+                d.s["wt"] = tempfile.mkdtemp(dir=h)
+                calls = []
+                d.pi = lambda name, prompt, timeout=1800, gpu=None: (calls.append(name), len(calls) > 1)[1]   # fails exactly once
+                d.st_implement()
+                self.assertEqual(d.s["tasks_done"], ["t1"])
+                self.assertEqual(d.s["stage"], "local-verify")
+                self.assertEqual(len(calls), 2)
+                self.assertNotEqual(calls[1], "t1")
+                self.assertIn("retry", calls[1].lower())
+            finally: L.HOME = old
+
 class Concurrency(unittest.TestCase):
     def test_one_active_item_per_gpu_and_wip_three_per_repo(self):
         alive = lambda pid: pid != 9

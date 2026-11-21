@@ -30,6 +30,8 @@ PROJECT = "PVT_kwDOD_ESUc4BliGL"
 STATUS_FIELD = "PVTSSF_lADOD_ESUc4BliGLzhkOn7g"
 STATUS = {"Todo": "f75ad846", "In Progress": "47fc9ee4", "Review": "e19122d0", "Merged": "8012c69b",
           "TDD": "eeb01ba5", "UAT": "ebff1a13", "Done": "98236657"}
+# Board columns an item moves through after merge, in order (an item only moves forward, one column per healthy env).
+BOARD_ORDER = ["Merged", "TDD", "UAT", "Done"]
 REQUIRED = {"cmdemo1-workorders": ["Build result", "secret-scan"], "cmdemo1-system": ["env-checks"]}
 DEPLOYABLE = {"cmdemo1-workorders": "ui", "cmdemo1-dashboard": "dashboard", "cmdemo1-system": "system"}
 DELIVERY = f"https://raw.githubusercontent.com/{ORG}/cmdemo1-system/status/delivery.json"
@@ -111,12 +113,16 @@ def checks_state(checks, required):
     if all(b in ("pass", "skipping") for b in rs): return "GREEN"
     return "PENDING"
 
-def quality_failures(checks):
-    """Names of failing Qodana / Refactoring-rationale checks (latest attempt of each name wins)."""
+def quality_states(checks):
+    """name -> bucket for the Qodana / Refactoring-rationale checks (latest attempt of each name wins)."""
     st = {}
     for c in checks:
         if any(q in c["name"].lower() for q in QUALITY_CHECKS): st[c["name"]] = c.get("bucket") or "pending"
-    return sorted(n for n, b in st.items() if b in ("fail", "cancel"))
+    return st
+
+def quality_failures(checks):
+    """Names of failing Qodana / Refactoring-rationale checks (latest attempt of each name wins)."""
+    return sorted(n for n, b in quality_states(checks).items() if b in ("fail", "cancel"))
 
 def heartbeat_due(progress_at, last_heartbeat, at, minutes=HEARTBEAT_MIN):
     """True when nothing progressed for `minutes` and no heartbeat was posted in the last `minutes` (ISO strings)."""
@@ -157,10 +163,7 @@ def gate_state(checks, required):
     return "GREEN"
 
 def quality_pending(checks):
-    st = {}
-    for c in checks:
-        if any(q in c["name"].lower() for q in QUALITY_CHECKS): st[c["name"]] = c.get("bucket") or "pending"
-    return sorted(n for n, b in st.items() if b not in ("pass", "skipping", "fail", "cancel"))
+    return sorted(n for n, b in quality_states(checks).items() if b not in ("pass", "skipping", "fail", "cancel"))
 
 def merge_args(full, pr, head):
     """Squash merge pinned to the reviewed head. Never --delete-branch (the branch stays for the record)."""
@@ -202,6 +205,16 @@ def busy_gpus(states, me=None, alive=lambda pid: False):
     return {s.get("gpu") for k, s in states
             if k != me and s.get("gpu") and s.get("stage") in ACTIVE_STAGES and alive(s.get("pid"))}
 
+def gpu_for_item(rec, size, up, busy):
+    """(gpu, wait_why) for the gpu stage. A resumed item keeps the GPU recorded in state: take it when it is up,
+    otherwise wait for that GPU (never re-pick, never fall back to the pro5000 default). A new item picks a free
+    GPU of the right size; gpu=None means wait, and wait_why says for what."""
+    if rec:
+        if rec in up: return rec, None
+        return None, f"waiting for the recorded GPU {rec} (up: {', '.join(up) or 'none'})"
+    g = G.pick_gpu(size, up, busy)
+    return g, None if g else f"no free GPU for a {size} item (up: {', '.join(up) or 'none'})"
+
 def repo_wip(states, repo, me=None, alive=lambda pid: False):
     """Driver items of `repo` in In Progress or Review (active stages) on this box, live or blocked mid-review."""
     return sum(1 for k, s in states if k != me and s.get("repo") == repo and
@@ -224,10 +237,9 @@ def docs_only(files):
 
 def deploy_moves(column, in_env):
     """column: current board column; in_env: {'tdd': bool, 'uat': bool, 'prod': bool}. Returns the moves to make."""
-    order = ["Merged", "TDD", "UAT", "Done"]
     target = "Done" if in_env.get("prod") else "UAT" if in_env.get("uat") else "TDD" if in_env.get("tdd") else column
-    if column not in order or order.index(target) <= order.index(column): return []
-    return order[order.index(column) + 1: order.index(target) + 1]
+    if column not in BOARD_ORDER or BOARD_ORDER.index(target) <= BOARD_ORDER.index(column): return []
+    return BOARD_ORDER[BOARD_ORDER.index(column) + 1: BOARD_ORDER.index(target) + 1]
 
 def pickup_comment(p, run_id, run_dir):
     plan = "\n".join(f"  - [ ] {c['text']} — {c.get('how') or 'evidence: `' + c['evidence_cmd'] + '`'}" for c in p["criteria"])
@@ -359,7 +371,11 @@ class Driver:
         return self.sh(a, check=False).stdout.strip()
 
     # Pi
-    def gpu(self): return self.s.get("gpu") or G.LARGE_GPU
+    def gpu(self):
+        g = self.s.get("gpu")
+        if not g:
+            raise RuntimeError(f"no GPU is recorded for this item ({self.full}#{self.issue}); it must pass the gpu stage first")
+        return g
     def gpu_label(self, g=None): return G.GPUS[g or self.gpu()]["label"]
 
     def pi(self, name, prompt, timeout=1800, gpu=None):
@@ -373,6 +389,17 @@ class Driver:
                      "--prompt-file", pf, "--timeout", str(timeout), "--gpu", gpu or self.gpu()], check=False)
         self.log(f"pi {name}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
         return r.returncode == 0
+
+    def task_passes(self, t):
+        """Run one plan task through Pi; retry a failure up to LIMITS['local_fix'] times under distinct names
+        (`<name>-retry-<k>`, at most LIMITS['local_fix'] + 1 pi calls), then Blocker. True only when the task passed."""
+        prompt = t["prompt"]
+        for k in range(LIMITS["local_fix"] + 1):
+            name = t["name"] if not k else f"{t['name']}-retry-{k}"
+            if k: prompt = t["prompt"] + "\nNote: a previous attempt at this task failed; fix what it left broken."
+            if self.pi(name, prompt, int(t.get("timeout", 1800))): return True
+        self.blocker(f"Pi task `{t['name']}` still failed after {LIMITS['local_fix'] + 1} attempts (last attempt `{name}`).")
+        return False
 
     def verify(self, name):
         log = os.path.join(self.run_dir, "logs", f"verify-{name}.log"); t0 = time.time()
@@ -414,10 +441,6 @@ class Driver:
         try: cs = json.loads(r.stdout or "[]")
         except Exception: cs = []
         return checks_state(cs, REQUIRED.get(self.repo)), cs
-
-    def changed_files(self):
-        r = self.sh(["git", "diff", "--name-only", f"origin/{self.s['default']}...HEAD"], cwd=self.s["wt"], check=False)
-        return [l for l in r.stdout.splitlines() if l.strip()]
 
     def wait_ci(self, max_s=4 * 3600):
         """Zero-LLM wait: gh's own watch; falls back to a sleep loop until checks exist."""
@@ -534,12 +557,13 @@ class Driver:
                     up = G.available(gpu_health())
                     if repo_wip(states, self.repo, me, pid_alive) >= WIP_LIMIT: why = f"WIP is full for {self.repo} ({WIP_LIMIT})"
                     else:
-                        g = self.s.get("gpu") if self.s.get("gpu") in up else G.pick_gpu(size, up, busy_gpus(states, me, pid_alive))
+                        g, why = gpu_for_item(self.s.get("gpu"), size, up, busy_gpus(states, me, pid_alive))
                         if g:
                             self.save(gpu=g, size=size, stage="pickup"); self.log(f"GPU {g} ({self.gpu_label(g)}) for a {size} item")
                             return
-                        why = f"no free GPU for a {size} item (up: {', '.join(up) or 'none'})"
-            if self.dry: self.log(f"DRY-RUN: {why}; taking {G.LARGE_GPU}"); return self.save(gpu=G.LARGE_GPU, size=size, stage="pickup")
+            if self.dry:
+                g = self.s.get("gpu") or G.LARGE_GPU
+                self.log(f"DRY-RUN: {why}; taking {g}"); return self.save(gpu=g, size=size, stage="pickup")
             if self.s.get("wait_why") != why: self.save(wait_why=why); self.log(f"waiting: {why}")
             time.sleep(GPU_WAIT_S)
         self.blocker(f"waited {GPU_WAIT_H} hours to start ({self.s.get('wait_why')}).")
@@ -620,7 +644,7 @@ class Driver:
         done = set(self.s.get("tasks_done", []))
         for t in self.s["plan"]["tasks"]:
             if t["name"] in done: continue
-            self.pi(t["name"], t["prompt"], int(t.get("timeout", 1800)))
+            if not self.task_passes(t): return   # the Blocker is already raised; never mark a failed task done
             done.add(t["name"]); self.save(tasks_done=sorted(done))
         self.save(stage="local-verify")
 
@@ -801,9 +825,12 @@ class Driver:
         out = os.path.join(self.run_dir, "independent-review.md")
         if os.path.exists(out): os.remove(out)
         crit = "\n".join(f"- {c['text']}" for c in p["criteria"])
+        sec = body.split(RESEARCH_HEAD, 1)[1]
+        if len(sec) > 24000:   # the reviewer must read every verdict: whole section, or a line-boundary cut that says so
+            sec = sec[:24000].rsplit("\n", 1)[0].rstrip() + "\n(the section is longer than this prompt copy; the full text is in the PR body)"
         ok = self.pi(f"independent-review-{self.s['counts'].get('review_fail', 0) + 1}",
                      f"Independent code review of {self.repo}#{self.issue} ({p['pr_title']}). You did not write this code. Change NO "
-                     "files.\n\nAcceptance criteria:\n" + crit + "\n\nThe PR's refactoring research:\n" + body.split(RESEARCH_HEAD, 1)[1][:6000] +
+                     "files.\n\nAcceptance criteria:\n" + crit + "\n\nThe PR's refactoring research:\n" + sec +
                      f"\n\nDiff against {self.s['default']} (read any file in this tree for context):\n```diff\n{scrub(diff)[:limit]}\n```\n\n"
                      "Check: every criterion is met by the code and its tests; tests are real (none skipped, deleted or weakened); "
                      "the repository's AGENTS.md / CLAUDE.md rules hold; the code is easy to read (names, small methods, no "
@@ -930,7 +957,7 @@ def cmd_draft_plan(a):
               "prompt; one test or one code change each; tests first), size ('large' for big or cross-cutting work, 'small' for a UI or "
               "test-only change), verify_cmd (the repo's real build+test command, "
               "narrowed to the touched projects), pr_title, pr_summary (one line).")
-    ok = d.pi("draft-plan", prompt, 1500)
+    ok = d.pi("draft-plan", prompt, 1500, gpu=G.LARGE_GPU)   # plan drafting runs before the gpu stage: no gpu recorded yet
     try:
         p = json.load(open(out)); errs = validate_plan(p)
     except Exception as e:
