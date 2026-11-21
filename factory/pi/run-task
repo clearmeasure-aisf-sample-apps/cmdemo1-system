@@ -12,8 +12,12 @@
   and the start time, which usage-report reads.
 - Result is PASS / FAIL when the reply's last line says so (ask Pi to end with PASS or FAIL), timeout, or exit N.
   Exit code: 0 PASS, 1 otherwise. Pi's reply tail is printed with secrets scrubbed.
+- --timeout is hard: Pi runs in its own process group, so the timeout kills Pi AND every process Pi started (its tool
+  subprocesses inherit the stdout pipe, so killing only Pi left communicate() blocked on them -- #817: --timeout 1800
+  ran 4263 s with the GPU slot held). The record says result "timeout", rc 124.
+- Test overrides: FACTORY_PI_GPU_BIN (stand-in for ./pi-gpu) and FACTORY_PI_LOCK_DIR (stand-in for /tmp slot locks).
 """
-import argparse, datetime as dt, fcntl, glob, json, os, re, subprocess, sys, time
+import argparse, datetime as dt, fcntl, glob, json, os, re, signal, subprocess, sys, time
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 from item_loop import scrub   # one scrub rule set (tokens, tunnel hosts, every LOCAL_LLM_*_URL / _TOKEN value)
@@ -35,14 +39,41 @@ def session_usage(path):
     return sid, tot
 
 def take_slot(gpu):
+    locks = os.environ.get("FACTORY_PI_LOCK_DIR") or "/tmp"
     while True:
         for i in range(G.GPUS[gpu]["slots"]):
-            f = open(f"/tmp/factory-pi-{gpu}-slot-{i}.lock", "w")
+            f = open(os.path.join(locks, f"factory-pi-{gpu}-slot-{i}.lock"), "w")
             try:
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); return f
             except BlockingIOError:
                 f.close()
         time.sleep(5)
+
+def run_pi(cmd, cwd, timeout):
+    """Run Pi in its own process group; return (rc, output). On timeout SIGTERM then SIGKILL the whole group (#817),
+    reporting rc 124 with whatever output was collected before the pipe had to be closed."""
+    p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, start_new_session=True)
+    def kill(sig):
+        try: os.killpg(p.pid, sig)
+        except ProcessLookupError: pass
+    def s(v): return (v.decode(errors="replace") if isinstance(v, bytes) else v) or ""
+    text = ""
+    try:
+        out, _ = p.communicate(timeout=timeout); return p.returncode, s(out)
+    except subprocess.TimeoutExpired as e:
+        text = s(e.stdout)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            kill(sig)
+            try:
+                out, _ = p.communicate(timeout=5); return 124, s(out) or text
+            except subprocess.TimeoutExpired as e2:
+                text = s(e2.stdout) or text
+        try: p.stdout.close()     # a process outside the group still holds the pipe: stop waiting for EOF
+        except OSError: pass
+        try: p.wait(timeout=5)    # always reap: the group is killed, so this returns at once
+        except subprocess.TimeoutExpired: pass
+        return 124, text
 
 def main():
     p = argparse.ArgumentParser()
@@ -63,15 +94,10 @@ def main():
     prompt = open(a.prompt_file).read()
     open(os.path.join(run, "logs", f"{task}.prompt.md"), "w").write(prompt)
     slot = take_slot(a.gpu); t0 = now()
-    pi_gpu = os.path.join(HERE, "pi-gpu")
+    pi_gpu = os.environ.get("FACTORY_PI_GPU_BIN") or os.path.join(HERE, "pi-gpu")
     try:
-        r = subprocess.run([pi_gpu, a.gpu, "--session-dir", sdir, "--no-context-files", "--no-skills", "--no-mcp",
-                            "--approve", "-p", prompt], cwd=a.cwd, stdin=subprocess.DEVNULL, text=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=max(a.timeout, G.MIN_CLIENT_TIMEOUT_S))
-        rc, text = r.returncode, r.stdout or ""
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout or ""
-        rc, text = 124, out.decode(errors="replace") if isinstance(out, bytes) else out
+        rc, text = run_pi([pi_gpu, a.gpu, "--session-dir", sdir, "--no-context-files", "--no-skills", "--no-mcp",
+                           "--approve", "-p", prompt], a.cwd, max(a.timeout, G.MIN_CLIENT_TIMEOUT_S))
     finally:
         t1 = now(); slot.close()
     text = scrub(text)
