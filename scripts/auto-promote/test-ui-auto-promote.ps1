@@ -1558,6 +1558,18 @@ throw 'simulated promote failure'
 "@
 Test-Case 'throw still exits non-zero (#646)' ($throwExit -ne 0) $true
 
+# Ripe hold elsewhere gets the free slot first (system kept losing the single prod slot to ui and dashboard).
+$ripeNow = [datetime]::Parse('2026-11-21T16:00:00Z').ToUniversalTime()
+function New-RipeHold($n, $title, $minutes, $body = $pipeHoldBody) { @{ number = $n; title = $title; body = $body; createdAt = $ripeNow.AddMinutes(-$minutes).ToString('o') } }
+$r = Get-RipeHeldElsewhere -HeldIssues @((New-RipeHold 834 'system 1.0.250 held before prod' 96)) -Now $ripeNow -Name 'ui'
+Test-Case 'ripe hold elsewhere: system past its window is yielded to' @($r.Deployable, $r.Version, $r.Number) @('system', '1.0.250', 834)
+Test-Case 'ripe hold elsewhere: still inside the window is not' ($null -eq (Get-RipeHeldElsewhere -HeldIssues @((New-RipeHold 834 'system 1.0.250 held before prod' 30)) -Now $ripeNow -Name 'ui')) $true
+Test-Case 'ripe hold elsewhere: mixed-flag hold (needs a person) is not' ($null -eq (Get-RipeHeldElsewhere -HeldIssues @((New-RipeHold 834 'system 1.0.250 held before prod' 96 $mixedRedHoldBody)) -Now $ripeNow -Name 'ui')) $true
+Test-Case 'ripe hold elsewhere: older than the cap is not (no starvation)' ($null -eq (Get-RipeHeldElsewhere -HeldIssues @((New-RipeHold 834 'system 1.0.250 held before prod' 300)) -Now $ripeNow -Name 'ui')) $true
+Test-Case 'ripe hold elsewhere: own deployable hold is not' ($null -eq (Get-RipeHeldElsewhere -HeldIssues @((New-RipeHold 834 'system 1.0.250 held before prod' 96)) -Now $ripeNow -Name 'system')) $true
+$r = Get-RipeHeldElsewhere -HeldIssues @((New-RipeHold 9 'dashboard 1.0.1 held before prod' 70), (New-RipeHold 834 'system 1.0.250 held before prod' 96)) -Now $ripeNow -Name 'ui'
+Test-Case 'ripe hold elsewhere: longest waiting wins' $r.Deployable 'system'
+
 if ($failures -gt 0) { Write-Host "$failures case(s) failed."; exit 1 }
 Write-Host 'All cases passed.'
 # Actions' pwsh shell would otherwise exit with a leftover LASTEXITCODE from the nested probes above.
