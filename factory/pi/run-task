@@ -67,7 +67,7 @@ def main():
     try:
         r = subprocess.run([pi_gpu, a.gpu, "--session-dir", sdir, "--no-context-files", "--no-skills", "--no-mcp",
                             "--approve", "-p", prompt], cwd=a.cwd, stdin=subprocess.DEVNULL, text=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=a.timeout)
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=max(a.timeout, G.MIN_CLIENT_TIMEOUT_S))
         rc, text = r.returncode, r.stdout or ""
     except subprocess.TimeoutExpired as e:
         out = e.stdout or ""

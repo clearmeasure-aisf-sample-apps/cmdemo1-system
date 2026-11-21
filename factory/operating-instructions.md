@@ -209,9 +209,9 @@ Pi sessions. Jeffrey, 20 Nov 2026 3:49pm CT: "equip the cm ai ops bot ... with t
 
 | GPU | Card | Context | Use |
 |---|---|---|---|
-| `pro5000` | RTX PRO 5000, Qwen3.8 27B Q6 | 262K | strongest: big or cross-cutting items |
-| `obs` | RTX 5070 Ti | 64K | small UI or test items |
-| `ts3` | RTX 5060 Ti | 64K | small UI or test items; slowest |
+| `pro5000` | RTX PRO 5000, Qwen3.8 Flash-Next, 2 slots | 262K | first choice for every item; long-context, big or cross-cutting items only here |
+| `obs` | RTX 5070 Ti | 64K | second choice: small UI or test items |
+| `ts3` | RTX 5060 Ti | 64K | last choice, only when both `pro5000` slots and `obs` are busy; slowest |
 
 Each is a named Cloudflare tunnel to a token-protected llm-proxy. Pi always asks for model `auto`; the proxy refuses
 any other name. Never ask the proxy to load or switch a model and never send a warm-up or test completion: the health
@@ -238,8 +238,9 @@ as `pi-pro5000-health`), `factory-pi-run-task`, `factory-pi-usage-report` and `f
 (In Progress + Review on board 679; section "Board flow and WIP"). Start a driver for every startable Todo the WIP
 rule allows; the driver itself waits, with no Grok turn and no comment, in Todo until a GPU of the right size is
 free, then takes it (`stage: gpu`, `wait_why` in `status`). Big or cross-cutting items (`size: large`: many files,
-several layers, database, build or infra files) go to `pro5000` and wait for it while it is up; small UI or test
-items (`size: small`) go to `obs`, then `ts3`, then a free `pro5000`. An item holds its GPU from pickup through the
+several layers, database, build or infra files, long context) go to `pro5000` and wait for it while it is up; small UI or test
+items (`size: small`) go to `pro5000` first (keep both of its slots full), then `obs`, and `ts3` only when `pro5000`'s two slots and `obs`
+are busy. Every Pi or model client timeout is at least 300 s (`MIN_CLIENT_TIMEOUT_S`; a shorter one hangs up on long calls as a 499). An item holds its GPU slot from pickup through the
 merge; Pi tasks run at most 2 at once on `pro5000` and 1 on `obs` / `ts3` from this box.
 
 **Working an item: the loop is Pi, not Grok** (Jeffrey, 18 Nov 2026 11:41pm CT: "If there is build monitoring or
