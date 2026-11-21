@@ -1852,8 +1852,18 @@ function Read-MasterStateOnce {
         if (-not $branch) { throw 'no default branch' }
         $head = [string] (Invoke-Gh @("repos/$appRepo/branches/$branch")).commit.sha
         if ($head -notmatch '^[0-9a-f]{40}$') { throw "no head commit of $branch" }
-        $m = Get-MasterState -Checks @(Get-CommitChecks $head)
-        @{ State = $m.State; Evidence = @($m.Evidence); Sha = $head; Branch = $branch }
+        # A head commit that only monitor workflows ran for (the Pin commits of the Octopus deployments) has no build
+        # result of its own: it is judged by the nearest earlier commit that has one (at most 30 back), never by the empty list.
+        $sha = $head
+        $checks = @(Get-CommitChecks $sha)
+        if ($checks.Count -eq 0) {
+            foreach ($c in @((Invoke-Gh @("repos/$appRepo/commits?sha=$head&per_page=30")) | Select-Object -Skip 1)) {
+                $checks = @(Get-CommitChecks ([string] $c.sha))
+                if ($checks.Count -gt 0) { $sha = [string] $c.sha; break }
+            }
+        }
+        $m = Get-MasterState -Checks $checks
+        @{ State = $m.State; Evidence = @($m.Evidence); Sha = $sha; Branch = $branch }
     } catch { @{ State = 'unknown'; Evidence = @("read failed: $($_.Exception.Message)"); Sha = $null; Branch = $null } }
 }
 
