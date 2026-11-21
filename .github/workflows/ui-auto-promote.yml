@@ -20,7 +20,11 @@
 # which this workflow runs first; the owner's lists of documentation paths and build files are at the top of the script):
 #   1. Red build or tests: a failed check run or commit status on the release's commit in the application repository
 #      (pending: the run waits and flags nothing yet). This workflow's own check runs are not a build or test of the
-#      commit, so they are left out; every other workflow still counts.
+#      commit, so they are left out. Monitoring workflows are left out too, here and in master's state for the
+#      pipeline-only override (owner, Jeffrey Palermo 2026-11-21: "scheduled monitoring runs don't count as red build";
+#      capabilities, delivery, deployments, drift, workitems, fleet-findings, kit-templates, pool-*, factory-wake,
+#      ui-feature-toggles; list MonitorWorkflowFiles in the script). Identified by workflow file: capabilities called from
+#      system.yml still counts. Every other workflow still counts.
 #   2. Deployment or health failed: the deployment to the previous environment did not succeed, its task log has an
 #      Error or Warning line or a step SuccessWithWarning (the rule of the kit's test-deployment-logs.ps1), or
 #      its health (ui /_healthcheck/detailed overallStatus; dashboard / httpOk; system: no HTTP health, Verify already
@@ -36,7 +40,10 @@
 #      deployable's application paths (ui/dashboard: src/; system: environments/, infra/, octopus/, scripts/, …) or a
 #      build/project file inside them (Directory.Build.*, global.json, nuget.config, *.csproj, *.sln, *.props,
 #      *.targets, Dockerfile*). Never a flag: for ui src/Database/ (migrations; owner, 2026-10-14) and .github/private-build/ (the kit's script; owner, 2026-10-14); for all
-#      documentation (docs/**, arch/**, *.md anywhere: proposed, one list in the script for the owner to edit). The
+#      documentation (docs/**, arch/**, *.md anywhere: proposed, one list in the script for the owner to edit); for all
+#      test-project files (owner, Jeffrey Palermo 2026-11-21: "test-project files are not a pipeline change"): a path with
+#      a folder named *Tests, *.Tests, *.Tests.*, test or tests, its project file included, except under .github/ or
+#      scripts/ (those keep the 60-minute hold) or a Dockerfile* (list TestProjectFolders in the script). The
 #      comparison is read from a clone of the application repository (no commit or file cap, unlike GitHub's compare);
 #      one that is incomplete (no base commit, a read failed) flags.
 #   4. Hold label: a pull request in those commits, or an issue they close or reference (also owner/repo#N), labelled
