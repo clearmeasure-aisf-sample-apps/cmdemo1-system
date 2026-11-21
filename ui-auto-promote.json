@@ -1,0 +1,1044 @@
+{
+  "ui/Deployments-58737": [
+    {
+      "at": "2026-11-20T01:39:39.518016Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T01:44:41.1339354Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58790": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T15:24:52.0183129Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T15:38:31.4377758Z"
+    }
+  ],
+  "dashboard/Deployments-58670": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T19:55:06.4406143Z"
+    }
+  ],
+  "dashboard/Deployments-58618": [
+    {
+      "at": "2026-11-19T12:46:11.9486541Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T12:54:27.8544043Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58697": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T21:55:53.4143394Z"
+    }
+  ],
+  "ui/Deployments-58731": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T00:47:20.0887439Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T00:54:47.8368877Z"
+    }
+  ],
+  "dashboard/Deployments-58643": [
+    {
+      "at": "2026-11-19T16:21:19.4735285Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58841": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T05:11:18.9765564Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T05:16:19.0920891Z"
+    }
+  ],
+  "dashboard/Deployments-58744": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T02:27:32.673879Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T02:32:32.7855289Z"
+    }
+  ],
+  "dashboard/Deployments-58658": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T18:44:35.4701091Z"
+    }
+  ],
+  "dashboard/Deployments-58647": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T16:54:35.6195536Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T17:10:06.9122466Z"
+    }
+  ],
+  "dashboard/Deployments-58773": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T07:38:35.4965626Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T07:44:18.6940915Z"
+    }
+  ],
+  "dashboard/Deployments-58811": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T21:35:36.6193617Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T21:44:38.0435053Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T21:54:55.8312743Z"
+    }
+  ],
+  "dashboard/Deployments-58674": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T20:12:21.6453877Z"
+    }
+  ],
+  "dashboard/Deployments-58853": [
+    {
+      "at": "2026-11-21T10:16:34.5523385Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T10:24:45.7486989Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58691": [
+    {
+      "at": "2026-11-19T21:38:56.7404035Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T21:44:29.4556683Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58763": [
+    {
+      "at": "2026-11-20T06:34:36.0384966Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58812": [
+    {
+      "at": "2026-11-20T22:10:09.0413654Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T22:15:09.1644476Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58713": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T23:24:40.7845234Z"
+    }
+  ],
+  "dashboard/Deployments-58819": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T23:24:50.0079684Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T23:36:07.4213761Z"
+    }
+  ],
+  "dashboard/Deployments-58646": [
+    {
+      "at": "2026-11-19T16:38:34.2993648Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T16:44:53.0426892Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58717": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T23:42:05.5335784Z"
+    }
+  ],
+  "dashboard/Deployments-58746": [
+    {
+      "at": "2026-11-20T02:44:45.5208646Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T02:54:28.7892111Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58718": [
+    {
+      "at": "2026-11-19T23:54:24.3019721Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T23:59:24.3868111Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58775": [
+    {
+      "at": "2026-11-20T08:15:10.9468065Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T08:20:11.1254398Z",
+      "status": "Healthy"
+    }
+  ],
+  "ui/Deployments-58839": [
+    {
+      "at": "2026-11-21T04:44:56.5793135Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T04:54:48.9087699Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58636": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T15:55:18.9043226Z"
+    }
+  ],
+  "ui/Deployments-58823": [
+    {
+      "at": "2026-11-21T01:39:46.3809457Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T01:45:42.7160314Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58845": [
+    {
+      "at": "2026-11-21T05:54:48.5020045Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T05:59:48.8282527Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58827": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T02:14:33.3571394Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T02:19:33.428862Z"
+    }
+  ],
+  "dashboard/Deployments-58655": [
+    {
+      "at": "2026-11-19T18:14:19.7841034Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58680": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T20:44:46.8387105Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T20:55:31.1033445Z"
+    }
+  ],
+  "dashboard/Deployments-58800": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T18:14:14.358185Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T18:19:14.4811107Z"
+    }
+  ],
+  "dashboard/Deployments-58792": [
+    {
+      "at": "2026-11-20T15:55:06.9586068Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T16:12:15.8235232Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58620": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T13:11:24.2722931Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T13:16:24.3666062Z"
+    }
+  ],
+  "ui/Deployments-58830": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T02:54:37.2933283Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T03:12:56.0491928Z"
+    }
+  ],
+  "dashboard/Deployments-58705": [
+    {
+      "at": "2026-11-19T22:30:57.3667596Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58847": [
+    {
+      "at": "2026-11-21T06:17:41.6167092Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T06:22:41.7002211Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58630": [
+    {
+      "at": "2026-11-19T15:25:38.0328789Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58797": [
+    {
+      "at": "2026-11-20T16:54:26.3661697Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T17:09:13.7820676Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58795": [
+    {
+      "at": "2026-11-20T16:45:02.3384966Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T16:50:02.5514822Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58757": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T05:38:48.2393694Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T05:44:49.2398362Z"
+    }
+  ],
+  "ui/Deployments-58732": [
+    {
+      "at": "2026-11-20T01:12:13.8923673Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T01:17:15.3025308Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58755": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T05:19:27.0401125Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T05:26:47.262411Z"
+    }
+  ],
+  "ui/Deployments-58817": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T23:09:56.2262742Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T23:16:01.3144308Z"
+    }
+  ],
+  "dashboard/Deployments-58644": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T16:28:19.8228217Z"
+    }
+  ],
+  "ui/Deployments-58815": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T22:44:30.8307716Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T22:55:14.2564798Z"
+    }
+  ],
+  "dashboard/Deployments-58771": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T07:28:57.5410342Z"
+    }
+  ],
+  "dashboard/Deployments-58851": [
+    {
+      "at": "2026-11-21T09:54:49.0606534Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T10:10:01.2196713Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58707": [
+    {
+      "at": "2026-11-19T22:38:35.4413194Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58855": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T10:35:55.874172Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T10:45:01.3764633Z"
+    }
+  ],
+  "dashboard/Deployments-58710": [
+    {
+      "at": "2026-11-19T22:54:47.2410458Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58850": [
+    {
+      "at": "2026-11-21T09:36:07.5954283Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T09:44:42.3309499Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58612": [
+    {
+      "at": "2026-11-19T12:30:21.9402433Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T12:35:22.132484Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58760": [
+    {
+      "at": "2026-11-20T06:19:13.2619006Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58634": [
+    {
+      "at": "2026-11-19T15:44:39.3322862Z",
+      "status": "Healthy"
+    }
+  ],
+  "ui/Deployments-58694": [
+    {
+      "at": "2026-11-19T21:55:07.9648287Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T22:11:38.1003918Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T22:17:28.7546679Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T22:30:13.8847304Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T22:38:23.8227418Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T22:50:25.0745395Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58785": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T14:19:30.6087328Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T14:26:09.3911624Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T14:38:57.8891732Z"
+    }
+  ],
+  "dashboard/Deployments-58806": [
+    {
+      "at": "2026-11-20T20:11:19.3151665Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T20:16:19.3984723Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58725": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T00:33:51.3022906Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T00:38:51.38574Z"
+    }
+  ],
+  "dashboard/Deployments-58664": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T19:15:31.2710425Z"
+    }
+  ],
+  "dashboard/Deployments-58734": [
+    {
+      "at": "2026-11-20T01:18:01.7341387Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T01:23:01.833628Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58688": [
+    {
+      "at": "2026-11-19T21:23:20.2532891Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T21:28:20.3467256Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58840": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T05:25:09.2352664Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T05:30:09.3654428Z"
+    }
+  ],
+  "dashboard/Deployments-58844": [
+    {
+      "at": "2026-11-21T05:37:41.8836316Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T05:45:03.6152338Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58816": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T23:10:03.99978Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T23:15:04.1808706Z"
+    }
+  ],
+  "dashboard/Deployments-58764": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T06:46:40.2519918Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T06:54:45.0207974Z"
+    }
+  ],
+  "ui/Deployments-58724": [
+    {
+      "at": "2026-11-20T00:27:59.4464505Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T00:33:01.3324015Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58632": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T15:38:37.1528208Z"
+    }
+  ],
+  "dashboard/Deployments-58623": [
+    {
+      "at": "2026-11-19T13:25:33.4069686Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58668": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T19:44:40.6896907Z"
+    }
+  ],
+  "dashboard/Deployments-58802": [
+    {
+      "at": "2026-11-20T18:28:57.3860421Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T18:37:20.7463839Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58624": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T13:38:09.0819399Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T13:44:38.5220212Z"
+    }
+  ],
+  "dashboard/Deployments-58805": [
+    {
+      "at": "2026-11-20T19:36:00.945906Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T19:44:30.8784099Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T19:54:39.9063744Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58703": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T22:12:22.1358228Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T22:18:13.44866Z"
+    }
+  ],
+  "ui/Deployments-58837": [
+    {
+      "at": "2026-11-21T04:21:10.8260173Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T04:28:03.5779535Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58676": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T20:24:52.4843008Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T20:29:52.5745392Z"
+    }
+  ],
+  "ui/Deployments-58822": [
+    {
+      "at": "2026-11-21T01:12:11.2922072Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T01:19:19.2393297Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T01:25:45.3874742Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58788": [
+    {
+      "at": "2026-11-20T15:11:12.4961431Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T15:17:57.8577725Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58626": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T13:54:36.4104398Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T14:12:27.9223383Z"
+    }
+  ],
+  "dashboard/Deployments-58824": [
+    {
+      "at": "2026-11-21T01:39:54.6847288Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T01:46:04.7910391Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58810": [
+    {
+      "at": "2026-11-20T21:25:11.9126099Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58657": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T18:28:56.8566126Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T18:38:24.5582718Z"
+    }
+  ],
+  "dashboard/Deployments-58667": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T19:38:08.7126122Z"
+    }
+  ],
+  "dashboard/Deployments-58794": [
+    {
+      "at": "2026-11-20T16:18:36.748632Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T16:25:17.8626966Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T16:38:51.0604729Z",
+      "status": "Healthy"
+    }
+  ],
+  "ui/Deployments-58714": [
+    {
+      "at": "2026-11-19T23:36:42.8896286Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T23:41:44.4875473Z",
+      "status": "Healthy"
+    }
+  ],
+  "ui/Deployments-58833": [
+    {
+      "at": "2026-11-21T03:29:28.3745589Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T03:38:33.0038153Z",
+      "status": "Healthy"
+    }
+  ],
+  "ui/Deployments-58689": [
+    {
+      "at": "2026-11-19T23:09:40.6915025Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-19T23:14:42.1810753Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58742": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T02:16:17.578575Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T02:21:17.7637662Z"
+    }
+  ],
+  "ui/Deployments-58677": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T20:24:06.2513972Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T20:44:25.8421569Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T20:54:46.5447694Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T21:10:19.6194354Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T21:22:38.5676918Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T21:38:29.3556554Z"
+    }
+  ],
+  "dashboard/Deployments-58610": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T11:54:41.0741097Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T12:16:34.1625028Z"
+    }
+  ],
+  "dashboard/Deployments-58750": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T04:54:33.40461Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T05:12:12.4682318Z"
+    }
+  ],
+  "dashboard/Deployments-58709": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T22:51:18.4986871Z"
+    }
+  ],
+  "dashboard/Deployments-58686": [
+    {
+      "at": "2026-11-19T21:11:11.5875653Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58748": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T04:30:22.2778267Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T04:38:14.5576676Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T04:44:44.9552512Z"
+    }
+  ],
+  "dashboard/Deployments-58730": [
+    {
+      "at": "2026-11-20T00:47:29.2905316Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T00:52:29.3900624Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58829": [
+    {
+      "at": "2026-11-21T02:44:35.4777916Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T02:55:12.6341476Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58640": [
+    {
+      "at": "2026-11-19T16:12:53.9027417Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58735": [
+    {
+      "at": "2026-11-20T01:45:01.0247563Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T01:50:01.1415624Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58665": [
+    {
+      "at": "2026-11-19T19:24:59.5320252Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58825": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T02:27:36.2765432Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T02:32:36.392392Z"
+    }
+  ],
+  "dashboard/Deployments-58786": [
+    {
+      "at": "2026-11-20T14:44:55.1270608Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T14:54:48.4469016Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58660": [
+    {
+      "at": "2026-11-19T18:55:04.4784866Z",
+      "status": "Healthy"
+    }
+  ],
+  "ui/Deployments-58856": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T10:54:28.5315222Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T11:09:30.7282500Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T11:15:57.5762507Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T11:24:26.8110558Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T11:35:55.3689197Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T11:44:47.8232505Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-21T11:54:49.8353996Z"
+    }
+  ],
+  "dashboard/Deployments-58774": [
+    {
+      "at": "2026-11-20T07:54:59.2931303Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-20T07:59:59.3828332Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58838": [
+    {
+      "at": "2026-11-21T04:45:06.6469522Z",
+      "status": "Healthy"
+    },
+    {
+      "at": "2026-11-21T04:50:06.830711Z",
+      "status": "Healthy"
+    }
+  ],
+  "dashboard/Deployments-58662": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T19:09:22.1299122Z"
+    }
+  ],
+  "dashboard/Deployments-58651": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-19T17:54:38.7595311Z"
+    }
+  ],
+  "dashboard/Deployments-58765": [
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T07:12:47.3423716Z"
+    },
+    {
+      "status": "Healthy",
+      "at": "2026-11-20T07:17:47.5270273Z"
+    }
+  ]
+}
