@@ -185,7 +185,8 @@ def protected_files(files):
 
 def merge_base(sh, wt, default):
     """Merge base of HEAD and origin/<default>: the commit the branch forked from, which is what the PR diff shows.
-    Falls back to origin/<default> when git cannot resolve it, so the protected-file gate never widens."""
+    When git cannot resolve it, falls back to the old origin/<default> comparison, so the gate is never made more
+    permissive than it was (a branch behind main may still show a false protected file, never a missed one)."""
     r = sh(["git", "merge-base", "HEAD", f"origin/{default}"], cwd=wt, check=False)
     base = (r.stdout or "").strip()
     return f"origin/{default}" if r.returncode or not base else base
@@ -766,29 +767,43 @@ class Driver:
         """Merge base of HEAD and origin/<default>, or origin/<default> when git cannot resolve it."""
         return merge_base(self.sh, self.s["wt"], self.s["default"])
 
+    def enhancement_blocker(self):
+        """Blocker text when the enhancement's own staged changes touch credentials, secrets or production setup, else
+        None. The index is compared with merge_base(), so commits main made after the branch forked off never block."""
+        self.sh(["git", "add", "-A"], cwd=self.s["wt"])
+        bad = protected_files(staged_files(self.sh, self.s["wt"], self.s["default"]))
+        return (f"the change touches credentials, secrets or production setup ({', '.join(bad)}); "
+                "an enhancement PR may not.") if bad else None
+
+    def find_open_pr(self):
+        """Number of the PR already open for this branch, or None (gh prints a plain message, not a number, when there
+        is none)."""
+        p = self.s["plan"]
+        r = self.gh("pr", "list", "-R", self.full, "--head", p["branch"], "--state", "open", "--json", "number", "-q", ".[0].number", check=False)
+        return pr_number(r.stdout)
+
+    def create_pr(self, head):
+        """Open the PR (research section in the body), move the board to Review and say so on the issue."""
+        p = self.s["plan"]
+        body = os.path.join(self.run_dir, "logs", "pr-body.md")
+        open(body, "w").write(scrub(with_research(f"Closes #{self.issue}\n\n{p.get('pr_summary', '')}\n\nCode by Pi on the {self.gpu_label()}; "
+                                    f"planned, verified and merged by the factory bot's Pi driver (run `{self.s['run_id']}`).\n\n{DRIVER_MARK}\n",
+                                    self.research_text())))
+        r = self.gh("pr", "create", "-R", self.full, "--head", p["branch"], "--base", self.s["default"],
+                    "--title", p["pr_title"], "--body-file", body, write=True)
+        self.save(pr=int(r.stdout.strip().rstrip("/").split("/")[-1]))
+        self.move("Review")
+        self.comment(f"In Progress → Review\n\nPR #{self.s['pr']} (head `{head[:8]}`). Required checks: running "
+                     f"(local verification green, {self.s.get('verify_runs', 0)} runs). Change: {p.get('pr_summary', p['pr_title'])}\n\n{self.usage()}")
+
     def st_pr(self):
         p = self.s["plan"]
         if p.get("kind") == "enhancement":
-            self.sh(["git", "add", "-A"], cwd=self.s["wt"])
-            bad = protected_files(staged_files(self.sh, self.s["wt"], self.s["default"]))
-            if bad: return self.blocker(f"the change touches credentials, secrets or production setup ({', '.join(bad)}); "
-                                        "an enhancement PR may not.")
+            if (why := self.enhancement_blocker()): return self.blocker(why)
         head = self.commit_push(p["pr_title"])
         if not self.s.get("pr"):
-            r = self.gh("pr", "list", "-R", self.full, "--head", p["branch"], "--state", "open", "--json", "number", "-q", ".[0].number", check=False)
-            n = pr_number(r.stdout)
-            if n is not None: self.save(pr=n)
-        if not self.s.get("pr"):
-            body = os.path.join(self.run_dir, "logs", "pr-body.md")
-            open(body, "w").write(scrub(with_research(f"Closes #{self.issue}\n\n{p.get('pr_summary', '')}\n\nCode by Pi on the {self.gpu_label()}; "
-                                        f"planned, verified and merged by the factory bot's Pi driver (run `{self.s['run_id']}`).\n\n{DRIVER_MARK}\n",
-                                        self.research_text())))
-            r = self.gh("pr", "create", "-R", self.full, "--head", p["branch"], "--base", self.s["default"],
-                        "--title", p["pr_title"], "--body-file", body, write=True)
-            self.save(pr=int(r.stdout.strip().rstrip("/").split("/")[-1]))
-            self.move("Review")
-            self.comment(f"In Progress → Review\n\nPR #{self.s['pr']} (head `{head[:8]}`). Required checks: running "
-                         f"(local verification green, {self.s.get('verify_runs', 0)} runs). Change: {p.get('pr_summary', p['pr_title'])}\n\n{self.usage()}")
+            if (n := self.find_open_pr()) is not None: self.save(pr=n)
+        if not self.s.get("pr"): self.create_pr(head)
         self.save(stage="ci")
 
     def st_ci(self):
@@ -923,7 +938,7 @@ class Driver:
         if not rv and not self.dry:
             self.blocker(f"no second GPU is up for the independent review of code written on the {self.gpu_label()}."); return None
         rv = rv or self.gpu(); self.save(reviewer_gpu=rv)
-        diff = self.sh(["git", "diff", f"origin/{self.s['default']}...HEAD"], cwd=self.s["wt"], check=False).stdout
+        diff = self.sh(["git", "diff", f"{self.merge_base()}...HEAD"], cwd=self.s["wt"], check=False).stdout
         limit = 60000 if rv == G.LARGE_GPU else 24000
         out = os.path.join(self.run_dir, "independent-review.md")
         if os.path.exists(out): os.remove(out)

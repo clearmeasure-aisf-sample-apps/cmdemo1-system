@@ -13,16 +13,20 @@ class Clock:  # fake time module: one sleep() jumps past GPU_WAIT_H so st_gpu's 
     def time(self): return self.t
     def sleep(self, s): self.t += L.GPU_WAIT_H * 3600 + 1
 
-def scripted_sh(d, replies):
-    """d.sh replacement for git/gh steps: the first substring of `replies` (e.g. 'merge-base', 'diff', 'rev-parse',
-    'create') found in the command decides its stdout; every command is recorded in the callable's .calls list."""
+def scripted_sh(replies):
+    """sh replacement for git/gh steps: a reply key is a command word or a run of consecutive words ('merge-base',
+    'diff --cached', 'rev-parse', 'create') matched against the argv only, never against a commit message or a
+    branch name. The first matching key answers; its value is the stdout, or a (returncode, stdout) pair when the
+    command must fail. Every command is recorded in the callable's .calls list."""
     calls = []
     def sh(cmd, **k):
         calls.append(list(cmd))
-        line = " ".join(cmd)
-        for pattern, stdout in replies.items():
-            if pattern in line:
-                return L.subprocess.CompletedProcess(cmd, 0, stdout, "")
+        argv = cmd.split() if isinstance(cmd, str) else [str(x) for x in cmd]
+        for key, reply in replies.items():
+            words = key.split()
+            if any(argv[i:i + len(words)] == words for i in range(len(argv) - len(words) + 1)):
+                rc, stdout = reply if isinstance(reply, tuple) else (0, reply)
+                return L.subprocess.CompletedProcess(cmd, rc, stdout, "")
         return L.subprocess.CompletedProcess(cmd, 0, "", "")
     sh.calls = calls
     return sh
@@ -530,7 +534,7 @@ class GhRateLimit(unittest.TestCase):
                 d.s["default"] = "main"
                 d.s["gpu"] = "obs"
                 d.s["run_id"] = "run30"
-                d.sh = scripted_sh(d, {
+                d.sh = scripted_sh({
                     "list": "no open PR for that head",   # gh pr list printed a non-numeric, non-rate-limit message
                     "create": "https://github.com/x/cmdemo1-workorders/pull/42",
                     "graphql": "{\"data\": null}",
@@ -545,53 +549,6 @@ class GhRateLimit(unittest.TestCase):
                 L.HOME = old_home
         self.assertTrue(any("list" in c for c in calls))
         self.assertTrue(any("create" in c for c in calls))
-
-    def test_st_pr_protected_file_gate_diffs_against_the_merge_base(self):
-        """The enhancement gate compares the index with merge-base(HEAD, origin/<default>), not main's tip."""
-        def driver(h, issue, base_out, base_rc=0, staged="src/A.cs\n"):
-            d = L.Driver("cmdemo1-workorders", issue, dry_run=True)
-            d.s["plan"] = dict(PLAN, kind="enhancement")
-            d.s["wt"] = tempfile.mkdtemp(dir=h)
-            d.s["default"] = "main"; d.s["gpu"] = "obs"; d.s["run_id"] = f"run{issue}"
-            calls = []
-            def fake_sh(cmd, **k):
-                calls.append(list(cmd))
-                if cmd[:2] == ["git", "merge-base"]:
-                    return L.subprocess.CompletedProcess(cmd, base_rc, base_out, "")
-                if cmd[:3] == ["git", "diff", "--cached"] and "--name-only" in cmd:
-                    return L.subprocess.CompletedProcess(cmd, 0, staged, "")
-                if cmd[0] == "gh" and "create" in cmd:
-                    return L.subprocess.CompletedProcess(cmd, 0, "https://github.com/x/cmdemo1-workorders/pull/43", "")
-                return L.subprocess.CompletedProcess(cmd, 0, "", "")
-            d.sh = fake_sh
-            d.usage = lambda final=False: "usage"
-            return d, calls
-        with tempfile.TemporaryDirectory() as h:
-            old_home = L.HOME
-            L.HOME = h
-            try:
-                d, calls = driver(h, 31, "0f5e8d2c1a4b6973\n")
-                d.st_pr()
-                diffs = [c for c in calls if c[:3] == ["git", "diff", "--cached"] and "--name-only" in c]
-                self.assertEqual([c[-1] for c in diffs], ["0f5e8d2c1a4b6973"])   # the merge base, never origin/main
-                self.assertNotIn("origin/main", diffs[0])
-                self.assertLess(calls.index(["git", "add", "-A"]), calls.index(diffs[0]))   # the add still comes first
-                self.assertEqual(d.s["stage"], "ci")                                # clean files: on to the PR
-
-                d2, calls2 = driver(h, 32, "0f5e8d2c1a4b6973\n", staged="infra/main.bicep\n")
-                d2.st_pr()
-                self.assertEqual(d2.s["stage"], "blocked")                           # the gate still bites
-                self.assertIn("credentials, secrets or production setup", d2.s["blocker"])
-                self.assertEqual([c[-1] for c in calls2 if c[:3] == ["git", "diff", "--cached"] and "--name-only" in c],
-                                 ["0f5e8d2c1a4b6973"])
-
-                # an unresolvable merge base falls back to origin/<default>: the gate never widens
-                d3, _ = driver(h, 33, "", base_rc=128)
-                self.assertEqual(d3.merge_base(), "origin/main")
-                d4, _ = driver(h, 34, "   \n")
-                self.assertEqual(d4.merge_base(), "origin/main")
-            finally:
-                L.HOME = old_home
 
 class RefactoringResearch(unittest.TestCase):
     GOOD = ("## Refactoring research\n\n- `src/A.cs` `Save()`: 80-line method with duplicated validation; extract a "
@@ -632,10 +589,11 @@ class RefactoringResearch(unittest.TestCase):
             finally: L.HOME = old
 
 class StagedFilesGate(unittest.TestCase):
-    """Red tests for item_loop.staged_files(sh, wt, default): the files staged in the worktree's index relative to
-    the merge base of HEAD and origin/<default>, with protected_files() applied to the result. Built on a real
-    temporary git repo: a bare origin remote, a main branch, and a worktree branched from an older main commit
-    after main has advanced with a commit touching environments/prod/versions.json."""
+    """The protected-file gate: item_loop.staged_files(sh, wt, default) (the files staged in the worktree's index
+    relative to the merge base of HEAD and origin/<default>, with protected_files() applied to the result) and the
+    `st_pr` enhancement gate that reads it. The staged_files tests run on a real temporary git repo: a bare origin
+    remote, a main branch, and a worktree branched from an older main commit after main has advanced with a commit
+    touching environments/prod/versions.json."""
 
     def build_repo(self, tmp):
         env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
@@ -694,6 +652,47 @@ class StagedFilesGate(unittest.TestCase):
             staged = L.staged_files(sh, wt, "main")
             self.assertIn("environments/prod/versions.json", staged)
             self.assertNotEqual(L.protected_files(staged), [])
+
+    def st_pr_driver(self, h, issue, base_reply, staged="src/A.cs\n"):
+        """Dry-run enhancement Driver whose sh is the shared scripted fixture: `base_reply` is git merge-base's
+        (returncode, stdout), `staged` the paths its index holds relative to that base."""
+        d = L.Driver("cmdemo1-workorders", issue, dry_run=True)
+        d.s["plan"] = dict(PLAN, kind="enhancement")
+        d.s["wt"] = tempfile.mkdtemp(dir=h)
+        d.s["default"] = "main"; d.s["gpu"] = "obs"; d.s["run_id"] = f"run{issue}"
+        d.sh = scripted_sh({"merge-base": base_reply, "--name-only": staged,
+                            "create": "https://github.com/x/cmdemo1-workorders/pull/43"})
+        d.usage = lambda final=False: "usage"
+        return d
+
+    def name_only_diffs(self, d):
+        return [c for c in d.sh.calls if c[:3] == ["git", "diff", "--cached"] and "--name-only" in c]
+
+    def test_st_pr_protected_file_gate_diffs_against_the_merge_base(self):
+        """The enhancement gate compares the index with merge-base(HEAD, origin/<default>), not main's tip."""
+        with tempfile.TemporaryDirectory() as h:
+            old_home = L.HOME
+            L.HOME = h
+            try:
+                d = self.st_pr_driver(h, 31, (0, "0f5e8d2c1a4b6973\n"))
+                d.st_pr()
+                diffs = self.name_only_diffs(d)
+                self.assertEqual([c[-1] for c in diffs], ["0f5e8d2c1a4b6973"])   # the merge base, never origin/main
+                self.assertNotIn("origin/main", diffs[0])
+                self.assertLess(d.sh.calls.index(["git", "add", "-A"]), d.sh.calls.index(diffs[0]))   # the add still comes first
+                self.assertEqual(d.s["stage"], "ci")                                # clean files: on to the PR
+
+                d2 = self.st_pr_driver(h, 32, (0, "0f5e8d2c1a4b6973\n"), staged="infra/main.bicep\n")
+                d2.st_pr()
+                self.assertEqual(d2.s["stage"], "blocked")                           # the gate still bites
+                self.assertIn("credentials, secrets or production setup", d2.s["blocker"])
+                self.assertEqual([c[-1] for c in self.name_only_diffs(d2)], ["0f5e8d2c1a4b6973"])
+
+                # an unresolvable merge base falls back to origin/<default>: the gate never widens
+                self.assertEqual(self.st_pr_driver(h, 33, (128, "")).merge_base(), "origin/main")
+                self.assertEqual(self.st_pr_driver(h, 34, (0, "   \n")).merge_base(), "origin/main")
+            finally:
+                L.HOME = old_home
 
 class RunTaskTimeout(unittest.TestCase):   # cmdemo1-system#817: --timeout must die with Pi's whole process group
     """run-task ran Pi with subprocess.run(stdout=PIPE, timeout=...) and killed only the direct child. Pi's own tool
