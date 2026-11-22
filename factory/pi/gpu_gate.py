@@ -39,8 +39,19 @@ def caps(env=None):
 def slot_path(g, i): return os.path.join(lock_dir(), f"factory-pi-{g}-slot-{i}.lock")
 
 def slot_dirs():
-    """Where slots of this gate live: the slot dir, plus legacy /tmp (drivers still on old code) unless overridden."""
-    return [lock_dir()] + ([] if os.environ.get("FACTORY_PI_LOCK_DIR") else ["/tmp"])
+    """Where slots live: the slot dir plus the legacy dir (/tmp: drivers still on old code; $FACTORY_PI_LEGACY_LOCK_DIR)."""
+    legacy = os.environ.get("FACTORY_PI_LEGACY_LOCK_DIR", "" if os.environ.get("FACTORY_PI_LOCK_DIR") else "/tmp")
+    return [lock_dir()] + ([os.path.realpath(legacy)] if legacy else [])
+
+def ancestors(pid=None):
+    """This process and its parents. A legacy run-task parent's /tmp slot is this launch's own slot, not another task's
+    (else the new pi-gpu under an old run-task would wait on its own parent forever)."""
+    out, pid = set(), pid or os.getpid()
+    while pid > 1 and pid not in out:
+        out.add(pid)
+        try: pid = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError): break
+    return out
 
 def holders(g, proc="/proc"):
     """Distinct slot files of GPU g open in any live process: (dev, inode) -> pids; deleted files included."""
@@ -65,7 +76,8 @@ def try_acquire(g):
     cap = caps()[g]
     with open(os.path.join(lock_dir(), "gate.lock"), "a") as mutex:
         fcntl.flock(mutex, fcntl.LOCK_EX)
-        if len(holders(g)) >= cap: return None
+        mine = ancestors()
+        if sum(1 for pids in holders(g).values() if not pids <= mine) >= cap: return None
         for i in range(cap):
             fd = os.open(slot_path(g, i), os.O_RDWR | os.O_CREAT, 0o644)
             try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

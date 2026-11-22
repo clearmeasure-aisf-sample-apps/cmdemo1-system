@@ -754,6 +754,19 @@ class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, o
         self.assertEqual(third.returncode, 75, "a deleted slot file must still count as held")
         self.assertEqual(self.held("pro5000"), 2)
 
+    def test_legacy_slots_count_but_not_the_launchers_own_parent(self):
+        legacy = os.path.join(self.tmp, "legacy"); os.makedirs(legacy); self.env["FACTORY_PI_LEGACY_LOCK_DIR"] = legacy
+        hold_legacy = ("import fcntl,os,subprocess,sys; f=open(os.path.join(sys.argv[1],'factory-pi-obs-slot-0.lock'),'w');"
+                       "fcntl.flock(f,fcntl.LOCK_EX); sys.exit(subprocess.call(sys.argv[2:]))")
+        other = subprocess.Popen([sys.executable, "-c", hold_legacy, legacy, "sleep", "30"], env=self.env)
+        self.procs.append(other); self.assertTrue(self.wait_held("obs", 1))      # an old run-task elsewhere: counted
+        blocked = self.hold("obs", "--no-wait"); blocked.wait(timeout=10); self.assertEqual(blocked.returncode, 75)
+        other.kill(); other.wait(); self.assertTrue(self.wait_held("obs", 0))
+        # an old run-task whose new pi-gpu launches Pi: its own legacy slot must not block it
+        own = subprocess.run([sys.executable, "-c", hold_legacy, legacy, sys.executable, self.GATE, "hold", "obs",
+                              "--no-wait", "--", "true"], env=self.env, timeout=20)
+        self.assertEqual(own.returncode, 0, "the launcher's own parent slot must not count against it")
+
     def test_every_pi_launch_path_goes_through_the_gate(self):
         src = lambda n: open(os.path.join(self.HERE, n)).read()
         self.assertIn('gpu_gate.py" hold "$gpu" -- pi ', src("pi-gpu"))          # manual runs, the watchdog, run-task
