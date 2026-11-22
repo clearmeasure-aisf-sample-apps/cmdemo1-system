@@ -94,6 +94,30 @@ def scrub(s):
     return s
 
 # ---------------------------------------------------------------- pure helpers (unit-tested)
+
+# ---- GitHub App token for gh (own API quota). Opt-in: set GH_APP_TOKEN_CMD to a command that prints an installation token.
+GH_APP_TOKEN_TTL_S = 50 * 60   # installation tokens last 1h; refresh before that
+_APP_DENIED_RE = re.compile(r"HTTP 40[13]\b|Resource not accessible|Forbidden|Bad credentials|not permitted|must have admin|"
+                            r"protected branch|required status check|API rate limit", re.I)
+_app_tok = {"v": None, "at": 0.0}
+
+def app_denied(output):
+    """True when gh's output says the App token was refused (401/403, missing permission, branch rule, App rate limit)."""
+    return bool(_APP_DENIED_RE.search("\n".join((output or "").splitlines()[-8:])))
+
+def app_token(env=None, clock=time.time, runner=subprocess.run):
+    """Cached App installation token from $GH_APP_TOKEN_CMD, or None when unset / the command fails (callers then use the user login).
+    Never logged: scrub() redacts it and it is only passed to gh through GH_TOKEN."""
+    env = os.environ if env is None else env
+    cmd = env.get("GH_APP_TOKEN_CMD")
+    if not cmd: return None
+    if _app_tok["v"] and clock() - _app_tok["at"] < GH_APP_TOKEN_TTL_S: return _app_tok["v"]
+    try:
+        r = runner(cmd, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+        tok = (r.stdout or "").strip() if r.returncode == 0 else ""
+    except Exception: tok = ""
+    _app_tok.update(v=tok or None, at=clock())
+    return tok or None
 # gh's own error line for a GitHub rate-limit reply, e.g. "GraphQL: API rate limit already exceeded for user ID 1.",
 # "HTTP 403: API rate limit exceeded for ...", "HTTP 403: You have exceeded a secondary rate limit ...". Anchored at a
 # line start and only looked for in the last lines gh printed, so a log dump that merely mentions a rate limit is not one.
@@ -400,8 +424,17 @@ class Driver:
         is_gh = (isinstance(cmd, list) and cmd and cmd[0] == "gh") or (isinstance(cmd, str) and cmd.startswith("gh "))
         attempt = waited = 0
         while True:
-            r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            r = None
+            tok = app_token() if is_gh else None
+            if tok:   # App quota first; any refusal (403 / permission / branch rule) re-runs the same call on the user login
+                r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout, env={**os.environ, "GH_TOKEN": tok},
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                if r.returncode and app_denied(r.stdout):
+                    if re.search(r"HTTP 401|Bad credentials", r.stdout): _app_tok.update(v=None, at=0.0)   # expired: re-mint next call
+                    self.log("gh: App token refused; retrying this call with the user login"); r = None
+            if r is None:
+                r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if not (is_gh and r.returncode and is_rate_limit(r.stdout)):
                 break
             wait = gh_retry_wait(attempt, waited)

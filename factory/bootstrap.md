@@ -11,6 +11,7 @@ review is PASS and required checks are green; he does not wait for a human yes i
 |---|---|---|
 | `CM_AI_OPS_BOT_GH_TOKEN` | GitHub token of user `cm-ai-ops-bot`: repo contents, pull requests, issues, Actions read on the `cmdemo1-*` repositories | Jeffrey creates it as `cm-ai-ops-bot` |
 | `GH_PROJECT_TOKEN` | Token that can edit organization project 679 (fallback when the first cannot) | Jeffrey |
+| `GH_APP_TOKEN_CMD` (optional) | Command that prints a GitHub App installation token; `item_loop.py` then runs `gh` with it (own API quota) and re-runs any call the App is refused (401/403, permission, branch rule) on the user login | Jeffrey, if the App key is on this box |
 | Azure service principal `cm-ai-ops-bot` (client id, tenant id, client secret) | Contributor on `rg-cmdemo1-nonprod` and `rg-cmdemo1-prod`; the bot uses it read-only (health, logs) | Entra ID app registration `cm-ai-ops-bot` |
 | `LOCAL_LLM_PRO5000_URL` | OpenAI-compatible base URL (ending in `/v1`) of the llm-proxy to the RTX PRO 5000 (named Cloudflare tunnel) | Jeffrey |
 | `LOCAL_LLM_PRO5000_TOKEN` | Bearer token of that proxy | Jeffrey |
