@@ -1110,9 +1110,9 @@ class GhAppToken(unittest.TestCase):   # gh reads/writes use the GitHub App toke
 
     def test_app_denied_matches_refusals_only(self):
         for out in ("gh: Resource not accessible by integration (HTTP 403)", "HTTP 401: Bad credentials",
-                    "GraphQL: Resource not accessible by integration", "Pull request is not mergeable: required status check"):
+                    "GraphQL: Resource not accessible by integration"):
             self.assertTrue(L.app_denied(out), out)
-        for out in ("", "HTTP 404: Not Found", "no pull requests match"): self.assertFalse(L.app_denied(out), out)
+        for out in ("", "HTTP 404: Not Found", "no pull requests match", "Pull request is not mergeable: required status check"): self.assertFalse(L.app_denied(out), out)
 
     def run_gh(self, replies):
         """d.gh() with subprocess.run returning `replies` in order; returns (result, [GH_TOKEN seen per call], driver logs)."""
@@ -1155,7 +1155,31 @@ class GhAppToken(unittest.TestCase):   # gh reads/writes use the GitHub App toke
     def test_401_drops_cached_token(self):
         os.environ["GH_APP_TOKEN_CMD"] = f"printf {self.FAKE}"
         self.run_gh([(1, "HTTP 401: Bad credentials"), (0, "[]")])
-        self.assertIsNone(L._app_tok["v"] if L._app_tok["at"] == 0.0 else None)
+        self.assertEqual(L._app_tok, {"v": None, "at": 0.0})
+
+    def test_pr_and_issue_create_stay_on_user_login(self):
+        os.environ["GH_APP_TOKEN_CMD"] = f"printf {self.FAKE}"
+        for args in (("pr", "create", "--title", "t"), ("issue", "create", "--title", "t")):
+            with tempfile.TemporaryDirectory() as h:
+                old_home, old_run = L.HOME, L.subprocess.run; L.HOME = h; seen = []
+                L.subprocess.run = lambda *a, **k: (seen.append(k.get("env")), L.subprocess.CompletedProcess(a, 0, "", ""))[1]
+                try: L.Driver("cmdemo1-workorders", 8).gh(*args)
+                finally: L.subprocess.run, L.HOME = old_run, old_home
+            self.assertEqual(seen, [None], args)
+
+    def test_failed_mint_is_not_retried_every_call(self):
+        calls, t = [], [5000.0]
+        def runner(cmd, **k): calls.append(1); return L.subprocess.CompletedProcess(cmd, 1, "", "")
+        env = {"GH_APP_TOKEN_CMD": "mint"}
+        for _ in range(3): L.app_token(env, clock=lambda: t[0], runner=runner)
+        self.assertEqual(len(calls), 1)
+        t[0] += L.GH_APP_MINT_RETRY_S + 1
+        L.app_token(env, clock=lambda: t[0], runner=runner)
+        self.assertEqual(len(calls), 2)
+
+    def test_scrub_redacts_cached_app_token_value(self):
+        L._app_tok.update(v="opaque-token-value", at=1.0)
+        self.assertNotIn("opaque-token-value", L.scrub("x opaque-token-value y"))
 
 
 if __name__ == "__main__": unittest.main()

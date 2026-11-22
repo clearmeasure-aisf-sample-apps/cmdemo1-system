@@ -88,6 +88,7 @@ def iso(t=None): return (t or now()).isoformat(timespec="seconds")
 
 def scrub(s):
     s = SECRET_RE.sub("[redacted]", s or "")
+    if _app_tok["v"] and len(_app_tok["v"]) > 6: s = s.replace(_app_tok["v"], "[redacted]")
     for name in (*G.secret_env_names(), "GH_TOKEN", "GITHUB_TOKEN", "CM_AI_OPS_BOT_GH_TOKEN", "GH_PROJECT_TOKEN"):
         v = os.environ.get(name)
         if v and len(v) > 6: s = s.replace(v, "[redacted]")
@@ -97,8 +98,9 @@ def scrub(s):
 
 # ---- GitHub App token for gh (own API quota). Opt-in: set GH_APP_TOKEN_CMD to a command that prints an installation token.
 GH_APP_TOKEN_TTL_S = 50 * 60   # installation tokens last 1h; refresh before that
-_APP_DENIED_RE = re.compile(r"HTTP 40[13]\b|Resource not accessible|Forbidden|Bad credentials|not permitted|must have admin|"
-                            r"protected branch|required status check|API rate limit", re.I)
+_APP_DENIED_RE = re.compile(r"HTTP 40[13]\b|Resource not accessible|Forbidden|Bad credentials|API rate limit", re.I)   # clear authorization refusals only
+GH_APP_USER_ONLY = {("pr", "create"), ("issue", "create")}   # authored objects stay the bot user's: the merge gate requires PR author == BOT
+GH_APP_MINT_RETRY_S = 5 * 60   # a failed mint is not retried on every gh call
 _app_tok = {"v": None, "at": 0.0}
 
 def app_denied(output):
@@ -107,11 +109,13 @@ def app_denied(output):
 
 def app_token(env=None, clock=time.time, runner=subprocess.run):
     """Cached App installation token from $GH_APP_TOKEN_CMD, or None when unset / the command fails (callers then use the user login).
-    Never logged: scrub() redacts it and it is only passed to gh through GH_TOKEN."""
+    Never logged: scrub() redacts it (ghs_ pattern and its exact value) and it is only passed to gh through GH_TOKEN."""
     env = os.environ if env is None else env
     cmd = env.get("GH_APP_TOKEN_CMD")
     if not cmd: return None
-    if _app_tok["v"] and clock() - _app_tok["at"] < GH_APP_TOKEN_TTL_S: return _app_tok["v"]
+    age = clock() - _app_tok["at"]
+    if _app_tok["v"] and age < GH_APP_TOKEN_TTL_S: return _app_tok["v"]
+    if not _app_tok["v"] and _app_tok["at"] and age < GH_APP_MINT_RETRY_S: return None   # recent failed mint: negative cache
     try:
         r = runner(cmd, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
         tok = (r.stdout or "").strip() if r.returncode == 0 else ""
@@ -425,12 +429,12 @@ class Driver:
         attempt = waited = 0
         while True:
             r = None
-            tok = app_token() if is_gh else None
+            tok = app_token() if is_gh and not (isinstance(cmd, list) and tuple(cmd[1:3]) in GH_APP_USER_ONLY) else None
             if tok:   # App quota first; any refusal (403 / permission / branch rule) re-runs the same call on the user login
                 r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout, env={**os.environ, "GH_TOKEN": tok},
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 if r.returncode and app_denied(r.stdout):
-                    if re.search(r"HTTP 401|Bad credentials", r.stdout): _app_tok.update(v=None, at=0.0)   # expired: re-mint next call
+                    if re.search(r"HTTP 401|Bad credentials", r.stdout): _app_tok.update(v=None, at=0.0)   # expired: re-mint next call (at=0: no negative cache)
                     self.log("gh: App token refused; retrying this call with the user login"); r = None
             if r is None:
                 r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
