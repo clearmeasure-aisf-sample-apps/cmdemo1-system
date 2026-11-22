@@ -99,8 +99,10 @@ def reviewer_gpu(author, up):
     return next((g for g in GPUS if g in up and g != author), None)
 
 def reviewer_gpus(author, up):
-    """Every healthy GPU but the author's, strongest first: the review takes whichever has a free slot first."""
-    return [g for g in GPUS if g in up and g != author]
+    """Every healthy GPU but the author's, strongest first: the review takes whichever has a free slot first. author is
+    one GPU or a list (every GPU that wrote code for the item, relaunches included): none of them may review."""
+    authors = {author} if isinstance(author, str) else set(author or ())
+    return [g for g in GPUS if g in up and g not in authors]
 
 def main():
     a = sys.argv[1:]

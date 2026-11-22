@@ -115,9 +115,10 @@ def acquire(g, wait=True, log=sys.stderr):
             print(f"gpu_gate: waiting for a {g} slot ({tasks(holders(g))}/{caps()[g]} held, {int(last - t0)} s)", file=log, flush=True)
         time.sleep(POLL_S)
 
-def acquire_any(gs, wait=True, log=sys.stderr):
+def acquire_any(gs, wait=True, log=sys.stderr, max_wait=None):
     """(gpu, fd) for the first of gs with a free slot (in the given order), or (None, None) with wait=False. A review may
-    run on any non-author GPU, so it never waits on one specific GPU while another is free (Jeffrey, t81u / t83u)."""
+    run on any non-author GPU, so it never waits on one specific GPU while another is free (Jeffrey, t81u / t83u).
+    max_wait (s): give up with (None, None) after that long (a hand-off that cannot start is relaunched, t85u)."""
     gs = [g for g in gs if g in G.GPUS]
     if not gs: raise ValueError("no known GPU to acquire")
     t0 = last = time.monotonic()
@@ -125,7 +126,7 @@ def acquire_any(gs, wait=True, log=sys.stderr):
         for g in gs:
             fd = try_acquire(g)
             if fd is not None: return g, fd
-        if not wait: return None, None
+        if not wait or (max_wait is not None and time.monotonic() - t0 >= max_wait): return None, None
         if time.monotonic() - last >= HEARTBEAT_S:
             last = time.monotonic()
             print(f"gpu_gate: waiting for a slot on any of {','.join(gs)} ({int(last - t0)} s)", file=log, flush=True)
