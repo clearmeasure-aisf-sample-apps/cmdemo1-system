@@ -766,6 +766,13 @@ class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, o
         own = subprocess.run([sys.executable, "-c", hold_legacy, legacy, sys.executable, self.GATE, "hold", "obs",
                               "--no-wait", "--", "true"], env=self.env, timeout=20)
         self.assertEqual(own.returncode, 0, "the launcher's own parent slot must not count against it")
+        self.hold("pro5000"); self.assertTrue(self.wait_held("pro5000", 1))   # new slot + legacy twin: one task
+        self.hold("pro5000", "--no-wait"); self.assertTrue(self.wait_held("pro5000", 2))
+        mine = self.hold("obs"); self.assertTrue(self.wait_held("obs", 1))        # new slot + its legacy twin
+        f = open(os.path.join(legacy, "factory-pi-obs-slot-0.lock"), "w")         # what an old run-task tries
+        with self.assertRaises(BlockingIOError, msg="old run-tasks must see the gate's slot as taken"):
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        f.close()
 
     def test_every_pi_launch_path_goes_through_the_gate(self):
         src = lambda n: open(os.path.join(self.HERE, n)).read()

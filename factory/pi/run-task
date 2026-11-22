@@ -45,7 +45,7 @@ def run_pi(cmd, cwd, timeout, slot_fd=None, env=None):
     reporting rc 124 with whatever output was collected before the pipe had to be closed."""
     p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True,
-                         pass_fds=(slot_fd,) if slot_fd is not None else (), env=env)
+                         pass_fds=gpu_gate.slot_fds(slot_fd) if slot_fd is not None else (), env=env)
     def kill(sig):
         try: os.killpg(p.pid, sig)
         except ProcessLookupError: pass
@@ -92,7 +92,7 @@ def main():
         rc, text = run_pi([pi_gpu, a.gpu, "--session-dir", sdir, "--no-context-files", "--no-skills", "--no-mcp",
                            "--approve", "-p", prompt], a.cwd, max(a.timeout, G.MIN_CLIENT_TIMEOUT_S), slot, env)
     finally:
-        t1 = now(); os.close(slot)
+        t1 = now(); gpu_gate.release(slot)
     text = scrub(text)
     open(os.path.join(run, "logs", f"{task}.out"), "w").write(text)
     files = sorted(glob.glob(os.path.join(sdir, "**", "*.jsonl"), recursive=True), key=os.path.getmtime)

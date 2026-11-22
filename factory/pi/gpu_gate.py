@@ -70,20 +70,40 @@ def holders(g, proc="/proc"):
             found.setdefault((st.st_dev, st.st_ino), set()).add(int(pid))
     return found
 
+def tasks(h, mine=frozenset()):
+    """Live tasks among holders h: a slot and its legacy twin are held by the same processes, so they count once."""
+    return len({frozenset(p) for p in h.values() if not p <= mine})
+
 def try_acquire(g):
     """An inheritable fd holding one of g's slots, or None when g already has cap live holders."""
     if g not in G.GPUS: raise ValueError(f"unknown GPU {g}")
     cap = caps()[g]
     with open(os.path.join(lock_dir(), "gate.lock"), "a") as mutex:
         fcntl.flock(mutex, fcntl.LOCK_EX)
-        mine = ancestors()
-        if sum(1 for pids in holders(g).values() if not pids <= mine) >= cap: return None
-        for i in range(cap):
-            fd = os.open(slot_path(g, i), os.O_RDWR | os.O_CREAT, 0o644)
-            try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError: os.close(fd); continue
-            os.set_inheritable(fd, True); return fd
-    return None
+        mine, h = ancestors(), holders(g)
+        if tasks(h, mine) >= cap: return None
+        fd = next((x for x in (_lock(slot_path(g, i)) for i in range(cap)) if x is not None), None)
+        legacy = slot_dirs()[1:]
+        if fd is None or not legacy or any(pids <= mine for pids in h.values()): return fd
+        # rollout: also hold a legacy slot, so a run-task still on old code (it only sees /tmp) cannot start beside us
+        lfd = next((x for x in (_lock(os.path.join(legacy[0], f"factory-pi-{g}-slot-{i}.lock"))
+                                for i in range(G.GPUS[g]["slots"])) if x is not None), None)
+        if lfd is None: os.close(fd); return None
+        COMPAT[fd] = lfd; return fd
+
+COMPAT = {}   # slot fd -> the legacy /tmp slot fd held with it during the rollout
+
+def _lock(path):
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError: os.close(fd); return None
+    os.set_inheritable(fd, True); return fd
+
+def slot_fds(fd): return (fd,) + ((COMPAT[fd],) if fd in COMPAT else ())
+
+def release(fd):
+    for x in slot_fds(fd): os.close(x)
+    COMPAT.pop(fd, None)
 
 def acquire(g, wait=True, log=sys.stderr):
     t0 = last = time.monotonic()
@@ -92,7 +112,7 @@ def acquire(g, wait=True, log=sys.stderr):
         if fd is not None or not wait: return fd
         if time.monotonic() - last >= HEARTBEAT_S:
             last = time.monotonic()
-            print(f"gpu_gate: waiting for a {g} slot ({len(holders(g))}/{caps()[g]} held, {int(last - t0)} s)", file=log, flush=True)
+            print(f"gpu_gate: waiting for a {g} slot ({tasks(holders(g))}/{caps()[g]} held, {int(last - t0)} s)", file=log, flush=True)
         time.sleep(POLL_S)
 
 def held_fd(g, env=None):
@@ -107,7 +127,7 @@ def held_fd(g, env=None):
 
 def main(argv):
     if argv[:1] == ["status"]:
-        st = {g: {"held": len(holders(g)), "cap": c} for g, c in caps().items()}
+        st = {g: {"held": tasks(holders(g)), "cap": c} for g, c in caps().items()}
         print(json.dumps(st) if "--json" in argv else "\n".join(f"{g}: {v['held']}/{v['cap']}" for g, v in st.items()))
         return 0
     if len(argv) < 4 or argv[0] != "hold" or "--" not in argv:
