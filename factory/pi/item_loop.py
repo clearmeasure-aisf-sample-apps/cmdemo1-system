@@ -622,8 +622,10 @@ class Driver:
         except Exception as e:  # unexpected: record, wake the bot once, never guess
             self.log(f"driver error: {e}")
             self.save(status="error", error=scrub(str(e))[-1500:]); self.wake_bot("driver error")
+            watchdog_exit(self)
             raise
         self.save(status=self.s["stage"], end=iso())
+        watchdog_exit(self)
 
     def hold_blocked(self):
         """After a Blocker the driver stays up (status stays `blocked`, the bot was woken) and re-checks the PR every
@@ -1059,6 +1061,19 @@ class Driver:
     def _col_before(self, moves):
         order = ["Merged", "TDD", "UAT", "Done"]
         return order[order.index(moves[0]) - 1]
+
+def watchdog_exit(drv):
+    """Driver-exit hook: the shared watchdog checks (factory/pi/watchdog.py) run exactly once when a
+    driver run ends (done, blocker or error). A check's failure (and a failed `import watchdog`) is logged;
+    this function never raises and never changes the driver's exit status or replaces its exception."""
+    try:
+        import watchdog
+        watchdog.run_checks(log=drv.log)
+    except Exception as e:
+        try:
+            drv.log(f"watchdog exit hook failed: {scrub(str(e))}")
+        except Exception:
+            pass   # never let the hook (or its log) change the driver's exit
 
 # ---------------------------------------------------------------- commands
 def cmd_draft_plan(a):
