@@ -183,6 +183,18 @@ def validate_plan(p):
 def protected_files(files):
     return [f for f in files if PROTECTED_RE.search(f)]
 
+def merge_base(sh, wt, default):
+    """Merge base of HEAD and origin/<default>: the commit the branch forked from, which is what the PR diff shows.
+    Falls back to origin/<default> when git cannot resolve it, so the protected-file gate never widens."""
+    r = sh(["git", "merge-base", "HEAD", f"origin/{default}"], cwd=wt, check=False)
+    base = (r.stdout or "").strip()
+    return f"origin/{default}" if r.returncode or not base else base
+
+def staged_files(sh, wt, default):
+    """Paths staged in the worktree's index relative to merge_base(sh, wt, default): the branch's own staged
+    changes, never commits main made after the branch forked off."""
+    return sh(["git", "diff", "--cached", "--name-only", merge_base(sh, wt, default)], cwd=wt, check=False).stdout.split()
+
 def gate_state(checks, required):
     """Merge gate: required checks GREEN and the quality checks (Qodana zero new problems, Refactoring rationale)
     passed. RED when either is red, PENDING while either is still running, else GREEN."""
@@ -750,12 +762,15 @@ class Driver:
         f = os.path.join(self.run_dir, "refactoring-research.md")
         return open(f).read() if os.path.exists(f) else ""
 
+    def merge_base(self):
+        """Merge base of HEAD and origin/<default>, or origin/<default> when git cannot resolve it."""
+        return merge_base(self.sh, self.s["wt"], self.s["default"])
+
     def st_pr(self):
         p = self.s["plan"]
         if p.get("kind") == "enhancement":
             self.sh(["git", "add", "-A"], cwd=self.s["wt"])
-            staged = self.sh(["git", "diff", "--cached", "--name-only", f"origin/{self.s['default']}"], cwd=self.s["wt"], check=False).stdout.split()
-            bad = protected_files(staged)
+            bad = protected_files(staged_files(self.sh, self.s["wt"], self.s["default"]))
             if bad: return self.blocker(f"the change touches credentials, secrets or production setup ({', '.join(bad)}); "
                                         "an enhancement PR may not.")
         head = self.commit_push(p["pr_title"])
