@@ -717,6 +717,120 @@ class UsageReport(unittest.TestCase):
             for s in ("`grok-a`, `grok-b`", "`drv1`", "`pi-1`", "1,000 + 5,000", "1m01s", "Total (1 Pi session)"): self.assertIn(s, out)
             self.assertNotIn("(progress)", out)
 
+class ResumeTarget(unittest.TestCase):   # the paused-item resume rule, pure: resume_target(state) -> (stage, clear_gpu)
+    def test_blocked_with_resume_stage(self):
+        s = {"status": "blocked", "stage": "review", "resume_stage": "review", "pr": 7, "blocker": "checks still red"}
+        self.assertEqual(L.resume_target(s), ("review", False))
+        self.assertEqual(L.resume_target({"status": "blocked", "resume_stage": "ci", "pr": 7}), ("ci", False))
+
+    def test_blocked_without_resume_stage_with_pr(self):
+        self.assertEqual(L.resume_target({"status": "blocked", "stage": "review", "pr": 7}), ("ci", False))
+
+    def test_blocked_without_resume_stage_without_pr(self):
+        self.assertEqual(L.resume_target({"status": "blocked", "stage": "implement"}), ("implement", False))
+
+    def test_does_not_mutate_the_state(self):
+        s = {"status": "blocked", "resume_stage": "ci", "pr": 7, "blocker": "x", "gpu": "obs", "counts": {"ci_fix": 2}}
+        before = dict(s); L.resume_target(s); self.assertEqual(s, before)
+        e = {"status": "error", "stage": "pickup", "gpu": "obs", "error": "boom"}
+        before = dict(e); L.resume_target(e); self.assertEqual(e, before)
+
+    def test_error_resumes_the_saved_stage(self):
+        self.assertEqual(L.resume_target({"status": "error", "stage": "ci", "error": "boom"}), ("ci", False))
+        self.assertEqual(L.resume_target({"status": "error", "stage": "implement", "pr": 7}), ("implement", False))
+        self.assertEqual(L.resume_target({"status": "error", "stage": "merge"}), ("merge", False))
+
+    def test_error_at_gpu_or_pickup_maps_to_gpu_and_clears_the_recorded_gpu(self):
+        self.assertEqual(L.resume_target({"status": "error", "stage": "gpu", "gpu": "obs"}), ("gpu", True))
+        self.assertEqual(L.resume_target({"status": "error", "stage": "pickup", "gpu": "ts3"}), ("gpu", True))
+
+class ResumeAfterError(unittest.TestCase):   # resuming an error state: keeps the saved stage, never jumping to ci (PR exists) or implement
+    def test_blocked_still_resumes_resume_stage(self):
+        # a status: blocked state still resumes its saved resume_stage (never jumping to ci or implement),
+        # drops the blocker field and resets the counts -- the existing blocked behavior stays intact
+        for rs in ("review", "ci", "implement"):
+            for pr in (None, 7):
+                s = {"status": "blocked", "stage": "blocked", "resume_stage": rs, "blocker": "checks still red",
+                     "counts": {k: 5 for k in L.LIMITS}}
+                if pr is not None: s["pr"] = pr
+                r = L.apply_resume(s)
+                self.assertEqual(r["stage"], rs, f"a blocked item with resume_stage {rs} (pr={pr}) must resume there, not ci or implement")
+                self.assertNotIn("blocker", r)
+                self.assertEqual(r["counts"], {k: 0 for k in L.LIMITS})
+        for s, want in (({"status": "blocked", "stage": "review", "pr": 7, "blocker": "x", "counts": {k: 5 for k in L.LIMITS}}, "ci"),
+                        ({"status": "blocked", "stage": "implement", "blocker": "x", "counts": {k: 5 for k in L.LIMITS}}, "implement")):
+            r = L.apply_resume(s)
+            self.assertEqual(r["stage"], want, "without a saved resume_stage: ci when a PR exists, implement otherwise")
+            self.assertNotIn("blocker", r)
+            self.assertEqual(r["counts"], {k: 0 for k in L.LIMITS})
+
+    def test_error_resumes_saved_stage_not_implement_or_ci(self):
+        for stage in ("implement", "local-verify", "ci", "review", "merge", "research"):
+            for pr in (None, 7):
+                s = {"status": "error", "stage": stage, "error": "boom", "counts": {k: 5 for k in L.LIMITS}}
+                if pr is not None: s["pr"] = pr
+                r = L.apply_resume(s)
+                self.assertEqual(r["stage"], stage, f"an error at {stage} (pr={pr}) must resume the saved stage, not ci or implement")
+                self.assertNotIn("error", r)
+                self.assertEqual(r["counts"], {k: 0 for k in L.LIMITS})
+
+    def test_error_in_gpu_or_pickup_clears_recorded_gpu(self):
+        for stage in ("gpu", "pickup"):
+            s = {"status": "error", "stage": stage, "gpu": "obs", "error": "boom"}
+            r = L.apply_resume(s)
+            self.assertEqual(r["stage"], "gpu", f"an error at {stage} with a recorded gpu must resume the gpu stage")
+            self.assertNotIn("gpu", r)   # the recorded gpu is cleared, so the gpu stage re-picks instead of keeping it
+
+    def test_errone_gpu_item_repicks_and_waits(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME, L.gpu_health, L.time, L.gpu_for_item
+            L.HOME = h; L.time = GpuResume._Clock()
+            try:
+                d = L.Driver("cmdemo1-workorders", 29)   # dry_run=False
+                d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"
+                d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()
+                d.s = L.apply_resume(d.s); d.save()     # the resume rule: saved stage, error dropped, gpu cleared
+                self.assertNotIn("gpu", d.s)
+                rec = []
+                real = L.gpu_for_item
+                L.gpu_for_item = lambda *a: (rec.append(a), real(*a))[1]   # watch what st_gpu passes in
+                L.gpu_health = lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}
+                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+                d.st_gpu()
+                self.assertEqual(rec[0][0], None)        # st_gpu re-ran gpu_for_item with the cleared gpu
+                self.assertEqual(d.s["gpu"], "pro5000")  # obs is down, so the free healthy pick is pro5000
+                self.assertEqual(d.s["stage"], "pickup")
+            finally:
+                L.HOME, L.gpu_health, L.time, L.gpu_for_item = old
+
+    def test_errone_gpu_item_waits_while_gpus_held_then_blocks(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME, L.gpu_health, L.time
+            L.HOME = h; L.time = GpuResume._Clock()
+            try:
+                # Live items in another repo hold every available GPU: both pro5000 slots, obs and ts3.
+                runs = os.path.join(h, "factory-runs")
+                for i, (gpu, stage) in enumerate((("pro5000", "ci"), ("pro5000", "ci"), ("obs", "implement"), ("ts3", "review"))):
+                    r = os.path.join(runs, f"cmdemo1-dashboard-{11 + i}"); os.makedirs(r)
+                    json.dump({"repo": "cmdemo1-dashboard", "issue": 11 + i, "gpu": gpu, "stage": stage,
+                              "status": "running", "pid": os.getpid()}, open(os.path.join(r, "state.json"), "w"))
+                d = L.Driver("cmdemo1-workorders", 28)   # dry_run=False
+                d.s["plan"] = dict(PLAN, size="large")
+                d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()   # the gpu is already cleared
+                L.gpu_health = lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}
+                d.comment = lambda *a, **k: None; d.usage = lambda final=False: ""; d.wake_bot = lambda reason: None
+                d.st_gpu()
+                self.assertNotIn("gpu", d.s)                        # never re-picked: it stays in the gpu stage
+                self.assertEqual(d.s["stage"], "blocked")
+                self.assertEqual(d.s["status"], "blocked")
+                self.assertEqual(d.s["resume_stage"], "gpu")        # it resumes the gpu stage, never implement or ci
+                self.assertNotIn(d.s["stage"], ("implement", "ci"))
+                self.assertTrue(d.s["wait_why"].startswith("no free GPU"), d.s["wait_why"])
+                self.assertTrue(d.s["blocker"].startswith(f"waited {L.GPU_WAIT_H} hours to start (no free GPU"),
+                                d.s["blocker"])
+            finally:
+                L.HOME, L.gpu_health, L.time = old
+
 # Asking unittest for one test as `<file> <Class>.<test>` (e.g. `python3 -m unittest factory/pi/test_item_loop.py
 # RunTaskTimeout.test_run_pi_normal_exit_returns_rc_and_output`) does not work out of the box: unittest resolves every
 # CLI name on its own, so it never reads <Class> off the file given before it -- it imports it as a module and the whole
