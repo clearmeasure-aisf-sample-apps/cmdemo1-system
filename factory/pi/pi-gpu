@@ -4,6 +4,8 @@
 # Reads LOCAL_LLM_<GPU>_URL / LOCAL_LLM_<GPU>_TOKEN, checks the GPU with one models list (never a completion, never
 # a model load or warm-up), writes Pi's provider config for model `auto` (the only name the proxy accepts) and passes
 # every other argument through to pi. Never prints the URL or token.
+# Pi always starts through gpu_gate.py (#861): it takes one of the GPU's hard-capped slots (pro5000 2, obs 1, ts3 1),
+# waiting while the GPU is full, and Pi inherits the slot, so manual runs, the pi-pro5000 shim and run-task all count.
 set -euo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 GPU_PY="$HERE/gpu.py"; [[ -f "$GPU_PY" ]] || GPU_PY="$HOME/.local/bin/factory-pi-gpu.py"
@@ -34,4 +36,4 @@ open(os.path.join(d, "settings.json"), "w").write(json.dumps(
 PY
 
 export LLM_API_KEY="${!tok_var}" PI_CODING_AGENT_DIR="$AGENT_DIR" PI_OFFLINE=1
-exec pi --provider local --model auto "$@"
+exec python3 "$HERE/gpu_gate.py" hold "$gpu" -- pi --provider local --model auto "$@"
