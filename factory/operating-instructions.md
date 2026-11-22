@@ -309,6 +309,7 @@ to read and maintainable"):**
 repository's `AGENTS.md` / `CLAUDE.md` rules, changes no files, and ends PASS or FAIL. When no second GPU is up the
 driver waits up to 2 hours, then a Blocker; it never reviews on the author's GPU.
 A missing or empty findings file, or a review that ends with no PASS/FAIL verdict (timeout), is a review-infra failure, never a FAIL: the driver retries the review at most 2 times on any free non-author GPU within the caps, never sends the nonexistent findings to Pi, and after that posts a Blocker that says review infra failed, not a code FAIL (Jeffrey, t83u, 22 Nov 2026).
+A Pi hand-off (implement, fix, research) that has not really started within 15 minutes (no GPU slot, or no model output / session record; also a run with no new session record for 15 minutes) is killed and relaunched on any free GPU within the caps, at most 2 relaunches, then a Blocker; run-task writes `logs/<task>.progress.json` as a live heartbeat, and a run dir with a `HOLD` file (handed off or held) is never started, resumed or touched by a watchdog check (Jeffrey, t85u, 22 Nov 2026).
 
 ## Continuous enhancement pipeline
 

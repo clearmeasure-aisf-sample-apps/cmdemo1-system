@@ -36,7 +36,7 @@ _last_comment = {}     # watchdog-owned: (repo, issue) -> iso time of the watchd
 def excluded(repo, issue):
     """Hard rule: a check must never touch these items (no action, no comment)."""
     try:
-        return (repo, int(issue)) in EXCLUDED
+        return (repo, int(issue)) in EXCLUDED or bool(L.held(repo, issue))   # + a run dir HOLD file (t85u)
     except (TypeError, ValueError):
         return False
 

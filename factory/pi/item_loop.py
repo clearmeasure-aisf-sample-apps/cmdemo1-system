@@ -51,7 +51,8 @@ FOLLOWUP_MAX = 5          # follow-up refactoring issues one item may file
 RESEARCH_MIN_CHARS = 300
 DRIVER_MARK = "<!-- factory-pi-driver -->"
 # Existing limits (operating-instructions): 2 Review FAILs, 3 infrastructure reruns; then a Blocker.
-LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3, "research": 2, "review_infra": 2}
+LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3, "research": 2, "review_infra": 2, "pi_relaunch": 2}
+HANDOFF_START_S = 900     # a Pi hand-off with no slot or no session record for 15 min is killed and relaunched (t85u)
 # Not required to merge, but a red one still stalls the PR: route to Pi instead of waiting on it (no-idle-stall).
 QUALITY_CHECKS = ("qodana", "refactoring rationale")
 HEARTBEAT_MIN = 30        # no progress for this long -> one short status comment
@@ -324,7 +325,8 @@ def repo_wip(states, repo, me=None, alive=lambda pid: False):
 def hold_resumes(blocker):
     """Whether a Blocker may clear itself when the PR's checks turn green. A Review FAIL blocker never does: its checks
     were already green, so resuming only re-ran the same failing review (a loop that held a GPU and a WIP slot for hours)."""
-    return not str(blocker or "").lstrip().lower().startswith(("review fail", "independent review fail", "independent review infra"))
+    return not str(blocker or "").lstrip().lower().startswith(("review fail", "independent review fail", "independent review infra",
+                                                               "pi hand-off"))
 
 def review_verdict(result, findings):
     """(ok, text) for one independent-review run. ok None = an infrastructure failure, never a code FAIL (t83u, #1944 / #820):
@@ -365,6 +367,15 @@ def pickup_comment(p, run_id, run_dir):
 
 # ---------------------------------------------------------------- box-wide state (red flags, other drivers)
 def _runs_dir(): return os.path.join(HOME, "factory-runs")
+
+def held(repo, issue):
+    """The text of <run dir>/HOLD (an item handed off or held by Jeffrey), or None. A held item is never started,
+    resumed or touched by a watchdog check (t85u: #1944 handed to FactoryBot1)."""
+    try: return open(os.path.join(_runs_dir(), f"{repo}-{int(issue)}", "HOLD")).read().strip() or "held"
+    except (OSError, TypeError, ValueError): return None
+
+class PiNotStarted(Exception):
+    """A Pi hand-off still did not start after LIMITS['pi_relaunch'] relaunches: the stage ends in a Blocker."""
 
 def red_load():
     try: return json.load(open(os.path.join(_runs_dir(), "red.json")))
@@ -534,12 +545,22 @@ class Driver:
                   "the last line.")
         open(pf, "w").write(scrub(prompt) + suffix)
         timeout = max(int(timeout), G.MIN_CLIENT_TIMEOUT_S)
-        r = self.sh([os.path.join(HERE, "run-task"), "--run-dir", self.run_dir, "--cwd", self.s["wt"], "--task", name,
-                     "--prompt-file", pf, "--timeout", str(timeout), "--gpu", gpu or self.gpu()], check=False)
-        self.log(f"pi {name}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
-        self.last_task = next((rec for rec in map(_json_or_none, (r.stdout or "").splitlines()) if isinstance(rec, dict)),
-                              {"result": f"exit {r.returncode}"})
-        return r.returncode == 0
+        review = name.startswith("independent-review")   # a review keeps its non-author GPUs; no-start = infra retry
+        task, g = name, gpu or self.gpu()
+        for k in range(LIMITS["pi_relaunch"] + 1):
+            r = self.sh([os.path.join(HERE, "run-task"), "--run-dir", self.run_dir, "--cwd", self.s["wt"], "--task", task,
+                         "--prompt-file", pf, "--timeout", str(timeout), "--gpu", g, "--start-timeout", str(HANDOFF_START_S)], check=False)
+            self.log(f"pi {task}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
+            self.last_task = next((rec for rec in map(_json_or_none, (r.stdout or "").splitlines()) if isinstance(rec, dict)),
+                                  {"result": f"exit {r.returncode}"})
+            if review or self.last_task.get("result") not in ("no-start", "stalled"): return r.returncode == 0
+            if k == LIMITS["pi_relaunch"]: break
+            up = G.available(gpu_health()) or list(G.PRIORITY)
+            task, g = f"{name}-relaunch-{k + 1}", ",".join(x for x in G.PRIORITY if x in up)   # any free GPU within the caps
+            self.log(f"Pi hand-off {name} {self.last_task.get('result')} within {HANDOFF_START_S} s; relaunch {k + 1} of "
+                     f"{LIMITS['pi_relaunch']} on any free GPU ({g})")
+        raise PiNotStarted(f"Pi hand-off `{name}` did not start ({self.last_task.get('result')}: no GPU slot or no model output "
+                           f"within {HANDOFF_START_S // 60} min) after {LIMITS['pi_relaunch']} relaunches on any free GPU.")
 
     def task_passes(self, t):
         """Run one plan task through Pi; retry a failure up to LIMITS['local_fix'] times under distinct names
@@ -669,7 +690,9 @@ class Driver:
             while True:
                 while self.s["stage"] not in ("done", "blocked", "dry-run-done"):
                     stage = self.s["stage"]; self.log(f"stage {stage}")
-                    getattr(self, "st_" + stage.replace("-", "_"))(); self.progress()
+                    try: getattr(self, "st_" + stage.replace("-", "_"))()
+                    except PiNotStarted as e: self.blocker(str(e))
+                    self.progress()
                 if self.s["stage"] != "blocked" or not self.hold_blocked(): break
         except Exception as e:  # unexpected: record, wake the bot once, never guess
             self.log(f"driver error: {e}")
@@ -1162,7 +1185,12 @@ def cmd_draft_plan(a):
     print("Review plan.draft.json; copy it to plan.json (edit as needed), then run `item-loop start`.")
     sys.exit(0 if not errs else 1)
 
+def refuse_held(a):
+    h = held(a.repo, a.issue)
+    if h: print(f"{a.repo}#{a.issue} is held, not starting: {h[:300]}"); sys.exit(0)
+
 def cmd_start(a):
+    refuse_held(a)
     d = Driver(a.repo, a.issue, top_session=a.top_session)
     plan_p = os.path.join(d.run_dir, "plan.json"); p = json.load(open(plan_p))
     labels = d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "[.labels[].name]", check=False).stdout
@@ -1186,7 +1214,7 @@ def cmd_start(a):
     p = subprocess.Popen(["nohup", *cmd], stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     print(f"driver started pid {p.pid}; state {d.state_p}. End your turn; GitHub events wake you.")
 
-def cmd_run(a): Driver(a.repo, a.issue, dry_run=a.dry_run).run()
+def cmd_run(a): refuse_held(a); Driver(a.repo, a.issue, dry_run=a.dry_run).run()
 
 def cmd_status(a):
     d = Driver(a.repo, a.issue); s = d.s

@@ -216,6 +216,91 @@ class ReviewInfraRetry(unittest.TestCase):   # t83u: no / empty findings or no v
                     if v is None: os.environ.pop(k, None)
                     else: os.environ[k] = v
 
+class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has not really started in 15 min is relaunched
+    def rt(self):
+        loader = importlib.machinery.SourceFileLoader("run_task_t85u", os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-task"))
+        m = importlib.util.module_from_spec(importlib.util.spec_from_loader("run_task_t85u", loader)); loader.exec_module(m); return m
+
+    def test_run_pi_kills_a_pi_with_no_session_record(self):
+        rt = self.rt()
+        with tempfile.TemporaryDirectory() as tmp:
+            beats = []; t0 = time.monotonic()
+            rc, _ = rt.run_pi(["bash", "-c", "sleep 60"], cwd=tmp, timeout=30, sdir=tmp, start_s=1, beat=beats.append)
+            self.assertEqual(rc, rt.NO_START_RC); self.assertFalse(rt.run_pi.started)
+            self.assertLess(time.monotonic() - t0, 15); self.assertTrue(beats and "pi_pid" in beats[0])
+
+    def test_run_pi_stalled_after_model_output_is_stalled_not_no_start(self):
+        rt = self.rt()
+        with tempfile.TemporaryDirectory() as tmp:
+            f = os.path.join(tmp, "s.jsonl")
+            rc, _ = rt.run_pi(["bash", "-c", f"echo h > {f}; echo r >> {f}; sleep 60"], cwd=tmp, timeout=30, sdir=tmp, start_s=2)
+            self.assertEqual(rc, rt.NO_START_RC); self.assertTrue(rt.run_pi.started)
+
+    def test_run_pi_with_progress_is_left_alone(self):
+        rt = self.rt()
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, text = rt.run_pi(["bash", "-c", "echo done; exit 0"], cwd=tmp, timeout=10, sdir=tmp, start_s=5)
+            self.assertEqual(rc, 0); self.assertIn("done", text)
+
+    def test_gate_gives_up_after_max_wait(self):
+        import gpu_gate
+        with tempfile.TemporaryDirectory() as h:
+            old = os.environ.get("FACTORY_PI_LOCK_DIR"); os.environ["FACTORY_PI_LOCK_DIR"] = h
+            p = subprocess.Popen([sys.executable, "-c", "import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.flock(f, fcntl.LOCK_EX); "
+                                  "print('held', flush=True); time.sleep(30)", os.path.join(h, "factory-pi-ts3-slot-0.lock")],
+                                 stdout=subprocess.PIPE, text=True)
+            try:
+                p.stdout.readline(); self.assertEqual(gpu_gate.acquire_any(["ts3"], max_wait=0), (None, None))
+            finally:
+                p.kill(); p.wait()
+                if old is None: os.environ.pop("FACTORY_PI_LOCK_DIR", None)
+                else: os.environ["FACTORY_PI_LOCK_DIR"] = old
+
+    def driver(self, h, results):
+        d = L.Driver("cmdemo1-workorders", 41, dry_run=True); d.s.update(gpu="ts3", wt=tempfile.mkdtemp(dir=h)); calls = []
+        def sh(cmd, **k):
+            calls.append(list(cmd)); res = results.pop(0)
+            return subprocess.CompletedProcess(cmd, 0 if res == "PASS" else 1, json.dumps({"task": cmd[cmd.index("--task") + 1], "result": res}), "")
+        d.sh = sh; return d, calls
+
+    def test_handoff_relaunched_on_any_free_gpu_then_passes(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = (L.HOME, L.gpu_health); L.HOME = h; L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
+            try:
+                d, calls = self.driver(h, ["no-start", "stalled", "PASS"])
+                self.assertTrue(d.pi("review-fix-2", "fix it"))
+                arg = lambda c, f: c[c.index(f) + 1]
+                self.assertEqual([arg(c, "--gpu") for c in calls], ["ts3", "pro5000,obs,ts3", "pro5000,obs,ts3"])
+                self.assertEqual([arg(c, "--task") for c in calls], ["review-fix-2", "review-fix-2-relaunch-1", "review-fix-2-relaunch-2"])
+                self.assertEqual(arg(calls[0], "--start-timeout"), str(L.HANDOFF_START_S))
+            finally: L.HOME, L.gpu_health = old
+
+    def test_handoff_blocks_after_two_relaunches_and_reviews_are_not_relaunched(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = (L.HOME, L.gpu_health); L.HOME = h; L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
+            try:
+                d, calls = self.driver(h, ["no-start"] * 3)
+                with self.assertRaises(L.PiNotStarted) as e: d.pi("t1", "do it")
+                self.assertEqual(len(calls), 3); self.assertFalse(L.hold_resumes(str(e.exception)))
+                d, calls = self.driver(h, ["no-start"])
+                self.assertFalse(d.pi("independent-review-1", "review", gpu="obs")); self.assertEqual(len(calls), 1)
+            finally: L.HOME, L.gpu_health = old
+
+    def test_hold_file_stops_start_run_and_watchdog(self):
+        import watchdog as W
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                os.makedirs(os.path.join(h, "factory-runs", "cmdemo1-workorders-1944"))
+                self.assertFalse(W.excluded("cmdemo1-workorders", 1944))
+                open(os.path.join(h, "factory-runs", "cmdemo1-workorders-1944", "HOLD"), "w").write("handed-off: FactoryBot1")
+                self.assertTrue(W.excluded("cmdemo1-workorders", 1944))
+                a = L.argparse.Namespace(repo="cmdemo1-workorders", issue=1944, top_session=None, dry_run=False, resume=True)
+                for cmd in (L.cmd_start, L.cmd_run):
+                    with self.assertRaises(SystemExit) as e: cmd(a)
+                    self.assertEqual(e.exception.code, 0)
+            finally: L.HOME = old
+
 class DryRunDriver(unittest.TestCase):
     def test_writes_are_skipped_in_dry_run(self):
         with tempfile.TemporaryDirectory() as h:

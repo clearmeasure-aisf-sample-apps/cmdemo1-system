@@ -18,9 +18,13 @@
 - --timeout is hard: Pi runs in its own process group, so the timeout kills Pi AND every process Pi started (its tool
   subprocesses inherit the stdout pipe, so killing only Pi left communicate() blocked on them -- #817: --timeout 1800
   ran 4263 s with the GPU slot held). The record says result "timeout", rc 124.
+- --start-timeout SEC (drivers pass 900, t85u): a hand-off must really start. No slot within SEC, or no new Pi session
+  record (a model reply, a tool result) for SEC, kills the whole Pi group; the record says result "no-start" (never
+  started: no slot or no model output) or "stalled", rc 125, and the driver relaunches it. While Pi runs, run-task
+  rewrites DIR/logs/NAME.progress.json every poll (gpu, pi pid, session lines, last activity): a visible heartbeat.
 - Test overrides: FACTORY_PI_GPU_BIN (stand-in for ./pi-gpu) and FACTORY_PI_LOCK_DIR (stand-in for the real slot dir).
 """
-import argparse, datetime as dt, fcntl, glob, json, os, re, signal, subprocess, sys, time
+import argparse, datetime as dt, fcntl, glob, json, os, re, signal, subprocess, sys, threading, time
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 from item_loop import scrub   # one scrub rule set (tokens, tunnel hosts, every LOCAL_LLM_*_URL / _TOKEN value)
@@ -42,9 +46,36 @@ def session_usage(path):
             for k in ("input", "output", "cacheRead"): tot[k] += int(u.get(k) or 0)
     return sid, tot
 
-def run_pi(cmd, cwd, timeout, slot_fd=None, env=None):
+NO_START_RC = 125
+
+def session_lines(sdir):
+    """Lines in Pi's newest session JSONL (the header is line 1; every model reply or tool result adds one)."""
+    files = sorted(glob.glob(os.path.join(sdir, "**", "*.jsonl"), recursive=True), key=os.path.getmtime)
+    try: return sum(1 for _ in open(files[-1])) if files else 0
+    except OSError: return 0
+
+def watch_progress(p, kill, sdir, start_s, beat=None, poll_s=None):
+    """Kill Pi's group when its session gains no record for start_s (t85u). Returns an Event: set = killed, and
+    .started tells whether any model record ever arrived (no-start vs stalled)."""
+    ev = threading.Event(); ev.started = False; poll_s = poll_s or min(30.0, start_s / 4)
+    def loop():
+        seen, last = session_lines(sdir), time.time()
+        while p.poll() is None:
+            n = session_lines(sdir)
+            if n > max(seen, 1): ev.started = True
+            if n > seen: seen, last = n, time.time()
+            if beat: beat({"pi_pid": p.pid, "session_lines": n, "last_activity": dt.datetime.fromtimestamp(last, dt.timezone.utc).isoformat(timespec="seconds")})
+            if time.time() - last > start_s:
+                ev.set(); kill(signal.SIGTERM); time.sleep(5); kill(signal.SIGKILL); return
+            time.sleep(poll_s)
+    threading.Thread(target=loop, daemon=True).start()
+    return ev
+
+def run_pi(cmd, cwd, timeout, slot_fd=None, env=None, sdir=None, start_s=None, beat=None):
     """Run Pi in its own process group; return (rc, output). On timeout SIGTERM then SIGKILL the whole group (#817),
-    reporting rc 124 with whatever output was collected before the pipe had to be closed."""
+    reporting rc 124 with whatever output was collected before the pipe had to be closed. With sdir and start_s, a Pi
+    whose session gains no record for start_s is killed the same way: rc 125 (NO_START_RC); rc 125 with
+    run_pi.started False means it never produced model output."""
     p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True,
                          pass_fds=gpu_gate.slot_fds(slot_fd) if slot_fd is not None else (), env=env)
@@ -52,9 +83,12 @@ def run_pi(cmd, cwd, timeout, slot_fd=None, env=None):
         try: os.killpg(p.pid, sig)
         except ProcessLookupError: pass
     def s(v): return (v.decode(errors="replace") if isinstance(v, bytes) else v) or ""
-    text = ""
+    text = ""; ev = watch_progress(p, kill, sdir, start_s, beat) if sdir and start_s else None
+    run_pi.started = True
     try:
-        out, _ = p.communicate(timeout=timeout); return p.returncode, s(out)
+        out, _ = p.communicate(timeout=timeout)
+        if ev is not None and ev.is_set(): run_pi.started = ev.started; return NO_START_RC, s(out)
+        return p.returncode, s(out)
     except subprocess.TimeoutExpired as e:
         text = s(e.stdout)
         for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -80,6 +114,7 @@ def main():
     p.add_argument("--task", required=True); p.add_argument("--prompt-file", required=True)
     p.add_argument("--timeout", type=int, default=1500); p.add_argument("--top-session")
     p.add_argument("--gpu", type=gpu_list, default=os.environ.get("FACTORY_PI_GPU") or G.LARGE_GPU)
+    p.add_argument("--start-timeout", type=int, default=0)
     a = p.parse_args()
     run = os.path.abspath(a.run_dir); os.makedirs(os.path.join(run, "logs"), exist_ok=True)
     meta = os.path.join(run, "run.json")
@@ -92,12 +127,22 @@ def main():
     sdir = os.path.join(run, "pi-sessions", task); os.makedirs(sdir, exist_ok=True)
     prompt = open(a.prompt_file).read()
     open(os.path.join(run, "logs", f"{task}.prompt.md"), "w").write(prompt)
-    a.gpu, slot = gpu_gate.acquire_any(a.gpu); t0 = now()
+    gs, t0 = a.gpu, now()
+    a.gpu, slot = gpu_gate.acquire_any(gs, max_wait=a.start_timeout or None)
+    if slot is None:   # no slot within --start-timeout: never started, the driver relaunches on any free GPU
+        rec = {"task": task, "gpu": ",".join(gs), "start": t0.isoformat(timespec="seconds"), "end": now().isoformat(timespec="seconds"),
+               "rc": NO_START_RC, "result": "no-start", "why": f"no free slot on {','.join(gs)} within {a.start_timeout} s"}
+        with open(os.path.join(run, "tasks.jsonl"), "a") as f: f.write(json.dumps(rec) + "\n")
+        print(json.dumps(rec)); sys.exit(1)
+    t0 = now(); prog = os.path.join(run, "logs", f"{task}.progress.json")
+    beat = lambda d: json.dump({"task": task, "gpu": a.gpu, "start": t0.isoformat(timespec="seconds"),
+                                "at": now().isoformat(timespec="seconds"), **d}, open(prog, "w"))
     env = dict(os.environ, FACTORY_GPU_SLOT_FD=f"{a.gpu}:{slot}")
     pi_gpu = os.environ.get("FACTORY_PI_GPU_BIN") or os.path.join(HERE, "pi-gpu")
     try:
         rc, text = run_pi([pi_gpu, a.gpu, "--session-dir", sdir, "--no-context-files", "--no-skills", "--no-mcp",
-                           "--approve", "-p", prompt], a.cwd, max(a.timeout, G.MIN_CLIENT_TIMEOUT_S), slot, env)
+                           "--approve", "-p", prompt], a.cwd, max(a.timeout, G.MIN_CLIENT_TIMEOUT_S), slot, env,
+                          sdir=sdir, start_s=a.start_timeout or None, beat=beat)
     finally:
         t1 = now(); gpu_gate.release(slot)
     text = scrub(text)
@@ -105,7 +150,7 @@ def main():
     files = sorted(glob.glob(os.path.join(sdir, "**", "*.jsonl"), recursive=True), key=os.path.getmtime)
     sid, u = session_usage(files[-1]) if files else (None, {"input": 0, "output": 0, "cacheRead": 0, "turns": 0})
     last = ([l for l in text.strip().splitlines() if l.strip()][-1:] or [""])[0]
-    result = "timeout" if rc == 124 else ("PASS" if "PASS" in last else ("FAIL" if "FAIL" in last else f"exit {rc}"))
+    result = ("no-start" if not run_pi.started else "stalled") if rc == NO_START_RC else "timeout" if rc == 124 else ("PASS" if "PASS" in last else ("FAIL" if "FAIL" in last else f"exit {rc}"))
     rec = {"task": task, "gpu": a.gpu, "session_id": sid, "session_file": files[-1] if files else None,
            "start": t0.isoformat(timespec="seconds"), "end": t1.isoformat(timespec="seconds"),
            "wall_s": round((t1 - t0).total_seconds(), 1), "rc": rc, "result": result, **u}
