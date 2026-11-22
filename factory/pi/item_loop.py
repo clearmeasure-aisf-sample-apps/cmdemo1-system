@@ -51,7 +51,7 @@ FOLLOWUP_MAX = 5          # follow-up refactoring issues one item may file
 RESEARCH_MIN_CHARS = 300
 DRIVER_MARK = "<!-- factory-pi-driver -->"
 # Existing limits (operating-instructions): 2 Review FAILs, 3 infrastructure reruns; then a Blocker.
-LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3, "research": 2}
+LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3, "research": 2, "review_infra": 2}
 # Not required to merge, but a red one still stalls the PR: route to Pi instead of waiting on it (no-idle-stall).
 QUALITY_CHECKS = ("qodana", "refactoring rationale")
 HEARTBEAT_MIN = 30        # no progress for this long -> one short status comment
@@ -296,7 +296,16 @@ def repo_wip(states, repo, me=None, alive=lambda pid: False):
 def hold_resumes(blocker):
     """Whether a Blocker may clear itself when the PR's checks turn green. A Review FAIL blocker never does: its checks
     were already green, so resuming only re-ran the same failing review (a loop that held a GPU and a WIP slot for hours)."""
-    return not str(blocker or "").lstrip().lower().startswith(("review fail", "independent review fail"))
+    return not str(blocker or "").lstrip().lower().startswith(("review fail", "independent review fail", "independent review infra"))
+
+def review_verdict(result, findings):
+    """(ok, text) for one independent-review run. ok None = an infrastructure failure, never a code FAIL (t83u, #1944 / #820):
+    no findings file (findings None), an empty / whitespace-only one, or a reply with no PASS / FAIL verdict (timeout,
+    crash). Those are retried on any free GPU and never handed to Pi as findings."""
+    if findings is None: return None, f"the reviewer wrote no findings file (run result: {result})"
+    if not findings.strip(): return None, f"the reviewer's findings file is empty (run result: {result})"
+    if result not in ("PASS", "FAIL"): return None, f"the review ended with no PASS/FAIL verdict (run result: {result})"
+    return result == "PASS", findings
 
 def intake_open(red, plan):
     """While anything is red only fix-forward items start."""
@@ -363,6 +372,10 @@ def gpu_health(max_age=600):
     return _HEALTH["h"]
 
 # ---------------------------------------------------------------- side-effect layer
+def _json_or_none(line):
+    try: return json.loads(line)
+    except ValueError: return None
+
 class Driver:
     def __init__(self, repo, issue, dry_run=False, top_session=None):
         self.repo, self.issue, self.dry = repo, int(issue), dry_run
@@ -373,7 +386,7 @@ class Driver:
         self.s.setdefault("repo", repo); self.s.setdefault("issue", self.issue)
         self.s.setdefault("counts", {k: 0 for k in LIMITS})
         if top_session: self.s["top_session"] = top_session
-        self.full = f"{ORG}/{repo}"
+        self.full = f"{ORG}/{repo}"; self.last_task = {}
 
     # state / log
     def save(self, **kw):
@@ -487,6 +500,8 @@ class Driver:
         r = self.sh([os.path.join(HERE, "run-task"), "--run-dir", self.run_dir, "--cwd", self.s["wt"], "--task", name,
                      "--prompt-file", pf, "--timeout", str(timeout), "--gpu", gpu or self.gpu()], check=False)
         self.log(f"pi {name}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
+        self.last_task = next((rec for rec in map(_json_or_none, (r.stdout or "").splitlines()) if isinstance(rec, dict)),
+                              {"result": f"exit {r.returncode}"})
         return r.returncode == 0
 
     def task_passes(self, t):
@@ -889,8 +904,16 @@ class Driver:
             return self.save(stage="ci")
         self.save(evidence=[[c["text"], c["evidence_cmd"], last] for c, last, _ in ev])
         verdict = self.independent_review()
+        while verdict is not None and verdict[0] is None:   # review infra failure: retry, never a FAIL, never sent to Pi
+            if not self.bump("review_infra"):
+                return self.blocker(f"independent review infra failed {LIMITS['review_infra'] + 1} times ({verdict[1]}); "
+                                    "this is not a code FAIL and no findings were sent to Pi. Check the review GPUs, then resume.")
+            self.log(f"independent review infra failure: {verdict[1]}; retry {self.s['counts']['review_infra']} of "
+                     f"{LIMITS['review_infra']} on any free GPU")
+            verdict = self.independent_review()
         if verdict is None: return
         ok, findings = verdict
+        self.s["counts"]["review_infra"] = 0; self.save()
         if not ok:
             if not self.bump("review_fail"):
                 return self.blocker("independent review FAIL twice: " + findings[:600])
@@ -924,7 +947,8 @@ class Driver:
     def independent_review(self):
         """Pi on a different GPU than the author reviews the diff, the issue's criteria and the `## Refactoring
         research` section of the PR body (missing or not substantive = FAIL). Returns (ok, findings), or None after a
-        Blocker when no second GPU came up."""
+        Blocker when no second GPU came up. ok is None for a review-infra failure (review_verdict): no / empty findings
+        file or no verdict. The review runs on whichever non-author GPU has a free slot first."""
         p = self.s["plan"]
         body = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body", check=False).stdout
         if not research_ok(body, p["files"]):
@@ -934,21 +958,22 @@ class Driver:
         self.save(research_in_body=True)
         t_end = time.time() + REVIEWER_WAIT_H * 3600
         while True:
-            rv = G.reviewer_gpu(self.gpu(), G.available(gpu_health(0 if self.s.get("reviewer_waited") else 600)))
+            rv = G.reviewer_gpus(self.gpu(), G.available(gpu_health(0 if self.s.get("reviewer_waited") else 600)))
             if rv or self.dry or time.time() > t_end: break
             self.save(reviewer_waited=True); self.heartbeat(); time.sleep(RECHECK_S)
         if not rv and not self.dry:
             self.blocker(f"no second GPU is up for the independent review of code written on the {self.gpu_label()}."); return None
-        rv = rv or self.gpu(); self.save(reviewer_gpu=rv)
+        rv = rv or [self.gpu()]; self.save(reviewer_gpu=rv[0])
         diff = self.sh(["git", "diff", f"{self.merge_base()}...HEAD"], cwd=self.s["wt"], check=False).stdout
-        limit = 60000 if rv == G.LARGE_GPU else 24000
+        limit = 60000 if rv == [G.LARGE_GPU] else 24000   # any small GPU may take it: size the prompt for the smallest
         out = os.path.join(self.run_dir, "independent-review.md")
         if os.path.exists(out): os.remove(out)
         crit = "\n".join(f"- {c['text']}" for c in p["criteria"])
         sec = body.split(RESEARCH_HEAD, 1)[1]
         if len(sec) > 24000:   # the reviewer must read every verdict: whole section, or a line-boundary cut that says so
             sec = sec[:24000].rsplit("\n", 1)[0].rstrip() + "\n(the section is longer than this prompt copy; the full text is in the PR body)"
-        ok = self.pi(f"independent-review-{self.s['counts'].get('review_fail', 0) + 1}",
+        k = self.s["counts"].get("review_infra", 0)
+        self.pi(f"independent-review-{self.s['counts'].get('review_fail', 0) + 1}" + (f"-retry-{k}" if k else ""),
                      f"Independent code review of {self.repo}#{self.issue} ({p['pr_title']}). You did not write this code. Change NO "
                      "files.\n\nAcceptance criteria:\n" + crit + "\n\nThe PR's refactoring research:\n" + sec +
                      f"\n\nDiff against {self.s['default']} (read any file in this tree for context):\n```diff\n{scrub(diff)[:limit]}\n```\n\n"
@@ -956,12 +981,13 @@ class Driver:
                      "the repository's AGENTS.md / CLAUDE.md rules hold; the code is easy to read (names, small methods, no "
                      "duplication) and the refactoring research is substantive and its in-scope items are done; no secret, "
                      f"credential or production-setup change. Write one bullet per problem to {out} (or `- No findings.`). "
-                     "End your reply with PASS when there is no blocking problem, otherwise FAIL.", 1800, gpu=rv)
+                     "End your reply with PASS when there is no blocking problem, otherwise FAIL.", 1800, gpu=",".join(rv))
+        rv = self.last_task.get("gpu") or rv[0]; self.save(reviewer_gpu=rv)
         if self.sh(["git", "status", "--porcelain"], cwd=self.s["wt"], check=False).stdout.strip():
             self.log("reviewer changed files; discarding them"); self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"])
             self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"])
-        findings = scrub(open(out).read()) if os.path.exists(out) else "- (the reviewer wrote no findings file)"
-        self.log(f"independent review on {rv}: {'PASS' if ok else 'FAIL'}")
+        ok, findings = review_verdict(self.last_task.get("result"), scrub(open(out).read()) if os.path.exists(out) else None)
+        self.log(f"independent review on {rv}: {'INFRA (retry)' if ok is None else 'PASS' if ok else 'FAIL'}")
         return ok, findings
 
     def st_merge(self):
