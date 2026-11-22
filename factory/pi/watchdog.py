@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Shared factory watchdog: a small registry of checks that the "Factory watchdog (every 30 min)" routine
-runs from the CLI and the Pi driver's exit hook (item_loop.watchdog_exit) runs when a driver run ends.
+"""Shared factory watchdog: a small registry of checks that run from the CLI
+(`python3 factory/pi/watchdog.py run`) and that the Pi driver's exit hook (item_loop.watchdog_exit) runs
+once when a driver run ends. No schedule: the repo's rules wake the bot on GitHub events only.
 
     python3 factory/pi/watchdog.py run
 
@@ -30,6 +31,7 @@ REPOS = ("cmdemo1-workorders", "cmdemo1-dashboard", "cmdemo1-system")
 # item_loop's NEVER_MERGE and HANDS_OFF, plus the excluded issues Jeffrey named: system #652, workorders #1672.
 EXCLUDED = L.NEVER_MERGE | L.HANDS_OFF | {("cmdemo1-system", 652), ("cmdemo1-workorders", 1672)}
 COMMENT_GAP_S = 61.0   # never two comments on one item within a minute
+_last_comment = {}     # watchdog-owned: (repo, issue) -> iso time of the watchdog's last comment (state.json is never written)
 
 def excluded(repo, issue):
     """Hard rule: a check must never touch these items (no action, no comment)."""
@@ -65,21 +67,25 @@ def wip_full(states, repo, me=None, alive=L.pid_alive):
 def gh_subprocess(args):
     return subprocess.run(["gh", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
-def post_comment(repo, issue, body, states, gh=None, clock=None):
+def post_comment(repo, issue, body, states, gh=None, clock=None, log=None):
     """Comment only when a check took an action: the body must be non-empty, the item must not be excluded
     and its driver must not be alive and progressing; a comment lands at least COMMENT_GAP_S after the
-    item's last comment; the posted body is scrubbed. Returns the posted body, or None when nothing was
-    posted."""
+    watchdog's own last comment on that item (its own tracking, kept in this module) and after the item's
+    last driver comment (read from the caller's state, never written there); the posted body is scrubbed.
+    Returns the posted body, or None when nothing was posted."""
     clock = clock or L.now
+    log = log or print
     body = scrub(body)
     if not body or excluded(repo, issue):
         return None
     st = next((s for _, s in states or [] if s.get("repo") == repo and s.get("issue") == int(issue)), {})
     if alive_progressing(st, clock()):
         return None
-    last = st.get("last_comment_at")
-    if last:
-        wait = COMMENT_GAP_S - (clock() - dt.datetime.fromisoformat(last)).total_seconds()
+    key = (repo, int(issue))
+    stamps = [t for t in (_last_comment.get(key), st.get("last_comment_at")) if t]
+    if stamps:
+        last = max(dt.datetime.fromisoformat(t) for t in stamps)
+        wait = COMMENT_GAP_S - (clock() - last).total_seconds()
         if wait > 0:
             time.sleep(wait)
     with tempfile.NamedTemporaryFile("w", prefix="wd-comment-", suffix=".md", delete=False) as f:
@@ -89,7 +95,11 @@ def post_comment(repo, issue, body, states, gh=None, clock=None):
         r = (gh or gh_subprocess)(["issue", "comment", str(issue), "-R", f"{L.ORG}/{repo}", "--body-file", p])
     finally:
         os.unlink(p)
-    return body if r.returncode == 0 else None
+    if r.returncode != 0:
+        log("watchdog comment on %s#%s failed: %s" % (repo, issue, scrub(r.stdout or "")))
+        return None
+    _last_comment[key] = clock().isoformat()
+    return body
 
 # ---------------------------------------------------------------- check registry
 CHECKS = []
@@ -105,7 +115,7 @@ def run_checks(repos=REPOS, gh=None, health=None, clock=None, log=None):
     Returns [(check name, result), ...]; the caller's result is never changed."""
     log = log or print
     gh = gh or gh_subprocess
-    health = health or G.health
+    health = health or L.gpu_health   # the driver's cached probe, so an exit hook never fires three fresh GETs
     clock = clock or L.now
     results = []
     for c in CHECKS:
@@ -121,14 +131,14 @@ def run_checks(repos=REPOS, gh=None, health=None, clock=None, log=None):
 def gpu_health_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
     """Check 1: GPU health for pro5000, obs (RTX 5070 Ti) and ts3 (RTX 5060 Ti) via the gpu.py models list
     (read-only: one GET /models per GPU; it never starts, stops or warms a model server). A down GPU is
-    reported in the log, and GPU selection routes to the healthy GPUs; selection never picks a down GPU.
-    All GPUs healthy is a no-op (no comment)."""
+    reported in the log and in this check's result ("down: <gpu>"), and GPU selection routes to the healthy
+    GPUs; selection never picks a down GPU. All GPUs healthy is a no-op ("ok", no comment)."""
     h = health()
     up = G.available(h)
-    for g in G.GPUS:
-        if g not in up:
-            s, d = h[g]
-            log("watchdog GPU %s (%s): %s - %s" % (g, G.GPUS[g]["label"], s, scrub(d)))
+    down = [g for g in G.GPUS if g not in up]
+    for g in down:
+        s, d = h[g]
+        log("watchdog GPU %s (%s): %s - %s" % (g, G.GPUS[g]["label"], s, scrub(d)))
     if not up:
         log("watchdog: no GPU is healthy; ask Jeffrey (never restart or warm a server)")
         return "no healthy GPU"
@@ -139,9 +149,9 @@ def gpu_health_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
             raise RuntimeError("GPU selection routed a %s item to the down GPU %s" % (size, g))
     log("watchdog GPU selection: " + ", ".join(
         "%s -> %s" % (size, picks[size] or "wait for a free healthy GPU") for size in ("large", "small")))
-    return "ok"
+    return "ok" if not down else "down: " + ", ".join(down)
 
-# ---------------------------------------------------------------- CLI: the "Factory watchdog (every 30 min)" routine
+# ---------------------------------------------------------------- CLI: run every check once (the same entry the driver-exit hook uses)
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="watchdog.py",
         description="Shared factory watchdog checks (scope: %s)." % ", ".join(REPOS))

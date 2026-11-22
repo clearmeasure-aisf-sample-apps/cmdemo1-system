@@ -4,6 +4,7 @@ shared entry (no network, no Pi).
 Run: python3 -m unittest factory/pi/test_watchdog.py
 """
 import contextlib, datetime as dt, io, json, os, subprocess, sys, tempfile, unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gpu as G
@@ -47,6 +48,9 @@ class Guards(unittest.TestCase):
         self.assertFalse(W.wip_full([(f"r{i}", dict(s)) for i in range(2)], "cmdemo1-workorders", alive=L.pid_alive))
 
 class Comments(unittest.TestCase):
+    def setUp(self):
+        W._last_comment.clear()      # the watchdog's own comment tracking is per process: start each test clean
+
     def test_no_action_posts_no_comment(self):
         def gh(args): raise AssertionError("a no-op check must not call gh")
         self.assertIsNone(W.post_comment("cmdemo1-workorders", 7, "", states=[], gh=gh))
@@ -92,6 +96,32 @@ class Comments(unittest.TestCase):
         self.assertEqual(sleeps[-1], 51.0)                    # sleeps so action B lands 61 s after action A
         self.assertGreaterEqual((now[0] - T0).total_seconds(), W.COMMENT_GAP_S)
 
+    def test_two_watchdog_actions_are_spaced_without_any_state(self):
+        """The watchdog spaces its own comments: it remembers what it posted, so it never needs the item's state."""
+        sleeps, calls = [], []
+        now = [T0]
+        def gh(args):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        old_now, old_sleep = L.now, W.time.sleep
+        L.now = lambda: now[0]
+        W.time.sleep = lambda secs: (sleeps.append(secs), now.__setitem__(0, now[0] + dt.timedelta(seconds=secs)))[1]
+        try:
+            self.assertIsNotNone(W.post_comment("cmdemo1-workorders", 7, "action A", states=[], gh=gh))
+            self.assertIsNotNone(W.post_comment("cmdemo1-workorders", 7, "action B", states=[], gh=gh))
+        finally:
+            L.now, W.time.sleep = old_now, old_sleep
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [W.COMMENT_GAP_S])           # the second action waited the whole gap on its own
+        self.assertGreaterEqual((now[0] - T0).total_seconds(), W.COMMENT_GAP_S)
+
+    def test_failed_comment_is_logged_and_nothing_is_recorded(self):
+        logs = []
+        def gh(args): return subprocess.CompletedProcess(args, 1, "gh: no such issue", "")
+        self.assertIsNone(W.post_comment("cmdemo1-workorders", 7, "acted", states=[], gh=gh, log=logs.append))
+        self.assertEqual(W._last_comment, {})
+        self.assertTrue(any("watchdog comment on cmdemo1-workorders#7 failed: gh: no such issue" in s for s in logs))
+
 class GpuHealthCheck(unittest.TestCase):
     """Check 1: a down GPU is reported in run_checks' result and log and pick_gpu / gpu_for_item never
     select it; all GPUs healthy is a no-op with no comment."""
@@ -110,7 +140,7 @@ class GpuHealthCheck(unittest.TestCase):
         h["ts3"] = ("UNREACHABLE", "no answer (unknown host or timeout)")
         logs = []
         r = self._run(lambda: dict(h), logs.append)
-        self.assertEqual(r, [("gpu_health_check", "ok")])      # the healthy GPUs carry on
+        self.assertEqual(r, [("gpu_health_check", "down: ts3")])   # the down GPU is in the result; the healthy ones carry on
         self.assertTrue(any("watchdog GPU ts3 (RTX 5060 Ti): UNREACHABLE - no answer (unknown host or timeout)" in s
                             for s in logs))
         up = G.available(h)
@@ -247,6 +277,48 @@ class ExitHook(unittest.TestCase):
                 log = f.read()
             self.assertIn("watchdog exit hook failed: checks down", log)
         self.assertEqual(d.s["status"], "done")          # the run still ends with the same status
+        self.assertEqual(len(calls), 1)
+
+    def test_import_failure_never_raises_out_of_the_done_path(self):
+        with tempfile.TemporaryDirectory() as h:
+            d, calls, old = self._setup(h, 45, "done")
+            try:
+                with mock.patch.dict(sys.modules, {"watchdog": None}):    # `import watchdog` raises
+                    d.run()                                               # the hook swallows it; the run ends done
+            finally:
+                L.HOME, W.run_checks = old
+            with open(os.path.join(d.run_dir, "driver.log")) as f:
+                log = f.read()
+            self.assertIn("watchdog exit hook failed", log)
+        self.assertEqual(d.s["status"], "done")
+        self.assertEqual(calls, [])
+
+    def test_import_failure_does_not_replace_the_driver_exception(self):
+        with tempfile.TemporaryDirectory() as h:
+            d, calls, old = self._setup(h, 46, "raise")
+            try:
+                with mock.patch.dict(sys.modules, {"watchdog": None}):
+                    with self.assertRaises(RuntimeError) as e:
+                        d.run()
+                self.assertEqual(str(e.exception), "driver boom")   # still the original driver exception
+            finally:
+                L.HOME, W.run_checks = old
+        self.assertEqual(d.s["status"], "error")
+        self.assertEqual(calls, [])
+
+    def test_hook_never_raises_even_when_logging_fails(self):
+        with tempfile.TemporaryDirectory() as h:
+            d, calls, old = self._setup(h, 47, "done", failing=True)
+            real = d.log
+            def log(line):
+                if "watchdog exit hook" in line: raise IOError("driver.log is closed")
+                real(line)
+            d.log = log
+            try:
+                d.run()                                   # the failed log line never escapes Driver.run
+            finally:
+                L.HOME, W.run_checks = old
+        self.assertEqual(d.s["status"], "done")
         self.assertEqual(len(calls), 1)
 
     def test_failing_run_checks_never_swallows_the_driver_exception(self):

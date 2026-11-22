@@ -1034,13 +1034,16 @@ class Driver:
 
 def watchdog_exit(drv):
     """Driver-exit hook: the shared watchdog checks (factory/pi/watchdog.py) run exactly once when a
-    driver run ends (done, blocker or error). A check's failure is logged; this function never raises
-    and never changes the driver's exit status."""
-    import watchdog
+    driver run ends (done, blocker or error). A check's failure (and a failed `import watchdog`) is logged;
+    this function never raises and never changes the driver's exit status or replaces its exception."""
     try:
+        import watchdog
         watchdog.run_checks(log=drv.log)
     except Exception as e:
-        drv.log(f"watchdog exit hook failed: {scrub(str(e))}")
+        try:
+            drv.log(f"watchdog exit hook failed: {scrub(str(e))}")
+        except Exception:
+            pass   # never let the hook (or its log) change the driver's exit
 
 # ---------------------------------------------------------------- commands
 def cmd_draft_plan(a):
