@@ -41,7 +41,7 @@ def excluded(repo, issue):
         return False
 
 def wip_limit(repo):
-    """Hard rule: the per-repo WIP cap, reused from item_loop (3 per repo, dashboard 5)."""
+    """Hard rule: the per-repo WIP cap, reused from item_loop (3 per repo, dashboard 8)."""
     return L.wip_limit(repo)
 
 def scrub(text):

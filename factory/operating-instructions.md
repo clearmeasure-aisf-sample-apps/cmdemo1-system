@@ -108,7 +108,7 @@ below). In order:
 
 Todo → In Progress → Review → Merged → TDD → UAT → Done.
 
-- WIP limit 3 per repository, except `cmdemo1-dashboard` which is 5 (Jeffrey, 21 Nov 2026 8:30am CT): items in In Progress and Review whose issue lives in that repository (e.g.
+- WIP limit 3 per repository, except `cmdemo1-dashboard` which is 8 (Jeffrey, 22 Nov 2026 7:31am CT; was 5): items in In Progress and Review whose issue lives in that repository (e.g.
   cmdemo1-workorders, cmdemo1-system, cmdemo1-dashboard). Merged, TDD and UAT do not count. There is no global
   WIP cap. Count from the one project query of this wake (group by `repo`; do not query per repo). When a repo is
   at its limit, leave its new items in Todo and take the next Todo item from a repo with room; post one
