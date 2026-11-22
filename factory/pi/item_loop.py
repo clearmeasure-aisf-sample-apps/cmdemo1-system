@@ -229,6 +229,34 @@ def new_followups(items, existing_titles, limit=FOLLOWUP_MAX):
         if len(out) == limit: break
     return out
 
+def resume_target(state):
+    """(stage, clear_gpu) where a paused item (status `blocked` or `error`) resumes, from the state dict alone.
+    Blocked: `resume_stage` when set, else `ci` when a PR exists, else `implement`; the GPU is never cleared.
+    Error: resume the saved stage (falling back to implement when no stage is saved); a gpu/pickup error maps to the
+    gpu stage with the recorded GPU cleared."""
+    st = state or {}
+    if st.get("status") == "error":
+        stage = st.get("stage")
+        if stage in ("gpu", "pickup"):
+            return "gpu", True
+        return stage or "implement", False
+    return st.get("resume_stage") or ("ci" if st.get("pr") else "implement"), False
+
+def apply_resume(state):
+    """Resume a paused item (status `blocked` or `error`) from the state dict alone and return the new state: the
+    target stage from resume_target (the saved stage for an error, falling back to implement when none is saved,
+    `resume_stage` / ci / implement for a blocked),
+    with the `error` (or `blocker`) field dropped, the recorded GPU cleared only when the saved stage was gpu or
+    pickup, and the fix counts reset to zero."""
+    st = dict(state or {})
+    if st.get("status") in ("blocked", "error"):
+        stage, clear_gpu = resume_target(st)
+        st["stage"] = stage
+        st.pop("blocker" if st.get("status") == "blocked" else "error", None)
+        if clear_gpu: st.pop("gpu", None)
+        st["counts"] = {k: 0 for k in LIMITS}
+    return st
+
 def busy_gpus(states, me=None, alive=lambda pid: False):
     """GPUs whose slots are all held by other live items in an active stage (pro5000 has 2, obs and ts3 have 1).
     states: [(key, state dict)]."""
@@ -1043,8 +1071,7 @@ def cmd_start(a):
     d.s.setdefault("top_sessions", [])
     if a.top_session and a.top_session not in d.s["top_sessions"]: d.s["top_sessions"].append(a.top_session)
     if d.s.get("status") in ("blocked", "error") and a.resume:
-        d.s["stage"] = d.s.get("resume_stage") or ("ci" if d.s.get("pr") else "implement"); d.s.pop("blocker", None)
-        d.s["counts"] = {k: 0 for k in LIMITS}   # Jeffrey answered the Blocker: the limits start again
+        d.s = apply_resume(d.s)   # Jeffrey answered the Blocker: the limits start again
     d.save()
     log = open(os.path.join(d.run_dir, "driver.out"), "a")
     cmd = [sys.executable, os.path.abspath(__file__), "run", "--repo", a.repo, "--issue", str(a.issue)] + (["--dry-run"] if a.dry_run else [])
