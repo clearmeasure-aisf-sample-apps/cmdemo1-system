@@ -982,6 +982,88 @@ class RefactoringResearch(unittest.TestCase):
                 self.assertTrue(out.startswith(d.run_dir) and fu.startswith(d.run_dir))   # outside the worktree
             finally: L.HOME = old
 
+class ResearchInnerH2(unittest.TestCase):   # the research section ends at the driver's next H2, never at an inner H2
+    FINDINGS = ("- `src/A.cs` `Save()`: 80-line method with duplicated validation; extract a specification object "
+                "(in scope).\n- `src/A.cs` `status` strings: primitive obsession; a value object would make the rules "
+                "explicit (follow-up: filed).\n- `src/A.cs` `Total()`: long conditional chain; one strategy per pricing "
+                "rule keeps it readable (in scope).")
+    GOOD = ("## Refactoring research\n\nRead `src/A.cs` and its close collaborators before touching anything.\n\n"
+            "## Findings\n\n" + FINDINGS + "\n\n"
+            "In scope: extract the specification object. Follow-up: the status value object.")
+
+    def test_inner_h2_heading_passes_research_ok(self):
+        self.assertTrue(L.research_ok(self.GOOD, ["src/A.cs"]))
+
+    def test_several_inner_h2_headings_pass_research_ok(self):
+        text = ("## Refactoring research\n\nRead `src/A.cs` and its close collaborators before touching anything.\n\n"
+                "## Findings\n\n- `src/A.cs` `Save()`: 80-line method with duplicated validation; extract a specification "
+                "object (in scope).\n- `src/A.cs` `status` strings: primitive obsession; a value object would make the "
+                "rules explicit (follow-up: filed).\n\n"
+                "## Notes\n\n- `src/A.cs` `Total()`: long conditional chain; one strategy per pricing rule keeps it "
+                "readable (in scope).\n\nIn scope: extract the specification object. Follow-up: the status value object.")
+        self.assertTrue(L.research_ok(text, ["src/A.cs"]))
+
+    def test_inner_h2_still_rejects_thin_research(self):
+        self.assertFalse(L.research_ok("## Refactoring research\n\nintro about src/A.cs.\n\n## Findings\n\n- none\n", ["src/A.cs"]))
+
+    def test_inner_h2_stops_at_the_next_driver_section(self):
+        plan = ("- `src/A.cs` `Save()` becomes a thin coordinator over the specification object; every rule moves out of it.\n"
+                "- `src/A.cs` status strings move to the value object, with the parsing helper deleted and its callers updated.")
+        self.assertFalse(L.research_ok("## Refactoring research\n\nintro about src/A.cs.\n\n## Refactoring plan\n\n" + plan, ["src/A.cs"]))
+
+class ResearchBodyInnerH2(unittest.TestCase):   # the inner-H2 research lands in the PR body as ONE top-level section
+    RESEARCH = ResearchInnerH2.GOOD                                  # research text that carries an inner `## Findings`
+    BULLETS = [l for l in ResearchInnerH2.FINDINGS.splitlines() if l.strip()]
+    PLAN = "\n## Refactoring plan\n\nshrink\n"                       # the driver's own section after the research
+
+    @staticmethod
+    def h2_lines(text):   # the body's top-level H2 lines; an H2 written inside the research must never become one
+        return [l for l in text.splitlines() if l.startswith("## ")]
+
+    def test_inner_h2_research_gives_one_pr_section(self):
+        b = L.with_research("Closes #9\n\nsummary\n\n", self.RESEARCH)
+        self.assertEqual(b.count("## Refactoring research"), 1)
+        self.assertIn("### Findings", b)                             # the inner H2 is demoted under the research
+        self.assertNotIn("## Findings", self.h2_lines(b))            # ...and is not re-emitted as a second top-level section
+        self.assertTrue(b.startswith("Closes #9"))                   # the body's own head is kept
+        for line in self.BULLETS:                                    # every finding still reaches the PR body
+            self.assertIn(line, b)
+
+    def test_inner_h2_findings_appear_once(self):
+        b = L.with_research("Closes #9\n\nsummary\n\n", self.RESEARCH)
+        self.assertEqual(self.h2_lines(b), ["## Refactoring research"])          # nothing duplicated as a top-level section
+        self.assertEqual(b.count("primitive obsession"), 1)                      # no repeated heading or bullet text
+        for line in self.BULLETS:
+            self.assertEqual([l for l in b.splitlines() if l == line], [line])   # each finding bullet exactly once
+
+    def test_inner_h2_body_keeps_the_following_plan_section(self):
+        b2 = L.with_research("Closes #9\n\n" + self.RESEARCH + self.PLAN, self.RESEARCH)
+        self.assertIn("## Refactoring plan", b2)
+        self.assertGreater(b2.index("Refactoring plan"), b2.index("Refactoring research"))
+        self.assertEqual(b2.count("## Refactoring research"), 1)
+        self.assertIn("### Findings", b2)
+        self.assertTrue(L.research_ok(b2, ["src/A.cs"]))
+
+    def test_replacing_a_body_research_section_leaves_no_leftovers(self):
+        b = L.with_research("Closes #9\n\n" + self.RESEARCH + self.PLAN, self.RESEARCH)   # legacy body with an inner H2
+        self.assertEqual(b.count("## Refactoring research"), 1)
+        self.assertEqual(b.count("## Refactoring plan"), 1)
+        self.assertNotIn("## Findings", self.h2_lines(b))
+        self.assertEqual(self.h2_lines(b), ["## Refactoring research", "## Refactoring plan"])
+        for line in self.BULLETS:                                                        # no leftovers of the old section
+            self.assertEqual([l for l in b.splitlines() if l == line], [line])
+
+    def test_research_prompt_uses_only_h3_subheadings(self):   # cmdemo1-dashboard#651: tell Pi, not just the body writer
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 9, dry_run=True); d.s["plan"] = PLAN
+                out, fu, prompt = d.research_prompt()
+                self.assertIn(L.RESEARCH_HEAD, prompt)                                   # the heading the research starts with
+                self.assertIn("###", prompt)                                             # ...and the subheadings it must use
+                self.assertIn("never `## `", prompt)                                     # an H2 inside the research is forbidden
+            finally: L.HOME = old
+
 class StagedFilesGate(unittest.TestCase):
     """The protected-file gate: item_loop.staged_files(sh, wt, default) (the files staged in the worktree's index
     relative to the merge base of HEAD and origin/<default>, with protected_files() applied to the result) and the
