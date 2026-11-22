@@ -241,7 +241,10 @@ free, then takes it (`stage: gpu`, `wait_why` in `status`). Big or cross-cutting
 several layers, database, build or infra files, long context) go to `pro5000` and wait for it while it is up; small UI or test
 items (`size: small`) go to `pro5000` first (keep both of its slots full), then `obs`, and `ts3` only when `pro5000`'s two slots and `obs`
 are busy. Every Pi or model client timeout is at least 300 s (`MIN_CLIENT_TIMEOUT_S`; a shorter one hangs up on long calls as a 499). An item holds its GPU slot from pickup through the
-merge; Pi tasks run at most 2 at once on `pro5000` and 1 on `obs` / `ts3` from this box.
+merge; Pi tasks run at most 2 at once on `pro5000` and 1 on `obs` / `ts3` from this box. These are hard caps (Jeffrey,
+21 Nov 2026), enforced by `factory/pi/gpu_gate.py` for every Pi launch (`run-task`, `pi-gpu`, the `pi-pro5000` shim): a
+launch on a full GPU waits. Never start Pi any other way, and never delete slot files (`~/.config/factory/gpu-slots/`,
+legacy `/tmp/factory-pi-*-slot-*.lock`); `python3 factory/pi/gpu_gate.py status` shows live holders per GPU.
 
 **Working an item: the loop is Pi, not Grok** (Jeffrey, 18 Nov 2026 11:41pm CT: "If there is build monitoring or
 processing logs or polling tool calls, delegate those to pi also. Let the loop be pi."):

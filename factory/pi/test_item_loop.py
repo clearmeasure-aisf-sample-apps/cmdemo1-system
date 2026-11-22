@@ -683,6 +683,105 @@ class RunTaskTimeout(unittest.TestCase):   # cmdemo1-system#817: --timeout must 
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN); f.close()
 
+class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, obs 1, ts3 1 for every Pi launch
+    """On Nov 21 a Pi session ran `rm -f /tmp/factory-pi-*-slot-*.lock`; new run-tasks then took "free" slots on new
+    inodes while the old holders still ran (3 on pro5000, 2 on ts3 and obs). Only a private slot dir is used here."""
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    GATE = os.path.join(HERE, "gpu_gate.py")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(); self.procs = []
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith(("LOCAL_LLM_", "FACTORY_GPU_"))}
+        self.env["FACTORY_PI_LOCK_DIR"] = os.path.join(self.tmp, "slots")
+        self.addCleanup(self._reap)
+
+    def _reap(self):
+        for p in self.procs:
+            if p.poll() is None: p.kill()
+            p.wait()
+
+    def hold(self, gpu, *extra, secs=30):
+        """Start `gpu_gate.py hold GPU [extra] -- sleep secs` in the background; returns the Popen."""
+        p = subprocess.Popen([sys.executable, self.GATE, "hold", gpu, *extra, "--", "sleep", str(secs)], env=self.env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        self.procs.append(p); return p
+
+    def held(self, gpu):
+        out = subprocess.run([sys.executable, self.GATE, "status", "--json"], env=self.env, capture_output=True,
+                             text=True, check=True).stdout
+        return json.loads(out)[gpu]["held"]
+
+    def wait_held(self, gpu, n, within=10.0):
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            if self.held(gpu) == n: return True
+            time.sleep(0.1)
+        return False
+
+    def test_default_caps_are_the_hard_caps_and_overrides_only_lower(self):
+        sys.path.insert(0, self.HERE); import gpu_gate
+        self.assertEqual(gpu_gate.caps({}), {"pro5000": 2, "obs": 1, "ts3": 1})
+        self.assertEqual(gpu_gate.caps({"FACTORY_GPU_CAPS": "pro5000=5,obs=0,ts3=x"}), {"pro5000": 2, "obs": 0, "ts3": 1})
+
+    def test_caps_hold_under_concurrent_acquisition(self):
+        for gpu, cap in (("pro5000", 2), ("obs", 1), ("ts3", 1)):
+            ps = [self.hold(gpu, "--no-wait") for _ in range(5)]   # five launches race for the GPU at once
+            time.sleep(2.0)
+            running = [p for p in ps if p.poll() is None]
+            self.assertEqual(len(running), cap, f"{gpu}: {len(running)} holders, cap {cap}")
+            self.assertTrue(all(p.returncode == 75 for p in ps if p not in running), f"{gpu}: the rest must exit 75")
+            self.assertEqual(self.held(gpu), cap)
+
+    def test_waiters_start_only_as_slots_free(self):
+        first = self.hold("obs", secs=2)
+        self.assertTrue(self.wait_held("obs", 1))
+        second = self.hold("obs", secs=30)                 # waits instead of starting
+        time.sleep(1.0); self.assertEqual(self.held("obs"), 1)
+        first.wait(timeout=10)
+        self.assertTrue(self.wait_held("obs", 1, within=12)); self.assertIsNone(second.poll())
+
+    def test_slot_is_released_when_the_holder_is_killed(self):
+        p = self.hold("ts3"); self.assertTrue(self.wait_held("ts3", 1))
+        p.send_signal(signal.SIGKILL); p.wait(timeout=5)
+        q = self.hold("ts3", "--no-wait"); self.assertTrue(self.wait_held("ts3", 1))
+        time.sleep(0.5); self.assertIsNone(q.poll(), "the slot of a SIGKILLed holder must be free again")
+
+    def test_deleting_slot_files_does_not_free_a_slot(self):
+        self.hold("pro5000"); self.hold("pro5000"); self.assertTrue(self.wait_held("pro5000", 2))
+        d = self.env["FACTORY_PI_LOCK_DIR"]
+        for f in os.listdir(d): os.remove(os.path.join(d, f))      # what the Nov 21 Pi session did in /tmp
+        third = self.hold("pro5000", "--no-wait"); third.wait(timeout=10)
+        self.assertEqual(third.returncode, 75, "a deleted slot file must still count as held")
+        self.assertEqual(self.held("pro5000"), 2)
+
+    def test_every_pi_launch_path_goes_through_the_gate(self):
+        src = lambda n: open(os.path.join(self.HERE, n)).read()
+        self.assertIn('gpu_gate.py" hold "$gpu" -- pi ', src("pi-gpu"))          # manual runs, the watchdog, run-task
+        self.assertNotRegex(src("pi-gpu"), r"(?m)^exec pi ")
+        self.assertIn('pi-gpu" pro5000', src("pi-pro5000"))                     # the shim goes through pi-gpu
+        rt = src("run-task")
+        self.assertIn("gpu_gate.acquire(", rt); self.assertIn("pass_fds", rt); self.assertNotIn("/tmp", rt)
+        self.assertIn('"run-task"', src("item_loop.py"))                        # drivers launch Pi only via run-task
+        for n in os.listdir(self.HERE):                                          # no other tool starts Pi itself
+            path = os.path.join(self.HERE, n)
+            if n in ("pi-gpu", "test_item_loop.py") or not os.path.isfile(path) or n.endswith(".pyc"): continue
+            self.assertNotRegex(open(path, errors="replace").read(), r"(?m)(^|[;&|]\s*|exec\s+)pi\s+--provider",
+                                f"{n} starts Pi without the gate")
+
+    def test_run_task_hands_its_slot_to_pi_gpu(self):
+        rt = importlib.util.module_from_spec(importlib.util.spec_from_loader(
+            "run_task_861", importlib.machinery.SourceFileLoader("run_task_861", os.path.join(self.HERE, "run-task"))))
+        rt.__spec__.loader.exec_module(rt)
+        os.environ["FACTORY_PI_LOCK_DIR"] = self.env["FACTORY_PI_LOCK_DIR"]
+        self.addCleanup(os.environ.pop, "FACTORY_PI_LOCK_DIR", None)
+        import gpu_gate
+        fd = gpu_gate.acquire("obs", wait=False); self.assertIsNotNone(fd)
+        env = dict(self.env, FACTORY_GPU_SLOT_FD=f"obs:{fd}")
+        code = "import gpu_gate,sys; print(gpu_gate.held_fd('obs'))"
+        rc, out = rt.run_pi([sys.executable, "-c", code], cwd=self.HERE, timeout=20, slot_fd=fd, env=env)
+        os.close(fd)
+        self.assertEqual((rc, out.strip()), (0, str(fd)), "pi-gpu must see the slot run-task passed down")
+
 class Scrubbing(unittest.TestCase):
     def test_tunnel_hosts_and_every_gpu_secret_are_redacted(self):
         for host in ("pro5000", "5070ti", "5060ti"):
