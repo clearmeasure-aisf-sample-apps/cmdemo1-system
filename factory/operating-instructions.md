@@ -308,6 +308,7 @@ to read and maintainable"):**
 (strongest available first) reviews the diff, the acceptance criteria, the `## Refactoring research` section and the
 repository's `AGENTS.md` / `CLAUDE.md` rules, changes no files, and ends PASS or FAIL. When no second GPU is up the
 driver waits up to 2 hours, then a Blocker; it never reviews on the author's GPU.
+A missing or empty findings file, or a review that ends with no PASS/FAIL verdict (timeout), is a review-infra failure, never a FAIL: the driver retries the review at most 2 times on any free non-author GPU within the caps, never sends the nonexistent findings to Pi, and after that posts a Blocker that says review infra failed, not a code FAIL (Jeffrey, t83u, 22 Nov 2026).
 
 ## Continuous enhancement pipeline
 

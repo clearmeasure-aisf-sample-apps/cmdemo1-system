@@ -115,6 +115,22 @@ def acquire(g, wait=True, log=sys.stderr):
             print(f"gpu_gate: waiting for a {g} slot ({tasks(holders(g))}/{caps()[g]} held, {int(last - t0)} s)", file=log, flush=True)
         time.sleep(POLL_S)
 
+def acquire_any(gs, wait=True, log=sys.stderr):
+    """(gpu, fd) for the first of gs with a free slot (in the given order), or (None, None) with wait=False. A review may
+    run on any non-author GPU, so it never waits on one specific GPU while another is free (Jeffrey, t81u / t83u)."""
+    gs = [g for g in gs if g in G.GPUS]
+    if not gs: raise ValueError("no known GPU to acquire")
+    t0 = last = time.monotonic()
+    while True:
+        for g in gs:
+            fd = try_acquire(g)
+            if fd is not None: return g, fd
+        if not wait: return None, None
+        if time.monotonic() - last >= HEARTBEAT_S:
+            last = time.monotonic()
+            print(f"gpu_gate: waiting for a slot on any of {','.join(gs)} ({int(last - t0)} s)", file=log, flush=True)
+        time.sleep(POLL_S)
+
 def held_fd(g, env=None):
     """The slot fd a parent (run-task) took for g and passed down as FACTORY_GPU_SLOT_FD=<gpu>:<fd>, or None."""
     env = os.environ if env is None else env

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Run ONE Pi task on one of the factory's GPUs and record its usage.
 
-    run-task --run-dir DIR --cwd WORKTREE --task NAME --prompt-file FILE [--gpu pro5000|obs|ts3] [--timeout SEC] [--top-session ID]
+    run-task --run-dir DIR --cwd WORKTREE --task NAME --prompt-file FILE [--gpu pro5000|obs|ts3|obs,ts3] [--timeout SEC] [--top-session ID]
 
 - Runs `pi-gpu <gpu> -p <prompt>` (default GPU: $FACTORY_PI_GPU, else pro5000) in WORKTREE with stdin closed (Pi waits forever on an open stdin), no context files,
   skills or MCP, and its own session dir DIR/pi-sessions/NAME, so the session JSONL is kept.
 - At most 2 Pi tasks run at once on pro5000, 1 on obs and 1 on ts3 (hard caps): it waits for a slot from gpu_gate.py,
   the one gate every Pi launch goes through (#861), and hands the slot fd to pi-gpu / Pi, so the slot is held exactly as
   long as Pi or anything it started is alive (a killed run-task no longer frees the slot of a running orphan Pi).
+- --gpu may list several GPUs (comma-separated, e.g. obs,ts3): Pi runs on the first with a free slot (reviews, #t83u);
+  the record's "gpu" is the one that ran.
 - Appends one record to DIR/tasks.jsonl: Pi session id, task, GPU, result, turns, input / cached / output tokens, wall
   time. The first call creates DIR/run.json with the top-level session id (--top-session or $FACTORY_TOP_SESSION)
   and the start time, which usage-report reads.
@@ -67,12 +69,17 @@ def run_pi(cmd, cwd, timeout, slot_fd=None, env=None):
         except subprocess.TimeoutExpired: pass
         return 124, text
 
+def gpu_list(v):
+    gs = [g.strip() for g in str(v).split(",") if g.strip()]
+    if not gs or any(g not in G.GPUS for g in gs): raise argparse.ArgumentTypeError(f"--gpu: one or more of {list(G.GPUS)}")
+    return gs
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--run-dir", required=True); p.add_argument("--cwd", required=True)
     p.add_argument("--task", required=True); p.add_argument("--prompt-file", required=True)
     p.add_argument("--timeout", type=int, default=1500); p.add_argument("--top-session")
-    p.add_argument("--gpu", choices=list(G.GPUS), default=os.environ.get("FACTORY_PI_GPU") or G.LARGE_GPU)
+    p.add_argument("--gpu", type=gpu_list, default=os.environ.get("FACTORY_PI_GPU") or G.LARGE_GPU)
     a = p.parse_args()
     run = os.path.abspath(a.run_dir); os.makedirs(os.path.join(run, "logs"), exist_ok=True)
     meta = os.path.join(run, "run.json")
@@ -85,7 +92,7 @@ def main():
     sdir = os.path.join(run, "pi-sessions", task); os.makedirs(sdir, exist_ok=True)
     prompt = open(a.prompt_file).read()
     open(os.path.join(run, "logs", f"{task}.prompt.md"), "w").write(prompt)
-    slot = gpu_gate.acquire(a.gpu); t0 = now()
+    a.gpu, slot = gpu_gate.acquire_any(a.gpu); t0 = now()
     env = dict(os.environ, FACTORY_GPU_SLOT_FD=f"{a.gpu}:{slot}")
     pi_gpu = os.environ.get("FACTORY_PI_GPU_BIN") or os.path.join(HERE, "pi-gpu")
     try:

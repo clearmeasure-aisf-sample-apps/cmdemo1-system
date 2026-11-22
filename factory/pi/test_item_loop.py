@@ -135,6 +135,87 @@ class NoIdleStall(unittest.TestCase):
                 self.assertFalse(d.hold_blocked())
             finally: L.HOME = old
 
+class ReviewInfraRetry(unittest.TestCase):   # t83u: no / empty findings or no verdict = retry the review, never a FAIL
+    def test_review_verdict_classifies_infra_failures(self):
+        self.assertIsNone(L.review_verdict("exit 1", None)[0])         # #1944: no findings file
+        self.assertIsNone(L.review_verdict("FAIL", " \n\t")[0])       # whitespace only
+        self.assertIsNone(L.review_verdict("timeout", "- partial")[0])  # #820: timed out, no verdict
+        self.assertEqual(L.review_verdict("PASS", "- No findings."), (True, "- No findings."))
+        self.assertEqual(L.review_verdict("FAIL", "- bug"), (False, "- bug"))
+        self.assertFalse(L.hold_resumes("independent review infra failed 3 times (x)"))
+
+    def driver(self, h, verdicts):
+        d = L.Driver("cmdemo1-workorders", 31, dry_run=True)
+        plan = dict(PLAN, criteria=[{"text": "A works", "evidence_cmd": "true"}])
+        d.s.update(plan=plan, wt=tempfile.mkdtemp(dir=h), gpu="pro5000", pr=7, stage="review")
+        d.independent_review = lambda: verdicts.pop(0)
+        d.pi = lambda *a, **k: self.fail("review infra findings must never reach Pi")
+        d.blocker = lambda what: d.save(stage="blocked", blocker=what)
+        d.comment = d.move = lambda *a, **k: None
+        return d
+
+    def test_infra_failure_is_retried_then_passes(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = self.driver(h, [(None, "no findings file"), (None, "empty"), (True, "- No findings.")])
+                d.st_review()
+                self.assertEqual(d.s["stage"], "merge")
+                self.assertEqual((d.s["counts"]["review_fail"], d.s["counts"]["review_infra"]), (0, 0))
+            finally: L.HOME = old
+
+    def test_infra_failure_blocks_after_two_retries_without_a_fail(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = self.driver(h, [(None, "no findings file")] * 3)
+                d.st_review()
+                self.assertEqual(d.s["stage"], "blocked")
+                self.assertTrue(d.s["blocker"].startswith("independent review infra failed 3 times"))
+                self.assertIn("not a code FAIL", d.s["blocker"])
+                self.assertEqual(d.s["counts"]["review_fail"], 0)
+            finally: L.HOME = old
+
+    def test_review_runs_on_any_free_non_author_gpu_and_missing_file_is_infra(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = (L.HOME, L.research_ok, L.gpu_health); L.HOME = h
+            try:
+                L.research_ok = lambda *a: True; L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
+                d = L.Driver("cmdemo1-workorders", 32, dry_run=True)
+                d.s.update(plan=dict(PLAN), wt=tempfile.mkdtemp(dir=h), gpu="pro5000", pr=7, default="main")
+                d.merge_base = lambda: "abc"; calls = []
+                rec = json.dumps({"task": "independent-review-1", "gpu": "ts3", "result": "exit 1"})
+                def sh(cmd, **k):
+                    calls.append(list(cmd))
+                    out = "body\n## Refactoring research\n- x" if "pr" in cmd else (rec + "\n--- pi tail ---" if "--gpu" in cmd else "")
+                    return subprocess.CompletedProcess(cmd, 1 if "--gpu" in cmd else 0, out, "")
+                d.sh = sh
+                ok, why = d.independent_review()
+                run = next(c for c in calls if "--gpu" in c)
+                self.assertEqual(run[run.index("--gpu") + 1], "obs,ts3")
+                self.assertIsNone(ok); self.assertIn("no findings file", why); self.assertEqual(d.s["reviewer_gpu"], "ts3")
+            finally: L.HOME, L.research_ok, L.gpu_health = old
+
+    def test_gate_acquire_any_takes_the_first_free_gpu(self):
+        import gpu_gate
+        with tempfile.TemporaryDirectory() as h:
+            env = {k: os.environ.get(k) for k in ("FACTORY_PI_LOCK_DIR", "FACTORY_PI_LEGACY_LOCK_DIR")}
+            os.environ["FACTORY_PI_LOCK_DIR"] = h; os.environ.pop("FACTORY_PI_LEGACY_LOCK_DIR", None)
+            try:
+                p = subprocess.Popen([sys.executable, "-c", "import fcntl,sys,time; f=open(sys.argv[1],'a'); "
+                                      "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); time.sleep(30)",
+                                      os.path.join(h, "factory-pi-obs-slot-0.lock")], stdout=subprocess.PIPE, text=True)
+                try:
+                    p.stdout.readline()
+                    g, fd = gpu_gate.acquire_any(["obs", "ts3"], wait=False)
+                    self.assertEqual(g, "ts3"); gpu_gate.release(fd)
+                    self.assertEqual(gpu_gate.acquire_any(["obs"], wait=False), (None, None))
+                finally: p.kill(); p.wait()
+            finally:
+                for k, v in env.items():
+                    if v is None: os.environ.pop(k, None)
+                    else: os.environ[k] = v
+
 class DryRunDriver(unittest.TestCase):
     def test_writes_are_skipped_in_dry_run(self):
         with tempfile.TemporaryDirectory() as h:
@@ -178,6 +259,10 @@ class Gpus(unittest.TestCase):
 
     def test_client_timeout_floor_is_300s(self):
         self.assertGreaterEqual(G.MIN_CLIENT_TIMEOUT_S, 300)
+
+    def test_reviewer_gpus_are_every_other_healthy_gpu(self):
+        self.assertEqual(G.reviewer_gpus("pro5000", ["pro5000", "obs", "ts3"]), ["obs", "ts3"])
+        self.assertEqual(G.reviewer_gpus("obs", ["pro5000", "obs"]), ["pro5000"])
 
     def test_reviewer_is_a_different_gpu(self):
         self.assertEqual(G.reviewer_gpu("obs", ["pro5000", "obs", "ts3"]), "pro5000")
@@ -897,7 +982,7 @@ class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, o
         self.assertNotRegex(src("pi-gpu"), r"(?m)^exec pi ")
         self.assertIn('pi-gpu" pro5000', src("pi-pro5000"))                     # the shim goes through pi-gpu
         rt = src("run-task")
-        self.assertIn("gpu_gate.acquire(", rt); self.assertIn("pass_fds", rt); self.assertNotIn("/tmp", rt)
+        self.assertIn("gpu_gate.acquire_any(", rt); self.assertIn("pass_fds", rt); self.assertNotIn("/tmp", rt)
         self.assertIn('"run-task"', src("item_loop.py"))                        # drivers launch Pi only via run-task
         for n in os.listdir(self.HERE):                                          # no other tool starts Pi itself
             path = os.path.join(self.HERE, n)

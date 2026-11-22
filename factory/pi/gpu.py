@@ -98,6 +98,10 @@ def reviewer_gpu(author, up):
     """A different healthy GPU for the independent diff review (strongest first), or None."""
     return next((g for g in GPUS if g in up and g != author), None)
 
+def reviewer_gpus(author, up):
+    """Every healthy GPU but the author's, strongest first: the review takes whichever has a free slot first."""
+    return [g for g in GPUS if g in up and g != author]
+
 def main():
     a = sys.argv[1:]
     if not a: print(__doc__); sys.exit(2)
