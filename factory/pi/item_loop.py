@@ -98,7 +98,7 @@ def scrub(s):
 
 # ---- GitHub App token for gh (own API quota). Opt-in: set GH_APP_TOKEN_CMD to a command that prints an installation token.
 GH_APP_TOKEN_TTL_S = 50 * 60   # installation tokens last 1h; refresh before that
-_APP_DENIED_RE = re.compile(r"HTTP 40[13]\b|Resource not accessible|Forbidden|Bad credentials|API rate limit", re.I)   # clear authorization refusals only
+_APP_DENIED_RE = re.compile(r"HTTP 40[13]\b|Resource not accessible|Forbidden|Bad credentials|API rate limit|Repository rule violations|not authorized to push|protected branch", re.I)   # clear authorization refusals only
 GH_APP_USER_ONLY = {("pr", "create"), ("issue", "create")}   # authored objects stay the bot user's: the merge gate requires PR author == BOT
 GH_APP_MINT_RETRY_S = 5 * 60   # a failed mint is not retried on every gh call
 _app_tok = {"v": None, "at": 0.0}
