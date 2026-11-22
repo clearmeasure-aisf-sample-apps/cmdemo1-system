@@ -27,7 +27,7 @@ class Guards(unittest.TestCase):
     def test_wip_cap_reuses_item_loop(self):
         self.assertEqual(W.wip_limit("cmdemo1-workorders"), L.wip_limit("cmdemo1-workorders"))
         self.assertEqual(W.wip_limit("cmdemo1-system"), 3)
-        self.assertEqual(W.wip_limit("cmdemo1-dashboard"), 5)
+        self.assertEqual(W.wip_limit("cmdemo1-dashboard"), 8)
 
     def test_scrub_reuses_item_loop(self):
         url = "https://fake-pro5000.trycloudflare.com/v1"

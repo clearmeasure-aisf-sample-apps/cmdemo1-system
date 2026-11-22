@@ -328,7 +328,7 @@ class Concurrency(unittest.TestCase):
         self.assertEqual(L.repo_wip(st, "cmdemo1-workorders", None, alive), 2)   # a (ci) + d (blocked in review)
         self.assertEqual(L.repo_wip(st, "cmdemo1-dashboard", None, alive), 1)
         self.assertEqual(L.WIP_LIMIT, 3)
-        self.assertEqual((L.wip_limit("cmdemo1-dashboard"), L.wip_limit("cmdemo1-workorders"), L.wip_limit("cmdemo1-system")), (5, 3, 3))
+        self.assertEqual((L.wip_limit("cmdemo1-dashboard"), L.wip_limit("cmdemo1-workorders"), L.wip_limit("cmdemo1-system")), (8, 3, 3))
 
     def test_intake_stops_while_red_except_fix_forward(self):
         self.assertTrue(L.intake_open({}, PLAN))

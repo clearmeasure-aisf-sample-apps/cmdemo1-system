@@ -40,7 +40,7 @@ NEVER_MERGE = {("cmdemo1-workorders", 1918)}
 # Jeffrey: leave these alone (no plan, no driver, no comment).
 HANDS_OFF = {("cmdemo1-system", 654), ("cmdemo1-workorders", 1875), ("cmdemo1-workorders", 1876)}
 WIP_LIMIT = 3             # per repository: In Progress + Review (default)
-WIP_LIMITS = {"cmdemo1-dashboard": 5}   # Jeffrey, 21 Nov 2026 8:30am CT: dashboard 5, workorders and system stay 3
+WIP_LIMITS = {"cmdemo1-dashboard": 8}   # Jeffrey, 22 Nov 2026 7:31am CT: dashboard 8, workorders and system stay 3 (was 5 per 21 Nov 8:30am CT)
 def wip_limit(repo): return WIP_LIMITS.get(repo, WIP_LIMIT)
 # Stages in which an item holds its GPU (In Progress / Review). Waiting for a GPU, blocked, main, deploy and done do not.
 ACTIVE_STAGES = ("pickup", "research", "implement", "local-verify", "pr", "ci", "review", "merge")
