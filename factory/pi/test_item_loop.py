@@ -8,6 +8,29 @@ PLAN = {"repo": "cmdemo1-workorders", "issue": 1, "branch": "cm-ai-ops-bot/1-x",
         "criteria": [{"text": "A works", "evidence_cmd": "dotnet test --filter A"}],
         "tasks": [{"name": "t1", "prompt": "Write test A"}], "verify_cmd": "dotnet build", "pr_title": "A"}
 
+class Clock:  # fake time module: one sleep() jumps past GPU_WAIT_H so st_gpu's wait loop exits after one iteration
+    def __init__(self, t=1e9): self.t = float(t)
+    def time(self): return self.t
+    def sleep(self, s): self.t += L.GPU_WAIT_H * 3600 + 1
+
+def scripted_sh(replies):
+    """sh replacement for git/gh steps: a reply key is a command word or a run of consecutive words ('merge-base',
+    'diff --cached', 'rev-parse', 'create') matched against the argv only, never against a commit message or a
+    branch name. The first matching key answers; its value is the stdout, or a (returncode, stdout) pair when the
+    command must fail. Every command is recorded in the callable's .calls list."""
+    calls = []
+    def sh(cmd, **k):
+        calls.append(list(cmd))
+        argv = cmd.split() if isinstance(cmd, str) else [str(x) for x in cmd]
+        for key, reply in replies.items():
+            words = key.split()
+            if any(argv[i:i + len(words)] == words for i in range(len(argv) - len(words) + 1)):
+                rc, stdout = reply if isinstance(reply, tuple) else (0, reply)
+                return L.subprocess.CompletedProcess(cmd, rc, stdout, "")
+        return L.subprocess.CompletedProcess(cmd, 0, "", "")
+    sh.calls = calls
+    return sh
+
 class Rules(unittest.TestCase):
     def test_infra_vs_code(self):
         self.assertEqual(L.classify_failure("curl: (6) Could not resolve host: api.nuget.org"), "infra")
@@ -184,11 +207,6 @@ class Gpus(unittest.TestCase):
         self.assertEqual(G.health_exit({"pro5000": ("UNREACHABLE", ""), "obs": ("MISSING_SECRETS", ""), "ts3": ("REFUSED", "")}), 4)
 
 class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU recorded in state.json, never a silent pro5000 default
-    class _Clock:  # fake time module: one sleep() jumps past GPU_WAIT_H so st_gpu's wait loop exits after one iteration
-        def __init__(self, t=1e9): self.t = float(t)
-        def time(self): return self.t
-        def sleep(self, s): self.t += L.GPU_WAIT_H * 3600 + 1
-
     def test_gpu_raises_when_unrecorded(self):
         with tempfile.TemporaryDirectory() as h:
             old = L.HOME; L.HOME = h
@@ -203,7 +221,7 @@ class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU re
     def test_resumed_item_keeps_its_gpu_and_waits(self):
         with tempfile.TemporaryDirectory() as h:
             old = L.HOME, L.gpu_health, L.time
-            L.HOME = h; L.time = self._Clock()
+            L.HOME = h; L.time = Clock()
             try:
                 d = L.Driver("cmdemo1-workorders", 22)   # dry_run=False
                 d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"; d.s["stage"] = "gpu"; d.save()
@@ -218,7 +236,7 @@ class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU re
     def test_new_item_picks_and_persists_its_gpu(self):
         with tempfile.TemporaryDirectory() as h:
             old = L.HOME, L.gpu_health, L.time
-            L.HOME = h; L.time = self._Clock()
+            L.HOME = h; L.time = Clock()
             try:
                 d = L.Driver("cmdemo1-workorders", 23, dry_run=True)
                 d.s["plan"] = PLAN; d.save()              # no 'gpu' in state yet
@@ -516,20 +534,13 @@ class GhRateLimit(unittest.TestCase):
                 d.s["default"] = "main"
                 d.s["gpu"] = "obs"
                 d.s["run_id"] = "run30"
-                calls = []
-                def fake_sh(cmd, **k):
-                    calls.append(list(cmd))
-                    if cmd[0] == "gh":
-                        if "list" in cmd:   # gh pr list printed a non-numeric, non-rate-limit message
-                            return L.subprocess.CompletedProcess(cmd, 0, "no open PR for that head", "")
-                        if "create" in cmd:
-                            return L.subprocess.CompletedProcess(cmd, 0, "https://github.com/x/cmdemo1-workorders/pull/42", "")
-                        if "graphql" in cmd:
-                            return L.subprocess.CompletedProcess(cmd, 0, "{\"data\": null}", "")
-                    if cmd[0] == "git":
-                        return L.subprocess.CompletedProcess(cmd, 0, "abc123def" if "rev-parse" in cmd else "", "")
-                    return L.subprocess.CompletedProcess(cmd, 0, "", "")
-                d.sh = fake_sh
+                d.sh = scripted_sh({
+                    "list": "no open PR for that head",   # gh pr list printed a non-numeric, non-rate-limit message
+                    "create": "https://github.com/x/cmdemo1-workorders/pull/42",
+                    "graphql": "{\"data\": null}",
+                    "rev-parse": "abc123def",
+                })
+                calls = d.sh.calls
                 d.usage = lambda final=False: "usage"
                 d.st_pr()                       # no ValueError from the non-numeric list output
                 self.assertEqual(d.s["pr"], 42)  # it went on to creating the PR
@@ -576,6 +587,112 @@ class RefactoringResearch(unittest.TestCase):
                     self.assertIn(w, prompt)
                 self.assertTrue(out.startswith(d.run_dir) and fu.startswith(d.run_dir))   # outside the worktree
             finally: L.HOME = old
+
+class StagedFilesGate(unittest.TestCase):
+    """The protected-file gate: item_loop.staged_files(sh, wt, default) (the files staged in the worktree's index
+    relative to the merge base of HEAD and origin/<default>, with protected_files() applied to the result) and the
+    `st_pr` enhancement gate that reads it. The staged_files tests run on a real temporary git repo: a bare origin
+    remote, a main branch, and a worktree branched from an older main commit after main has advanced with a commit
+    touching environments/prod/versions.json."""
+
+    def build_repo(self, tmp):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        def git(*a, cwd):
+            r = subprocess.run(["git", *a], cwd=cwd, env=env, text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            self.assertEqual(r.returncode, 0, f"git {' '.join(a)} failed: {r.stdout.strip()}")
+        origin, work, wt = os.path.join(tmp, "origin.git"), os.path.join(tmp, "work"), os.path.join(tmp, "wt")
+        git("init", "--bare", origin, cwd=tmp)
+        git("init", "-b", "main", work, cwd=tmp)
+        git("remote", "add", "origin", origin, cwd=work)
+        def write(rel, text):
+            p = os.path.join(work, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").write(text)
+        write("environments/prod/versions.json", '{"v": 1}\n')
+        write("factory/pi/sample.txt", "one\n")
+        git("add", "-A", cwd=work)
+        git("commit", "-m", "main A", cwd=work)
+        a = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, env=env, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True).stdout.strip()
+        git("push", "origin", "main", cwd=work)
+        # main advances past the fork point with a commit touching the protected production file
+        write("environments/prod/versions.json", '{"v": 2}\n')
+        git("add", "environments/prod/versions.json", cwd=work)
+        git("commit", "-m", "main B (prod bump)", cwd=work)
+        git("push", "origin", "main", cwd=work)
+        # the worktree branches from the older main commit A
+        git("worktree", "add", wt, "-b", "branch", a, cwd=work)
+        def sh(cmd, cwd=None, check=True):
+            r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if check and r.returncode:
+                raise RuntimeError(f"failed ({r.returncode}): {cmd}\n{r.stdout}")
+            return r
+        return sh, wt
+
+    def stage(self, wt, rel, text):
+        open(os.path.join(wt, rel), "a").write(text)
+        subprocess.run(["git", "add", rel], cwd=wt, check=True)
+
+    def test_staged_files_merge_base_protected_empty_for_factory_pi_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sh, wt = self.build_repo(tmp)
+            self.stage(wt, "factory/pi/sample.txt", "two\n")
+            staged = L.staged_files(sh, wt, "main")
+            self.assertEqual(sorted(staged), ["factory/pi/sample.txt"])   # only what the worktree staged; not main's prod bump
+            self.assertEqual(L.protected_files(staged), [])
+
+    def test_staged_files_merge_base_protected_nonempty_for_prod_versions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sh, wt = self.build_repo(tmp)
+            self.stage(wt, "factory/pi/sample.txt", "two\n")
+            self.stage(wt, "environments/prod/versions.json", '{"v": 3}\n')
+            staged = L.staged_files(sh, wt, "main")
+            self.assertIn("environments/prod/versions.json", staged)
+            self.assertNotEqual(L.protected_files(staged), [])
+
+    def st_pr_driver(self, h, issue, base_reply, staged="src/A.cs\n"):
+        """Dry-run enhancement Driver whose sh is the shared scripted fixture: `base_reply` is git merge-base's
+        (returncode, stdout), `staged` the paths its index holds relative to that base."""
+        d = L.Driver("cmdemo1-workorders", issue, dry_run=True)
+        d.s["plan"] = dict(PLAN, kind="enhancement")
+        d.s["wt"] = tempfile.mkdtemp(dir=h)
+        d.s["default"] = "main"; d.s["gpu"] = "obs"; d.s["run_id"] = f"run{issue}"
+        d.sh = scripted_sh({"merge-base": base_reply, "--name-only": staged,
+                            "create": "https://github.com/x/cmdemo1-workorders/pull/43"})
+        d.usage = lambda final=False: "usage"
+        return d
+
+    def name_only_diffs(self, d):
+        return [c for c in d.sh.calls if c[:3] == ["git", "diff", "--cached"] and "--name-only" in c]
+
+    def test_st_pr_protected_file_gate_diffs_against_the_merge_base(self):
+        """The enhancement gate compares the index with merge-base(HEAD, origin/<default>), not main's tip."""
+        with tempfile.TemporaryDirectory() as h:
+            old_home = L.HOME
+            L.HOME = h
+            try:
+                d = self.st_pr_driver(h, 31, (0, "0f5e8d2c1a4b6973\n"))
+                d.st_pr()
+                diffs = self.name_only_diffs(d)
+                self.assertEqual([c[-1] for c in diffs], ["0f5e8d2c1a4b6973"])   # the merge base, never origin/main
+                self.assertNotIn("origin/main", diffs[0])
+                self.assertLess(d.sh.calls.index(["git", "add", "-A"]), d.sh.calls.index(diffs[0]))   # the add still comes first
+                self.assertEqual(d.s["stage"], "ci")                                # clean files: on to the PR
+
+                d2 = self.st_pr_driver(h, 32, (0, "0f5e8d2c1a4b6973\n"), staged="infra/main.bicep\n")
+                d2.st_pr()
+                self.assertEqual(d2.s["stage"], "blocked")                           # the gate still bites
+                self.assertIn("credentials, secrets or production setup", d2.s["blocker"])
+                self.assertEqual([c[-1] for c in self.name_only_diffs(d2)], ["0f5e8d2c1a4b6973"])
+
+                # an unresolvable merge base falls back to origin/<default>: the gate never widens
+                self.assertEqual(self.st_pr_driver(h, 33, (128, "")).merge_base(), "origin/main")
+                self.assertEqual(self.st_pr_driver(h, 34, (0, "   \n")).merge_base(), "origin/main")
+            finally:
+                L.HOME = old_home
 
 class RunTaskTimeout(unittest.TestCase):   # cmdemo1-system#817: --timeout must die with Pi's whole process group
     """run-task ran Pi with subprocess.run(stdout=PIPE, timeout=...) and killed only the direct child. Pi's own tool
@@ -903,7 +1020,7 @@ class ResumeAfterError(unittest.TestCase):   # resuming an error state: keeps th
     def test_errone_gpu_item_repicks_and_waits(self):
         with tempfile.TemporaryDirectory() as h:
             old = L.HOME, L.gpu_health, L.time, L.gpu_for_item
-            L.HOME = h; L.time = GpuResume._Clock()
+            L.HOME = h; L.time = Clock()
             try:
                 d = L.Driver("cmdemo1-workorders", 29)   # dry_run=False
                 d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"
@@ -925,7 +1042,7 @@ class ResumeAfterError(unittest.TestCase):   # resuming an error state: keeps th
     def test_errone_gpu_item_waits_while_gpus_held_then_blocks(self):
         with tempfile.TemporaryDirectory() as h:
             old = L.HOME, L.gpu_health, L.time
-            L.HOME = h; L.time = GpuResume._Clock()
+            L.HOME = h; L.time = Clock()
             try:
                 # Live items in another repo hold every available GPU: both pro5000 slots, obs and ts3.
                 runs = os.path.join(h, "factory-runs")
