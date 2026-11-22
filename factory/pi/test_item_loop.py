@@ -97,6 +97,21 @@ class NoIdleStall(unittest.TestCase):
                 d.heartbeat(); self.assertIn("no progress for 30+ min", d.hb); self.assertIn("required checks still red", d.hb)
             finally: L.HOME = old
 
+    def test_review_fail_blocker_does_not_resume_on_green_checks(self):
+        self.assertFalse(L.hold_resumes("Review FAIL twice: A works (exit 1)"))
+        self.assertFalse(L.hold_resumes("independent review FAIL twice: - finding"))
+        self.assertTrue(L.hold_resumes("required checks still red after 3 Pi fix passes."))
+        self.assertTrue(L.hold_resumes("Qodana did not finish within 60 minutes."))
+        self.assertTrue(L.hold_resumes(None))
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-workorders", 9, dry_run=True); d.dry = False
+                d.s.update(pr=5, resume_stage="review", blocker="independent review FAIL twice: - x")
+                d.pr_checks = lambda: self.fail("a Review FAIL blocker must not wait on checks")
+                self.assertFalse(d.hold_blocked())
+            finally: L.HOME = old
+
 class DryRunDriver(unittest.TestCase):
     def test_writes_are_skipped_in_dry_run(self):
         with tempfile.TemporaryDirectory() as h:
