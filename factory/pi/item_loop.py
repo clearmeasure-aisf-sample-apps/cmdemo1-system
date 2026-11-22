@@ -252,6 +252,11 @@ def repo_wip(states, repo, me=None, alive=lambda pid: False):
                ((s.get("stage") in ACTIVE_STAGES and s.get("stage") != "pickup" and alive(s.get("pid")))
                 or (s.get("stage") == "blocked" and s.get("resume_stage") in ACTIVE_STAGES)))
 
+def hold_resumes(blocker):
+    """Whether a Blocker may clear itself when the PR's checks turn green. A Review FAIL blocker never does: its checks
+    were already green, so resuming only re-ran the same failing review (a loop that held a GPU and a WIP slot for hours)."""
+    return not str(blocker or "").lstrip().lower().startswith(("review fail", "independent review fail"))
+
 def intake_open(red, plan):
     """While anything is red only fix-forward items start."""
     return not red or bool(plan.get("fix_forward"))
@@ -584,6 +589,7 @@ class Driver:
         RECHECK_S for BLOCKED_HOLD_H. When the PR turns clean on its own (or Jeffrey's fix landed) it clears the
         Blocker and resumes; otherwise it posts a heartbeat. Returns True when it resumed."""
         if not self.s.get("pr") or self.s.get("resume_stage") not in ("ci", "review", "merge") or self.dry: return False
+        if not hold_resumes(self.s.get("blocker")): return False
         t_end = time.time() + BLOCKED_HOLD_H * 3600
         while time.time() < t_end:
             time.sleep(RECHECK_S)
