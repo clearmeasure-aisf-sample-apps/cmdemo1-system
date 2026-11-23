@@ -716,6 +716,13 @@ class ClientTimeoutAndReserve(unittest.TestCase):   # t89u: idle timeout 600 s o
         src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pi-gpu")).read()
         self.assertIn("httpIdleTimeoutMs", src); self.assertIn("min_client_timeout(gpu)", src)
 
+    def test_busy_gpus_honors_lowered_cap(self):   # the box lane holds one pro5000 slot: FACTORY_GPU_CAPS=pro5000=1
+        st = [("a", {"gpu": "pro5000", "stage": "implement", "pid": 1})]
+        with mock.patch.dict(os.environ, {"FACTORY_GPU_CAPS": ""}):
+            self.assertEqual(L.busy_gpus(st, alive=lambda p: True), set())
+        with mock.patch.dict(os.environ, {"FACTORY_GPU_CAPS": "pro5000=1"}):
+            self.assertEqual(L.busy_gpus(st, alive=lambda p: True), {"pro5000"})
+
     def test_is_excluded(self):
         self.assertTrue(G.is_excluded("pro6000", {"FACTORY_GPU_EXCLUDE": "obs, pro6000"}))
         self.assertFalse(G.is_excluded("pro5000", {"FACTORY_GPU_EXCLUDE": "pro6000"}))

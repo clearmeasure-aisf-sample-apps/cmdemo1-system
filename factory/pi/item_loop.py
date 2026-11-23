@@ -24,6 +24,7 @@ from enum import StrEnum
 import argparse, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, time, urllib.request, uuid
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
+import gpu_gate
 
 # String enums for check states and failure types (values are string literals for JSON compatibility).
 class CheckState(StrEnum):
@@ -389,7 +390,8 @@ def busy_gpus(states, me=None, alive=lambda pid: False):
     states: [(key, state dict)]."""
     held = Counter(s.get("gpu") for k, s in states
                    if k != me and s.get("gpu") and s.get("stage") in ACTIVE_STAGES and alive(s.get("pid")))
-    return {g for g, n in held.items() if n >= G.GPUS.get(g, {}).get("slots", 1)}
+    cap = gpu_gate.caps()   # $FACTORY_GPU_CAPS may lower a cap (pro5000=1 while the box lane holds the other slot)
+    return {g for g, n in held.items() if n >= cap.get(g, 1)}
 
 def gpu_for_item(rec, size, up, busy):
     """(gpu, wait_why) for the gpu stage. A resumed item keeps the GPU recorded in state: take it when it is up,
