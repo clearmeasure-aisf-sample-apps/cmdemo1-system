@@ -1,5 +1,5 @@
 """Unit tests of the Pi item driver's decision rules (no network, no Pi). Run: python3 -m unittest factory/pi/test_item_loop.py"""
-import fcntl, importlib.machinery, importlib.util, json, os, signal, subprocess, sys, tempfile, time, unittest
+import fcntl, importlib.machinery, importlib.util, json, os, re, signal, subprocess, sys, tempfile, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import item_loop as L
 import gpu as G
@@ -1772,6 +1772,40 @@ class GhAppToken(unittest.TestCase):   # gh reads/writes use the GitHub App toke
     def test_scrub_redacts_cached_app_token_value(self):
         L._app_tok.update(v="opaque-token-value", at=1.0)
         self.assertNotIn("opaque-token-value", L.scrub("x opaque-token-value y"))
+
+class GhChokepoint(unittest.TestCase):   # cmdemo1-system#828: every gh call is one sh chokepoint with explicit check, timeout and write
+    def gh_recorder(self):
+        calls = []
+        sh = lambda cmd, **k: (calls.append((cmd, k)), subprocess.CompletedProcess(cmd, 0, "", ""))[1]
+        return sh, calls
+
+    def test_gh_passes_timeout_and_check_to_sh(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-system", 828, dry_run=True)
+                sh, calls = self.gh_recorder(); d.sh = sh
+                d.gh("run", "watch", "1", check=False, timeout=21600)
+                cmd, k = calls[0]
+                self.assertEqual(list(cmd), ["gh", "run", "watch", "1"])
+                self.assertEqual((k.get("check"), k.get("timeout"), k.get("write")), (False, 21600, False))
+            finally: L.HOME = old
+
+    def test_gh_defaults_unchanged(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d = L.Driver("cmdemo1-system", 828, dry_run=True)
+                sh, calls = self.gh_recorder(); d.sh = sh
+                d.gh("pr", "list")
+                cmd, k = calls[0]
+                self.assertEqual(list(cmd), ["gh", "pr", "list"])
+                self.assertEqual((k.get("check"), k.get("timeout"), k.get("write")), (True, None, False))
+            finally: L.HOME = old
+
+    def test_no_direct_sh_gh_call_sites(self):
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "item_loop.py")).read()
+        self.assertIsNone(re.search(r'sh\(\[\s*"gh"', src))
 
 
 if __name__ == "__main__": unittest.main()
