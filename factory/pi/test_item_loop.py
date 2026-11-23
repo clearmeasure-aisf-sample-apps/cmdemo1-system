@@ -1,5 +1,6 @@
 """Unit tests of the Pi item driver's decision rules (no network, no Pi). Run: python3 -m unittest factory/pi/test_item_loop.py"""
-import fcntl, importlib.machinery, importlib.util, json, os, signal, subprocess, sys, tempfile, time, unittest
+import argparse, fcntl, importlib.machinery, importlib.util, json, os, signal, subprocess, sys, tempfile, time, unittest
+from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import item_loop as L
 import gpu as G
@@ -34,6 +35,10 @@ def scripted_sh(replies):
         return L.subprocess.CompletedProcess(cmd, 0, "", "")
     sh.calls = calls
     return sh
+
+class PromptMentions:   # mixin for prompt tests: every phrase the prompt must name, on one line, needle named on failure
+    def assert_mentions(self, text, *needles):
+        for n in needles: self.assertIn(n, text, n)
 
 class Rules(unittest.TestCase):
     def test_infra_vs_code(self):
@@ -944,7 +949,7 @@ class GhRateLimit(unittest.TestCase):
         self.assertTrue(any("list" in c for c in calls))
         self.assertTrue(any("create" in c for c in calls))
 
-class RefactoringResearch(unittest.TestCase):
+class RefactoringResearch(PromptMentions, unittest.TestCase):
     GOOD = ("## Refactoring research\n\n- `src/A.cs` `Save()`: 80-line method with duplicated validation; extract a "
             "specification object (in scope).\n- `src/A.cs` `status` strings: primitive obsession; a value object would "
             "make the rules explicit (follow-up: filed).\n- Tests build data by hand; an ObjectMother would keep them short.\n\n"
@@ -976,9 +981,9 @@ class RefactoringResearch(unittest.TestCase):
             try:
                 d = L.Driver("cmdemo1-workorders", 9, dry_run=True); d.s["plan"] = PLAN
                 out, fu, prompt = d.research_prompt()
-                for w in ("duplication", "long methods", "primitive obsession", "missing abstractions", "strategy", "specification",
-                          "ObjectMother", "query / command", "## Refactoring research", "follow-up", out, fu, "src/A.cs"):
-                    self.assertIn(w, prompt)
+                self.assert_mentions(prompt, "duplication", "long methods", "primitive obsession", "missing abstractions",
+                                      "strategy", "specification", "ObjectMother", "query / command", "## Refactoring research",
+                                      "follow-up", out, fu, "src/A.cs")
                 self.assertTrue(out.startswith(d.run_dir) and fu.startswith(d.run_dir))   # outside the worktree
             finally: L.HOME = old
 
@@ -1011,7 +1016,7 @@ class ResearchInnerH2(unittest.TestCase):   # the research section ends at the d
                 "- `src/A.cs` status strings move to the value object, with the parsing helper deleted and its callers updated.")
         self.assertFalse(L.research_ok("## Refactoring research\n\nintro about src/A.cs.\n\n## Refactoring plan\n\n" + plan, ["src/A.cs"]))
 
-class ResearchBodyInnerH2(unittest.TestCase):   # the inner-H2 research lands in the PR body as ONE top-level section
+class ResearchBodyInnerH2(PromptMentions, unittest.TestCase):   # the inner-H2 research lands in the PR body as ONE top-level section
     RESEARCH = ResearchInnerH2.GOOD                                  # research text that carries an inner `## Findings`
     BULLETS = [l for l in ResearchInnerH2.FINDINGS.splitlines() if l.strip()]
     PLAN = "\n## Refactoring plan\n\nshrink\n"                       # the driver's own section after the research
@@ -1059,9 +1064,7 @@ class ResearchBodyInnerH2(unittest.TestCase):   # the inner-H2 research lands in
             try:
                 d = L.Driver("cmdemo1-workorders", 9, dry_run=True); d.s["plan"] = PLAN
                 out, fu, prompt = d.research_prompt()
-                self.assertIn(L.RESEARCH_HEAD, prompt)                                   # the heading the research starts with
-                self.assertIn("###", prompt)                                             # ...and the subheadings it must use
-                self.assertIn("never `## `", prompt)                                     # an H2 inside the research is forbidden
+                self.assert_mentions(prompt, L.RESEARCH_HEAD, "###", "never `## `")   # starts at the heading, uses H3 subheadings, never an H2 inside
             finally: L.HOME = old
 
 class ResearchHeadingLine(unittest.TestCase):   # the section starts at the heading LINE, never at an inline mention
@@ -1749,6 +1752,71 @@ class GhAppToken(unittest.TestCase):   # gh reads/writes use the GitHub App toke
     def test_scrub_redacts_cached_app_token_value(self):
         L._app_tok.update(v="opaque-token-value", at=1.0)
         self.assertNotIn("opaque-token-value", L.scrub("x opaque-token-value y"))
+
+class DraftPlanPrompt(unittest.TestCase):   # the draft-plan prompt is pure: no driver, no network, no Pi
+    def test_names_the_draft_output_path_and_every_plan_key(self):
+        out, prompt = L.draft_plan_prompt("cmdemo1-workorders", 28, "A title", "Body text", "/runs/cmdemo1-workorders-28/plan.draft.json")
+        self.assertEqual(out, "/runs/cmdemo1-workorders-28/plan.draft.json")
+        self.assertIn("Write the plan as JSON to the file /runs/cmdemo1-workorders-28/plan.draft.json", prompt)
+        keys = prompt.split("with keys:", 1)[1]        # so a key must be named in the plan-key list, not just anywhere
+        for key in ("repo", "issue", "branch", "files", "constraints", "criteria", "evidence_cmd", "tasks",
+                    "size", "verify_cmd", "pr_title", "pr_summary"):
+            self.assertIn(key, keys, key)
+        self.assertIn("cmdemo1-workorders#28", prompt); self.assertIn("A title", prompt); self.assertIn("Body text", prompt)
+        self.assertIn("change NO files", prompt)
+
+class DraftPlanTests(unittest.TestCase):   # cmd_draft_plan with gh/plan_worktree/pi patched: no network, no Pi
+    PLAN = dict(PLAN, repo="cmdemo1-system", issue=884)   # the module's valid plan, retargeted at this item
+
+    @staticmethod
+    def _out_of(prompt):
+        """The draft path quoted in the prompt (`Write the plan as JSON to the file {out} with keys`)."""
+        i = prompt.index(" to the file ") + len(" to the file ")
+        return prompt[i:].split(" with keys", 1)[0].strip()
+
+    def _run(self, write_plan=False):
+        """Run cmd_draft_plan for cmdemo1-system#884 with Driver.gh, Driver.plan_worktree and Driver.pi patched:
+        gh returns the issue, plan_worktree does nothing, pi records (name, prompt, timeout, gpu) and, when
+        write_plan, writes a valid plan to the path quoted in the prompt. Returns (calls, SystemExit code);
+        L.HOME is a temp dir during the call and is restored after."""
+        old, calls = L.HOME, []
+        L.HOME = tempfile.mkdtemp()
+        gh = mock.Mock(return_value=mock.Mock(stdout='{"title": "t", "body": "b"}'))
+        plan, out_of = self.PLAN, self._out_of   # bound in the closure: the patched pi's `self` is the Driver
+
+        def pi(self, name, prompt, timeout, gpu=None):
+            calls.append((name, prompt, timeout, gpu))
+            if write_plan: json.dump(plan, open(out_of(prompt), "w"))
+            return False
+
+        code = None
+        try:
+            with mock.patch.object(L.Driver, "gh", gh), mock.patch.object(L.Driver, "plan_worktree", mock.Mock()), \
+                    mock.patch.object(L.Driver, "pi", pi):
+                try:
+                    L.cmd_draft_plan(argparse.Namespace(repo="cmdemo1-system", issue=884, top_session=None))
+                except SystemExit as e:
+                    code = e.code
+        finally:
+            L.HOME = old
+        return calls, code
+
+    def test_draft_plan_uses_named_timeout(self):
+        calls, _ = self._run()
+        self.assertEqual(calls[0][2], L.DRAFT_PLAN_TIMEOUT_S)
+        self.assertGreaterEqual(L.DRAFT_PLAN_TIMEOUT_S, 2700)
+
+    def test_draft_plan_prompt_asks_for_early_draft(self):
+        calls, _ = self._run()
+        prompt = calls[0][1]
+        self.assertIn("plan.draft.json", prompt)
+        self.assertIn("first complete draft", prompt)
+        self.assertIn("refine", prompt)
+
+    def test_draft_plan_accepts_draft_written_before_timeout(self):
+        calls, code = self._run(write_plan=True)
+        self.assertEqual(calls[0][0], "draft-plan")
+        self.assertEqual(code, 0)   # a valid draft on disk exits 0 even though the pi pass returned False
 
 
 if __name__ == "__main__": unittest.main()
