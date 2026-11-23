@@ -405,6 +405,15 @@ def env_red(environment, dep):
 def docs_only(files):
     return bool(files) and all(f.endswith(".md") or f.startswith("docs/") for f in files)
 
+# Paths each deployable's release pipeline ignores (cmdemo1-system: .github/workflows/system.yml paths-ignore). A merge
+# that changes only these builds no release, so there is no deploy to wait for (#914).
+RELEASE_SKIP_RE = {"cmdemo1-system": re.compile(r"^(factory/.*|docs/.*|.*\.md|environments/[^/]+/(versions|nodes|database)\.json)$")}
+
+def release_skipped(repo, files):
+    """True when every changed file is one the repo's release pipeline ignores (never for no files or an unknown repo)."""
+    rx = RELEASE_SKIP_RE.get(repo)
+    return bool(rx and files) and all(rx.match(f) for f in files)
+
 def deploy_moves(column, in_env):
     """column: current board column; in_env: {'tdd': bool, 'uat': bool, 'prod': bool}. Returns the moves to make."""
     target = "Done" if in_env.get("prod") else "UAT" if in_env.get("uat") else "TDD" if in_env.get("tdd") else column
@@ -1186,6 +1195,7 @@ class Driver:
 
     def st_main(self):
         sha, d_only = self.s["merge_sha"], docs_only(self.s["plan"]["files"])
+        no_release = release_skipped(self.repo, self.merge_files(sha))
         time.sleep(30); runs = []
         for _ in range(20):   # wait for push runs of the merge commit to appear (none when paths-ignore skips them)
             r = self.gh("api", f"repos/{self.full}/actions/runs?head_sha={sha}&event=push&per_page=50", "--jq",
@@ -1199,10 +1209,13 @@ class Driver:
                     "[.workflow_runs[]|{name,conclusion}]", check=False)
         red = [x["name"] for x in json.loads(r.stdout or "[]") if x["conclusion"] not in ("success", "skipped", "neutral")]
         ev = "\n".join(f"- {t}: `{cmd}` passed — {last}" for t, cmd, last in self.s.get("evidence", []))
-        col = "Done" if d_only and not red else "Merged"
+        col = "Done" if (d_only or no_release) and not red else "Merged"
+        live = (f"This change touches only paths the system pipeline ignores (`factory/`, docs, pinned environment files) and "
+                f"is live from main (merge `{sha[:8]}`); factory code runs from main on the factory box, and the system "
+                "pipeline does not build a release for it, so no release is needed.\n\n") if no_release and col == "Done" else ""
         self.move(col)
         self.comment(f"Review → {col}\n\nReview: PASS. Squash-merged PR #{self.s['pr']} (head `{self.s['head'][:8]}`) as `{sha}`. "
-                     f"Required checks green.\n\n{ev}\n\n{self.usage(final=(col == 'Done'))}")
+                     f"Required checks green.\n\n{live}{ev}\n\n{self.usage(final=(col == 'Done'))}")
         key = f"{self.repo} main"
         if red:
             red_set(key, f"{', '.join(red)} red at `{sha[:8]}`")
@@ -1210,7 +1223,13 @@ class Driver:
             return self.blocker(f"default-branch run(s) {', '.join(red)} of merge `{sha[:8]}` are red. Intake is stopped; a "
                                 "fix-forward issue is filed.", who="the factory bot (fix forward)")
         if runs: red_clear(key)   # a green default-branch run of a newer commit: main is green again
-        self.save(stage="done" if d_only or self.repo not in DEPLOYABLE else "deploy")
+        self.save(stage="done" if d_only or no_release or self.repo not in DEPLOYABLE else "deploy")
+
+    def merge_files(self, sha):
+        """Files the merge commit changed ([] when GitHub cannot say, so the item still waits for its deploy)."""
+        r = self.gh("api", f"repos/{self.full}/commits/{sha}", "--jq", "[.files[].filename]", check=False)
+        try: return json.loads(r.stdout or "[]")
+        except Exception: return []
 
     def st_deploy(self, max_h=48):
         dep, sha, t_end = DEPLOYABLE[self.repo], self.s["merge_sha"], time.time() + max_h * 3600

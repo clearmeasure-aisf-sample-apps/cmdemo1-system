@@ -1902,4 +1902,51 @@ class UsageReportTests(unittest.TestCase):
             self.assertIn("**300**", total_line)
 
 
+class ReleaseSkip(unittest.TestCase):   # #914: a system merge the system pipeline ignores goes straight to Done
+    def test_factory_docs_and_pinned_env_files_are_release_skipped(self):
+        self.assertTrue(L.release_skipped("cmdemo1-system", ["factory/pi/item_loop.py", "factory/pi/test_item_loop.py"]))
+        self.assertTrue(L.release_skipped("cmdemo1-system", ["README.md", "docs/a.png", "src/x/NOTES.md",
+                                                             "environments/prod/versions.json", "environments/tdd/nodes.json",
+                                                             "environments/uat/database.json"]))
+
+    def test_mixed_or_unknown_changes_still_deploy(self):
+        self.assertFalse(L.release_skipped("cmdemo1-system", ["factory/pi/gpu.py", "src/System/Program.cs"]))
+        self.assertFalse(L.release_skipped("cmdemo1-system", ["environments/prod/secrets.json"]))
+        self.assertFalse(L.release_skipped("cmdemo1-system", ["environments/prod/x/versions.json"]))
+        self.assertFalse(L.release_skipped("cmdemo1-system", ["factory.yml"]))
+        self.assertFalse(L.release_skipped("cmdemo1-system", []))
+        self.assertFalse(L.release_skipped("cmdemo1-workorders", ["factory/pi/gpu.py"]))
+
+    def run_main(self, h, files):
+        d = L.Driver("cmdemo1-system", 914, dry_run=True)
+        d.s.update(plan=dict(PLAN, repo="cmdemo1-system", issue=914, files=["factory/pi/item_loop.py"]), merge_sha="ab" * 20,
+                   pr=9, head="cd" * 20)
+        moves, comments = [], []
+        d.gh = lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(files) if a[1].endswith("/commits/" + "ab" * 20) else "[]", "")
+        d.move, d.comment, d.usage = moves.append, lambda body, **k: comments.append(body), lambda **k: ""
+        old = L.time.sleep; L.time.sleep = lambda s: None
+        try: d.st_main()
+        finally: L.time.sleep = old
+        return d, moves, comments
+
+    def test_factory_only_merge_goes_to_done_without_deploy(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, moves, comments = self.run_main(h, ["factory/pi/item_loop.py", "factory/README.md"])
+                self.assertEqual((moves, d.s["stage"]), (["Done"], "done"))
+                self.assertIn("live from main (merge `abababab`)", comments[0])
+                self.assertIn("no release is needed", comments[0])
+            finally: L.HOME = old
+
+    def test_mixed_merge_waits_for_its_deploy(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, moves, comments = self.run_main(h, ["factory/pi/item_loop.py", "src/System/Program.cs"])
+                self.assertEqual((moves, d.s["stage"]), (["Merged"], "deploy"))
+                self.assertNotIn("live from main", comments[0])
+            finally: L.HOME = old
+
+
 if __name__ == "__main__": unittest.main()
