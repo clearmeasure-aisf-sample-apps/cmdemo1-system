@@ -16,6 +16,9 @@ from zoneinfo import ZoneInfo
 def fmt(s):
     s = int(round(s)); return f"{s//3600}h{(s%3600)//60:02d}m{s%60:02d}s" if s >= 3600 else f"{s//60}m{s%60:02d}s"
 
+def nums(t):
+    return t.get("input", 0), t.get("cacheRead", 0), t.get("output", 0), t.get("wall_s", 0)
+
 def ct(t): return t.astimezone(ZoneInfo("America/Chicago")).strftime("%-I:%M%p CT %b %-d").replace("AM", "am").replace("PM", "pm")
 
 def main():
@@ -45,9 +48,10 @@ def main():
            "|---|---|---|---|---|---|---|---|"]
     ti = tc = to = tw = 0
     for i, t in enumerate(ts, 1):
-        out.append(f"| {i} | `{t.get('session_id') or 'n/a'}` | {t['task']}{' (' + t['gpu'] + ')' if t.get('gpu') else ''} | {t['result']} | {t.get('turns', 0)} | "
-                   f"{t['input']:,} + {t['cacheRead']:,} | {t['output']:,} | {fmt(t['wall_s'])} |")
-        ti += t["input"]; tc += t["cacheRead"]; to += t["output"]; tw += t["wall_s"]
+        inp, cr, out_t, wall = nums(t)
+        out.append(f"| {i} | `{t.get('session_id') or 'n/a'}` | {t['task']}{' (' + t['gpu'] + ')' if t.get('gpu') else ''} | {t.get('result', '?')} | {t.get('turns', 0)} | "
+                   f"{inp:,} + {cr:,} | {out_t:,} | {fmt(wall)} |")
+        ti += inp; tc += cr; to += out_t; tw += wall
     out.append(f"| | **Total ({len(ts)} Pi session{'' if len(ts) == 1 else 's'})** | | | | **{ti:,} + {tc:,}** | **{to:,}** | **{fmt(tw)}** |")
     print("\n".join(out))
 
