@@ -1144,6 +1144,12 @@ class ReviewFailOnPr(unittest.TestCase):   # cmdemo1-dashboard#1311: a review FA
                 self.assertEqual([p for p, _ in sent], [False])
             finally: L.HOME = old
 
+    def test_research_only_fix_path_leaves_journal_activity(self):   # no commit on this path: check 2 must see activity
+        import inspect
+        src = inspect.getsource(L.Driver.st_review)
+        i = src.index("self.sync_pr_research()")
+        self.assertIn('self.comment("Research re-done after the review FAIL', src[i:i + 300])
+
     def test_st_review_fail_comments_use_the_mirror(self):   # both FAIL branches go through review_fail_comment
         import inspect
         src = inspect.getsource(L.Driver.st_review)

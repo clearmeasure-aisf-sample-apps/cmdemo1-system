@@ -1095,6 +1095,7 @@ class Driver:
                     if self.s.get("stage") == "blocked": return
                     self.save(stage="review")
                 self.sync_pr_research()
+                self.comment("Research re-done after the review FAIL; the PR body's `## Refactoring research` section is updated.")   # journal activity: no commit on this path
             else:
                 self.pi(f"review-fix-{n}", "An independent review of this branch failed. Findings:\n" + findings[:6000] +
                         "\nFix each finding with the smallest change. Never skip, delete or weaken a test or gate.")

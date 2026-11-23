@@ -260,6 +260,39 @@ class FixHandoffCheck(unittest.TestCase):
         with mock.patch.object(W, "EXCLUDED", W.EXCLUDED | {("cmdemo1-dashboard", 1309)}):   # an excluded issue
             self.assertEqual(self._run([self.PR], [c(FAIL, 5)]), ("ok", []))
 
+    def test_live_driver_with_stale_progress_is_not_flagged(self):   # mid-fix / CI wait / review-GPU wait: still running
+        posted = []
+        with tempfile.TemporaryDirectory() as home:
+            old = L.HOME; L.HOME = home
+            try:
+                states = [("run", {"repo": "cmdemo1-dashboard", "issue": 1309, "pid": os.getpid(), "stage": "ci",
+                                   "progress_at": (T0 - dt.timedelta(minutes=60)).isoformat()})]
+                with mock.patch.object(L, "all_states", lambda: states):
+                    r = W.fix_handoff_check(gh=self._gh([self.PR], [c(FAIL, 5)], posted),
+                                            clock=lambda: T0 + dt.timedelta(minutes=40), log=lambda s: None)
+            finally: L.HOME = old
+        self.assertEqual((r, posted), ("ok", []))
+        self.assertTrue(W.driver_alive(states, "cmdemo1-dashboard", 1309))
+        self.assertFalse(W.driver_alive([("run", dict(states[0][1], pid=2 ** 22))], "cmdemo1-dashboard", 1309))
+
+    def test_cross_repo_closing_issue_is_ignored(self):
+        pr = dict(self.PR, closingIssuesReferences=[{"number": 1309, "repository": {"name": "cmdemo1-workorders"}}])
+        self.assertEqual(self._run([pr], [c(FAIL, 5)]), ("ok", []))
+
+    def test_one_bad_comment_response_does_not_hide_the_others(self):
+        posted, logs = [], []
+        good = self._gh([self.PR, dict(self.PR, number=1400, closingIssuesReferences=[{"number": 1398}])], [c(FAIL, 5)], posted)
+        def gh(args):
+            if args[0] == "api" and "/issues/1309/" in args[2]:
+                return subprocess.CompletedProcess(args, 0, "gh: warning not json", "")
+            return good(args)
+        with tempfile.TemporaryDirectory() as home:
+            old = L.HOME; L.HOME = home
+            try: r = W.fix_handoff_check(gh=gh, clock=lambda: T0 + dt.timedelta(minutes=40), log=logs.append)
+            finally: L.HOME = old
+        self.assertEqual(r, "stalled: cmdemo1-dashboard#1398")
+        self.assertTrue(any("PR #1311 skipped" in l for l in logs))
+
     def test_fixed_pr_is_not_flagged(self):
         pr = dict(self.PR, commits=[{"committedDate": (T0 + dt.timedelta(minutes=10)).isoformat()}])
         self.assertEqual(self._run([pr], [c(FAIL, 5)]), ("ok", []))

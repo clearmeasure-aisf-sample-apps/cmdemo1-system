@@ -188,39 +188,59 @@ def _json_lines(text):
         if line: out.append(json.loads(line))
     return out
 
+def driver_alive(states, repo, issue, alive=None):
+    """True when any driver run for (repo, issue) has a live pid: a running driver (mid-fix, waiting on CI or a review
+    GPU) is never reported as a hand-off that did not run, however stale its progress stamp is."""
+    alive = alive or L.pid_alive
+    return any(s.get("repo") == repo and s.get("issue") == int(issue) and alive(s.get("pid")) for _, s in states or [])
+
+def _stalled_pr(repo, pr, states, gh, clock):
+    """(issue, fail_at) when this open PR is a driver PR whose fix-up hand-off stalled, else None."""
+    if L.DRIVER_MARK not in (pr.get("body") or ""): return None
+    issues = [i.get("number") for i in pr.get("closingIssuesReferences") or []
+              if i.get("number") and (i.get("repository") or {}).get("name", repo) == repo]   # same-repo issues only
+    if not issues or excluded(repo, issues[0]) or excluded(repo, pr["number"]): return None
+    issue = issues[0]
+    if driver_alive(states, repo, issue): return None
+    dates = [c.get("committedDate") for c in pr.get("commits") or [] if c.get("committedDate")]
+    head_at = max(dates, key=_ts) if dates else None
+    c = gh(["api", "--paginate", f"repos/{L.ORG}/{repo}/issues/{issue}/comments?per_page=100",
+            "--jq", ".[] | {body, created_at}"])
+    if c.returncode != 0: raise RuntimeError(c.stdout or "gh api comments failed")
+    fail_at = fix_handoff_stalled(_json_lines(c.stdout), head_at, clock())
+    return (issue, fail_at) if fail_at is not None else None
+
 @register
 def fix_handoff_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
     """Check 2: a driver PR whose review FAILed but whose fix-up hand-off never ran (cmdemo1-dashboard#1311: the FAIL
     went to the issue, the Pi fix never started, the PR sat idle). For each open PR carrying item_loop's DRIVER_MARK,
     read its closing issue's journal; when fix_handoff_stalled() says the latest FAIL is FIX_HANDOFF_MIN+ min old with
-    no fix commit and no activity, post one flagged comment on the issue and on the PR (post_comment's guards apply:
+    no fix commit, no activity and no live driver for the item, post one flagged comment on the issue and on the PR (post_comment's guards apply:
     excluded items and live, progressing drivers are left alone). Read-only otherwise: it never relaunches anything."""
     clock = clock or L.now; log = log or print; gh = gh or gh_subprocess
     states = L.all_states(); flagged = []
     for repo in repos:
-        r = gh(["pr", "list", "-R", f"{L.ORG}/{repo}", "--state", "open", "--limit", "100",
-                "--json", "number,body,closingIssuesReferences,commits"])
-        if r.returncode != 0:
-            log("watchdog fix-handoff: PR list for %s failed: %s" % (repo, scrub(r.stdout or ""))); continue
-        for pr in json.loads(r.stdout or "[]"):
-            if L.DRIVER_MARK not in (pr.get("body") or ""): continue
-            issues = [i.get("number") for i in pr.get("closingIssuesReferences") or [] if i.get("number")]
-            if not issues or excluded(repo, issues[0]) or excluded(repo, pr["number"]): continue
-            issue = issues[0]
-            dates = [c.get("committedDate") for c in pr.get("commits") or [] if c.get("committedDate")]
-            head_at = max(dates, key=_ts) if dates else None
-            c = gh(["api", "--paginate", f"repos/{L.ORG}/{repo}/issues/{issue}/comments?per_page=100",
-                    "--jq", ".[] | {body, created_at}"])
-            if c.returncode != 0:
-                log("watchdog fix-handoff: comments of %s#%s failed: %s" % (repo, issue, scrub(c.stdout or ""))); continue
-            fail_at = fix_handoff_stalled(_json_lines(c.stdout), head_at, clock())
-            if fail_at is None: continue
+        try:
+            r = gh(["pr", "list", "-R", f"{L.ORG}/{repo}", "--state", "open", "--limit", "100",
+                    "--json", "number,body,closingIssuesReferences,commits"])
+            if r.returncode != 0: raise RuntimeError(r.stdout or "gh pr list failed")
+            prs = json.loads(r.stdout or "[]")
+        except Exception as e:
+            log("watchdog fix-handoff: PR list for %s failed: %s" % (repo, scrub(str(e)))); continue
+        for pr in prs:
+            try:
+                hit = _stalled_pr(repo, pr, states, gh, clock)
+            except Exception as e:   # one bad response never hides the other PRs
+                log("watchdog fix-handoff: %s PR #%s skipped: %s" % (repo, pr.get("number"), scrub(str(e)))); continue
+            if not hit: continue
+            issue, fail_at = hit
             mins = int((clock() - fail_at).total_seconds() // 60)
             body = (f"{STALL_MARK}\nFix-up hand-off stalled: the review FAILed {mins} min ago "
                     f"({fail_at.strftime('%Y-%m-%d %H:%M UTC')}) and no fix commit reached PR #{pr['number']} since, with no "
-                    "driver activity. The factory bot should resume the driver or take the fix over; nothing merges until a "
-                    "review passes.")
+                    "driver activity and no live driver. The factory bot should resume the driver or take the fix over; "
+                    "nothing merges until a review passes.")
             if post_comment(repo, issue, body, states, gh=gh, clock=clock, log=log):
+                # the PR post rides on the issue post's guards (the item's state is keyed by issue, not PR number)
                 post_comment(repo, pr["number"], body, states, gh=gh, clock=clock, log=log)
                 log("watchdog fix-handoff: flagged %s#%s (PR #%s)" % (repo, issue, pr["number"]))
                 flagged.append(f"{repo}#{issue}")
