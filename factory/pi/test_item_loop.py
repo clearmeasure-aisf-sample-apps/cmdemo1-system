@@ -706,6 +706,29 @@ class Gpus(unittest.TestCase):
         self.assertEqual(G.health_exit(G.health(env={}, opener=opener)), 3)
         self.assertEqual(G.health_exit({"pro5000": ("UNREACHABLE", ""), "obs": ("MISSING_SECRETS", ""), "ts3": ("REFUSED", "")}), 4)
 
+class ClientTimeoutAndReserve(unittest.TestCase):   # t89u: idle timeout 600 s on pro5000, 300 s elsewhere; a reserved GPU is never waited for
+    def test_min_client_timeout_per_gpu(self):
+        self.assertGreaterEqual(G.min_client_timeout("pro5000"), 600 if G.MIN_CLIENT_TIMEOUT_S == 300 else 0)
+        self.assertGreaterEqual(G.min_client_timeout("pro5000"), G.min_client_timeout("obs"))
+        for g in ("pro6000", "obs", "ts3"): self.assertEqual(G.min_client_timeout(g), G.MIN_CLIENT_TIMEOUT_S)
+
+    def test_pi_gpu_writes_idle_timeout(self):
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pi-gpu")).read()
+        self.assertIn("httpIdleTimeoutMs", src); self.assertIn("min_client_timeout(gpu)", src)
+
+    def test_is_excluded(self):
+        self.assertTrue(G.is_excluded("pro6000", {"FACTORY_GPU_EXCLUDE": "obs, pro6000"}))
+        self.assertFalse(G.is_excluded("pro5000", {"FACTORY_GPU_EXCLUDE": "pro6000"}))
+        self.assertFalse(G.is_excluded("pro6000", {}))
+
+    def test_recorded_excluded_gpu_is_repicked(self):
+        with mock.patch.dict(os.environ, {"FACTORY_GPU_EXCLUDE": "pro6000"}):
+            self.assertEqual(L.gpu_for_item("pro6000", "large", ["pro5000", "obs"], set()), ("pro5000", None))
+            self.assertEqual(L.gpu_for_item("obs", "small", ["pro5000", "obs"], set()), ("obs", None))   # others keep their GPU
+        with mock.patch.dict(os.environ, {"FACTORY_GPU_EXCLUDE": ""}):
+            self.assertIsNone(L.gpu_for_item("pro6000", "large", ["pro5000", "obs"], set())[0])         # not reserved: waits for it
+
+
 class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU recorded in state.json, never a silent pro5000 default
     def test_gpu_raises_when_unrecorded(self):
         with tempfile.TemporaryDirectory() as h:

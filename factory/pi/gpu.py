@@ -28,6 +28,18 @@ PRIORITY = ("pro5000", "pro6000", "obs", "ts3")   # new work goes to the first G
 # shortest client timeout for a Pi / model call (a long call hung up at less is a 499). Tests may lower the floor
 # with FACTORY_MIN_CLIENT_TIMEOUT_S; production leaves it unset, so the floor stays 300.
 MIN_CLIENT_TIMEOUT_S = int(os.environ.get("FACTORY_MIN_CLIENT_TIMEOUT_S", "300"))
+# Pi's HTTP idle timeout (httpIdleTimeoutMs) per GPU: 499 client disconnects rose to ~9% (Jeffrey, t89u). pro5000 needs 600 s
+# (slow cold prompt reads), every other GPU at least 300 s. Tests lower both floors with FACTORY_MIN_CLIENT_TIMEOUT_S.
+PRO5000_MIN_CLIENT_TIMEOUT_S = int(os.environ.get("FACTORY_MIN_CLIENT_TIMEOUT_S", "600"))
+
+def min_client_timeout(g):
+    """Shortest client (idle / call) timeout in seconds for GPU g: 600 on pro5000, 300 elsewhere."""
+    return PRO5000_MIN_CLIENT_TIMEOUT_S if g == "pro5000" else MIN_CLIENT_TIMEOUT_S
+
+def is_excluded(g, env=None):
+    """True when GPU g is reserved away from the factory (FACTORY_GPU_EXCLUDE, set from ~/.config/factory/gpu-exclude)."""
+    env = os.environ if env is None else env
+    return g in {x.strip().lower() for x in (env.get("FACTORY_GPU_EXCLUDE") or "").split(",") if x.strip()}
 
 def env_names(g):
     u = g.upper(); return f"LOCAL_LLM_{u}_URL", f"LOCAL_LLM_{u}_TOKEN"

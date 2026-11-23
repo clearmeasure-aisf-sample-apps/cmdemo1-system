@@ -395,6 +395,7 @@ def gpu_for_item(rec, size, up, busy):
     """(gpu, wait_why) for the gpu stage. A resumed item keeps the GPU recorded in state: take it when it is up,
     otherwise wait for that GPU (never re-pick, never fall back to the pro5000 default). A new item picks a free
     GPU of the right size; gpu=None means wait, and wait_why says for what."""
+    if rec and G.is_excluded(rec): rec = None   # a GPU reserved in gpu-exclude (e.g. pro6000 for the box lane): re-pick, never wait for it
     if rec:
         if rec in up: return rec, None
         return None, f"waiting for the recorded GPU {rec} (up: {', '.join(up) or 'none'})"
@@ -681,7 +682,7 @@ class Driver:
                   "credentials. When done, run the narrowest relevant build/test, then end your reply with PASS or FAIL as "
                   "the last line.")
         open(pf, "w").write(scrub(prompt) + suffix)
-        timeout = max(int(timeout), G.MIN_CLIENT_TIMEOUT_S)
+        timeout = max(int(timeout), *(G.min_client_timeout(x) for x in (gpu or self.gpu()).split(",")))
         review = name.startswith("independent-review")   # a review keeps its non-author GPUs; no-start = infra retry
         task, g = name, gpu or self.gpu()
         for k in range(LIMITS["pi_relaunch"] + 1):

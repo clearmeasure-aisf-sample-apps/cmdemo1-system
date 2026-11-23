@@ -32,7 +32,8 @@ cfg = {"providers": {"local": {
                 "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}
 open(os.path.join(d, "models.json"), "w").write(json.dumps(cfg))
 open(os.path.join(d, "settings.json"), "w").write(json.dumps(
-    {"extensions": ["-builtin:llama.cpp"], "defaultProvider": "local", "defaultModel": m}))
+    {"extensions": ["-builtin:llama.cpp"], "defaultProvider": "local", "defaultModel": m,
+     "httpIdleTimeoutMs": G.min_client_timeout(gpu) * 1000, "retry": {"provider": {"timeoutMs": G.min_client_timeout(gpu) * 1000}}}))
 PY
 
 export LLM_API_KEY="${!tok_var}" PI_CODING_AGENT_DIR="$AGENT_DIR" PI_OFFLINE=1

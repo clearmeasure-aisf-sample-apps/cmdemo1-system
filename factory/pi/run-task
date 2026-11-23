@@ -215,7 +215,7 @@ def main():
     launched = time.time()
     try:
         rc, text = run_pi([pi_gpu, a.gpu, "--session-dir", sdir, "--no-context-files", "--no-skills", "--no-mcp",
-                           "--approve", "-p", prompt], a.cwd, max(a.timeout, G.MIN_CLIENT_TIMEOUT_S), slot, env,
+                           "--approve", "-p", prompt], a.cwd, max(a.timeout, G.min_client_timeout(a.gpu)), slot, env,
                           sdir=sdir, start_s=a.start_timeout or None, beat=lambda d: progress(**d),
                           stall_s=a.stall_timeout or None)
     finally:
