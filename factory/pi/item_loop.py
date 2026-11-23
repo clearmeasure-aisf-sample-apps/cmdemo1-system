@@ -942,7 +942,7 @@ class Driver:
         """File a new open issue with `label` when no open issue already has that title, and return its
         number; None when the title is already open (case-insensitive by default) or the create failed."""
         full = f"{ORG}/{repo or self.repo}"
-        r = self.gh("api", f"repos/{full}/issues?state=open&labels={label}&per_page=100", "--jq", "[.[].title", check=False)
+        r = self.gh("api", f"repos/{full}/issues?state=open&labels={label}&per_page=100", "--jq", "[.[].title]", check=False)
         try: titles = json.loads(r.stdout or "[]")
         except Exception: titles = []
         have = {t.lower() for t in titles} if case_insensitive else titles

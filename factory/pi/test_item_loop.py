@@ -1976,7 +1976,7 @@ class EnsureIssueTests(unittest.TestCase):   # cmdemo1-system#831: the shared en
                 full = f"{L.ORG}/{self.REPO}"   # the default repo is self.repo, as a full repo name
                 list_args, list_kw = calls[0]
                 self.assertEqual(list_args, ["api", f"repos/{full}/issues?state=open&labels=enhancement&per_page=100",
-                                            "--jq", "[.[].title"])
+                                            "--jq", "[.[].title]"])
                 self.assertEqual(list_kw, {"check": False})
                 create_args, create_kw = calls[1]
                 self.assertEqual(create_kw, {"write": True, "check": False})
