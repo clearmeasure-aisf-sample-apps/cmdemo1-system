@@ -204,14 +204,15 @@ duplicate journals, or a comment within a minute of another one on the same item
 
 Jeffrey, 18 Nov 2026: the bot takes the work item and owns the plan and implementation, but delegates every task to Pi
 through the proxy, and every implemented item gets comments with tokens and time used, the top-level session and the
-Pi sessions. Jeffrey, 20 Nov 2026 3:49pm CT: "equip the cm ai ops bot ... with the 3 tunnel GPUs". Tools are in
+Pi sessions. Jeffrey, 20 Nov 2026 3:49pm CT: "equip the cm ai ops bot ... with the 3 tunnel GPUs". Jeffrey, 22 Nov 2026 8:43pm CT, for the RTX PRO 6000: "Yes, copy the PRO 6000 token and add it at 1 task". Tools are in
 `factory/pi/` of this repository; the GPU table and the rules that choose one are in `factory/pi/gpu.py`.
 
 | GPU | Card | Context | Use |
 |---|---|---|---|
-| `pro5000` | RTX PRO 5000, Qwen3.8 Flash-Next, 2 slots | 262K | first choice for every item; long-context, big or cross-cutting items only here |
-| `obs` | RTX 5070 Ti | 64K | second choice: small UI or test items |
-| `ts3` | RTX 5060 Ti | 64K | last choice, only when both `pro5000` slots and `obs` are busy; slowest |
+| `pro5000` | RTX PRO 5000, Qwen3.8 Flash-Next, 2 slots | 262K | first choice for every item; long-context, big or cross-cutting items only here or on `pro6000` |
+| `pro6000` | RTX PRO 6000 96 GB, Qwen3.8 27B Q8, 1 slot | 262K | second choice for every item; also takes long-context, big or cross-cutting items (Jeffrey, 22 Nov 2026) |
+| `obs` | RTX 5070 Ti | 64K | third choice: small UI or test items |
+| `ts3` | RTX 5060 Ti | 64K | last choice, only when both `pro5000` slots, `pro6000` and `obs` are busy; slowest |
 
 Each is a named Cloudflare tunnel to a token-protected llm-proxy. Pi always asks for model `auto`; the proxy refuses
 any other name. Never ask the proxy to load or switch a model and never send a warm-up or test completion: the health
@@ -219,7 +220,7 @@ check is a models list only. Never start, stop or restart anything behind a tunn
 
 **Setup (first wake, and any wake where `pi-gpu-health` is not on the PATH):** clone or update `cmdemo1-system` on
 the box and run `bash factory/pi/setup.sh`. It is idempotent: installs Pi (pinned version) and links `pi-gpu`
-(`pi-gpu <pro5000|obs|ts3> …`), `pi-pro5000` (kept as a shim for `pi-gpu pro5000`), `pi-gpu-health` (also linked
+(`pi-gpu <pro5000|pro6000|obs|ts3> …`), `pi-pro5000` (kept as a shim for `pi-gpu pro5000`), `pi-gpu-health` (also linked
 as `pi-pro5000-health`), `factory-pi-run-task`, `factory-pi-usage-report` and `factory-pi-item-loop` into
 `~/.local/bin`. Re-run it after `git pull` of this repository when `factory/pi/` changed.
 
@@ -228,20 +229,20 @@ as `pi-pro5000-health`), `factory-pi-run-task`, `factory-pi-usage-report` and `f
   continues on the others.
 - Exit 0: at least one GPU is up. When one or two are not, report it to Jeffrey once per outage (section "Reporting
   to Jeffrey") and keep working.
-- Exit 3 (`MISSING_SECRETS` on all three): ask Jeffrey for the secrets with the Grok Bot secret request form (names
+- Exit 3 (`MISSING_SECRETS` on all four): ask Jeffrey for the secrets with the Grok Bot secret request form (names
   in "Credentials"; never ask for the values in chat or a comment), leave the item in Todo with one
   `Blocker: Pi secrets missing` comment, and end.
 - Exit 4 (no GPU answers): report it to Jeffrey and ask him; never guess or search for a URL.
 - At the start of every implementation wake run `pi-gpu-health` once.
 
-**Concurrency:** up to 3 items run at once, one active item per available GPU, and still at most WIP 3 per repository (8 for `cmdemo1-dashboard`)
+**Concurrency:** up to 5 items run at once, one active item per available GPU slot, and still at most WIP 3 per repository (8 for `cmdemo1-dashboard`)
 (In Progress + Review on board 679; section "Board flow and WIP"). Start a driver for every startable Todo the WIP
 rule allows; the driver itself waits, with no Grok turn and no comment, in Todo until a GPU of the right size is
 free, then takes it (`stage: gpu`, `wait_why` in `status`). Big or cross-cutting items (`size: large`: many files,
-several layers, database, build or infra files, long context) go to `pro5000` and wait for it while it is up; small UI or test
-items (`size: small`) go to `pro5000` first (keep both of its slots full), then `obs`, and `ts3` only when `pro5000`'s two slots and `obs`
+several layers, database, build or infra files, long context) go to `pro5000`, else `pro6000`, and wait for one of them while either is up; small UI or test
+items (`size: small`) go to `pro5000` first (keep both of its slots full), then `pro6000`, then `obs`, and `ts3` only when `pro5000`'s two slots, `pro6000` and `obs`
 are busy. Every Pi or model client timeout is at least 300 s (`MIN_CLIENT_TIMEOUT_S`; a shorter one hangs up on long calls as a 499). An item holds its GPU slot from pickup through the
-merge; Pi tasks run at most 2 at once on `pro5000` and 1 on `obs` / `ts3` from this box. These are hard caps (Jeffrey,
+merge; Pi tasks run at most 2 at once on `pro5000` and 1 on `pro6000` / `obs` / `ts3` from this box. These are hard caps (Jeffrey,
 21 Nov 2026), enforced by `factory/pi/gpu_gate.py` for every Pi launch (`run-task`, `pi-gpu`, the `pi-pro5000` shim): a
 launch on a full GPU waits. Never start Pi any other way, and never delete slot files (`~/.config/factory/gpu-slots/`,
 legacy `/tmp/factory-pi-*-slot-*.lock`); `python3 factory/pi/gpu_gate.py status` shows live holders per GPU.
@@ -460,7 +461,7 @@ On any wake with items in Merged, TDD or UAT, check them all at once:
 Secrets of the Grok Bot account (names only; see `factory/bootstrap.md`): `CM_AI_OPS_BOT_GH_TOKEN` for GitHub,
 `GH_PROJECT_TOKEN` for project 679 when the first cannot edit it, and the Azure service principal `cm-ai-ops-bot`
 (read-only use: health and logs), plus two per GPU for Pi (read only by `factory/pi/`): `LOCAL_LLM_PRO5000_URL` /
-`LOCAL_LLM_PRO5000_TOKEN`, `LOCAL_LLM_OBS_URL` / `LOCAL_LLM_OBS_TOKEN`, `LOCAL_LLM_TS3_URL` / `LOCAL_LLM_TS3_TOKEN`
+`LOCAL_LLM_PRO5000_TOKEN`, `LOCAL_LLM_PRO6000_URL` / `LOCAL_LLM_PRO6000_TOKEN`, `LOCAL_LLM_OBS_URL` / `LOCAL_LLM_OBS_TOKEN`, `LOCAL_LLM_TS3_URL` / `LOCAL_LLM_TS3_TOKEN`
 (each URL is the proxy's base URL ending in `/v1`). Use them through environment variables only. Never change a
 credential, secret or the production setup in an enhancement PR.
 

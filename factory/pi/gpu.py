@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The factory's three local GPUs behind the token-protected llm-proxy (named Cloudflare tunnels), and the rules
+"""The factory's four local GPUs behind the token-protected llm-proxy (named Cloudflare tunnels), and the rules
 that choose one. Imported by item_loop.py and run-task; run by health.sh and pi-gpu.
 
     gpu.py health [--json] [GPU ...]   one models list per GPU (never a completion, never a model load); per-GPU lines
@@ -8,7 +8,7 @@ that choose one. Imported by item_loop.py and run-task; run by health.sh and pi-
 Secrets (values only in the account's secrets, never in a repository, log or comment), per GPU:
     LOCAL_LLM_<GPU>_URL     OpenAI-compatible base URL ending in /v1
     LOCAL_LLM_<GPU>_TOKEN   bearer token of the proxy
-for GPU in PRO5000, OBS, TS3. The model is always `auto`: the proxy refuses any other name and is never asked to load
+for GPU in PRO5000, PRO6000, OBS, TS3. The model is always `auto`: the proxy refuses any other name and is never asked to load
 or warm a model. A GPU whose secrets are missing or that does not answer is unavailable, not fatal.
 """
 import json, os, re, sys, urllib.error, urllib.request
@@ -16,13 +16,15 @@ import json, os, re, sys, urllib.error, urllib.request
 # Ordered strongest first. ctx = context window Pi is told; slots = Pi tasks at once from this box.
 GPUS = {
     "pro5000": {"label": "RTX PRO 5000", "ctx": 262144, "slots": 2, "rank": 0, "note": "Qwen3.8 27B Q6, strongest"},
-    "obs":     {"label": "RTX 5070 Ti",  "ctx": 65536,  "slots": 1, "rank": 1, "note": "64K context"},
-    "ts3":     {"label": "RTX 5060 Ti",  "ctx": 65536,  "slots": 1, "rank": 2, "note": "64K context, slowest"},
+    "pro6000": {"label": "RTX PRO 6000", "ctx": 262144, "slots": 1, "rank": 1, "note": "Qwen3.8 27B Q8, 96 GB; 1 slot (Jeffrey, 22 Nov 2026)"},
+    "obs":     {"label": "RTX 5070 Ti",  "ctx": 65536,  "slots": 1, "rank": 2, "note": "64K context"},
+    "ts3":     {"label": "RTX 5060 Ti",  "ctx": 65536,  "slots": 1, "rank": 3, "note": "64K context, slowest"},
 }
 MODEL = "auto"
-LARGE_GPU = "pro5000"
+LARGE_GPU = "pro5000"                  # default GPU (run-task, plan drafting)
+LARGE_GPUS = ("pro5000", "pro6000")    # 262K context: the only GPUs a large item waits for while one is up
 SMALL_GPUS = ("obs", "ts3")
-PRIORITY = ("pro5000", "obs", "ts3")   # new work goes to the first GPU with a free slot; ts3 (slowest) only when the rest are full
+PRIORITY = ("pro5000", "pro6000", "obs", "ts3")   # new work goes to the first GPU with a free slot; ts3 (slowest) only when the rest are full
 # shortest client timeout for a Pi / model call (a long call hung up at less is a 499). Tests may lower the floor
 # with FACTORY_MIN_CLIENT_TIMEOUT_S; production leaves it unset, so the floor stays 300.
 MIN_CLIENT_TIMEOUT_S = int(os.environ.get("FACTORY_MIN_CLIENT_TIMEOUT_S", "300"))
@@ -31,7 +33,7 @@ def env_names(g):
     u = g.upper(); return f"LOCAL_LLM_{u}_URL", f"LOCAL_LLM_{u}_TOKEN"
 
 def secret_env_names(env=None):
-    """Every LOCAL_LLM_*_URL / *_TOKEN name (the three GPUs and any other in the environment): scrubbed everywhere."""
+    """Every LOCAL_LLM_*_URL / *_TOKEN name (the factory GPUs and any other in the environment): scrubbed everywhere."""
     env = os.environ if env is None else env
     names = {n for g in GPUS for n in env_names(g)}
     names |= {k for k in env if re.fullmatch(r"LOCAL_LLM_[A-Z0-9]+_(URL|TOKEN)", k)}
@@ -77,7 +79,8 @@ LARGE_PATH_RE = re.compile(r"(?i)(^|/)(database|migrations?|infra|octopus|enviro
 SMALL_PATH_RE = re.compile(r"(?i)(test|spec)s?[/._]|\.(razor|cshtml|css|scss|html|js|ts|tsx|md)$|(^|/)(ui|wwwroot|docs)/")
 
 def classify_size(plan):
-    """'large' (big, long-context or cross-cutting: pro5000 only) or 'small' (UI or test items: pro5000, then obs, then ts3). plan['size'] wins."""
+    """'large' (big, long-context or cross-cutting: pro5000 / pro6000 only) or 'small' (UI or test items: pro5000, pro6000,
+    obs, then ts3). plan['size'] wins."""
     if plan.get("size") in ("large", "small"): return plan["size"]
     files = plan.get("files") or []
     areas = {"/".join(f.split("/")[:2]) for f in files}
@@ -88,10 +91,12 @@ def classify_size(plan):
 
 def pick_gpu(size, up, busy):
     """GPU for a new item, or None to wait. up: healthy GPUs; busy: GPUs with every slot taken (busy_gpus).
-    pro5000 first (2 slots, 262K context), then obs, then ts3 only when pro5000 and obs are full. Large
-    (long-context) items wait for pro5000 while it is up and fall back to obs / ts3 only when it is down."""
+    pro5000 first (2 slots, 262K context), then pro6000 (1 slot, 262K), then obs, then ts3 only when the rest are full.
+    Large (long-context) items wait for pro5000 / pro6000 while either is up and fall back to obs / ts3 only when both
+    are down."""
     free = [g for g in PRIORITY if g in up and g not in busy]
-    if size == "large" and LARGE_GPU in up: return LARGE_GPU if LARGE_GPU in free else None
+    if size == "large" and any(g in up for g in LARGE_GPUS):
+        return next((g for g in free if g in LARGE_GPUS), None)
     return free[0] if free else None
 
 def reviewer_gpu(author, up):

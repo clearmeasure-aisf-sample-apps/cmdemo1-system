@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The one per-GPU concurrency gate every Pi launch goes through (cmdemo1-system#861). Hard caps: pro5000 2, obs 1, ts3 1.
+"""The one per-GPU concurrency gate every Pi launch goes through (cmdemo1-system#861). Hard caps: pro5000 2, pro6000 1, obs 1, ts3 1.
 
     gpu_gate.py hold GPU [--no-wait] -- CMD [ARGS...]   take a slot of GPU, then exec CMD holding it (pi-gpu runs Pi so)
     gpu_gate.py status [--json]                         live holders per GPU (pi-gpu-health / watchdog)
@@ -12,7 +12,7 @@
 - Tamper-proof count: under a gate mutex, holders are counted from /proc/*/fd, as distinct open slot files of that GPU:
   deleted ones (`(deleted)`) and the legacy /tmp slot files of drivers still on old code included. A new slot is taken
   only while that count is under the cap, so deleting lock files can never let a fourth task start.
-- Caps: gpu.GPUS[g]['slots']. $FACTORY_GPU_CAPS ("pro5000=2,obs=1,ts3=1") may lower a cap, never raise it.
+- Caps: gpu.GPUS[g]['slots']. $FACTORY_GPU_CAPS ("pro5000=2,pro6000=1,obs=1,ts3=1") may lower a cap, never raise it.
 - Waiting: a launch that finds the GPU full waits (5 s polls) and prints a heartbeat line to stderr every 60 s; with
   --no-wait it exits 75 instead.
 """
