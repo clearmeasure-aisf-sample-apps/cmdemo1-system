@@ -122,6 +122,9 @@ class Comments(unittest.TestCase):
         self.assertEqual(W._last_comment, {})
         self.assertTrue(any("watchdog comment on cmdemo1-workorders#7 failed: gh: no such issue" in s for s in logs))
 
+def no_prs(args):   # gh stub for run_checks: no open PRs anywhere, so check 2 is a no-op
+    return subprocess.CompletedProcess(args, 0, "[]", "")
+
 class GpuHealthCheck(unittest.TestCase):
     """Check 1: a down GPU is reported in run_checks' result and log and pick_gpu / gpu_for_item never
     select it; all GPUs healthy is a no-op with no comment."""
@@ -131,7 +134,7 @@ class GpuHealthCheck(unittest.TestCase):
             old_home = L.HOME
             L.HOME = home     # no real drivers on disk: all_states() sees no live items
             try:
-                return W.run_checks(health=health, log=log)
+                return W.run_checks(health=health, log=log, gh=no_prs)
             finally:
                 L.HOME = old_home
 
@@ -140,7 +143,7 @@ class GpuHealthCheck(unittest.TestCase):
         h["ts3"] = ("UNREACHABLE", "no answer (unknown host or timeout)")
         logs = []
         r = self._run(lambda: dict(h), logs.append)
-        self.assertEqual(r, [("gpu_health_check", "down: ts3")])   # the down GPU is in the result; the healthy ones carry on
+        self.assertEqual(r, [("gpu_health_check", "down: ts3"), ("fix_handoff_check", "ok")])   # the down GPU is in the result; the healthy ones carry on
         self.assertTrue(any("watchdog GPU ts3 (RTX 5060 Ti): UNREACHABLE - no answer (unknown host or timeout)" in s
                             for s in logs))
         up = G.available(h)
@@ -160,7 +163,7 @@ class GpuHealthCheck(unittest.TestCase):
                           lambda s: None)
         finally:
             W.post_comment = old
-        self.assertEqual(r, [("gpu_health_check", "ok")])
+        self.assertEqual(r, [("gpu_health_check", "ok"), ("fix_handoff_check", "ok")])
 
     def test_check_failure_is_caught_logged_and_in_the_result(self):
         logs = []
@@ -178,6 +181,88 @@ class GpuHealthCheck(unittest.TestCase):
         self.assertTrue(any("watchdog check boom failed" in s and "[redacted]" in s for s in logs))
         self.assertNotIn("ghp_", r[0][1])
         self.assertNotIn("ghp_", "".join(logs))
+
+FAIL = "Review → In Progress\n\nReview: FAIL (independent review on the RTX 5070 Ti).\n\n- a finding\n\nSending the findings to Pi."
+
+def c(body, minutes_after_t0):
+    return {"body": body, "created_at": (T0 + dt.timedelta(minutes=minutes_after_t0)).isoformat().replace("+00:00", "Z")}
+
+class FixHandoffRule(unittest.TestCase):
+    """Check 2's pure rule: a review FAIL whose fix-up hand-off produced no commit and no activity in 20+ min."""
+    AT = T0 + dt.timedelta(minutes=30)
+
+    def test_old_fail_with_no_commit_and_no_activity_is_stalled(self):
+        self.assertEqual(W.fix_handoff_stalled([c("In Progress → Review", 0), c(FAIL, 5)], None, self.AT),
+                         T0 + dt.timedelta(minutes=5))
+
+    def test_heartbeats_are_not_activity(self):
+        self.assertIsNotNone(W.fix_handoff_stalled([c(FAIL, 5), c("Status: no progress for 30+ min.", 25)], None, self.AT))
+
+    def test_young_fail_is_not_stalled(self):
+        self.assertIsNone(W.fix_handoff_stalled([c(FAIL, 15)], None, self.AT))   # 15 min < 20
+
+    def test_fix_commit_after_the_fail_clears_it(self):
+        head = (T0 + dt.timedelta(minutes=12)).isoformat()
+        self.assertIsNone(W.fix_handoff_stalled([c(FAIL, 5)], head, self.AT))
+        older = (T0 + dt.timedelta(minutes=1)).isoformat()
+        self.assertIsNotNone(W.fix_handoff_stalled([c(FAIL, 5)], older, self.AT))   # only commits before the FAIL
+
+    def test_activity_or_an_earlier_flag_clears_it(self):
+        self.assertIsNone(W.fix_handoff_stalled([c(FAIL, 5), c("In Progress → Review", 9)], None, self.AT))
+        self.assertIsNone(W.fix_handoff_stalled([c(FAIL, 5), c(W.STALL_MARK + "\nFix-up hand-off stalled", 26)], None, self.AT))
+
+    def test_no_fail_or_a_new_fail_after_a_flag(self):
+        self.assertIsNone(W.fix_handoff_stalled([c("In Progress → Review", 1)], None, self.AT))
+        self.assertIsNone(W.fix_handoff_stalled([], None, self.AT))
+        # flagged once, then a newer FAIL: the newer one is judged on its own
+        cs = [c(FAIL, 0), c(W.STALL_MARK, 3), c(FAIL, 8)]
+        self.assertEqual(W.fix_handoff_stalled(cs, None, self.AT), T0 + dt.timedelta(minutes=8))
+
+class FixHandoffCheck(unittest.TestCase):
+    """Check 2 end to end with a stub gh: one flagged comment on the issue and the PR, guards respected."""
+    def setUp(self):
+        W._last_comment.clear()
+
+    def _gh(self, prs, comments, posted):
+        def gh(args):
+            if args[:2] == ["pr", "list"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps(prs if "cmdemo1-dashboard" in args[3] else []), "")
+            if args[0] == "api":
+                return subprocess.CompletedProcess(args, 0, "\n".join(json.dumps(x) for x in comments), "")
+            if args[:2] == ["issue", "comment"]:
+                with open(args[args.index("--body-file") + 1]) as f: posted.append((args[2], f.read()))
+                return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(args)
+        return gh
+
+    def _run(self, prs, comments):
+        posted = []
+        with tempfile.TemporaryDirectory() as home:
+            old = L.HOME; L.HOME = home
+            try:
+                r = W.fix_handoff_check(gh=self._gh(prs, comments, posted), clock=lambda: T0 + dt.timedelta(minutes=40),
+                                        log=lambda s: None)
+            finally: L.HOME = old
+        return r, posted
+
+    PR = {"number": 1311, "body": "Closes #1309\n\n" + L.DRIVER_MARK, "closingIssuesReferences": [{"number": 1309}],
+          "commits": [{"committedDate": (T0 - dt.timedelta(minutes=30)).isoformat()}]}
+
+    def test_stalled_fail_is_flagged_on_issue_and_pr(self):
+        r, posted = self._run([self.PR], [c(FAIL, 5)])
+        self.assertEqual(r, "stalled: cmdemo1-dashboard#1309")
+        self.assertEqual([n for n, _ in posted], ["1309", "1311"])
+        self.assertTrue(all(W.STALL_MARK in b and "PR #1311" in b for _, b in posted))
+
+    def test_non_driver_pr_and_excluded_items_are_left_alone(self):
+        r, posted = self._run([dict(self.PR, body="human PR")], [c(FAIL, 5)])
+        self.assertEqual((r, posted), ("ok", []))
+        with mock.patch.object(W, "EXCLUDED", W.EXCLUDED | {("cmdemo1-dashboard", 1309)}):   # an excluded issue
+            self.assertEqual(self._run([self.PR], [c(FAIL, 5)]), ("ok", []))
+
+    def test_fixed_pr_is_not_flagged(self):
+        pr = dict(self.PR, commits=[{"committedDate": (T0 + dt.timedelta(minutes=10)).isoformat()}])
+        self.assertEqual(self._run([pr], [c(FAIL, 5)]), ("ok", []))
 
 class SharedEntry(unittest.TestCase):
     def test_cli_run_entry_calls_run_checks_once_with_the_defaults(self):
@@ -199,8 +284,8 @@ class SharedEntry(unittest.TestCase):
         self.assertEqual(e.exception.code, 0)
         self.assertIn("usage:", out.getvalue())
 
-    def test_registry_lists_check_1(self):
-        self.assertEqual([c.__name__ for c in W.CHECKS], ["gpu_health_check"])
+    def test_registry_lists_checks_1_and_2(self):
+        self.assertEqual([c.__name__ for c in W.CHECKS], ["gpu_health_check", "fix_handoff_check"])
 
 class ExitHook(unittest.TestCase):
     """The driver's exit hook (item_loop.watchdog_exit): run_checks runs exactly once when a driver run

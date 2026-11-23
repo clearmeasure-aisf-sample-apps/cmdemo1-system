@@ -13,6 +13,9 @@ is alive and progressing are skipped; a check comments only when it took an acti
 item are at least COMMENT_GAP_S apart; every log line and comment is scrubbed of secrets and tunnel URLs.
 A check's failure is caught and logged; it never changes the caller's result.
 
+Check 2 (fix_handoff_check): a driver PR whose latest review FAIL is 20+ min old with no fix commit and no driver
+activity gets one flagged comment on its issue and on the PR (read-only otherwise).
+
 Check 1: GPU health for pro5000, obs (RTX 5070 Ti) and ts3 (RTX 5060 Ti) via the gpu.py models list
 (read-only: one GET /models per GPU; it never starts, stops or warms a model server). A down GPU is
 reported in the log and in run_checks' result, and GPU selection routes to the healthy GPUs.
@@ -150,6 +153,78 @@ def gpu_health_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
     log("watchdog GPU selection: " + ", ".join(
         "%s -> %s" % (size, picks[size] or "wait for a free healthy GPU") for size in ("large", "small")))
     return "ok" if not down else "down: " + ", ".join(down)
+
+# ---------------------------------------------------------------- check 2: stalled fix-up hand-offs
+FIX_HANDOFF_MIN = 20                                   # a review FAIL with no fix commit and no driver activity for this long
+REVIEW_FAIL_HEAD = "Review → In Progress\n\nReview: FAIL"   # the driver's review-FAIL journal comment (st_review)
+STALL_MARK = "<!-- watchdog-fix-handoff-stalled -->"   # one flag per FAIL: a later FAIL can be flagged again
+QUIET_HEADS = ("Status: no progress",)                 # driver heartbeats are not activity
+
+def _ts(s):
+    return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+
+def fix_handoff_stalled(comments, head_at, at, minutes=FIX_HANDOFF_MIN):
+    """Pure rule for check 2. `comments` is the issue journal ([{"body", "created_at"}], any order), `head_at` the
+    newest commit time on the PR (or None). Returns the time of the latest review FAIL when its fix-up hand-off has
+    stalled: the FAIL is at least `minutes` old, no commit reached the PR after it, no comment after it other than
+    driver heartbeats shows activity, and the watchdog has not flagged it yet. Otherwise None."""
+    cs = sorted(({"body": c.get("body") or "", "at": _ts(c["created_at"])} for c in comments or [] if c.get("created_at")),
+                key=lambda c: c["at"])
+    fails = [c for c in cs if c["body"].startswith(REVIEW_FAIL_HEAD)]
+    if not fails: return None
+    fail_at = fails[-1]["at"]
+    if (at - fail_at).total_seconds() < minutes * 60: return None
+    if head_at is not None and _ts(head_at) > fail_at: return None
+    for c in cs:
+        if c["at"] <= fail_at: continue
+        if STALL_MARK in c["body"]: return None           # already flagged
+        if not c["body"].startswith(QUIET_HEADS): return None   # the driver (or someone) acted after the FAIL
+    return fail_at
+
+def _json_lines(text):
+    out = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line: out.append(json.loads(line))
+    return out
+
+@register
+def fix_handoff_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
+    """Check 2: a driver PR whose review FAILed but whose fix-up hand-off never ran (cmdemo1-dashboard#1311: the FAIL
+    went to the issue, the Pi fix never started, the PR sat idle). For each open PR carrying item_loop's DRIVER_MARK,
+    read its closing issue's journal; when fix_handoff_stalled() says the latest FAIL is FIX_HANDOFF_MIN+ min old with
+    no fix commit and no activity, post one flagged comment on the issue and on the PR (post_comment's guards apply:
+    excluded items and live, progressing drivers are left alone). Read-only otherwise: it never relaunches anything."""
+    clock = clock or L.now; log = log or print; gh = gh or gh_subprocess
+    states = L.all_states(); flagged = []
+    for repo in repos:
+        r = gh(["pr", "list", "-R", f"{L.ORG}/{repo}", "--state", "open", "--limit", "100",
+                "--json", "number,body,closingIssuesReferences,commits"])
+        if r.returncode != 0:
+            log("watchdog fix-handoff: PR list for %s failed: %s" % (repo, scrub(r.stdout or ""))); continue
+        for pr in json.loads(r.stdout or "[]"):
+            if L.DRIVER_MARK not in (pr.get("body") or ""): continue
+            issues = [i.get("number") for i in pr.get("closingIssuesReferences") or [] if i.get("number")]
+            if not issues or excluded(repo, issues[0]) or excluded(repo, pr["number"]): continue
+            issue = issues[0]
+            dates = [c.get("committedDate") for c in pr.get("commits") or [] if c.get("committedDate")]
+            head_at = max(dates, key=_ts) if dates else None
+            c = gh(["api", "--paginate", f"repos/{L.ORG}/{repo}/issues/{issue}/comments?per_page=100",
+                    "--jq", ".[] | {body, created_at}"])
+            if c.returncode != 0:
+                log("watchdog fix-handoff: comments of %s#%s failed: %s" % (repo, issue, scrub(c.stdout or ""))); continue
+            fail_at = fix_handoff_stalled(_json_lines(c.stdout), head_at, clock())
+            if fail_at is None: continue
+            mins = int((clock() - fail_at).total_seconds() // 60)
+            body = (f"{STALL_MARK}\nFix-up hand-off stalled: the review FAILed {mins} min ago "
+                    f"({fail_at.strftime('%Y-%m-%d %H:%M UTC')}) and no fix commit reached PR #{pr['number']} since, with no "
+                    "driver activity. The factory bot should resume the driver or take the fix over; nothing merges until a "
+                    "review passes.")
+            if post_comment(repo, issue, body, states, gh=gh, clock=clock, log=log):
+                post_comment(repo, pr["number"], body, states, gh=gh, clock=clock, log=log)
+                log("watchdog fix-handoff: flagged %s#%s (PR #%s)" % (repo, issue, pr["number"]))
+                flagged.append(f"{repo}#{issue}")
+    return "ok" if not flagged else "stalled: " + ", ".join(flagged)
 
 # ---------------------------------------------------------------- CLI: run every check once (the same entry the driver-exit hook uses)
 def main(argv=None):
