@@ -97,6 +97,85 @@ class Rules(unittest.TestCase):
         self.assertTrue(c.startswith("Todo → In Progress\n\ncm-ai-ops-bot is taking this issue."))
         self.assertIn("`Docs-only: no`", c); self.assertIn("- [ ] A works", c); self.assertIn("~/factory-runs/x", c)
 
+class PlanSpec(unittest.TestCase):   # validate_plan as a specification list: PLAN_CHECKS = [(predicate, message), ...]
+    """The plan rules as data: L.PLAN_CHECKS is a list of (predicate, message) pairs and validate_plan(p) returns
+    exactly the messages of the specs p fails, in list order. A message is a string or a callable taking the plan.
+    Every message pinned below is today's, one per check."""
+    KEYS = ("repo", "issue", "branch", "files", "criteria", "tasks", "verify_cmd", "pr_title")
+
+    def spec_errors(self, p):
+        """The messages of the specs PLAN_CHECKS rejects for p, in list order: a spec's predicate is true when the
+        plan satisfies it, and its message is either a string or a callable taking the plan."""
+        return [(m(p) if callable(m) else m) for ok, m in L.PLAN_CHECKS if not ok(p)]
+
+    def assert_check(self, p, msg):
+        """p trips exactly one spec, its message is msg, and validate_plan says the same in list order."""
+        self.assertEqual(L.validate_plan(p), [msg], msg)
+        self.assertEqual(self.spec_errors(p), [msg], msg)
+
+    def test_plan_checks_is_a_specification_list(self):
+        self.assertIsInstance(L.PLAN_CHECKS, list)
+        self.assertGreaterEqual(len(L.PLAN_CHECKS), 8)
+        for c in L.PLAN_CHECKS:
+            self.assertIsInstance(c, tuple); self.assertEqual(len(c), 2, str(c))
+            ok, msg = c
+            self.assertTrue(callable(ok), str(c))
+            self.assertTrue(isinstance(msg, str) or callable(msg), str(c))
+        self.assertEqual(self.spec_errors(PLAN), [])   # a good plan satisfies every spec
+
+    def test_validate_plan_returns_the_failing_specs_in_list_order(self):
+        bad = dict(PLAN, branch="feature/x", size="medium", pr_title="token=abc123",
+                   tasks=[{"name": "t1", "prompt": "then git push origin"}])
+        self.assertEqual(L.validate_plan(bad),
+                         ["branch must start with cm-ai-ops-bot/", "size must be large or small",
+                          "plan contains a secret-looking value",
+                          "Pi task prompts must not ask Pi to commit, push or call gh"])
+        for p in (PLAN, bad, dict(PLAN, issue=1918), dict(PLAN, criteria=[{"text": "A works"}])):
+            self.assertEqual(L.validate_plan(p), self.spec_errors(p), json.dumps(p, sort_keys=True))
+
+    def test_missing_key(self):
+        for k in self.KEYS:
+            absent = {x: v for x, v in PLAN.items() if x != k}
+            # a missing branch is missing and not-a-bot-branch: today's two messages, in list order
+            errs = [f"missing {k}"] + (["branch must start with cm-ai-ops-bot/"] if k == "branch" else [])
+            for p in (absent, dict(PLAN, **{k: None})):
+                self.assertEqual(L.validate_plan(p), errs, k)
+                self.assertEqual(self.spec_errors(p), errs, k)
+
+    def test_branch_prefix(self):
+        self.assert_check(dict(PLAN, branch="feature/x"), "branch must start with cm-ai-ops-bot/")
+
+    def test_criteria_need_text_and_evidence(self):
+        self.assert_check(dict(PLAN, criteria=[{"text": "A works", "evidence_cmd": "dotnet test --filter A"},
+                                              {"text": "B works"}]), "criteria[1] needs text and evidence_cmd")
+
+    def test_tasks_need_name_and_prompt(self):
+        self.assert_check(dict(PLAN, tasks=[{"name": "t1", "prompt": "Write test A"}, {"prompt": "Write B"}]),
+                          "tasks[1] needs name and prompt")
+
+    def test_never_merge(self):
+        self.assert_check(dict(PLAN, issue=1918), "this item's PR is never merged")
+
+    def test_hands_off(self):
+        self.assert_check(dict(PLAN, repo="cmdemo1-system", issue=654),
+                          "this item is hands-off (Jeffrey); do not work it")
+
+    def test_size(self):
+        self.assert_check(dict(PLAN, size="medium"), "size must be large or small")
+
+    def test_enhancement_protected_files(self):
+        self.assert_check(dict(PLAN, kind="enhancement",
+                               files=["src/A.cs", "infra/main.bicep", "src/appsettings.Production.json"]),
+                          "an enhancement may not change credentials, secrets or production setup: "
+                          "infra/main.bicep, src/appsettings.Production.json")
+
+    def test_secret_looking_value(self):
+        self.assert_check(dict(PLAN, pr_title="token=abc123"), "plan contains a secret-looking value")
+
+    def test_task_prompts_may_not_commit_push_or_call_gh(self):
+        self.assert_check(dict(PLAN, tasks=[{"name": "t1", "prompt": "then git push origin"}]),
+                          "Pi task prompts must not ask Pi to commit, push or call gh")
+
 class NoIdleStall(unittest.TestCase):
     def test_quality_failures_route_qodana_and_refactoring_rationale(self):
         cs = [{"name": "Build result", "bucket": "pass"}, {"name": "Qodana", "bucket": "fail"},
@@ -1874,6 +1953,68 @@ class GhChokepoint(unittest.TestCase):   # cmdemo1-system#828: every gh call is 
     def test_no_direct_sh_gh_call_sites(self):
         src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "item_loop.py")).read()
         self.assertIsNone(re.search(r'sh\(\[\s*"gh"', src))
+
+
+class StageRegistry(unittest.TestCase):   # cmdemo1-system#829: stage name -> handler is one registry, not a "st_" + name formula
+    def test_stages_is_a_dict_of_the_known_stage_names(self):
+        self.assertIsInstance(L.STAGES, dict)
+        self.assertEqual(set(L.STAGES), {"gpu", "pickup", "research", "implement", "local-verify",
+                                         "pr", "ci", "review", "merge", "main", "deploy"})
+
+    def test_every_value_is_an_existing_driver_method_name(self):   # the st_* methods keep their names
+        for stage, name in sorted(L.STAGES.items()):
+            with self.subTest(stage=stage):
+                self.assertIsInstance(name, str, stage)
+                self.assertTrue(callable(getattr(L.Driver, name, None)), f"{stage} -> {name}")
+
+    def test_terminal_stages(self):
+        self.assertEqual(L.TERMINAL_STAGES, ("done", "blocked", "dry-run-done"))
+
+    def test_stage_handler_returns_the_driver_method(self):
+        d = L.Driver.__new__(L.Driver)
+        h = L.stage_handler(d, "review")
+        self.assertTrue(callable(h))
+        self.assertEqual(h.__name__, "st_review")
+        self.assertEqual(h, d.st_review)
+
+    def test_stage_handler_follows_an_instance_override(self):   # existing tests patch driver methods on the instance
+        d = L.Driver.__new__(L.Driver)
+        d.st_review = lambda: "overridden"
+        self.assertEqual(L.stage_handler(d, "review")(), "overridden")
+
+    def test_unknown_stage_raises_naming_the_stage(self):
+        d = L.Driver.__new__(L.Driver)
+        with self.assertRaises(L.UnknownStage) as cm: L.stage_handler(d, "no-such-stage")
+        self.assertIn("no-such-stage", str(cm.exception))
+
+    def test_unknown_stage_lists_the_known_stages(self):
+        d = L.Driver.__new__(L.Driver)
+        with self.assertRaises(L.UnknownStage) as cm: L.stage_handler(d, "no-such-stage")
+        msg = str(cm.exception)
+        for stage in sorted(L.STAGES): self.assertIn(stage, msg, stage)
+
+    def test_unknown_stage_ends_the_run_like_any_driver_error(self):   # only the exception's name and message are new; the driver-error path (log, state, wake, watchdog) is unchanged
+        with tempfile.TemporaryDirectory() as h:
+            old = (L.HOME, L.watchdog_exit); L.HOME = h
+            woke, exits = [], []
+            L.watchdog_exit = lambda drv: exits.append(drv)
+            try:
+                d = L.Driver("cmdemo1-workorders", 1948, dry_run=True)
+                json.dump(PLAN, open(os.path.join(d.run_dir, "plan.json"), "w"))
+                d.sh = lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "0.1", "")
+                for name in sorted(set(L.STAGES.values()) | {a for a in dir(L.Driver) if a.startswith("st_")}):
+                    setattr(d, name, lambda *a, **k: self.fail("an unknown stage must not run any stage handler"))
+                d.comment = lambda *a, **k: self.fail("a driver error posts no comment")
+                d.wake_bot = lambda reason, **k: woke.append(reason)
+                d.s["stage"] = "no-such-stage"
+                with self.assertRaises(L.UnknownStage) as cm: d.run()
+                s = json.load(open(d.state_p))
+                self.assertEqual(s["status"], "error")
+                self.assertEqual(s["error"], str(cm.exception)[:1500], "state.json carries the same message the driver raised")
+                self.assertIn("no-such-stage", s["error"])
+                self.assertEqual(woke, ["driver error"], "the bot is woken once, for a driver error")
+                self.assertEqual(len(exits), 1, "the watchdog exit hook ran once")
+            finally: L.HOME, L.watchdog_exit = old
 
 
 if __name__ == "__main__": unittest.main()

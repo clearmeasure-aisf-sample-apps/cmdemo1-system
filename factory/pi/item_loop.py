@@ -194,26 +194,45 @@ def heartbeat_due(progress_at, last_heartbeat, at, minutes=HEARTBEAT_MIN):
     a, h = age(progress_at), age(last_heartbeat)
     return a is not None and a >= minutes and (h is None or h >= minutes)
 
-def validate_plan(p):
-    errs = []
-    for k in ("repo", "issue", "branch", "files", "criteria", "tasks", "verify_cmd", "pr_title"):
-        if k not in p or p[k] in (None, "", []): errs.append(f"missing {k}")
-    if not str(p.get("branch", "")).startswith(f"{BOT}/"): errs.append(f"branch must start with {BOT}/")
-    for i, c in enumerate(p.get("criteria") or []):
-        if not c.get("text") or not c.get("evidence_cmd"): errs.append(f"criteria[{i}] needs text and evidence_cmd")
-    for i, t in enumerate(p.get("tasks") or []):
-        if not t.get("name") or not t.get("prompt"): errs.append(f"tasks[{i}] needs name and prompt")
-    if (p.get("repo"), p.get("issue")) in NEVER_MERGE: errs.append("this item's PR is never merged")
-    if (p.get("repo"), p.get("issue")) in HANDS_OFF: errs.append("this item is hands-off (Jeffrey); do not work it")
-    if p.get("size") not in (None, "large", "small"): errs.append("size must be large or small")
-    if p.get("kind") == "enhancement":
-        bad = protected_files(p.get("files") or [])
-        if bad: errs.append(f"an enhancement may not change credentials, secrets or production setup: {', '.join(bad)}")
+# The plan rules as data: PLAN_CHECKS is one (predicate, message) spec per rule a plan must satisfy, in the order the
+# checks ran. A predicate is true when the plan satisfies its spec; the message is the error text, a string or a
+# callable taking the plan when the text is computed (the enhancement's protected-file list, the bad criteria / task
+# entries). validate_plan returns the messages of the specs the plan fails, in list order.
+def _required(k):
+    """Spec for one required plan key: present, and not None / "" / []."""
+    return (lambda p: k in p and p[k] not in (None, "", [])), f"missing {k}"
+
+def _entry_fields(field, *keys):
+    """Spec for one plan list (criteria, tasks): every entry carries all of `keys`. The message is today's per-entry
+    text; a plan with more than one bad entry gets those texts joined with '; '."""
+    def bad(p): return [i for i, e in enumerate(p.get(field) or []) if not all(e.get(k) for k in keys)]
+    return (lambda p: not bad(p)), lambda p: "; ".join(f"{field}[{i}] needs {' and '.join(keys)}" for i in bad(p))
+
+def _no_secret_values(p):
     blob = json.dumps(p)
-    if scrub(blob) != blob: errs.append("plan contains a secret-looking value")
-    if re.search(r"git\s+(push|commit)|gh\s+(pr|issue|api)", " ".join(t.get("prompt", "") for t in p.get("tasks") or [])):
-        errs.append("Pi task prompts must not ask Pi to commit, push or call gh")
-    return errs
+    return scrub(blob) == blob
+
+def _prompts_do_not_touch_github(p):
+    """No Pi task prompt asks Pi to commit, push or call gh: every GitHub write is the driver's."""
+    return not re.search(r"git\s+(push|commit)|gh\s+(pr|issue|api)", " ".join(t.get("prompt", "") for t in p.get("tasks") or []))
+
+PLAN_CHECKS = [
+    *[_required(k) for k in ("repo", "issue", "branch", "files", "criteria", "tasks", "verify_cmd", "pr_title")],
+    (lambda p: str(p.get("branch", "")).startswith(f"{BOT}/"), f"branch must start with {BOT}/"),
+    _entry_fields("criteria", "text", "evidence_cmd"),
+    _entry_fields("tasks", "name", "prompt"),
+    (lambda p: (p.get("repo"), p.get("issue")) not in NEVER_MERGE, "this item's PR is never merged"),
+    (lambda p: (p.get("repo"), p.get("issue")) not in HANDS_OFF, "this item is hands-off (Jeffrey); do not work it"),
+    (lambda p: p.get("size") in (None, "large", "small"), "size must be large or small"),
+    (lambda p: p.get("kind") != "enhancement" or not protected_files(p.get("files") or []),
+     lambda p: "an enhancement may not change credentials, secrets or production setup: "
+               f"{', '.join(protected_files(p.get('files') or []))}"),
+    (_no_secret_values, "plan contains a secret-looking value"),
+    (_prompts_do_not_touch_github, "Pi task prompts must not ask Pi to commit, push or call gh"),
+]
+
+def validate_plan(p):
+    return [(m(p) if callable(m) else m) for ok, m in PLAN_CHECKS if not ok(p)]
 
 def protected_files(files):
     return [f for f in files if PROTECTED_RE.search(f)]
@@ -490,6 +509,21 @@ def gpu_health(max_age=600):
 def _json_or_none(line):
     try: return json.loads(line)
     except ValueError: return None
+
+class UnknownStage(Exception):
+    """The state file names a stage with no handler: the driver records it and wakes the bot (cmdemo1-system#829)."""
+
+STAGES = {"gpu": "st_gpu", "pickup": "st_pickup", "research": "st_research", "implement": "st_implement",
+          "local-verify": "st_local_verify", "pr": "st_pr", "ci": "st_ci", "review": "st_review",
+          "merge": "st_merge", "main": "st_main", "deploy": "st_deploy"}
+TERMINAL_STAGES = ("done", "blocked", "dry-run-done")
+
+def stage_handler(driver, stage):
+    """The driver's bound method for a stage name. Resolved on the instance every call, so tests (and a driver that
+    swaps a stage out at runtime) can patch d.st_review; never capture the bound methods at import time."""
+    if stage not in STAGES:
+        raise UnknownStage(f"unknown stage {stage!r}; known stages: " + ", ".join(sorted(STAGES)))
+    return getattr(driver, STAGES[stage])
 
 class Driver:
     def __init__(self, repo, issue, dry_run=False, top_session=None):
@@ -788,10 +822,10 @@ class Driver:
         self.progress()
         try:
             while True:
-                while self.s["stage"] not in ("done", "blocked", "dry-run-done"):
+                while self.s["stage"] not in TERMINAL_STAGES:
                     if self.stop_if_held(): break
                     stage = self.s["stage"]; self.log(f"stage {stage}")
-                    try: getattr(self, "st_" + stage.replace("-", "_"))()
+                    try: stage_handler(self, stage)()
                     except PiNotStarted as e: self.blocker(str(e))
                     except PiHeld:   # HOLD appeared mid-pass: stop before the push / merge (no comment)
                         self.stop_if_held(); break
