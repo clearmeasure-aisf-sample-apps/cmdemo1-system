@@ -196,7 +196,7 @@ class ReviewInfraRetry(unittest.TestCase):   # t83u: no / empty findings or no v
                 d.sh = sh
                 ok, why = d.independent_review()
                 run = next(c for c in calls if "--gpu" in c)
-                self.assertEqual(run[run.index("--gpu") + 1], "obs,ts3")
+                self.assertEqual(run[run.index("--gpu") + 1], "pro6000,obs,ts3")   # never the author's pro5000
                 self.assertIsNone(ok); self.assertIn("no findings file", why); self.assertEqual(d.s["reviewer_gpu"], "ts3")
             finally: L.HOME, L.research_ok, L.gpu_health = old
 
@@ -376,7 +376,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
                 d, calls = self.driver(h, ["no-start", "stalled", "PASS"])
                 self.assertTrue(d.pi("review-fix-2", "fix it"))
                 arg = lambda c, f: c[c.index(f) + 1]
-                self.assertEqual([arg(c, "--gpu") for c in calls], ["ts3", "pro5000,obs,ts3", "pro5000,obs,ts3"])
+                self.assertEqual([arg(c, "--gpu") for c in calls], ["ts3", "pro5000,pro6000,obs,ts3", "pro5000,pro6000,obs,ts3"])
                 self.assertEqual([arg(c, "--task") for c in calls], ["review-fix-2", "review-fix-2-relaunch-1", "review-fix-2-relaunch-2"])
                 self.assertEqual(arg(calls[0], "--start-timeout"), str(L.HANDOFF_START_S))
                 self.assertEqual(arg(calls[0], "--stall-timeout"), str(L.HANDOFF_STALL_S))
@@ -394,17 +394,20 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         self.assertEqual(L.relaunch_gpus(None, ["ts3", "obs", "pro5000"]), ["pro5000"])
         self.assertEqual(L.relaunch_gpus("large", ["ts3", "obs"]), ["obs", "ts3"])   # pro5000 down: as pick_gpu
         self.assertEqual(L.relaunch_gpus("small", ["ts3", "pro5000"]), ["pro5000", "ts3"])
+        self.assertEqual(L.relaunch_gpus("large", ["ts3", "pro6000", "pro5000"]), ["pro5000", "pro6000"])   # either 262K GPU
+        self.assertEqual(L.relaunch_gpus("large", ["ts3", "pro6000"]), ["pro6000"])
+        self.assertEqual(L.relaunch_gpus("small", ["ts3", "obs", "pro6000", "pro5000"]), ["pro5000", "pro6000", "obs", "ts3"])
         with tempfile.TemporaryDirectory() as h:
             old = (L.HOME, L.gpu_health); L.HOME = h; L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
             try:
                 d, calls = self.driver(h, ["stalled", "PASS"], size="large")
                 self.assertTrue(d.pi("t1", "do it"))
-                self.assertEqual(calls[1][calls[1].index("--gpu") + 1], "pro5000")
+                self.assertEqual(calls[1][calls[1].index("--gpu") + 1], "pro5000,pro6000")   # a 262K GPU only
             finally: L.HOME, L.gpu_health = old
 
     def test_review_excludes_every_authoring_gpu_including_relaunch_gpus(self):   # review major 2
-        self.assertEqual(G.reviewer_gpus(["ts3", "obs"], list(G.GPUS)), ["pro5000"])
-        self.assertEqual(G.reviewer_gpus("ts3", list(G.GPUS)), ["pro5000", "obs"])
+        self.assertEqual(G.reviewer_gpus(["ts3", "obs"], list(G.GPUS)), ["pro5000", "pro6000"])
+        self.assertEqual(G.reviewer_gpus("ts3", list(G.GPUS)), ["pro5000", "pro6000", "obs"])
         with tempfile.TemporaryDirectory() as h:
             old = (L.HOME, L.gpu_health, L.research_ok); L.HOME = h
             L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}; L.research_ok = lambda *a: True
@@ -418,7 +421,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
                     if "--gpu" in cmd: review.append(list(cmd)); return subprocess.CompletedProcess(cmd, 0, rec, "")
                     return subprocess.CompletedProcess(cmd, 0, "body\n## Refactoring research\n- x" if "pr" in cmd else "", "")
                 d.sh = sh; d.independent_review()
-                self.assertEqual(review[0][review[0].index("--gpu") + 1], "pro5000", "neither ts3 nor obs may review")
+                self.assertEqual(review[0][review[0].index("--gpu") + 1], "pro5000,pro6000", "neither ts3 nor obs may review")
                 self.assertEqual(int(review[0][review[0].index("--slot-wait") + 1]), L.ANY_SLOT_WAIT_S)   # 2 h, per the docs
                 self.assertEqual(d.author_gpus(), ["ts3", "obs"], "a review never counts as authoring")
             finally: L.HOME, L.gpu_health, L.research_ok = old
@@ -539,12 +542,17 @@ class DryRunDriver(unittest.TestCase):
             finally: L.HOME = old
 
 class Gpus(unittest.TestCase):
-    def test_secret_names_cover_three_gpus_and_keep_pro5000(self):
+    def test_secret_names_cover_four_gpus_and_keep_pro5000(self):
         self.assertEqual(G.env_names("pro5000"), ("LOCAL_LLM_PRO5000_URL", "LOCAL_LLM_PRO5000_TOKEN"))
+        self.assertEqual(G.env_names("pro6000"), ("LOCAL_LLM_PRO6000_URL", "LOCAL_LLM_PRO6000_TOKEN"))
         self.assertEqual(G.env_names("obs"), ("LOCAL_LLM_OBS_URL", "LOCAL_LLM_OBS_TOKEN"))
         self.assertEqual(G.env_names("ts3"), ("LOCAL_LLM_TS3_URL", "LOCAL_LLM_TS3_TOKEN"))
-        self.assertEqual(list(G.GPUS), ["pro5000", "obs", "ts3"]); self.assertEqual(G.MODEL, "auto")
-        self.assertEqual((G.GPUS["pro5000"]["ctx"], G.GPUS["obs"]["ctx"], G.GPUS["ts3"]["ctx"]), (262144, 65536, 65536))
+        self.assertEqual(list(G.GPUS), ["pro5000", "pro6000", "obs", "ts3"]); self.assertEqual(G.MODEL, "auto")
+        self.assertEqual({g: G.GPUS[g]["ctx"] for g in G.GPUS}, {"pro5000": 262144, "pro6000": 262144, "obs": 65536, "ts3": 65536})
+
+    def test_hard_caps_pro5000_2_pro6000_1_obs_1_ts3_1(self):   # Jeffrey, 21 + 22 Nov 2026
+        self.assertEqual({g: G.GPUS[g]["slots"] for g in G.GPUS}, {"pro5000": 2, "pro6000": 1, "obs": 1, "ts3": 1})
+        self.assertEqual([G.GPUS[g]["rank"] for g in G.GPUS], [0, 1, 2, 3])
         self.assertIn("LOCAL_LLM_X9_TOKEN", G.secret_env_names({"LOCAL_LLM_X9_TOKEN": "v"}))
 
     def test_size_classification(self):
@@ -554,9 +562,20 @@ class Gpus(unittest.TestCase):
         self.assertEqual(G.classify_size({"files": ["src/Core/A.cs", "src/UI/B.razor", "src/DataAccess/C.cs"]}), "large")
         self.assertEqual(G.classify_size({"files": ["src/Database/x.sql"], "size": "small"}), "small")
 
-    def test_pick_gpu_pro5000_first_then_obs_then_ts3(self):
+    def test_pick_gpu_pro5000_then_pro6000_then_obs_then_ts3(self):
+        up = ["pro5000", "pro6000", "obs", "ts3"]
+        self.assertEqual(G.PRIORITY, ("pro5000", "pro6000", "obs", "ts3"))
+        for size in ("small", "large"): self.assertEqual(G.pick_gpu(size, up, set()), "pro5000")
+        for size in ("small", "large"): self.assertEqual(G.pick_gpu(size, up, {"pro5000"}), "pro6000")   # pro5000 full
+        self.assertEqual(G.pick_gpu("small", up, {"pro5000", "pro6000"}), "obs")
+        self.assertEqual(G.pick_gpu("small", up, {"pro5000", "pro6000", "obs"}), "ts3")
+        self.assertIsNone(G.pick_gpu("large", up, {"pro5000", "pro6000"}))        # long context waits for a 262K GPU
+        self.assertEqual(G.pick_gpu("large", ["pro6000", "obs"], set()), "pro6000")   # pro5000 down: pro6000 takes it
+        self.assertIsNone(G.pick_gpu("large", ["pro6000", "obs"], {"pro6000"}))
+        self.assertIsNone(G.pick_gpu("small", up, {"pro5000", "pro6000", "obs", "ts3"}))
+
+    def test_pick_gpu_without_pro6000_keeps_the_old_order(self):   # pro6000 secrets missing or down
         up = ["pro5000", "obs", "ts3"]
-        self.assertEqual(G.PRIORITY, ("pro5000", "obs", "ts3"))
         for size in ("small", "large"): self.assertEqual(G.pick_gpu(size, up, set()), "pro5000")
         self.assertEqual(G.pick_gpu("small", up, {"pro5000"}), "obs")             # pro5000 slots full
         self.assertEqual(G.pick_gpu("small", up, {"pro5000", "obs"}), "ts3")      # ts3 only when both are busy
@@ -571,6 +590,9 @@ class Gpus(unittest.TestCase):
 
     def test_reviewer_gpus_are_every_other_healthy_gpu(self):
         self.assertEqual(G.reviewer_gpus("pro5000", ["pro5000", "obs", "ts3"]), ["obs", "ts3"])
+        self.assertEqual(G.reviewer_gpus("pro5000", ["pro5000", "pro6000", "obs", "ts3"]), ["pro6000", "obs", "ts3"])
+        self.assertEqual(G.reviewer_gpus(["pro5000", "pro6000"], ["pro5000", "pro6000", "obs"]), ["obs"])
+        self.assertEqual(G.reviewer_gpus("pro6000", ["pro5000", "pro6000"]), ["pro5000"])
         self.assertEqual(G.reviewer_gpus("obs", ["pro5000", "obs"]), ["pro5000"])
 
     def test_reviewer_is_a_different_gpu(self):
@@ -593,7 +615,7 @@ class Gpus(unittest.TestCase):
         env = {"LOCAL_LLM_PRO5000_URL": "https://p.invalid/v1", "LOCAL_LLM_PRO5000_TOKEN": "t1",
                "LOCAL_LLM_OBS_URL": "https://obs.invalid/v1/", "LOCAL_LLM_OBS_TOKEN": "t2"}
         h = G.health(env=env, opener=opener)
-        self.assertEqual({g: st for g, (st, _) in h.items()}, {"pro5000": "HEALTHY", "obs": "UNREACHABLE", "ts3": "MISSING_SECRETS"})
+        self.assertEqual({g: st for g, (st, _) in h.items()}, {"pro5000": "HEALTHY", "pro6000": "MISSING_SECRETS", "obs": "UNREACHABLE", "ts3": "MISSING_SECRETS"})
         self.assertEqual(G.available(h), ["pro5000"]); self.assertEqual(G.health_exit(h), 0)
         self.assertEqual(seen, [("https://p.invalid/v1/models", "GET"), ("https://obs.invalid/v1/models", "GET")])  # models list only
         self.assertTrue(all("t1" not in d and "t2" not in d and "invalid" not in d for _, d in h.values()))
@@ -1369,7 +1391,7 @@ class RunTaskTimeout(unittest.TestCase):   # cmdemo1-system#817: --timeout must 
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN); f.close()
 
-class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, obs 1, ts3 1 for every Pi launch
+class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, pro6000 1, obs 1, ts3 1 for every Pi launch
     """On Nov 21 a Pi session ran `rm -f /tmp/factory-pi-*-slot-*.lock`; new run-tasks then took "free" slots on new
     inodes while the old holders still ran (3 on pro5000, 2 on ts3 and obs). Only a private slot dir is used here."""
     HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1406,11 +1428,12 @@ class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, o
 
     def test_default_caps_are_the_hard_caps_and_overrides_only_lower(self):
         sys.path.insert(0, self.HERE); import gpu_gate
-        self.assertEqual(gpu_gate.caps({}), {"pro5000": 2, "obs": 1, "ts3": 1})
-        self.assertEqual(gpu_gate.caps({"FACTORY_GPU_CAPS": "pro5000=5,obs=0,ts3=x"}), {"pro5000": 2, "obs": 0, "ts3": 1})
+        self.assertEqual(gpu_gate.caps({}), {"pro5000": 2, "pro6000": 1, "obs": 1, "ts3": 1})
+        self.assertEqual(gpu_gate.caps({"FACTORY_GPU_CAPS": "pro5000=5,obs=0,ts3=x"}), {"pro5000": 2, "pro6000": 1, "obs": 0, "ts3": 1})
+        self.assertEqual(gpu_gate.caps({"FACTORY_GPU_CAPS": "pro6000=3"})["pro6000"], 1)   # never raised past 1
 
     def test_caps_hold_under_concurrent_acquisition(self):
-        for gpu, cap in (("pro5000", 2), ("obs", 1), ("ts3", 1)):
+        for gpu, cap in (("pro5000", 2), ("pro6000", 1), ("obs", 1), ("ts3", 1)):
             ps = [self.hold(gpu, "--no-wait") for _ in range(5)]   # five launches race for the GPU at once
             time.sleep(2.0)
             running = [p for p in ps if p.poll() is None]
@@ -1490,7 +1513,7 @@ class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, o
 
 class Scrubbing(unittest.TestCase):
     def test_tunnel_hosts_and_every_gpu_secret_are_redacted(self):
-        for host in ("pro5000", "5070ti", "5060ti"):
+        for host in ("pro5000", "pro6000", "5070ti", "5060ti"):
             out = L.scrub(f"GET https://{host}.clearmeasure.ai/v1/models -> 200; host {host}.clearmeasure.ai")
             self.assertNotIn(f"{host}.clearmeasure.ai", out); self.assertIn("[redacted]", out)
         fake = lambda c: "fake" + c * 12   # built at run time so the secret scan sees no literal

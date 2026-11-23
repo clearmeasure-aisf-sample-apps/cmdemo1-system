@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Idempotent setup of Pi (pi-coding-agent) on the factory bot's Linux box, pointed at the factory's three local GPUs
+# Idempotent setup of Pi (pi-coding-agent) on the factory bot's Linux box, pointed at the factory's four local GPUs
 # through the token-protected llm-proxy (named Cloudflare tunnels). Safe to run on every wake: it only installs or
 # rewrites what is missing or different.
 #
 # Secrets of the Grok Bot account, as environment variables (values never go in a repository, comment, log or chat),
 # two per GPU; a GPU whose two are missing is simply unavailable:
 #   LOCAL_LLM_PRO5000_URL / LOCAL_LLM_PRO5000_TOKEN   RTX PRO 5000 (strongest, 262K context)
+#   LOCAL_LLM_PRO6000_URL / LOCAL_LLM_PRO6000_TOKEN   RTX PRO 6000 (262K context, 1 slot)
 #   LOCAL_LLM_OBS_URL     / LOCAL_LLM_OBS_TOKEN       RTX 5070 Ti (64K context)
 #   LOCAL_LLM_TS3_URL     / LOCAL_LLM_TS3_TOKEN       RTX 5060 Ti (64K context, slowest)
 # Each URL is the proxy's OpenAI-compatible base URL ending in /v1; Pi always asks for model `auto`.
@@ -13,7 +14,7 @@
 # Installs: Pi into ~/.local (npm prefix); links in ~/.local/bin to this clone: pi-gpu (Pi on one GPU), pi-pro5000
 # (shim for `pi-gpu pro5000`), pi-gpu-health and pi-pro5000-health (both health.sh), factory-pi-run-task,
 # factory-pi-usage-report, factory-pi-item-loop; the Pi agent dirs ~/.config/local-llm/pi-<gpu>. Ends with the health
-# check of all three GPUs (a models list each).
+# check of all four GPUs (a models list each).
 #
 # Exit codes: 0 ready (at least one GPU healthy), 3 every GPU lacks its secrets (ask Jeffrey), 4 no GPU answers (ask
 # Jeffrey), 1 other.
@@ -24,7 +25,7 @@ PI_VERSION="1.5.2"
 NODE_MAJOR_MIN=22
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HOME/.local/bin"
-GPUS=(pro5000 obs ts3)
+GPUS=(pro5000 pro6000 obs ts3)
 
 missing=(); configured=0
 for g in "${GPUS[@]}"; do
@@ -85,5 +86,5 @@ ln -sfn "$HERE/run-task" "$BIN/factory-pi-run-task"
 ln -sfn "$HERE/usage-report" "$BIN/factory-pi-usage-report"
 ln -sfn "$HERE/item-loop" "$BIN/factory-pi-item-loop"
 
-echo "Pi $(pi --version | tail -1) installed; wrapper $BIN/pi-gpu <pro5000|obs|ts3>"
+echo "Pi $(pi --version | tail -1) installed; wrapper $BIN/pi-gpu <pro5000|pro6000|obs|ts3>"
 exec "$HERE/health.sh"

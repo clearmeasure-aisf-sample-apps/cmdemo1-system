@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Pi against one of the factory's local GPUs through the token-protected llm-proxy:
-#   pi-gpu <pro5000|obs|ts3> [pi args...]
+#   pi-gpu <pro5000|pro6000|obs|ts3> [pi args...]
 # Reads LOCAL_LLM_<GPU>_URL / LOCAL_LLM_<GPU>_TOKEN, checks the GPU with one models list (never a completion, never
 # a model load or warm-up), writes Pi's provider config for model `auto` (the only name the proxy accepts) and passes
 # every other argument through to pi. Never prints the URL or token.
-# Pi always starts through gpu_gate.py (#861): it takes one of the GPU's hard-capped slots (pro5000 2, obs 1, ts3 1),
+# Pi always starts through gpu_gate.py (#861): it takes one of the GPU's hard-capped slots (pro5000 2, pro6000 1, obs 1, ts3 1),
 # waiting while the GPU is full, and Pi inherits the slot, so manual runs, the pi-pro5000 shim and run-task all count.
 set -euo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 GPU_PY="$HERE/gpu.py"; [[ -f "$GPU_PY" ]] || GPU_PY="$HOME/.local/bin/factory-pi-gpu.py"
 gpu="${1:-}"; shift || true
-case "$gpu" in pro5000|obs|ts3) ;; *) echo "usage: pi-gpu <pro5000|obs|ts3> [pi args...]" >&2; exit 2 ;; esac
+case "$gpu" in pro5000|pro6000|obs|ts3) ;; *) echo "usage: pi-gpu <pro5000|pro6000|obs|ts3> [pi args...]" >&2; exit 2 ;; esac
 up="${gpu^^}"; url_var="LOCAL_LLM_${up}_URL"; tok_var="LOCAL_LLM_${up}_TOKEN"
 [[ -n "${!url_var:-}" && -n "${!tok_var:-}" ]] || { echo "MISSING_SECRETS: $url_var and/or $tok_var" >&2; exit 3; }
 python3 "$GPU_PY" health "$gpu" >/dev/null || { echo "pi-gpu: $gpu unavailable (run pi-gpu-health)" >&2; exit 4; }

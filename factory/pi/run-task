@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Run ONE Pi task on one of the factory's GPUs and record its usage.
 
-    run-task --run-dir DIR --cwd WORKTREE --task NAME --prompt-file FILE [--gpu pro5000|obs|ts3|obs,ts3] [--timeout SEC] [--top-session ID]
+    run-task --run-dir DIR --cwd WORKTREE --task NAME --prompt-file FILE [--gpu pro5000|pro6000|obs|ts3|obs,ts3] [--timeout SEC] [--top-session ID]
 
 - Runs `pi-gpu <gpu> -p <prompt>` (default GPU: $FACTORY_PI_GPU, else pro5000) in WORKTREE with stdin closed (Pi waits forever on an open stdin), no context files,
   skills or MCP, and its own session dir DIR/pi-sessions/NAME, so the session JSONL is kept.
-- At most 2 Pi tasks run at once on pro5000, 1 on obs and 1 on ts3 (hard caps): it waits for a slot from gpu_gate.py,
+- At most 2 Pi tasks run at once on pro5000, 1 on pro6000, 1 on obs and 1 on ts3 (hard caps): it waits for a slot from gpu_gate.py,
   the one gate every Pi launch goes through (#861), and hands the slot fd to pi-gpu / Pi, so the slot is held exactly as
   long as Pi or anything it started is alive (a killed run-task no longer frees the slot of a running orphan Pi).
 - --gpu may list several GPUs (comma-separated, e.g. obs,ts3): Pi runs on the first with a free slot (reviews, #t83u);

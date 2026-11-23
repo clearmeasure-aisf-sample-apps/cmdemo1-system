@@ -15,6 +15,8 @@ review is PASS and required checks are green; he does not wait for a human yes i
 | Azure service principal `cm-ai-ops-bot` (client id, tenant id, client secret) | Contributor on `rg-cmdemo1-nonprod` and `rg-cmdemo1-prod`; the bot uses it read-only (health, logs) | Entra ID app registration `cm-ai-ops-bot` |
 | `LOCAL_LLM_PRO5000_URL` | OpenAI-compatible base URL (ending in `/v1`) of the llm-proxy to the RTX PRO 5000 (named Cloudflare tunnel) | Jeffrey |
 | `LOCAL_LLM_PRO5000_TOKEN` | Bearer token of that proxy | Jeffrey |
+| `LOCAL_LLM_PRO6000_URL` | Base URL (ending in `/v1`) of the llm-proxy to the RTX PRO 6000 (named Cloudflare tunnel) | Jeffrey |
+| `LOCAL_LLM_PRO6000_TOKEN` | Bearer token of that proxy | Jeffrey |
 | `LOCAL_LLM_OBS_URL` | Base URL (ending in `/v1`) of the llm-proxy to the RTX 5070 Ti | Jeffrey |
 | `LOCAL_LLM_OBS_TOKEN` | Bearer token of that proxy | Jeffrey |
 | `LOCAL_LLM_TS3_URL` | Base URL (ending in `/v1`) of the llm-proxy to the RTX 5060 Ti | Jeffrey |
@@ -28,7 +30,7 @@ A GPU whose two secrets are missing is simply unavailable; at least one GPU must
 proxies for model `auto` and never for another model, a model load or a warm-up.
 
 Then run `bash factory/pi/setup.sh` from a clone of this repository: it installs Pi and the `pi-gpu` tools (with the
-`pi-pro5000` shim) and ends with a models-list health check of all three GPUs (see "Pi on the factory GPUs" in
+`pi-pro5000` shim) and ends with a models-list health check of all four GPUs (see "Pi on the factory GPUs" in
 `operating-instructions.md`). The bot also runs it himself on his first wake and asks for the `LOCAL_LLM_*` secrets
 when all are missing. The same setup links `factory-pi-item-loop`, the per-item Pi driver that runs CI waits, log
 triage, fixes, reviews, merges and deploy moves without Grok turns; it needs no secret beyond `gh` (already signed in)

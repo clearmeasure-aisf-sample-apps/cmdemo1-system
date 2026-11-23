@@ -16,7 +16,7 @@ A check's failure is caught and logged; it never changes the caller's result.
 Check 2 (fix_handoff_check): a driver PR whose latest review FAIL is 20+ min old with no fix commit and no driver
 activity gets one flagged comment on its issue and on the PR (read-only otherwise).
 
-Check 1: GPU health for pro5000, obs (RTX 5070 Ti) and ts3 (RTX 5060 Ti) via the gpu.py models list
+Check 1: GPU health for pro5000, pro6000 (RTX PRO 6000), obs (RTX 5070 Ti) and ts3 (RTX 5060 Ti) via the gpu.py models list
 (read-only: one GET /models per GPU; it never starts, stops or warms a model server). A down GPU is
 reported in the log and in run_checks' result, and GPU selection routes to the healthy GPUs.
 
@@ -132,7 +132,7 @@ def run_checks(repos=REPOS, gh=None, health=None, clock=None, log=None):
 
 @register
 def gpu_health_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
-    """Check 1: GPU health for pro5000, obs (RTX 5070 Ti) and ts3 (RTX 5060 Ti) via the gpu.py models list
+    """Check 1: GPU health for pro5000, pro6000 (RTX PRO 6000), obs (RTX 5070 Ti) and ts3 (RTX 5060 Ti) via the gpu.py models list
     (read-only: one GET /models per GPU; it never starts, stops or warms a model server). A down GPU is
     reported in the log and in this check's result ("down: <gpu>"), and GPU selection routes to the healthy
     GPUs; selection never picks a down GPU. All GPUs healthy is a no-op ("ok", no comment)."""
