@@ -188,6 +188,14 @@ def _json_lines(text):
         if line: out.append(json.loads(line))
     return out
 
+PR_LIST_FIELDS = "number,body,closingIssuesReferences,headRefOid"
+
+def head_commit_at(repo, pr, gh):
+    """Committer time of the PR's head commit (one REST call, only for a PR that already has a stale FAIL)."""
+    r = gh(["api", f"repos/{L.ORG}/{repo}/commits/{pr['headRefOid']}", "--jq", ".commit.committer.date"])
+    if r.returncode != 0 or not (r.stdout or "").strip(): raise RuntimeError(r.stdout or "head commit lookup failed")
+    return r.stdout.strip()
+
 def driver_alive(states, repo, issue, alive=None):
     """True when any driver run for (repo, issue) has a live pid: a running driver (mid-fix, waiting on CI or a review
     GPU) is never reported as a hand-off that did not run, however stale its progress stamp is."""
@@ -202,12 +210,12 @@ def _stalled_pr(repo, pr, states, gh, clock):
     if not issues or excluded(repo, issues[0]) or excluded(repo, pr["number"]): return None
     issue = issues[0]
     if driver_alive(states, repo, issue): return None
-    dates = [c.get("committedDate") for c in pr.get("commits") or [] if c.get("committedDate")]
-    head_at = max(dates, key=_ts) if dates else None
     c = gh(["api", "--paginate", f"repos/{L.ORG}/{repo}/issues/{issue}/comments?per_page=100",
             "--jq", ".[] | {body, created_at}"])
     if c.returncode != 0: raise RuntimeError(c.stdout or "gh api comments failed")
-    fail_at = fix_handoff_stalled(_json_lines(c.stdout), head_at, clock())
+    comments = _json_lines(c.stdout)
+    if fix_handoff_stalled(comments, None, clock()) is None: return None   # cheap: no stale FAIL, no commit lookup
+    fail_at = fix_handoff_stalled(comments, head_commit_at(repo, pr, gh), clock())
     return (issue, fail_at) if fail_at is not None else None
 
 @register
@@ -218,15 +226,15 @@ def fix_handoff_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
     no fix commit, no activity and no live driver for the item, post one flagged comment on the issue and on the PR (post_comment's guards apply:
     excluded items and live, progressing drivers are left alone). Read-only otherwise: it never relaunches anything."""
     clock = clock or L.now; log = log or print; gh = gh or gh_subprocess
-    states = L.all_states(); flagged = []
+    states = L.all_states(); flagged = []; failed = []
     for repo in repos:
         try:
             r = gh(["pr", "list", "-R", f"{L.ORG}/{repo}", "--state", "open", "--limit", "100",
-                    "--json", "number,body,closingIssuesReferences,commits"])
+                    "--json", PR_LIST_FIELDS])   # no `commits`: GraphQL rejects 100 PRs x commits (500k-node limit)
             if r.returncode != 0: raise RuntimeError(r.stdout or "gh pr list failed")
             prs = json.loads(r.stdout or "[]")
         except Exception as e:
-            log("watchdog fix-handoff: PR list for %s failed: %s" % (repo, scrub(str(e)))); continue
+            log("watchdog fix-handoff: PR list for %s failed: %s" % (repo, scrub(str(e)))); failed.append(repo); continue
         for pr in prs:
             try:
                 hit = _stalled_pr(repo, pr, states, gh, clock)
@@ -244,7 +252,8 @@ def fix_handoff_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
                 post_comment(repo, pr["number"], body, states, gh=gh, clock=clock, log=log)
                 log("watchdog fix-handoff: flagged %s#%s (PR #%s)" % (repo, issue, pr["number"]))
                 flagged.append(f"{repo}#{issue}")
-    return "ok" if not flagged else "stalled: " + ", ".join(flagged)
+    out = "ok" if not flagged else "stalled: " + ", ".join(flagged)
+    return out + ("; list failed: " + ", ".join(failed) if failed else "")
 
 # ---------------------------------------------------------------- CLI: run every check once (the same entry the driver-exit hook uses)
 def main(argv=None):

@@ -226,7 +226,11 @@ class FixHandoffCheck(unittest.TestCase):
     def _gh(self, prs, comments, posted):
         def gh(args):
             if args[:2] == ["pr", "list"]:
+                self.assertEqual(args[args.index("--json") + 1], "number,body,closingIssuesReferences,headRefOid")   # never `commits`
                 return subprocess.CompletedProcess(args, 0, json.dumps(prs if "cmdemo1-dashboard" in args[3] else []), "")
+            if args[0] == "api" and "/commits/" in args[1]:
+                sha = args[1].rsplit("/", 1)[1]
+                return subprocess.CompletedProcess(args, 0, self.HEADS.get(sha, (T0 - dt.timedelta(minutes=30)).isoformat()) + "\n", "")
             if args[0] == "api":
                 return subprocess.CompletedProcess(args, 0, "\n".join(json.dumps(x) for x in comments), "")
             if args[:2] == ["issue", "comment"]:
@@ -246,7 +250,8 @@ class FixHandoffCheck(unittest.TestCase):
         return r, posted
 
     PR = {"number": 1311, "body": "Closes #1309\n\n" + L.DRIVER_MARK, "closingIssuesReferences": [{"number": 1309}],
-          "commits": [{"committedDate": (T0 - dt.timedelta(minutes=30)).isoformat()}]}
+          "headRefOid": "aaa"}
+    HEADS = {}   # sha -> committer date; default 30 min before T0
 
     def test_stalled_fail_is_flagged_on_issue_and_pr(self):
         r, posted = self._run([self.PR], [c(FAIL, 5)])
@@ -294,8 +299,20 @@ class FixHandoffCheck(unittest.TestCase):
         self.assertTrue(any("PR #1311 skipped" in l for l in logs))
 
     def test_fixed_pr_is_not_flagged(self):
-        pr = dict(self.PR, commits=[{"committedDate": (T0 + dt.timedelta(minutes=10)).isoformat()}])
+        self.HEADS = {"bbb": (T0 + dt.timedelta(minutes=10)).isoformat().replace("+00:00", "Z")}
+        pr = dict(self.PR, headRefOid="bbb")
         self.assertEqual(self._run([pr], [c(FAIL, 5)]), ("ok", []))
+
+    def test_failed_pr_list_is_in_the_result(self):
+        posted = []
+        def gh(args):
+            if args[:2] == ["pr", "list"]: return subprocess.CompletedProcess(args, 1, "GraphQL: too many nodes", "")
+            raise AssertionError(args)
+        with tempfile.TemporaryDirectory() as home:
+            old = L.HOME; L.HOME = home
+            try: r = W.fix_handoff_check(repos=("cmdemo1-dashboard",), gh=gh, clock=lambda: T0, log=lambda s: None)
+            finally: L.HOME = old
+        self.assertEqual(r, "ok; list failed: cmdemo1-dashboard")
 
 class SharedEntry(unittest.TestCase):
     def test_cli_run_entry_calls_run_checks_once_with_the_defaults(self):
