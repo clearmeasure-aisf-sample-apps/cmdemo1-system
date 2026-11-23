@@ -1949,4 +1949,113 @@ class ReleaseSkip(unittest.TestCase):   # #914: a system merge the system pipeli
             finally: L.HOME = old
 
 
+class EnsureIssueTests(unittest.TestCase):   # cmdemo1-system#831: the shared ensure_issue helper - mocked self.gh, no network
+    """Every test records each d.gh call (positional args and kwargs) and asserts them exactly:
+    the open-issues list, then the issue create with the correct title, label and --assignee (only when given).
+    TDD: these are red until the helper lands in implement-ensure-issue-helper."""
+
+    REPO = "cmdemo1-system"
+
+    def driver_and_gh(self, titles, create_rc=0, create_stdout="123\n"):
+        d = L.Driver(self.REPO, 831, dry_run=True)
+        calls = []
+        def gh(*a, **k):   # the mocked self.gh: answers the api list with titles, the create with an issue number
+            calls.append((list(a), dict(k)))
+            if a and a[0] == "api":
+                return subprocess.CompletedProcess(("gh",) + a, 0, json.dumps(titles), "")
+            return subprocess.CompletedProcess(("gh",) + a, create_rc, create_stdout, "")
+        d.gh = gh
+        return d, calls
+
+    def test_creates_when_title_absent_and_returns_issue_number(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, calls = self.driver_and_gh(["Some other followup"])
+                self.assertEqual(d.ensure_issue("New followup", "Body text", "enhancement", assignee=L.BOT), "123")
+                full = f"{L.ORG}/{self.REPO}"   # the default repo is self.repo, as a full repo name
+                list_args, list_kw = calls[0]
+                self.assertEqual(list_args, ["api", f"repos/{full}/issues?state=open&labels=enhancement&per_page=100",
+                                            "--jq", "[.[].title"])
+                self.assertEqual(list_kw, {"check": False})
+                create_args, create_kw = calls[1]
+                self.assertEqual(create_kw, {"write": True, "check": False})
+                body_f = create_args[create_args.index("--body-file") + 1]
+                self.assertTrue(body_f.startswith(d.run_dir + os.sep + "logs" + os.sep), body_f)
+                self.assertIn(L.scrub("Body text"), open(body_f).read())
+                self.assertEqual(create_args, ["issue", "create", "-R", full, "--title", "New followup",
+                                               "--body-file", body_f, "--label", "enhancement", "--assignee", L.BOT])
+                self.assertEqual(len(calls), 2)
+            finally: L.HOME = old
+
+    def test_no_assignee_flag_when_assignee_not_given(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, calls = self.driver_and_gh(["Some other followup"])
+                self.assertEqual(d.ensure_issue("New followup", "Body text", "enhancement"), "123")
+                full = f"{L.ORG}/{self.REPO}"
+                create_args, create_kw = calls[1]
+                body_f = create_args[create_args.index("--body-file") + 1]
+                self.assertEqual(create_args, ["issue", "create", "-R", full, "--title", "New followup",
+                                               "--body-file", body_f, "--label", "enhancement"])
+                self.assertEqual(create_kw, {"write": True, "check": False})
+                self.assertNotIn("--assignee", create_args)
+            finally: L.HOME = old
+
+    def test_existing_title_is_not_created(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, calls = self.driver_and_gh(["New followup"])
+                self.assertIsNone(d.ensure_issue("New followup", "Body text", "enhancement"))
+                self.assertEqual(len(calls), 1)   # the open-issues list only; no create call
+            finally: L.HOME = old
+
+    def test_dedup_is_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, calls = self.driver_and_gh(["Existing"])
+                self.assertIsNone(d.ensure_issue("existing", "Body text", "enhancement", case_insensitive=True))
+                self.assertEqual(len(calls), 1)   # 'existing' matches the open 'Existing'; no create call
+            finally: L.HOME = old
+
+    def test_exact_match_when_not_case_insensitive(self):   # fix_forward_issue keeps its exact-match dedup
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, calls = self.driver_and_gh(["fix: a"])
+                full = f"{L.ORG}/{self.REPO}"
+                self.assertEqual(d.ensure_issue("Fix: A", "Body text", "fix-forward", assignee=L.BOT, case_insensitive=False), "123")
+                self.assertEqual(len(calls), 2)   # different case is not a duplicate: it is created
+                create_args, create_kw = calls[1]
+                body_f = create_args[create_args.index("--body-file") + 1]
+                self.assertEqual(create_args, ["issue", "create", "-R", full, "--title", "Fix: A",
+                                               "--body-file", body_f, "--label", "fix-forward", "--assignee", L.BOT])
+                self.assertEqual(create_kw, {"write": True, "check": False})
+            finally: L.HOME = old
+
+    def test_explicit_repo_overrides_the_default(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, calls = self.driver_and_gh([])
+                self.assertEqual(d.ensure_issue("New followup", "Body text", "enhancement", repo="other"), "123")
+                full = f"{L.ORG}/other"
+                self.assertEqual(calls[0][0][1], f"repos/{full}/issues?state=open&labels=enhancement&per_page=100")
+                create_args, _ = calls[1]
+                self.assertEqual(create_args[create_args.index("-R") + 1], full)
+            finally: L.HOME = old
+
+    def test_create_failure_returns_none(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, calls = self.driver_and_gh([], create_rc=1, create_stdout="HTTP 422: Validation Failed")
+                self.assertIsNone(d.ensure_issue("New followup", "Body text", "enhancement"))
+                self.assertEqual(len(calls), 2)   # the list ran, the create was attempted and failed
+            finally: L.HOME = old
+
+
 if __name__ == "__main__": unittest.main()
