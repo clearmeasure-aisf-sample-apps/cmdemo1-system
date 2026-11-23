@@ -849,6 +849,10 @@ class Concurrency(unittest.TestCase):
         self.assertTrue(L.env_red(e, "ui")); self.assertFalse(L.env_red(e, "dashboard")); self.assertFalse(L.env_red(e, "system"))
         self.assertFalse(L.env_red({"health": {"containerApps": [{"name": "ui", "last": {"result": "healthy"}}]}}, "ui"))
 
+    def test_blocked_at_pickup_is_not_wip(self):
+        self.assertEqual(L.repo_wip([("x", {"repo": "cmdemo1-system", "stage": "blocked", "resume_stage": "pickup", "pid": 1})], "cmdemo1-system"), 0)
+        self.assertEqual(L.repo_wip([("y", {"repo": "cmdemo1-system", "stage": "blocked", "resume_stage": "review", "pid": 1})], "cmdemo1-system"), 1)
+
 class Gates(unittest.TestCase):
     def test_quality_checks_are_hard_merge_gates(self):
         req = ["Build result", "secret-scan"]; ok = [{"name": "Build result", "bucket": "pass"}, {"name": "secret-scan", "bucket": "pass"}]
@@ -2015,6 +2019,75 @@ class StageRegistry(unittest.TestCase):   # cmdemo1-system#829: stage name -> ha
                 self.assertEqual(woke, ["driver error"], "the bot is woken once, for a driver error")
                 self.assertEqual(len(exits), 1, "the watchdog exit hook ran once")
             finally: L.HOME, L.watchdog_exit = old
+
+
+class UsageReportTests(unittest.TestCase):
+    def test_no_start_record_renders_zero_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "run.json"), "w") as f:
+                json.dump({"start": "2026-11-23T12:00:00+00:00"}, f)
+            with open(os.path.join(tmp, "tasks.jsonl"), "w") as f:
+                f.write(json.dumps({"task": "t1", "gpu": "pro5000", "result": "PASS", "turns": 3, "session_id": "s1", "input": 1000, "cacheRead": 2000, "output": 300, "wall_s": 65}) + "\n")
+                f.write(json.dumps({"task": "draft-plan", "gpu": "pro5000", "result": "no-start", "rc": 125, "why": "no free slot", "start": "2026-11-23T12:00:00+00:00", "end": "2026-11-23T12:15:00+00:00"}) + "\n")
+            report = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usage-report")
+            p = subprocess.run([sys.executable, report, "--run-dir", tmp], capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, f"stderr: {p.stderr[-1000:]}" if p.stderr else "")
+            self.assertNotIn("Traceback", p.stderr)
+            lines = p.stdout.split("\n")
+            no_start_line = next((l for l in lines if "no-start" in l), None)
+            self.assertIsNotNone(no_start_line, "no line for the no-start task")
+            self.assertIn("0 + 0 | 0 | 0m00s", no_start_line)
+            total_line = next((l for l in lines if "Total" in l), None)
+            self.assertIsNotNone(total_line, "no totals line")
+            self.assertIn("**1,000 + 2,000**", total_line)
+            self.assertIn("**300**", total_line)
+
+
+class ReleaseSkip(unittest.TestCase):   # #914: a system merge the system pipeline ignores goes straight to Done
+    def test_factory_docs_and_pinned_env_files_are_release_skipped(self):
+        self.assertTrue(L.release_skipped("cmdemo1-system", ["factory/pi/item_loop.py", "factory/pi/test_item_loop.py"]))
+        self.assertTrue(L.release_skipped("cmdemo1-system", ["README.md", "docs/a.png", "src/x/NOTES.md",
+                                                             "environments/prod/versions.json", "environments/tdd/nodes.json",
+                                                             "environments/uat/database.json"]))
+
+    def test_mixed_or_unknown_changes_still_deploy(self):
+        self.assertFalse(L.release_skipped("cmdemo1-system", ["factory/pi/gpu.py", "src/System/Program.cs"]))
+        self.assertFalse(L.release_skipped("cmdemo1-system", ["environments/prod/secrets.json"]))
+        self.assertFalse(L.release_skipped("cmdemo1-system", ["environments/prod/x/versions.json"]))
+        self.assertFalse(L.release_skipped("cmdemo1-system", ["factory.yml"]))
+        self.assertFalse(L.release_skipped("cmdemo1-system", []))
+        self.assertFalse(L.release_skipped("cmdemo1-workorders", ["factory/pi/gpu.py"]))
+
+    def run_main(self, h, files):
+        d = L.Driver("cmdemo1-system", 914, dry_run=True)
+        d.s.update(plan=dict(PLAN, repo="cmdemo1-system", issue=914, files=["factory/pi/item_loop.py"]), merge_sha="ab" * 20,
+                   pr=9, head="cd" * 20)
+        moves, comments = [], []
+        d.gh = lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(files) if a[1].endswith("/commits/" + "ab" * 20) else "[]", "")
+        d.move, d.comment, d.usage = moves.append, lambda body, **k: comments.append(body), lambda **k: ""
+        old = L.time.sleep; L.time.sleep = lambda s: None
+        try: d.st_main()
+        finally: L.time.sleep = old
+        return d, moves, comments
+
+    def test_factory_only_merge_goes_to_done_without_deploy(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, moves, comments = self.run_main(h, ["factory/pi/item_loop.py", "factory/README.md"])
+                self.assertEqual((moves, d.s["stage"]), (["Done"], "done"))
+                self.assertIn("live from main (merge `abababab`)", comments[0])
+                self.assertIn("no release is needed", comments[0])
+            finally: L.HOME = old
+
+    def test_mixed_merge_waits_for_its_deploy(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, moves, comments = self.run_main(h, ["factory/pi/item_loop.py", "src/System/Program.cs"])
+                self.assertEqual((moves, d.s["stage"]), (["Merged"], "deploy"))
+                self.assertNotIn("live from main", comments[0])
+            finally: L.HOME = old
 
 
 if __name__ == "__main__": unittest.main()

@@ -20,9 +20,20 @@ comment or Pi prompt (scrubbed).
     item-loop red        status | set --key K --what TEXT | clear --key K      the intake-stop flags (~/factory-runs/red.json)
 """
 from collections import Counter
+from enum import StrEnum
 import argparse, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, time, urllib.request, uuid
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
+
+# String enums for check states and failure types (values are string literals for JSON compatibility).
+class CheckState(StrEnum):
+    GREEN = "GREEN"
+    RED = "RED"
+    PENDING = "PENDING"
+
+class FailureClass(StrEnum):
+    INFRA = "infra"
+    CODE = "code"
 
 ORG = "clearmeasure-aisf-sample-apps"
 BOT = "cm-ai-ops-bot"
@@ -90,6 +101,7 @@ INFRA_RE = re.compile(r"(?i)(could not resolve host|temporary failure in name re
 CODE_RE = re.compile(r"(?i)(error CS\d+|error [A-Z]{2,}\d+|\bFailed\b.*\btest|\bFAIL\b|Assert|Exception:|"
                      r"warning CS\d+|expected .* but|npm ERR!|Traceback)")
 
+
 def now(): return dt.datetime.now(dt.timezone.utc)
 def iso(t=None): return (t or now()).isoformat(timespec="seconds")
 
@@ -151,8 +163,8 @@ def pr_number(text):
 
 def classify_failure(log_text):
     """'infra' when the failure never reached the code (network, registry, runner), else 'code'."""
-    if CODE_RE.search(log_text or ""): return "code"
-    return "infra" if INFRA_RE.search(log_text or "") else "code"
+    if CODE_RE.search(log_text or ""): return FailureClass.CODE
+    return FailureClass.INFRA if INFRA_RE.search(log_text or "") else FailureClass.CODE
 
 def trim_log(text, limit=12000):
     """Keep the lines that explain a failure (errors, failed tests, assertion text) plus the tail."""
@@ -171,11 +183,11 @@ def checks_state(checks, required):
         if st.get(c["name"]) in ("pass", "skipping") and b not in ("pass", "skipping"): continue
         st[c["name"]] = b
     names = required or list(st)
-    if not names: return "PENDING"
+    if not names: return CheckState.PENDING
     rs = [st.get(n, "pending") for n in names]
-    if any(b in ("fail", "cancel") for b in rs): return "RED"
-    if all(b in ("pass", "skipping") for b in rs): return "GREEN"
-    return "PENDING"
+    if any(b in ("fail", "cancel") for b in rs): return CheckState.RED
+    if all(b in ("pass", "skipping") for b in rs): return CheckState.GREEN
+    return CheckState.PENDING
 
 def quality_states(checks):
     """name -> bucket for the Qodana / Refactoring-rationale checks (latest attempt of each name wins)."""
@@ -254,9 +266,9 @@ def gate_state(checks, required):
     """Merge gate: required checks GREEN and the quality checks (Qodana zero new problems, Refactoring rationale)
     passed. RED when either is red, PENDING while either is still running, else GREEN."""
     req = checks_state(checks, required)
-    if req == "RED" or quality_failures(checks): return "RED"
-    if req == "PENDING" or quality_pending(checks): return "PENDING"
-    return "GREEN"
+    if req == CheckState.RED or quality_failures(checks): return CheckState.RED
+    if req == CheckState.PENDING or quality_pending(checks): return CheckState.PENDING
+    return CheckState.GREEN
 
 def quality_pending(checks):
     return sorted(n for n, b in quality_states(checks).items() if b not in ("pass", "skipping", "fail", "cancel"))
@@ -393,7 +405,7 @@ def repo_wip(states, repo, me=None, alive=lambda pid: False):
     """Driver items of `repo` in In Progress or Review (active stages) on this box, live or blocked mid-review."""
     return sum(1 for k, s in states if k != me and s.get("repo") == repo and
                ((s.get("stage") in ACTIVE_STAGES and s.get("stage") != "pickup" and alive(s.get("pid")))
-                or (s.get("stage") == "blocked" and s.get("resume_stage") in ACTIVE_STAGES)))
+                or (s.get("stage") == "blocked" and s.get("resume_stage") in ACTIVE_STAGES and s.get("resume_stage") != "pickup")))
 
 def hold_resumes(blocker):
     """Whether a Blocker may clear itself when the PR's checks turn green. A Review FAIL blocker never does: its checks
@@ -423,6 +435,15 @@ def env_red(environment, dep):
 
 def docs_only(files):
     return bool(files) and all(f.endswith(".md") or f.startswith("docs/") for f in files)
+
+# Paths each deployable's release pipeline ignores (cmdemo1-system: .github/workflows/system.yml paths-ignore). A merge
+# that changes only these builds no release, so there is no deploy to wait for (#914).
+RELEASE_SKIP_RE = {"cmdemo1-system": re.compile(r"^(factory/.*|docs/.*|.*\.md|environments/[^/]+/(versions|nodes|database)\.json)$")}
+
+def release_skipped(repo, files):
+    """True when every changed file is one the repo's release pipeline ignores (never for no files or an unknown repo)."""
+    rx = RELEASE_SKIP_RE.get(repo)
+    return bool(rx and files) and all(rx.match(f) for f in files)
 
 def deploy_moves(column, in_env):
     """column: current board column; in_env: {'tdd': bool, 'uat': bool, 'prod': bool}. Returns the moves to make."""
@@ -753,14 +774,14 @@ class Driver:
         t_end = time.time() + max_s
         while time.time() < t_end:
             state, cs = self.pr_checks()
-            if cs and state != "PENDING": return state, cs
+            if cs and state != CheckState.PENDING: return state, cs
             if cs:
                 try:
                     self.gh("pr", "checks", str(self.s["pr"]), "-R", self.full, "--watch", "--interval", "60",
                             *(["--required"] if self.repo in REQUIRED else []), check=False, timeout=600)
                 except subprocess.TimeoutExpired: pass   # short slices so the heartbeat below runs
             self.heartbeat(); time.sleep(60)
-        return "PENDING", []
+        return CheckState.PENDING, []
 
     def failed_logs(self, cs):
         out, runs = [], set()
@@ -858,7 +879,7 @@ class Driver:
             time.sleep(RECHECK_S)
             if self.stop_if_held(): return False   # handed off while blocked: never clear the Blocker or resume
             state, cs = self.pr_checks()
-            if gate_state(cs, REQUIRED.get(self.repo)) == "GREEN":
+            if gate_state(cs, REQUIRED.get(self.repo)) == CheckState.GREEN:
                 self.log("blocked PR is clean now; resuming")
                 self.comment("Status: checks are green now (including Qodana and Refactoring rationale); the driver cleared its "
                              "Blocker and is resuming the Review.")
@@ -1035,7 +1056,7 @@ class Driver:
         state, cs = self.wait_ci()
         self.log(f"required checks {state}")
         bad = quality_failures(cs)
-        if state == "GREEN" and not bad:
+        if state == CheckState.GREEN and not bad:
             if quality_pending(cs):   # hard gate: Qodana and Refactoring rationale must finish green, never skipped
                 since = self.s.setdefault("quality_wait_since", iso()); self.save()
                 if (now() - dt.datetime.fromisoformat(since)).total_seconds() > QUALITY_WAIT_MIN * 60:
@@ -1043,10 +1064,10 @@ class Driver:
                 self.heartbeat(); time.sleep(120); return
             self.s.pop("quality_wait_since", None)
             return self.save(stage="review")
-        if state == "GREEN": return self.fix_quality(bad, cs)
-        if state == "PENDING": return self.blocker("required checks did not finish within 4 hours.")
+        if state == CheckState.GREEN: return self.fix_quality(bad, cs)
+        if state == CheckState.PENDING: return self.blocker("required checks did not finish within 4 hours.")
         runs, logs = self.failed_logs(cs)
-        if classify_failure(logs) == "infra":
+        if classify_failure(logs) == FailureClass.INFRA:
             if not self.bump("infra_rerun"):
                 return self.blocker(f"the same infrastructure step failed {LIMITS['infra_rerun']} times (runs {', '.join(runs)}).")
             time.sleep(600)
@@ -1207,7 +1228,7 @@ class Driver:
         self.check_held()
         pr = int(self.s["pr"]); _, cs = self.pr_checks(); state = gate_state(cs, REQUIRED.get(self.repo))
         info = json.loads(self.gh("pr", "view", str(pr), "-R", self.full, "--json", "author,headRefOid,state").stdout)
-        if (self.repo, pr) in NEVER_MERGE or info["author"]["login"] != BOT or state != "GREEN" or info["headRefOid"] != self.s["head"]:
+        if (self.repo, pr) in NEVER_MERGE or info["author"]["login"] != BOT or state != CheckState.GREEN or info["headRefOid"] != self.s["head"]:
             self.log(f"merge gate not met (checks {state}, head {info['headRefOid'][:8]})")
             if not self.bump("merge_gate"):   # was an unbounded ci -> review -> merge spin
                 return self.blocker(f"merge gate not met after {LIMITS['merge_gate']} tries (checks {state}, PR head "
@@ -1220,6 +1241,7 @@ class Driver:
 
     def st_main(self):
         sha, d_only = self.s["merge_sha"], docs_only(self.s["plan"]["files"])
+        no_release = release_skipped(self.repo, self.merge_files(sha))
         time.sleep(30); runs = []
         for _ in range(20):   # wait for push runs of the merge commit to appear (none when paths-ignore skips them)
             r = self.gh("api", f"repos/{self.full}/actions/runs?head_sha={sha}&event=push&per_page=50", "--jq",
@@ -1233,10 +1255,13 @@ class Driver:
                     "[.workflow_runs[]|{name,conclusion}]", check=False)
         red = [x["name"] for x in json.loads(r.stdout or "[]") if x["conclusion"] not in ("success", "skipped", "neutral")]
         ev = "\n".join(f"- {t}: `{cmd}` passed — {last}" for t, cmd, last in self.s.get("evidence", []))
-        col = "Done" if d_only and not red else "Merged"
+        col = "Done" if (d_only or no_release) and not red else "Merged"
+        live = (f"This change touches only paths the system pipeline ignores (`factory/`, docs, pinned environment files) and "
+                f"is live from main (merge `{sha[:8]}`); factory code runs from main on the factory box, and the system "
+                "pipeline does not build a release for it, so no release is needed.\n\n") if no_release and col == "Done" else ""
         self.move(col)
         self.comment(f"Review → {col}\n\nReview: PASS. Squash-merged PR #{self.s['pr']} (head `{self.s['head'][:8]}`) as `{sha}`. "
-                     f"Required checks green.\n\n{ev}\n\n{self.usage(final=(col == 'Done'))}")
+                     f"Required checks green.\n\n{live}{ev}\n\n{self.usage(final=(col == 'Done'))}")
         key = f"{self.repo} main"
         if red:
             red_set(key, f"{', '.join(red)} red at `{sha[:8]}`")
@@ -1244,7 +1269,13 @@ class Driver:
             return self.blocker(f"default-branch run(s) {', '.join(red)} of merge `{sha[:8]}` are red. Intake is stopped; a "
                                 "fix-forward issue is filed.", who="the factory bot (fix forward)")
         if runs: red_clear(key)   # a green default-branch run of a newer commit: main is green again
-        self.save(stage="done" if d_only or self.repo not in DEPLOYABLE else "deploy")
+        self.save(stage="done" if d_only or no_release or self.repo not in DEPLOYABLE else "deploy")
+
+    def merge_files(self, sha):
+        """Files the merge commit changed ([] when GitHub cannot say, so the item still waits for its deploy)."""
+        r = self.gh("api", f"repos/{self.full}/commits/{sha}", "--jq", "[.files[].filename]", check=False)
+        try: return json.loads(r.stdout or "[]")
+        except Exception: return []
 
     def st_deploy(self, max_h=48):
         dep, sha, t_end = DEPLOYABLE[self.repo], self.s["merge_sha"], time.time() + max_h * 3600
