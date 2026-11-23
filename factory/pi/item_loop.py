@@ -11,8 +11,8 @@ only on the plan and on the wake that follows the result.
 Run dir: ~/factory-runs/<repo>-<issue>/ (plan.json, state.json, driver.log, tasks.jsonl, pi-sessions/). Every
 decision that changes GitHub (push, PR, merge, board, comment, rerun) is a deterministic shell step under the gates of
 factory/operating-instructions.md; Pi only edits files and summarizes logs. Waiting on CI is `gh pr checks --watch`
-and `gh run watch` (no LLM call while waiting). Pi tasks go through run-task on the item's GPU (gpu.py: pro5000, obs,
-ts3; one active item per GPU, so up to 3 items at once). Every item starts with a refactoring-research pass, and its
+and `gh run watch` (no LLM call while waiting). Pi tasks go through run-task on the item's GPU (gpu.py: pro5000, pro6000, obs,
+ts3; one active item per GPU slot, so up to 5 items at once). Every item starts with a refactoring-research pass, and its
 Review includes an independent Pi diff review on a different GPU than the one that wrote the code. While anything is
 red (a default-branch build or an environment), intake stops: only fix-forward items start. Secrets never reach a log,
 comment or Pi prompt (scrubbed).
@@ -80,7 +80,7 @@ HOME = os.path.expanduser("~")
 
 # Tokens, temporary and named tunnel hosts (the GPUs' clearmeasure.ai tunnels, with or without a scheme), bearer headers.
 SECRET_RE = re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|https?://[^\s'\"]*trycloudflare\.com[^\s'\"]*"
-                       r"|(?:https?://)?[A-Za-z0-9.-]*\b(?:pro5000|\d{4}ti)\.clearmeasure\.ai\b[^\s'\"]*"
+                       r"|(?:https?://)?[A-Za-z0-9.-]*\b(?:pro\d{4}|\d{4}ti)\.clearmeasure\.ai\b[^\s'\"]*"
                        r"|Bearer\s+\S+|(?i:(?:password|secret|token|apikey|api_key)\s*[=:]\s*)\S+)")
 INFRA_RE = re.compile(r"(?i)(could not resolve host|temporary failure in name resolution|tls handshake timeout|"
                       r"connection reset by peer|econnreset|etimedout|503 service unavailable|502 bad gateway|"
@@ -354,7 +354,7 @@ def apply_resume(state):
     return st
 
 def busy_gpus(states, me=None, alive=lambda pid: False):
-    """GPUs whose slots are all held by other live items in an active stage (pro5000 has 2, obs and ts3 have 1).
+    """GPUs whose slots are all held by other live items in an active stage (pro5000 has 2, pro6000, obs and ts3 have 1).
     states: [(key, state dict)]."""
     held = Counter(s.get("gpu") for k, s in states
                    if k != me and s.get("gpu") and s.get("stage") in ACTIVE_STAGES and alive(s.get("pid")))
@@ -434,9 +434,11 @@ RELAUNCH_NOTE = ("\n\nNote: an earlier attempt at this task (`{name}`) was stopp
 
 def relaunch_gpus(size, up):
     """GPUs, in PRIORITY order, a stalled hand-off may be relaunched on. A large item (or one of unknown size) stays on
-    pro5000 while it is up (it needs the long context, as in pick_gpu); otherwise any healthy GPU. The gate holds the caps."""
+    pro5000 / pro6000 while either is up (it needs the long context, as in pick_gpu); otherwise any healthy GPU. The gate
+    holds the caps."""
     up = [g for g in G.PRIORITY if g in up]
-    if size != "small" and G.LARGE_GPU in up: return [G.LARGE_GPU]
+    large = [g for g in up if g in G.LARGE_GPUS]
+    if size != "small" and large: return large
     return up
 
 READ_ONLY_TASKS = ("independent-review", "draft-plan", "refactoring-research")   # told to change no repo files
@@ -550,7 +552,7 @@ class Driver:
         if check and r.returncode:
             raise RuntimeError(f"failed ({r.returncode}): {shown[:300]}\n{scrub(r.stdout)[-2000:]}")
         return r
-    def gh(self, *a, write=False, check=True): return self.sh(["gh", *a], check=check, write=write)
+    def gh(self, *a, write=False, check=True, timeout=None): return self.sh(list(("gh", *a)), check=check, timeout=timeout, write=write)
     def wait_alive(self, seconds, why):
         """Sleep in GH_RETRY_TICK_S steps, re-saving state.json each step (pid, `updated`, `gh_wait`) so a driver waiting
         out a rate limit stays visibly alive. No comment here: that would itself be a rate-limited gh call."""
@@ -720,8 +722,8 @@ class Driver:
             if cs and state != "PENDING": return state, cs
             if cs:
                 try:
-                    self.sh(["gh", "pr", "checks", str(self.s["pr"]), "-R", self.full, "--watch", "--interval", "60"]
-                            + (["--required"] if self.repo in REQUIRED else []), check=False, timeout=600)
+                    self.gh("pr", "checks", str(self.s["pr"]), "-R", self.full, "--watch", "--interval", "60",
+                            *(["--required"] if self.repo in REQUIRED else []), check=False, timeout=600)
                 except subprocess.TimeoutExpired: pass   # short slices so the heartbeat below runs
             self.heartbeat(); time.sleep(60)
         return "PENDING", []
@@ -742,7 +744,7 @@ class Driver:
         p = self.s["plan"]; clone = os.path.join(HOME, "factory-clones", self.repo)
         if not os.path.isdir(os.path.join(clone, ".git")):
             os.makedirs(os.path.dirname(clone), exist_ok=True)
-            self.sh(["gh", "repo", "clone", self.full, clone, "--", "-q"])
+            self.gh("repo", "clone", self.full, clone, "--", "-q")
         self.sh(["git", "fetch", "-q", "origin"], cwd=clone)
         default = self.gh("repo", "view", self.full, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").stdout.strip()
         wt = os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}")
@@ -760,7 +762,7 @@ class Driver:
         clone = os.path.join(HOME, "factory-clones", self.repo)
         if not os.path.isdir(os.path.join(clone, ".git")):
             os.makedirs(os.path.dirname(clone), exist_ok=True)
-            self.sh(["gh", "repo", "clone", self.full, clone, "--", "-q"])
+            self.gh("repo", "clone", self.full, clone, "--", "-q")
         self.sh(["git", "fetch", "-q", "origin"], cwd=clone)
         default = self.gh("repo", "view", self.full, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").stdout.strip()
         wt = os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}-plan")
@@ -833,7 +835,7 @@ class Driver:
 
     def st_gpu(self):
         """Wait (no Grok turn, no comment; the item stays in Todo) until intake is open, the repo has WIP room on this
-        box and a GPU of the right size is free; then take it. One active item per GPU slot (pro5000 has 2), so up to 4 items at once."""
+        box and a GPU of the right size is free; then take it. One active item per GPU slot (pro5000 has 2), so up to 5 items at once."""
         p = self.s["plan"]; size = G.classify_size(p); t_end = time.time() + GPU_WAIT_H * 3600; me = os.path.basename(self.run_dir)
         while time.time() < t_end:
             red = red_load()
@@ -1138,7 +1140,7 @@ class Driver:
             self.blocker(f"no second GPU is up for the independent review of code written on {', '.join(self.gpu_label(g) for g in self.author_gpus())}."); return None
         rv = rv or [self.gpu()]; self.save(reviewer_gpu=rv[0])
         diff = self.sh(["git", "diff", f"{self.merge_base()}...HEAD"], cwd=self.s["wt"], check=False).stdout
-        limit = 60000 if rv == [G.LARGE_GPU] else 24000   # any small GPU may take it: size the prompt for the smallest
+        limit = 60000 if all(g in G.LARGE_GPUS for g in rv) else 24000   # any small GPU may take it: size the prompt for the smallest
         out = os.path.join(self.run_dir, "independent-review.md")
         if os.path.exists(out): os.remove(out)
         crit = "\n".join(f"- {c['text']}" for c in p["criteria"])
@@ -1192,7 +1194,7 @@ class Driver:
             if runs: break
             time.sleep(30)
         for run in runs:
-            self.sh(["gh", "run", "watch", str(run["id"]), "-R", self.full, "--interval", "60"], check=False, timeout=6 * 3600)
+            self.gh("run", "watch", str(run["id"]), "-R", self.full, "--interval", "60", check=False, timeout=6 * 3600)
         r = self.gh("api", f"repos/{self.full}/actions/runs?head_sha={sha}&event=push&per_page=50", "--jq",
                     "[.workflow_runs[]|{name,conclusion}]", check=False)
         red = [x["name"] for x in json.loads(r.stdout or "[]") if x["conclusion"] not in ("success", "skipped", "neutral")]
