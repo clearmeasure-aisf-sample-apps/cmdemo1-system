@@ -1064,6 +1064,51 @@ class ResearchBodyInnerH2(unittest.TestCase):   # the inner-H2 research lands in
                 self.assertIn("never `## `", prompt)                                     # an H2 inside the research is forbidden
             finally: L.HOME = old
 
+class ResearchHeadingLine(unittest.TestCase):   # the section starts at the heading LINE, never at an inline mention
+    RESEARCH = ResearchInnerH2.GOOD
+    BODY = ("Closes #9\n\nThe driver now reads the `## Refactoring research` section to its own next H2.\n\n"
+            "Code by Pi (run `r1`).\n\n<!-- factory-pi-driver -->\n")
+
+    def test_inline_mention_is_not_the_heading(self):
+        self.assertEqual(L.research_head("see the `## Refactoring research` section"), -1)
+        self.assertEqual(L.research_section("see the `## Refactoring research` section"), "")
+        self.assertFalse(L.research_ok("prose about `## Refactoring research` in src/A.cs\n- a bullet line here\n- another bullet line", ["src/A.cs"]))
+
+    def test_heading_at_start_and_after_inline_mention(self):
+        self.assertEqual(L.research_head(self.RESEARCH), 0)
+        text = "Mentions `## Refactoring research` inline.\n\n" + self.RESEARCH
+        self.assertEqual(L.research_head(text), text.index("\n## Refactoring research") + 1)
+        self.assertTrue(L.research_ok(text, ["src/A.cs"]))
+
+    def test_summary_mentioning_the_heading_is_kept_in_the_pr_body(self):   # cmdemo1-system#890's own body was cut here
+        b = L.with_research(self.BODY, self.RESEARCH)
+        self.assertIn("The driver now reads the `## Refactoring research` section to its own next H2.", b)
+        self.assertIn("Code by Pi (run `r1`).", b)
+        self.assertIn("<!-- factory-pi-driver -->", b)                       # factory-wake recognises driver PRs by it
+        self.assertEqual([l for l in b.splitlines() if l.startswith("## ")], ["## Refactoring research"])
+        self.assertEqual(L.with_research(b, self.RESEARCH), b)               # syncing again changes nothing
+
+    def test_crlf_heading_line(self):
+        text = self.RESEARCH.replace("\n", "\r\n")
+        self.assertEqual(L.research_head(text), 0)
+        self.assertTrue(L.research_ok(text, ["src/A.cs"]))
+
+    def test_blank_line_kept_before_the_driver_plan_and_stable(self):
+        b = L.with_research("Closes #9\n\n" + self.RESEARCH + "\n\n## Refactoring plan\n\nshrink\n", self.RESEARCH)
+        self.assertIn("\n\n## Refactoring plan", b)
+        self.assertEqual(L.with_research(b, self.RESEARCH), b)
+
+    def test_normalize_research_idempotent_and_leaves_deeper_headings(self):
+        t = self.RESEARCH + "\n\n#### Deep\n"
+        n = L.normalize_research(t)
+        self.assertIn("### Findings", n); self.assertIn("\n#### Deep", n)
+        self.assertEqual(L.normalize_research(n), n)
+        self.assertEqual(L.normalize_research("no heading\n## Other\n"), "no heading\n## Other\n")
+
+    def test_col_before_uses_board_order(self):
+        self.assertEqual(L.Driver._col_before(None, ["TDD", "UAT"]), "Merged")
+        self.assertEqual(L.Driver._col_before(None, ["Done"]), "UAT")
+
 class StagedFilesGate(unittest.TestCase):
     """The protected-file gate: item_loop.staged_files(sh, wt, default) (the files staged in the worktree's index
     relative to the merge base of HEAD and origin/<default>, with protected_files() applied to the result) and the

@@ -252,19 +252,21 @@ FOLLOWUPS_FILE = "refactoring-followups.json"  # the driver's follow-ups artifac
 # producing a false Blocker after LIMITS['research'] passes.
 RESEARCH_TAIL = ("## Refactoring plan",)
 
-def section_end(text, index):
-    """End index of the research section starting at `index` (the offset of RESEARCH_HEAD in `text`): the
-    start of the next driver-owned H2 named in RESEARCH_TAIL, or len(text) when none follows."""
-    rest = text[index + len(RESEARCH_HEAD):]
-    ends = [j for j in (rest.find("\n" + tail) for tail in RESEARCH_TAIL) if j >= 0]
-    return index + len(RESEARCH_HEAD) + min(ends) if ends else len(text)
+_RESEARCH_HEAD_LINE = re.compile(r"(?m)^" + re.escape(RESEARCH_HEAD) + r"[ \t]*\r?$")
+
+def research_head(text):
+    """Offset of the first `## Refactoring research` heading LINE in `text` (the heading alone on its line), or -1.
+    An inline mention in prose or backticks (`the `## Refactoring research` section`) is not the heading, so a PR
+    summary that talks about the section is never mistaken for it (cmdemo1-system#890's own body was cut that way)."""
+    m = _RESEARCH_HEAD_LINE.search(text or "")
+    return m.start() if m else -1
 
 def research_section(text):
-    """The `## Refactoring research` section of a Markdown body: everything after the first RESEARCH_HEAD up to the
-    next heading the driver itself writes (a whole line matching RESEARCH_TAIL), or the end of the body; "" when the
-    heading is absent. Any other `## ` line (`## Findings`) stays part of the section."""
+    """The `## Refactoring research` section of a Markdown body: everything after the first heading line (see
+    research_head) up to the next heading the driver itself writes (a whole line matching RESEARCH_TAIL), or the end
+    of the body; "" when the heading is absent. Any other `## ` line (`## Findings`) stays part of the section."""
     text = text or ""
-    i = text.find(RESEARCH_HEAD)
+    i = research_head(text)
     if i < 0: return ""
     sec = text[i + len(RESEARCH_HEAD):]; n = 0
     for line in sec.splitlines(keepends=True):
@@ -275,7 +277,7 @@ def research_section(text):
 def research_ok(text, files):
     """The `## Refactoring research` section is present and substantive: long enough, names at least one file the
     item touches, and names what it found (or why there is nothing) in at least two bullet lines."""
-    if not text or RESEARCH_HEAD not in text: return False
+    if not text or research_head(text) < 0: return False
     sec = research_section(text)
     bullets = [l for l in sec.splitlines() if l.strip().startswith(("-", "*", "|")) and len(l.strip()) > 10]
     names = {f.rsplit("/", 1)[-1] for f in files or []} | set(files or [])
@@ -288,7 +290,7 @@ def normalize_research(text):
     outside the section and the leading/trailing whitespace are left as they are; the text is returned unchanged when
     the heading is absent, and normalizing twice is the same as normalizing once."""
     text = text or ""
-    i = text.find(RESEARCH_HEAD)
+    i = research_head(text)
     if i < 0: return text
     start = i + len(RESEARCH_HEAD)                      # the section starts after the heading line
     sec = research_section(text)                        # "" when the heading is absent, else up to the driver's next H2
@@ -298,13 +300,14 @@ def with_research(body, research):
     """PR body with exactly one `## Refactoring research` section (replaced when present): the research goes in with
     its own subheadings demoted, and the driver's H2s after it (`## Refactoring plan`) stay H2."""
     research = normalize_research(research.strip())
-    if not research.startswith(RESEARCH_HEAD): research = RESEARCH_HEAD + "\n\n" + research
+    if research_head(research) != 0: research = RESEARCH_HEAD + "\n\n" + research
     body = body or ""
-    i = body.find(RESEARCH_HEAD)
+    i = research_head(body)
     if i < 0:
         return body.rstrip() + "\n\n" + research + "\n"
     end = i + len(RESEARCH_HEAD) + len(research_section(body))   # where the old research section ends (its next driver H2)
-    return body[:i] + research + "\n" + body[end:]
+    rest = body[end:]
+    return body[:i] + research + ("\n\n" + rest if rest else "\n")   # keep the blank line before the driver's next H2
 
 def new_followups(items, existing_titles, limit=FOLLOWUP_MAX):
     """Follow-up refactoring issues to file: valid ones (title + body), not already open by title, at most `limit`."""
