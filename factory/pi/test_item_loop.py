@@ -1119,6 +1119,44 @@ class ResearchHeadingLine(unittest.TestCase):   # the section starts at the head
         self.assertEqual(L.Driver._col_before(None, ["TDD", "UAT"]), "Merged")
         self.assertEqual(L.Driver._col_before(None, ["Done"]), "UAT")
 
+class ReviewFailOnPr(unittest.TestCase):   # cmdemo1-dashboard#1311: a review FAIL must be visible on the PR too
+    def _driver(self, h, pr):
+        d = L.Driver("cmdemo1-workorders", 9, dry_run=True); d.s["pr"] = pr; sent = []
+        d.comment = lambda body, pr=False: sent.append((pr, body))
+        return d, sent
+
+    def test_fail_goes_to_issue_and_pr(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, sent = self._driver(h, 77)
+                d.review_fail_comment("Review → In Progress\n\nReview: FAIL.\n\n- x")
+                self.assertEqual([p for p, _ in sent], [False, True])
+                self.assertEqual(sent[0][1], sent[1][1])
+            finally: L.HOME = old
+
+    def test_no_pr_yet_only_the_issue(self):
+        with tempfile.TemporaryDirectory() as h:
+            old = L.HOME; L.HOME = h
+            try:
+                d, sent = self._driver(h, None)
+                d.review_fail_comment("Review: FAIL")
+                self.assertEqual([p for p, _ in sent], [False])
+            finally: L.HOME = old
+
+    def test_research_only_fix_path_leaves_journal_activity(self):   # no commit on this path: check 2 must see activity
+        import inspect
+        src = inspect.getsource(L.Driver.st_review)
+        i = src.index("self.sync_pr_research()")
+        self.assertIn('self.comment("Research re-done after the review FAIL', src[i:i + 300])
+
+    def test_st_review_fail_comments_use_the_mirror(self):   # both FAIL branches go through review_fail_comment
+        import inspect
+        src = inspect.getsource(L.Driver.st_review)
+        self.assertEqual(src.count("self.review_fail_comment("), 2)
+        self.assertNotIn('self.comment("Review → In Progress', src)
+        self.assertNotIn('self.comment(f"Review → In Progress', src)
+
 class StagedFilesGate(unittest.TestCase):
     """The protected-file gate: item_loop.staged_files(sh, wt, default) (the files staged in the worktree's index
     relative to the merge base of HEAD and origin/<default>, with protected_files() applied to the result) and the

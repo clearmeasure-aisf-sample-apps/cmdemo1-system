@@ -567,6 +567,12 @@ class Driver:
         self.gh("pr" if pr else "issue", "comment", target, "-R", self.full, "--body-file", p, write=True)
         self.save(last_comment_at=iso()); self.log(f"comment {'drafted (dry-run)' if self.dry else 'posted'}: {p}")
 
+    def review_fail_comment(self, body):
+        """A review FAIL goes in the issue journal AND on the PR, so the PR never looks clean while its review failed
+        (cmdemo1-dashboard#1311: the FAIL was on the issue only and the PR sat green and idle for two hours)."""
+        self.comment(body)
+        if self.s.get("pr"): self.comment(body, pr=True)
+
     def move(self, col):
         if not self.s.get("item_id"):
             q = ('query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){'
@@ -1055,8 +1061,8 @@ class Driver:
             if not self.bump("review_fail"):
                 return self.blocker("Review FAIL twice: " + "; ".join(f"{c['text']} (exit {rc})" for c, _, rc in failed))
             self.move("In Progress")
-            self.comment("Review → In Progress\n\nReview: FAIL.\n\n" + "\n".join(f"- {c['text']}: evidence `{c['evidence_cmd']}` exit {rc}: {last}" for c, last, rc in failed)
-                         + "\n\nSending the failed criteria to Pi.")
+            self.review_fail_comment("Review → In Progress\n\nReview: FAIL.\n\n" + "\n".join(f"- {c['text']}: evidence `{c['evidence_cmd']}` exit {rc}: {last}" for c, last, rc in failed)
+                                     + "\n\nSending the failed criteria to Pi.")
             self.pi(f"review-fix-{self.s['counts']['review_fail']}", "These acceptance criteria fail their evidence commands:\n" +
                     "\n".join(f"- {c['text']}: `{c['evidence_cmd']}` -> {last}" for c, last, _ in failed) + "\nFix the code so each passes.")
             if not self.local_green(f"review{self.s['counts']['review_fail']}"):
@@ -1080,8 +1086,8 @@ class Driver:
                 return self.blocker("independent review FAIL twice: " + findings[:600])
             n = self.s["counts"]["review_fail"]
             self.move("In Progress")
-            self.comment(f"Review → In Progress\n\nReview: FAIL (independent review on the {self.gpu_label(self.s.get('reviewer_gpu'))}).\n\n"
-                         f"{findings[:3000]}\n\nSending the findings to Pi.")
+            self.review_fail_comment(f"Review → In Progress\n\nReview: FAIL (independent review on the {self.gpu_label(self.s.get('reviewer_gpu'))}).\n\n"
+                                     f"{findings[:3000]}\n\nSending the findings to Pi.")
             if not self.s.get("research_in_body"):   # the section is the driver's to write: redo the research, fix the body
                 if not research_ok(self.research_text(), p["files"]):
                     self.s["counts"]["research"] = 0; self.save(stage="research", refactors_done=True)
@@ -1089,6 +1095,7 @@ class Driver:
                     if self.s.get("stage") == "blocked": return
                     self.save(stage="review")
                 self.sync_pr_research()
+                self.comment("Research re-done after the review FAIL; the PR body's `## Refactoring research` section is updated.")   # journal activity: no commit on this path
             else:
                 self.pi(f"review-fix-{n}", "An independent review of this branch failed. Findings:\n" + findings[:6000] +
                         "\nFix each finding with the smallest change. Never skip, delete or weaken a test or gate.")
