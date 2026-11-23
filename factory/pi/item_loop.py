@@ -244,25 +244,71 @@ def merge_args(full, pr, head):
     return ["pr", "merge", str(pr), "-R", full, "--squash", "--match-head-commit", head]
 
 RESEARCH_HEAD = "## Refactoring research"
+RESEARCH_FILE = "refactoring-research.md"      # the driver's research artifact (run dir, not the worktree)
+FOLLOWUPS_FILE = "refactoring-followups.json"  # the driver's follow-ups artifact (run dir, not the worktree)
+
+# H2s the driver itself writes after the research: the research section ends at the next of these, so an H2 written
+# inside the research (`## Findings`, cmdemo1-dashboard#651) belongs to the section instead of truncating it and
+# producing a false Blocker after LIMITS['research'] passes.
+RESEARCH_TAIL = ("## Refactoring plan",)
+
+_RESEARCH_HEAD_LINE = re.compile(r"(?m)^" + re.escape(RESEARCH_HEAD) + r"[ \t]*\r?$")
+
+def research_head(text):
+    """Offset of the first `## Refactoring research` heading LINE in `text` (the heading alone on its line), or -1.
+    An inline mention in prose or backticks (`the `## Refactoring research` section`) is not the heading, so a PR
+    summary that talks about the section is never mistaken for it (cmdemo1-system#890's own body was cut that way)."""
+    m = _RESEARCH_HEAD_LINE.search(text or "")
+    return m.start() if m else -1
+
+def research_section(text):
+    """The `## Refactoring research` section of a Markdown body: everything after the first heading line (see
+    research_head) up to the next heading the driver itself writes (a line starting with a RESEARCH_TAIL heading), or the end
+    of the body; "" when the heading is absent. Any other `## ` line (`## Findings`) stays part of the section."""
+    text = text or ""
+    i = research_head(text)
+    if i < 0: return ""
+    sec = text[i + len(RESEARCH_HEAD):]; n = 0
+    for line in sec.splitlines(keepends=True):
+        if line.startswith(RESEARCH_TAIL): return sec[:n]   # `## Refactoring plan` and `## Refactoring plan (size baseline)`
+        n += len(line)
+    return sec
 
 def research_ok(text, files):
     """The `## Refactoring research` section is present and substantive: long enough, names at least one file the
     item touches, and names what it found (or why there is nothing) in at least two bullet lines."""
-    if not text or RESEARCH_HEAD not in text: return False
-    sec = text.split(RESEARCH_HEAD, 1)[1].split("\n## ", 1)[0]
+    if not text or research_head(text) < 0: return False
+    sec = research_section(text)
     bullets = [l for l in sec.splitlines() if l.strip().startswith(("-", "*", "|")) and len(l.strip()) > 10]
     names = {f.rsplit("/", 1)[-1] for f in files or []} | set(files or [])
     return len(sec.strip()) >= RESEARCH_MIN_CHARS and len(bullets) >= 2 and (not names or any(n in sec for n in names))
 
+def normalize_research(text):
+    """Research text as it enters the PR body: the `## Refactoring research` heading stays H2 and every other H2
+    inside that section is demoted to `### `, so whatever headings the research pass wrote (`## Findings`,
+    cmdemo1-dashboard#651) the research is one top-level section of the body. `####` and deeper headings, the text
+    outside the section and the leading/trailing whitespace are left as they are; the text is returned unchanged when
+    the heading is absent, and normalizing twice is the same as normalizing once."""
+    text = text or ""
+    i = research_head(text)
+    if i < 0: return text
+    start = i + len(RESEARCH_HEAD)                      # the section starts after the heading line
+    sec = research_section(text)                        # "" when the heading is absent, else up to the driver's next H2
+    return text[:start] + re.sub(r"(?m)^##(?=[^#])", "###", sec) + text[start + len(sec):]
+
 def with_research(body, research):
-    """PR body with exactly one `## Refactoring research` section (replaced when present)."""
-    research = research.strip()
-    if not research.startswith(RESEARCH_HEAD): research = RESEARCH_HEAD + "\n\n" + research
-    if RESEARCH_HEAD in (body or ""):
-        pre, rest = body.split(RESEARCH_HEAD, 1)
-        tail = rest.split("\n## ", 1)
-        return pre + research + ("\n\n## " + tail[1] if len(tail) > 1 else "\n")
-    return (body or "").rstrip() + "\n\n" + research + "\n"
+    """PR body with exactly one `## Refactoring research` section (replaced when present): the research goes in with
+    its own subheadings demoted, and the driver's H2s after it (`## Refactoring plan`) stay H2."""
+    research = normalize_research(research.strip())
+    h = research_head(research)
+    research = research[h:] if h > 0 else research if h == 0 else RESEARCH_HEAD + "\n\n" + research   # drop any preamble
+    body = body or ""
+    i = research_head(body)
+    if i < 0:
+        return body.rstrip() + "\n\n" + research + "\n"
+    end = i + len(RESEARCH_HEAD) + len(research_section(body))   # where the old research section ends (its next driver H2)
+    rest = body[end:]
+    return body[:i] + research + ("\n\n" + rest if rest else "\n")   # keep the blank line before the driver's next H2
 
 def new_followups(items, existing_titles, limit=FOLLOWUP_MAX):
     """Follow-up refactoring issues to file: valid ones (title + body), not already open by title, at most `limit`."""
@@ -807,7 +853,7 @@ class Driver:
         self.save(stage="research")
 
     def research_prompt(self):
-        p = self.s["plan"]; out = os.path.join(self.run_dir, "refactoring-research.md"); fu = os.path.join(self.run_dir, "refactoring-followups.json")
+        p = self.s["plan"]; out = os.path.join(self.run_dir, RESEARCH_FILE); fu = os.path.join(self.run_dir, FOLLOWUPS_FILE)
         return out, fu, (
             f"Refactoring research for {self.repo}#{self.issue} ({p['pr_title']}). Change NO files in this repository: this is "
             "research before any code is written.\n\nRead the files this item will touch and their close collaborators "
@@ -818,7 +864,9 @@ class Driver:
             f"Write the findings as Markdown to {out}, starting with the line `{RESEARCH_HEAD}`, then one bullet per finding: "
             "file and member, the smell, the proposed refactoring or pattern, and the verdict `in scope` (small, safe, inside "
             "the files above: done in this PR) or `follow-up` (larger: filed as its own issue). When a file has nothing worth "
-            "refactoring, say so in a bullet naming the file and why. End with `In scope:` and `Follow-up:` summary lines.\n\n"
+            "refactoring, say so in a bullet naming the file and why. End with `In scope:` and `Follow-up:` summary lines. Under "
+            "it use only `###` subheadings - never `## `, which the driver reads as the end of the research section and would "
+            "drop your findings.\n\n"
             f"Write {fu} as JSON: {{\"in_scope\": [{{\"name\": \"refactor-<slug>\", \"prompt\": \"<one small refactoring Pi can do "
             "with tests kept green>\"}}], \"followups\": [{\"title\": \"Refactor: <what>\", \"body\": \"<the smell, the files, the "
             "proposed pattern, and acceptance criteria: behavior unchanged, tests green>\"}]}. Use empty lists when there is "
@@ -828,14 +876,14 @@ class Driver:
         """Mandatory on every item (Jeffrey, 20 Nov 2026): refactoring research before any code, findings in the issue
         journal and the PR body, small in-scope refactors in this PR (tests green), larger ones filed as follow-ups."""
         out, fu, prompt = self.research_prompt(); p = self.s["plan"]
-        text = open(out).read() if os.path.exists(out) else ""
+        text = self.research_text()
         while not research_ok(text, p["files"]):
             if not self.bump("research"):
                 return self.blocker("the refactoring research is missing or not substantive after "
                                     f"{LIMITS['research']} Pi passes (`{RESEARCH_HEAD}` with findings per touched file).")
             self.pi(f"refactoring-research-{self.s['counts']['research']}", prompt, 1500)
             self.sh(["git", "checkout", "--", "."], cwd=self.s["wt"], check=False); self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"], check=False)
-            text = open(out).read() if os.path.exists(out) else ""
+            text = self.research_text()
         try: extra = json.load(open(fu))
         except Exception: extra = {}
         if not self.s.get("research_posted"):
@@ -890,7 +938,7 @@ class Driver:
         self.save(stage="pr")
 
     def research_text(self):
-        f = os.path.join(self.run_dir, "refactoring-research.md")
+        f = os.path.join(self.run_dir, RESEARCH_FILE)
         return open(f).read() if os.path.exists(f) else ""
 
     def merge_base(self):
@@ -1082,7 +1130,7 @@ class Driver:
         out = os.path.join(self.run_dir, "independent-review.md")
         if os.path.exists(out): os.remove(out)
         crit = "\n".join(f"- {c['text']}" for c in p["criteria"])
-        sec = body.split(RESEARCH_HEAD, 1)[1]
+        sec = research_section(body)
         if len(sec) > 24000:   # the reviewer must read every verdict: whole section, or a line-boundary cut that says so
             sec = sec[:24000].rsplit("\n", 1)[0].rstrip() + "\n(the section is longer than this prompt copy; the full text is in the PR body)"
         k = self.s["counts"].get("review_infra", 0)
@@ -1203,8 +1251,7 @@ class Driver:
                 write=True, check=False)
 
     def _col_before(self, moves):
-        order = ["Merged", "TDD", "UAT", "Done"]
-        return order[order.index(moves[0]) - 1]
+        return BOARD_ORDER[BOARD_ORDER.index(moves[0]) - 1]
 
 def watchdog_exit(drv):
     """Driver-exit hook: the shared watchdog checks (factory/pi/watchdog.py) run exactly once when a
