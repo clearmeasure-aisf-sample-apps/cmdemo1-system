@@ -1105,6 +1105,16 @@ class ResearchHeadingLine(unittest.TestCase):   # the section starts at the head
         self.assertEqual(L.normalize_research(n), n)
         self.assertEqual(L.normalize_research("no heading\n## Other\n"), "no heading\n## Other\n")
 
+    def test_suffixed_driver_plan_heading_ends_the_section_and_survives(self):
+        b = L.with_research("Closes #1\n\n" + self.RESEARCH + "\n\n## Refactoring plan (size baseline)\n\nx\n", self.RESEARCH)
+        self.assertIn("## Refactoring plan (size baseline)\n\nx", b)
+        self.assertEqual(L.with_research(b, self.RESEARCH), b)
+
+    def test_research_preamble_before_the_heading_is_dropped(self):
+        b = L.with_research("Closes #1\n", "Note: see `## Refactoring research`.\n\n" + self.RESEARCH)
+        self.assertEqual([l for l in b.splitlines() if l.startswith("## ")], ["## Refactoring research"])
+        self.assertNotIn("Note: see", b)
+
     def test_col_before_uses_board_order(self):
         self.assertEqual(L.Driver._col_before(None, ["TDD", "UAT"]), "Merged")
         self.assertEqual(L.Driver._col_before(None, ["Done"]), "UAT")

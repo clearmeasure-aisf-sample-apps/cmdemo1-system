@@ -263,14 +263,14 @@ def research_head(text):
 
 def research_section(text):
     """The `## Refactoring research` section of a Markdown body: everything after the first heading line (see
-    research_head) up to the next heading the driver itself writes (a whole line matching RESEARCH_TAIL), or the end
+    research_head) up to the next heading the driver itself writes (a line starting with a RESEARCH_TAIL heading), or the end
     of the body; "" when the heading is absent. Any other `## ` line (`## Findings`) stays part of the section."""
     text = text or ""
     i = research_head(text)
     if i < 0: return ""
     sec = text[i + len(RESEARCH_HEAD):]; n = 0
     for line in sec.splitlines(keepends=True):
-        if line.startswith("## ") and line.strip() in RESEARCH_TAIL: return sec[:n]
+        if line.startswith(RESEARCH_TAIL): return sec[:n]   # `## Refactoring plan` and `## Refactoring plan (size baseline)`
         n += len(line)
     return sec
 
@@ -300,7 +300,8 @@ def with_research(body, research):
     """PR body with exactly one `## Refactoring research` section (replaced when present): the research goes in with
     its own subheadings demoted, and the driver's H2s after it (`## Refactoring plan`) stay H2."""
     research = normalize_research(research.strip())
-    if research_head(research) != 0: research = RESEARCH_HEAD + "\n\n" + research
+    h = research_head(research)
+    research = research[h:] if h > 0 else research if h == 0 else RESEARCH_HEAD + "\n\n" + research   # drop any preamble
     body = body or ""
     i = research_head(body)
     if i < 0:
