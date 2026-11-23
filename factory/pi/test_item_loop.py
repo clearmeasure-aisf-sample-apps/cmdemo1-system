@@ -542,7 +542,7 @@ class DryRunDriver(unittest.TestCase):
             finally: L.HOME = old
 
 class Gpus(unittest.TestCase):
-    def test_secret_names_cover_three_gpus_and_keep_pro5000(self):
+    def test_secret_names_cover_four_gpus_and_keep_pro5000(self):
         self.assertEqual(G.env_names("pro5000"), ("LOCAL_LLM_PRO5000_URL", "LOCAL_LLM_PRO5000_TOKEN"))
         self.assertEqual(G.env_names("pro6000"), ("LOCAL_LLM_PRO6000_URL", "LOCAL_LLM_PRO6000_TOKEN"))
         self.assertEqual(G.env_names("obs"), ("LOCAL_LLM_OBS_URL", "LOCAL_LLM_OBS_TOKEN"))
@@ -1391,7 +1391,7 @@ class RunTaskTimeout(unittest.TestCase):   # cmdemo1-system#817: --timeout must 
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN); f.close()
 
-class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, obs 1, ts3 1 for every Pi launch
+class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, pro6000 1, obs 1, ts3 1 for every Pi launch
     """On Nov 21 a Pi session ran `rm -f /tmp/factory-pi-*-slot-*.lock`; new run-tasks then took "free" slots on new
     inodes while the old holders still ran (3 on pro5000, 2 on ts3 and obs). Only a private slot dir is used here."""
     HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1433,7 +1433,7 @@ class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, o
         self.assertEqual(gpu_gate.caps({"FACTORY_GPU_CAPS": "pro6000=3"})["pro6000"], 1)   # never raised past 1
 
     def test_caps_hold_under_concurrent_acquisition(self):
-        for gpu, cap in (("pro5000", 2), ("obs", 1), ("ts3", 1)):
+        for gpu, cap in (("pro5000", 2), ("pro6000", 1), ("obs", 1), ("ts3", 1)):
             ps = [self.hold(gpu, "--no-wait") for _ in range(5)]   # five launches race for the GPU at once
             time.sleep(2.0)
             running = [p for p in ps if p.poll() is None]

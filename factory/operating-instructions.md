@@ -227,7 +227,7 @@ as `pi-pro5000-health`), `factory-pi-run-task`, `factory-pi-usage-report` and `f
 - `pi-gpu-health` prints one line per GPU (`HEALTHY`, `MISSING_SECRETS`, `UNREACHABLE`, `REFUSED`, `TUNNEL_DOWN`,
   `UNHEALTHY`) and `AVAILABLE: <list>`. A GPU with missing secrets or no answer is unavailable, not fatal: work
   continues on the others.
-- Exit 0: at least one GPU is up. When one or two are not, report it to Jeffrey once per outage (section "Reporting
+- Exit 0: at least one GPU is up. When one to three are not, report it to Jeffrey once per outage (section "Reporting
   to Jeffrey") and keep working.
 - Exit 3 (`MISSING_SECRETS` on all four): ask Jeffrey for the secrets with the Grok Bot secret request form (names
   in "Credentials"; never ask for the values in chat or a comment), leave the item in Todo with one
