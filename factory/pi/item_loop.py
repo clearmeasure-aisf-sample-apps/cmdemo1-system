@@ -426,12 +426,17 @@ def intake_open(red, plan):
     """While anything is red only fix-forward items start."""
     return not red or bool(plan.get("fix_forward"))
 
+def dep_health(environment, dep):
+    """The last health result for dep in this environment (None when no result is recorded)."""
+    for a in ((environment.get("health") or {}).get("containerApps") or []):
+        if a.get("name") == dep:
+            return (a.get("last") or {}).get("result")
+    return None
+
 def env_red(environment, dep):
     """An environment is red for a deployable when its last health report is not healthy (system has no HTTP health)."""
     if dep == "system": return False
-    for a in ((environment.get("health") or {}).get("containerApps") or []):
-        if a.get("name") == dep and (a.get("last") or {}).get("result") not in (None, "healthy"): return True
-    return False
+    return dep_health(environment, dep) not in (None, "healthy")
 
 def docs_only(files):
     return bool(files) and all(f.endswith(".md") or f.startswith("docs/") for f in files)
@@ -635,19 +640,37 @@ class Driver:
         self.comment(body)
         if self.s.get("pr"): self.comment(body, pr=True)
 
-    def move(self, col):
-        if not self.s.get("item_id"):
-            q = ('query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){'
-                 'projectItems(first:10){nodes{id project{id}}}}}}')
-            r = self.gh("api", "graphql", "-f", f"query={q}", "-f", f"o={ORG}", "-f", f"r={self.repo}", "-F", f"n={self.issue}", check=False)
-            try:
-                nodes = json.loads(r.stdout)["data"]["repository"]["issue"]["projectItems"]["nodes"]
-                self.save(item_id=next(n["id"] for n in nodes if n["project"]["id"] == PROJECT))
-            except Exception:
-                self.log("board item not found; skipping move"); return
-        self.gh("project", "item-edit", "--id", self.s["item_id"], "--project-id", PROJECT, "--field-id", STATUS_FIELD,
+    def lookup_board_item(self):
+        """Return the board item id, looking it up if necessary. Logs and returns None on failure."""
+        if self.s.get("item_id"):
+            return self.s["item_id"]
+        q = ('query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){'
+             'projectItems(first:10){nodes{id project{id}}}}}}')
+        r = self.gh("api", "graphql", "-f", f"query={q}", "-f", f"o={ORG}", "-f", f"r={self.repo}", "-F", f"n={self.issue}", check=False)
+        try:
+            nodes = json.loads(r.stdout)["data"]["repository"]["issue"]["projectItems"]["nodes"]
+            item_id = next(n["id"] for n in nodes if n["project"]["id"] == PROJECT)
+            self.save(item_id=item_id)
+            return item_id
+        except (json.JSONDecodeError, KeyError, TypeError):
+            self.log("board lookup failed; skipping move")
+            return None
+        except StopIteration:
+            self.log("board item not found; skipping move")
+            return None
+
+    def move_board_item(self, item_id, col):
+        """Move the board item to col. Raises on failure."""
+        self.gh("project", "item-edit", "--id", item_id, "--project-id", PROJECT, "--field-id", STATUS_FIELD,
                 "--single-select-option-id", STATUS[col], write=True)
         self.save(column=col); self.log(f"board -> {col}")
+
+    def move(self, col):
+        """Move the item to board column col. No-op (logs) if the board item is not found."""
+        item_id = self.lookup_board_item()
+        if not item_id:
+            return
+        self.move_board_item(item_id, col)
 
     def wake_bot(self, reason):
         """Fire the bot's issue-assigned listener once (unassign + assign) so he reads state.json."""
@@ -1304,16 +1327,17 @@ class Driver:
                     x = next((x for x in e["deployables"] if x.get("name") == dep), None)
                     if not x: continue
                     st = json.loads(self.gh("api", f"repos/{self.full}/compare/{sha}...{x['commit']}", "--jq", "{status:.status}", check=False).stdout or "{}").get("status")
-                    healthy = any(a.get("name") == dep and (a.get("last") or {}).get("result") == "healthy" for a in (e.get("health") or {}).get("containerApps", [])) or dep == "system"
                     rk = f"{dep} {e['name']}"
-                    if env_red(e, dep) and st in ("ahead", "identical"):
+                    health = dep_health(e, dep)
+                    red = dep != "system" and health not in (None, "healthy")
+                    if red and st in ("ahead", "identical"):
                         if rk not in red_load():
                             red_set(rk, f"{dep} {x.get('version')} unhealthy in {e['name']}")
                             self.fix_forward_issue(rk, f"{dep} {x.get('version')} is not healthy in {e['name']} (delivery.json)", "cmdemo1-system")
                             self.comment(f"Status: {dep} {x.get('version')} (contains merge `{sha[:8]}`) is not healthy in {e['name']}. "
                                          "Intake is stopped and a fix-forward issue is filed; the driver keeps watching.")
-                    elif healthy and rk in red_load(): red_clear(rk)
-                    in_env[e["name"]] = st in ("ahead", "identical") and healthy; ver[e["name"]] = (x.get("version"), x["commit"])
+                    elif not red and rk in red_load(): red_clear(rk)
+                    in_env[e["name"]] = st in ("ahead", "identical") and not red; ver[e["name"]] = (x.get("version"), x["commit"])
                 moves = deploy_moves(self.s.get("column", "Merged"), in_env)
                 if moves:
                     env = {"TDD": "tdd", "UAT": "uat", "Done": "prod"}[moves[-1]]
