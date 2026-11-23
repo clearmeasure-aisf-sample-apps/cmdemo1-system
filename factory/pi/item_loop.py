@@ -972,18 +972,35 @@ class Driver:
             self.save(refactors_done=True)
         self.save(stage="implement")
 
-    def file_followups(self, items):
-        r = self.gh("api", f"repos/{self.full}/issues?state=open&labels=enhancement&per_page=100", "--jq", "[.[].title]", check=False)
+    def ensure_issue(self, title, body, label, repo=None, assignee=None, case_insensitive=True):
+        """File a new open issue with `label` when no open issue already has that title, and return its
+        number; None when the title is already open (case-insensitive by default) or the create failed."""
+        full = f"{ORG}/{repo or self.repo}"
+        r = self.gh("api", f"repos/{full}/issues?state=open&labels={label}&per_page=100", "--jq", "[.[].title]", check=False)
         try: titles = json.loads(r.stdout or "[]")
         except Exception: titles = []
+        have = {t.lower() for t in titles} if case_insensitive else titles
+        q = title.lower() if case_insensitive else title
+        if q in have: return None
+        body_f = os.path.join(self.run_dir, "logs", f"ensure-issue-{int(time.time())}.md")
+        open(body_f, "w").write(scrub(body))
+        x = self.gh("issue", "create", "-R", full, "--title", title, "--body-file", body_f, "--label", label,
+                    *(("--assignee", assignee) if assignee is not None else ()), write=True, check=False)
+        return x.stdout.strip().rsplit("/", 1)[-1] if x.returncode == 0 and x.stdout.strip() else None
+
+    def file_followups(self, items):
+        """File the research follow-ups: one ensure_issue per valid item (the helper dedupes against the open
+        issues itself), at most FOLLOWUP_MAX filed."""
         made = []
-        for it in new_followups(items, titles):
-            body = os.path.join(self.run_dir, "logs", f"followup-{len(made)}.md")
-            open(body, "w").write(scrub(f"{it['body']}\n\nFound by the refactoring research of #{self.issue}. "
-                                        "Behavior unchanged; tests green; no test weakened.\n"))
-            x = self.gh("issue", "create", "-R", self.full, "--title", it["title"], "--body-file", body, "--label", "enhancement",
-                        "--assignee", BOT, write=True, check=False)
-            if x.returncode == 0 and x.stdout.strip(): made.append(x.stdout.strip().rsplit("/", 1)[-1])
+        for it in items or []:
+            t = str(it.get("title") or "").strip(); b = str(it.get("body") or "").strip()
+            if not t or not b: continue
+            n = self.ensure_issue(t[:120], f"{b}\n\nFound by the refactoring research of #{self.issue}. "
+                                         "Behavior unchanged; tests green; no test weakened.\n",
+                                label="enhancement", assignee=BOT)
+            if n:
+                made.append(n)
+                if len(made) == FOLLOWUP_MAX: break
         if made: self.save(followups=made); self.log(f"follow-up refactoring issues: {', '.join(made)}")
 
     def st_implement(self):
@@ -1316,18 +1333,12 @@ class Driver:
         """One open `fix-forward` issue per red key, assigned to the factory bot so its issue-assigned wake works it
         first (intake is stopped for everything else until it is green again)."""
         full = f"{ORG}/{repo or self.repo}"; title = f"Fix forward: {key} is red"
-        r = self.gh("api", f"repos/{full}/issues?state=open&labels=fix-forward&per_page=100", "--jq", "[.[].title]", check=False)
-        try:
-            if title in json.loads(r.stdout or "[]"): return
-        except Exception: pass
         self.gh("label", "create", "fix-forward", "-R", full, "--color", "B60205", "--description", "Red main or environment; fix forward",
                 write=True, check=False)
-        body = os.path.join(self.run_dir, "logs", f"fix-forward-{int(time.time())}.md")
-        open(body, "w").write(scrub(f"{what}.\n\nFound while following #{self.issue} (run `{self.s.get('run_id')}`). Fix forward with a "
-                                    "normal PR (plan `fix_forward: true`); never re-run, re-pin or promote by hand, and never "
-                                    "weaken a test or gate. Intake of other items stays stopped until this is green.\n"))
-        self.gh("issue", "create", "-R", full, "--title", title, "--body-file", body, "--label", "fix-forward", "--assignee", BOT,
-                write=True, check=False)
+        self.ensure_issue(title, f"{what}.\n\nFound while following #{self.issue} (run `{self.s.get('run_id')}`). Fix forward with a "
+                                "normal PR (plan `fix_forward: true`); never re-run, re-pin or promote by hand, and never "
+                                "weaken a test or gate. Intake of other items stays stopped until this is green.\n",
+                        label="fix-forward", assignee=BOT, repo=repo)
 
     def _col_before(self, moves):
         return BOARD_ORDER[BOARD_ORDER.index(moves[0]) - 1]
