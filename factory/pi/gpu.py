@@ -106,8 +106,8 @@ def pick_gpu(size, up, busy):
     pro5000 first (2 slots, 262K context), then pro6000 (1 slot, 262K), then obs, then ts3 only when the rest are full.
     Large (long-context) items wait for pro5000 / pro6000 while either is up and fall back to obs / ts3 only when both
     are down."""
-    free = [g for g in PRIORITY if g in up and g not in busy]
-    if size == "large" and any(g in up for g in LARGE_GPUS):
+    free = [g for g in PRIORITY if g in up and g not in busy and not is_excluded(g)]
+    if size == "large" and any(g in up and not is_excluded(g) for g in LARGE_GPUS):
         return next((g for g in free if g in LARGE_GPUS), None)
     return free[0] if free else None
 

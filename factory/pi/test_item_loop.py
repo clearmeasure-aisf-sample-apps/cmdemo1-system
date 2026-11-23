@@ -626,6 +626,9 @@ class DryRunDriver(unittest.TestCase):
             finally: L.HOME = old
 
 class Gpus(unittest.TestCase):
+    def setUp(self):   # the box's gpu-exclude / caps must not leak into these pure-rule tests
+        p = mock.patch.dict(os.environ, {"FACTORY_GPU_EXCLUDE": "", "FACTORY_GPU_CAPS": ""}); p.start(); self.addCleanup(p.stop)
+
     def test_secret_names_cover_four_gpus_and_keep_pro5000(self):
         self.assertEqual(G.env_names("pro5000"), ("LOCAL_LLM_PRO5000_URL", "LOCAL_LLM_PRO5000_TOKEN"))
         self.assertEqual(G.env_names("pro6000"), ("LOCAL_LLM_PRO6000_URL", "LOCAL_LLM_PRO6000_TOKEN"))
@@ -724,9 +727,15 @@ class ClientTimeoutAndReserve(unittest.TestCase):   # t89u: idle timeout 600 s o
             self.assertEqual(L.busy_gpus(st, alive=lambda p: True), {"pro5000"})
 
     def test_is_excluded(self):
+        self.assertTrue(G.is_excluded("pro6000", {"FACTORY_GPU_EXCLUDE": "PRO6000"}))
         self.assertTrue(G.is_excluded("pro6000", {"FACTORY_GPU_EXCLUDE": "obs, pro6000"}))
         self.assertFalse(G.is_excluded("pro5000", {"FACTORY_GPU_EXCLUDE": "pro6000"}))
         self.assertFalse(G.is_excluded("pro6000", {}))
+
+    def test_pick_gpu_skips_reserved(self):
+        with mock.patch.dict(os.environ, {"FACTORY_GPU_EXCLUDE": "pro6000"}):
+            self.assertEqual(G.pick_gpu("large", ["pro5000", "pro6000"], {"pro5000"}), None)
+            self.assertEqual(G.pick_gpu("small", ["pro5000", "pro6000", "obs"], {"pro5000"}), "obs")
 
     def test_recorded_excluded_gpu_is_repicked(self):
         with mock.patch.dict(os.environ, {"FACTORY_GPU_EXCLUDE": "pro6000"}):
@@ -845,6 +854,7 @@ class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be ma
             finally: L.HOME = old
 
 class Concurrency(unittest.TestCase):
+    @mock.patch.dict(os.environ, {"FACTORY_GPU_CAPS": "", "FACTORY_GPU_EXCLUDE": ""})
     def test_one_active_item_per_gpu_and_wip_three_per_repo(self):
         alive = lambda pid: pid != 9
         st = [("a", {"repo": "cmdemo1-workorders", "gpu": "pro5000", "stage": "ci", "pid": 1}),
