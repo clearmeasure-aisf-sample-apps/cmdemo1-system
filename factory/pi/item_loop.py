@@ -56,6 +56,9 @@ HANDOFF_START_S = 900     # a Pi hand-off with no model output 15 min after it g
 HANDOFF_STALL_S = 1800    # ... or, once started, no session record and no CPU work in its process group for 30 min
 HANDOFF_SLOT_WAIT_S = 900 # the first attempt waits this long for its own GPU's slot, then relaunches on any free GPU
 ANY_SLOT_WAIT_S = 2 * 3600  # a relaunch (any free GPU) or a review waits up to 2 h for a slot: a busy queue is no failure
+DRAFT_PLAN_TIMEOUT_S = 2700  # the draft-plan Pi pass: cold prompt reads on pro5000 made every 1500 s draft-plan time out (cmdemo1-system#884)
+RESEARCH_TIMEOUT_S = 1500    # the mandatory refactoring-research Pi pass
+PI_TASK_TIMEOUT_S = 1800     # the default timeout for one plan task run through task_passes
 # Not required to merge, but a red one still stalls the PR: route to Pi instead of waiting on it (no-idle-stall).
 QUALITY_CHECKS = ("qodana", "refactoring rationale")
 HEARTBEAT_MIN = 30        # no progress for this long -> one short status comment
@@ -246,6 +249,8 @@ def merge_args(full, pr, head):
 RESEARCH_HEAD = "## Refactoring research"
 RESEARCH_FILE = "refactoring-research.md"      # the driver's research artifact (run dir, not the worktree)
 FOLLOWUPS_FILE = "refactoring-followups.json"  # the driver's follow-ups artifact (run dir, not the worktree)
+PLAN_DRAFT_FILE = "plan.draft.json"            # Pi's draft of the item plan, before the bot copies it to PLAN_FILE
+PLAN_FILE = "plan.json"                        # the item plan artifact the driver validates and runs from (run dir, not the worktree)
 
 # H2s the driver itself writes after the research: the research section ends at the next of these, so an H2 written
 # inside the research (`## Findings`, cmdemo1-dashboard#651) belongs to the section instead of truncating it and
@@ -663,7 +668,7 @@ class Driver:
         for k in range(LIMITS["local_fix"] + 1):
             name = t["name"] if not k else f"{t['name']}-retry-{k}"
             if k: prompt = t["prompt"] + "\nNote: a previous attempt at this task failed; fix what it left broken."
-            if self.pi(name, prompt, int(t.get("timeout", 1800))): return True
+            if self.pi(name, prompt, int(t.get("timeout", PI_TASK_TIMEOUT_S))): return True
         self.blocker(f"Pi task `{t['name']}` still failed after {LIMITS['local_fix'] + 1} attempts (last attempt `{name}`).")
         return False
 
@@ -771,7 +776,7 @@ class Driver:
         except BlockingIOError: print("driver already running for this item"); sys.exit(0)
         self.s.setdefault("run_id", now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6])
         self.s.setdefault("start", iso()); self.s.setdefault("stage", "gpu")
-        self.s["plan"] = json.load(open(os.path.join(self.run_dir, "plan.json")))
+        self.s["plan"] = json.load(open(os.path.join(self.run_dir, PLAN_FILE)))
         self.save(status="running")
         meta_p = os.path.join(self.run_dir, "run.json")
         meta = json.load(open(meta_p)) if os.path.exists(meta_p) else {"start": self.s["start"]}
@@ -889,7 +894,7 @@ class Driver:
             if not self.bump("research"):
                 return self.blocker("the refactoring research is missing or not substantive after "
                                     f"{LIMITS['research']} Pi passes (`{RESEARCH_HEAD}` with findings per touched file).")
-            self.pi(f"refactoring-research-{self.s['counts']['research']}", prompt, 1500)
+            self.pi(f"refactoring-research-{self.s['counts']['research']}", prompt, RESEARCH_TIMEOUT_S)
             self.sh(["git", "checkout", "--", "."], cwd=self.s["wt"], check=False); self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"], check=False)
             text = self.research_text()
         try: extra = json.load(open(fu))
@@ -1276,21 +1281,30 @@ def watchdog_exit(drv):
             pass   # never let the hook (or its log) change the driver's exit
 
 # ---------------------------------------------------------------- commands
+def draft_plan_prompt(repo, issue, title, body, out):
+    """The draft-plan prompt (out path, prompt text): Pi drafts the plan JSON for <repo>#<issue> into `out` and changes
+    no repository files. Pure: it reads nothing and writes nothing, so the prompt can be tested without a driver."""
+    return out, (
+        f"Draft an implementation plan for GitHub issue {repo}#{issue}. Read the repository (AGENTS.md, CLAUDE.md, "
+        f"the files involved) but change NO files. Write the first complete draft early (do not wait for the last minutes "
+        "of the timeout), then refine it: as you learn, add, fix and remove entries until the draft is complete and valid.\n\n"
+        f"Issue title: {title}\n\nIssue body:\n{body}\n\n"
+        f"Write the plan as JSON to the file {out} with keys: repo ({repo!r}), issue ({issue}), branch "
+        f"('{BOT}/{issue}-<short-slug>'), files (every file to change), constraints (each Notes/Constraints/Out-of-scope "
+        "sentence quoted), criteria (one per acceptance criterion: text, how, evidence_cmd = a shell command that exits 0 "
+        "only when the criterion holds, e.g. a filtered test run or an HTTP probe), tasks (small ordered Pi tasks: name, "
+        "prompt; one test or one code change each; tests first), size ('large' for big or cross-cutting work, 'small' for a UI or "
+        "test-only change), verify_cmd (the repo's real build+test command, "
+        "narrowed to the touched projects), pr_title, pr_summary (one line). "
+        "Write a first complete, valid plan.draft.json as soon as you know the files involved (after at most a few reads), "
+        "then refine it in place; never leave the file unwritten.")
+
 def cmd_draft_plan(a):
     d = Driver(a.repo, a.issue, top_session=a.top_session)
     iss = json.loads(d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "{title,body}").stdout)
     d.plan_worktree()
-    out = os.path.join(d.run_dir, "plan.draft.json")
-    prompt = (f"Draft an implementation plan for GitHub issue {a.repo}#{a.issue}. Read the repository (AGENTS.md, CLAUDE.md, "
-              f"the files involved) but change NO files.\n\nIssue title: {iss['title']}\n\nIssue body:\n{iss['body']}\n\n"
-              f"Write the plan as JSON to the file {out} with keys: repo ({a.repo!r}), issue ({a.issue}), branch "
-              f"('{BOT}/{a.issue}-<short-slug>'), files (every file to change), constraints (each Notes/Constraints/Out-of-scope "
-              "sentence quoted), criteria (one per acceptance criterion: text, how, evidence_cmd = a shell command that exits 0 "
-              "only when the criterion holds, e.g. a filtered test run or an HTTP probe), tasks (small ordered Pi tasks: name, "
-              "prompt; one test or one code change each; tests first), size ('large' for big or cross-cutting work, 'small' for a UI or "
-              "test-only change), verify_cmd (the repo's real build+test command, "
-              "narrowed to the touched projects), pr_title, pr_summary (one line).")
-    try: ok = d.pi("draft-plan", prompt, 1500, gpu=G.LARGE_GPU)   # plan drafting runs before the gpu stage: no gpu recorded yet
+    out, prompt = draft_plan_prompt(a.repo, a.issue, iss["title"], iss["body"], os.path.join(d.run_dir, PLAN_DRAFT_FILE))
+    try: ok = d.pi("draft-plan", prompt, DRAFT_PLAN_TIMEOUT_S, gpu=G.LARGE_GPU)   # plan drafting runs before the gpu stage: no gpu recorded yet
     except PiNotStarted as e: print(json.dumps({"draft": out, "pi_pass": False, "errors": [str(e)]}, indent=1)); sys.exit(1)
     try:
         p = json.load(open(out)); errs = validate_plan(p)
@@ -1307,7 +1321,7 @@ def refuse_held(a):
 def cmd_start(a):
     refuse_held(a)
     d = Driver(a.repo, a.issue, top_session=a.top_session)
-    plan_p = os.path.join(d.run_dir, "plan.json"); p = json.load(open(plan_p))
+    plan_p = os.path.join(d.run_dir, PLAN_FILE); p = json.load(open(plan_p))
     labels = d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "[.labels[].name]", check=False).stdout
     try: labels = json.loads(labels or "[]")
     except Exception: labels = []
