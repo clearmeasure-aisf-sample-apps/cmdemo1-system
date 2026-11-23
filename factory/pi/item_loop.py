@@ -374,7 +374,7 @@ def repo_wip(states, repo, me=None, alive=lambda pid: False):
     """Driver items of `repo` in In Progress or Review (active stages) on this box, live or blocked mid-review."""
     return sum(1 for k, s in states if k != me and s.get("repo") == repo and
                ((s.get("stage") in ACTIVE_STAGES and s.get("stage") != "pickup" and alive(s.get("pid")))
-                or (s.get("stage") == "blocked" and s.get("resume_stage") in ACTIVE_STAGES)))
+                or (s.get("stage") == "blocked" and s.get("resume_stage") in ACTIVE_STAGES and s.get("resume_stage") != "pickup")))
 
 def hold_resumes(blocker):
     """Whether a Blocker may clear itself when the PR's checks turn green. A Review FAIL blocker never does: its checks
