@@ -545,7 +545,7 @@ class Driver:
         if check and r.returncode:
             raise RuntimeError(f"failed ({r.returncode}): {shown[:300]}\n{scrub(r.stdout)[-2000:]}")
         return r
-    def gh(self, *a, write=False, check=True): return self.sh(["gh", *a], check=check, write=write)
+    def gh(self, *a, write=False, check=True, timeout=None): return self.sh(list(("gh", *a)), check=check, timeout=timeout, write=write)
     def wait_alive(self, seconds, why):
         """Sleep in GH_RETRY_TICK_S steps, re-saving state.json each step (pid, `updated`, `gh_wait`) so a driver waiting
         out a rate limit stays visibly alive. No comment here: that would itself be a rate-limited gh call."""
@@ -715,8 +715,8 @@ class Driver:
             if cs and state != "PENDING": return state, cs
             if cs:
                 try:
-                    self.sh(["gh", "pr", "checks", str(self.s["pr"]), "-R", self.full, "--watch", "--interval", "60"]
-                            + (["--required"] if self.repo in REQUIRED else []), check=False, timeout=600)
+                    self.gh("pr", "checks", str(self.s["pr"]), "-R", self.full, "--watch", "--interval", "60",
+                            *(["--required"] if self.repo in REQUIRED else []), check=False, timeout=600)
                 except subprocess.TimeoutExpired: pass   # short slices so the heartbeat below runs
             self.heartbeat(); time.sleep(60)
         return "PENDING", []
@@ -737,7 +737,7 @@ class Driver:
         p = self.s["plan"]; clone = os.path.join(HOME, "factory-clones", self.repo)
         if not os.path.isdir(os.path.join(clone, ".git")):
             os.makedirs(os.path.dirname(clone), exist_ok=True)
-            self.sh(["gh", "repo", "clone", self.full, clone, "--", "-q"])
+            self.gh("repo", "clone", self.full, clone, "--", "-q")
         self.sh(["git", "fetch", "-q", "origin"], cwd=clone)
         default = self.gh("repo", "view", self.full, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").stdout.strip()
         wt = os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}")
@@ -755,7 +755,7 @@ class Driver:
         clone = os.path.join(HOME, "factory-clones", self.repo)
         if not os.path.isdir(os.path.join(clone, ".git")):
             os.makedirs(os.path.dirname(clone), exist_ok=True)
-            self.sh(["gh", "repo", "clone", self.full, clone, "--", "-q"])
+            self.gh("repo", "clone", self.full, clone, "--", "-q")
         self.sh(["git", "fetch", "-q", "origin"], cwd=clone)
         default = self.gh("repo", "view", self.full, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").stdout.strip()
         wt = os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}-plan")
@@ -1187,7 +1187,7 @@ class Driver:
             if runs: break
             time.sleep(30)
         for run in runs:
-            self.sh(["gh", "run", "watch", str(run["id"]), "-R", self.full, "--interval", "60"], check=False, timeout=6 * 3600)
+            self.gh("run", "watch", str(run["id"]), "-R", self.full, "--interval", "60", check=False, timeout=6 * 3600)
         r = self.gh("api", f"repos/{self.full}/actions/runs?head_sha={sha}&event=push&per_page=50", "--jq",
                     "[.workflow_runs[]|{name,conclusion}]", check=False)
         red = [x["name"] for x in json.loads(r.stdout or "[]") if x["conclusion"] not in ("success", "skipped", "neutral")]
