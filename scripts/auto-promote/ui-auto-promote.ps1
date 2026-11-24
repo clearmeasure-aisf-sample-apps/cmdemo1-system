@@ -34,6 +34,12 @@
     before it closed, or only one read since), the run pauses and reads once more (Get-HealthWaitSeconds: up to
     $HealthWaitMaxSeconds s, within the job budget). A read is recorded for a release only while its commit is what runs in
     the previous environment (Test-LiveCommitMatches).
+    Environment window (2026-11-24, second fix): a release is live in tdd for only part of the 5 to 10 minutes between
+    dashboard releases, so its own reads never spanned the window (runs 45442775877, 45445735479). Each read is now also
+    kept for the environment with the commit it served (state key <deployable>/env-<environment>). A release's window is
+    decided by its own reads plus the environment's reads since it finished (Get-WindowReads: nothing older runs there
+    after it), and counts only when the release itself was read Healthy while live (Test-LiveHealthSeen). Get-Evaluation
+    always takes a fresh read, so the environment must still be Healthy now; any non-Healthy read since it finished fails it.
     Failed retry (2026-11-24, after #957): a release whose every deployment to the next environment ended Failed or
     TimedOut is offered there again on a later run, at most $FailedDeploymentRetryLimit times, with every flag and the
     health window checked again; a Canceled deployment is still a person's no and is never retried.
@@ -631,6 +637,7 @@ function Get-PromotionDecision {
             $h = Get-HealthVerdict -Finished $Facts.Finished -Now $Facts.Now -Reads @($Facts.HealthReads)
             if ($h -eq 'fail') { $d.Add("health: $HealthPath was not Healthy: $(@($Facts.HealthReads | Where-Object { $_.Status -ne 'Healthy' } | ForEach-Object { "$($_.Status) at $($_.At.ToString('u'))" }) -join '; ')") }
             elseif ($h -eq 'wait') { $waiting.Add('health window: not yet 10 minutes since the deployment finished with two Healthy reads 5 minutes apart') }
+            elseif ($Facts.ContainsKey('LiveHealthSeen') -and -not [bool] $Facts.LiveHealthSeen) { $waiting.Add('health window: no Healthy read of this release while it was live in the previous environment') }
         }
     }
     if ($d.Count -gt 0) { $flags.Add(@{ Flag = 'Deployment or health failed'; Evidence = @($d) }) }
@@ -1416,6 +1423,36 @@ function Get-FailedTargetRetry {
     $all = @($TargetStates)
     $failed = @($all | Where-Object { $_ -in $Retryable }).Count
     @{ Retry = ($all.Count -gt 0 -and $failed -eq $all.Count -and $failed -le $Limit); Failed = $failed }
+}
+
+function Get-WindowReads {
+    <# The reads that decide a release's health window in the previous environment (2026-11-24, second fix): its own reads
+       (taken while its commit was live there) and the environment's reads (any commit) since its deployment finished.
+       Nothing older than the release runs there after it finished, so an environment read since then is of this release
+       or a newer one that contains it. tdd gets a new dashboard release every 5 to 10 minutes and each is live for only
+       part of that, so its own reads alone never span the 10-minute window. Own and Environment: @{ At; Status[; Commit] }. #>
+    param([object[]] $Own, [object[]] $Environment, $Finished)
+    $all = @(@($Own) + @($Environment) | Where-Object { $_ })
+    if ($Finished) { $all = @($all | Where-Object { $_.At -ge ([datetime] $Finished) }) }
+    # A read kept both as own and as the environment's is one read.
+    $seen = @{}
+    @($all | Sort-Object { $_.At } | Where-Object { $k = ([datetime] $_.At).ToString('o'); if ($seen.ContainsKey($k)) { $false } else { $seen[$k] = $true; $true } })
+}
+
+function Test-LiveHealthSeen {
+    <# The release itself was read Healthy while it was what ran in the previous environment: an own read since it
+       finished, or an environment read since then naming its commit. Without one, the environment's window does not count
+       for it (it may never have served). #>
+    param([object[]] $Own, [object[]] $Environment, $Finished, [string] $Commit)
+    $since = { param($r) $r -and (-not $Finished -or $r.At -ge ([datetime] $Finished)) -and $r.Status -eq 'Healthy' }
+    if (@(@($Own) | Where-Object { & $since $_ }).Count -gt 0) { return $true }
+    [bool] ($Commit -and @(@($Environment) | Where-Object { (& $since $_) -and [string] $_.Commit -eq $Commit }).Count -gt 0)
+}
+
+function Limit-EnvironmentReads {
+    # Environment reads kept in the state file: the last day (a release older than that is never a candidate).
+    param([object[]] $Reads, [datetime] $Now, [int] $Hours = 24)
+    @(@($Reads) | Where-Object { $_ -and $_.At -ge $Now.AddHours(-$Hours) } | Sort-Object { $_.At })
 }
 
 function Get-RetryBlocker {
@@ -2223,31 +2260,46 @@ function Get-Evaluation {
         if ($r.Attempts -gt 1) { Say "Health read: $($r.Status) after $($r.Attempts) attempts." }
         @{ At = [datetime]::UtcNow; Status = $r.Status }
     }
-    # A read counts for this release only while it is what runs in the previous environment (Test-LiveCommitMatches).
-    function Test-StillLive {
+    # Every read is kept for the environment with the commit it served (Get-WindowReads); it is also the release's own
+    # read when that commit is the release's (Test-LiveCommitMatches). Read before and after: a read can retry for
+    # about 100 s while a newer release goes live.
+    $envKey = Get-StateKey "env-$($Previous.Name)"
+    $envReads = @(Read-StateReads $state "env-$($Previous.Name)" | ForEach-Object { @{ At = Get-Utc $_.at; Status = [string] $_.status; Commit = [string] $_.commit } })
+    function Read-LiveCommit {
         $buildPath = [string] $Settings.BuildPath
-        if (-not $buildPath) { return $true }
-        $live = try { [string] (Invoke-RestMethod "$prevAddress$buildPath" -TimeoutSec 30).commit } catch { '' }
-        $ok = Test-LiveCommitMatches -BuildPath $buildPath -LiveCommit $live -ReleaseCommit $sha
-        if (-not $ok) { Say "Health read skipped: $($Previous.Name) runs commit '$live', not $sha of $($Release.Version)." }
-        $ok
+        if (-not $buildPath) { return $sha }
+        try { [string] (Invoke-RestMethod "$prevAddress$buildPath" -TimeoutSec 30).commit } catch { '' }
     }
-    # Checked before and after the read: a read can retry for about 100 s, and a newer release may go live meanwhile.
-    function Read-LiveHealth { if (Test-StillLive) { $h = Read-Health; if (Test-StillLive) { return $h } }; $null }
+    function Add-Read {
+        $before = Read-LiveCommit
+        $h = Read-Health
+        $after = Read-LiveCommit
+        $commit = if ($before -eq $after) { $after } else { '' }
+        # A read during a swap (commit unknown) is kept for the environment only when Healthy: an Unreachable read while
+        # tdd swaps to a newer release must not fail every older release (review of this change).
+        if ($commit -or $h.Status -eq 'Healthy') { Set-Variable -Name envReads -Scope 1 -Value (@($envReads) + @(@{ At = $h.At; Status = $h.Status; Commit = $commit })) }
+        if (Test-LiveCommitMatches -BuildPath ([string] $Settings.BuildPath) -LiveCommit $commit -ReleaseCommit $sha) {
+            Set-Variable -Name reads -Scope 1 -Value (@($reads) + @($h))
+        } else { Say "Health read $($h.Status) of $($Previous.Name) at commit '$commit': kept for the environment, not as a read of $($Release.Version)." }
+    }
     if ($healthRequired -and $addressKnown -and $prevTask.State -eq 'Success') {
-        $h = Read-LiveHealth; if ($h) { $reads += $h }
+        Add-Read
         $now = [datetime]::UtcNow
         $deadline = Get-MasterPendingDeadline
         $budget = if ($deadline) { [int] [Math]::Max(0, ($deadline - $now).TotalSeconds + $HealthPauseSeconds) } else { $HealthWaitMaxSeconds }
-        $pause = Get-HealthWaitSeconds -Finished $finished -Now $now -Reads $reads -MaxSeconds ([Math]::Min($HealthWaitMaxSeconds, $budget))
-        if ($pause -ge 0) {
+        $window = @(Get-WindowReads -Own $reads -Environment $envReads -Finished $finished)
+        $pause = Get-HealthWaitSeconds -Finished $finished -Now $now -Reads $window -MaxSeconds ([Math]::Min($HealthWaitMaxSeconds, $budget))
+        if ($pause -ge 0 -and (Test-LiveHealthSeen -Own $reads -Environment $envReads -Finished $finished -Commit $sha)) {
             Say "Waiting $pause s for the health read that closes the window."
             Start-Sleep -Seconds $pause
-            $h = Read-LiveHealth; if ($h) { $reads += $h }
+            Add-Read
         }
         $state[$key] = @($reads | ForEach-Object { @{ at = $_.At.ToString('o'); status = $_.Status } })
+        $state[$envKey] = @(Limit-EnvironmentReads -Reads $envReads -Now ([datetime]::UtcNow) | ForEach-Object { @{ at = $_.At.ToString('o'); status = $_.Status; commit = $_.Commit } })
         Save-State
     }
+    $liveSeen = Test-LiveHealthSeen -Own $reads -Environment $envReads -Finished $finished -Commit $sha
+    $reads = @(Get-WindowReads -Own $reads -Environment $envReads -Finished $finished)
 
     # 3 and 4. Changes since the commit running in the target
     $baseSha = $null
@@ -2279,7 +2331,7 @@ function Get-Evaluation {
     }
     $facts += @{ Checks = $checks; PathsKnown = $pathsKnown; PathsReason = $pathsReason; Paths = $paths; HoldItems = $holdItems; PreviousState = $prevTask.State
         LogFindings = $findings; Finished = $finished; Now = [datetime]::UtcNow; HealthReads = $reads; HealthAddressKnown = $addressKnown
-        HealthRequired = $healthRequired }
+        HealthRequired = $healthRequired; LiveHealthSeen = $liveSeen }
     $decision = Get-PromotionDecision -Facts $facts
     if (Test-PipelineOnly -Flags @($decision.Flags) -Facts $facts) {
         # The pipeline-only override: master of the application repository, read only when it can matter.
@@ -2485,14 +2537,23 @@ $preferHeld = @(Get-HeldPipelinePrefer -HeldIssues $heldIssues)
 $healthRequiredHere = [string] $Settings.HealthRead -ne 'none'
 $windowComplete = {
     # Script-scope names: the block runs inside Select-Candidate, whose own $state (a task state) would shadow the reads.
+    # Complete: the release was read Healthy while live there, and its own plus the environment's reads since it
+    # finished close the window (Get-WindowReads, Test-LiveHealthSeen). Get-Evaluation then takes a fresh read, so the
+    # environment must still be Healthy now.
     param($r, $prevDeployment)
     if (-not $script:healthRequiredHere) { return $true }
-    $stored = @(Read-StateReads $script:state ([string] $prevDeployment.Id) | ForEach-Object { @{ At = Get-Utc $_.at; Status = [string] $_.status } })
-    if ($stored.Count -lt 2) { return $false }
-    # An unreadable task is not complete (the newest release is then the candidate, as before), never a stopped run.
+    $own = @(Read-StateReads $script:state ([string] $prevDeployment.Id) | ForEach-Object { @{ At = Get-Utc $_.at; Status = [string] $_.status } })
+    $prevName = [string] (@($script:envs | Where-Object { $_.Id -eq $prevDeployment.EnvironmentId }) | Select-Object -First 1).Name
+    $envRs = @(Read-StateReads $script:state "env-$prevName" | ForEach-Object { @{ At = Get-Utc $_.at; Status = [string] $_.status; Commit = [string] $_.commit } })
+    if ((@($own) + @($envRs)).Count -lt 2) { return $false }
+    # An unreadable task or release commit is not complete (the newest release is then the candidate), never a stopped run.
     if (-not $script:taskCache.ContainsKey($prevDeployment.TaskId)) { try { $script:taskCache[$prevDeployment.TaskId] = Invoke-Octopus "/api/tasks/$($prevDeployment.TaskId)" } catch { return $false } }
     $completed = $script:taskCache[$prevDeployment.TaskId].CompletedTime
-    Test-HealthWindowComplete -HealthRequired $true -Finished $(if ($completed) { Get-Utc $completed } else { $null }) -Now ([datetime]::UtcNow) -Reads $stored
+    if (-not $completed) { return $false }
+    $finishedAt = Get-Utc $completed
+    $commit = try { [string] (Get-Commit $r) } catch { '' }
+    if (-not (Test-LiveHealthSeen -Own $own -Environment $envRs -Finished $finishedAt -Commit $commit)) { return $false }
+    Test-HealthWindowComplete -HealthRequired $true -Finished $finishedAt -Now ([datetime]::UtcNow) -Reads @(Get-WindowReads -Own $own -Environment $envRs -Finished $finishedAt)
 }
 # A failed deployment is retried only when it was this workflow's and no person answered its task (Get-RetryBlocker).
 # An unreadable interruption list blocks the retry (fail closed).
