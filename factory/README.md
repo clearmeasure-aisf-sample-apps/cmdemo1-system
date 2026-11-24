@@ -7,7 +7,10 @@ user `cm-ai-ops-bot` across the `cmdemo1-*` repositories on organization project
 |---|---|
 | [operating-instructions.md](operating-instructions.md) | What the bot does on every wake: scope, board flow, WIP, comments, releases, reporting. Read by the bot each wake; keep it short. |
 | [pi/](pi/) | `gpu.py` (the four GPUs `pro5000`, `pro6000`, `obs`, `ts3`, their secrets, health and the rules that choose one), `setup.sh` (installs Pi and links `pi-gpu` / the `pi-pro5000` shim on the bot's box), `health.sh` (all four GPUs), `run-task` (one Pi task on one GPU, usage recorded), `usage-report` (tokens-and-time table for the issue), `item_loop.py` / `item-loop` (the per-item Pi driver: GPU → pickup → refactoring research → Pi edits → build → PR → CI and quality gates → evidence + independent review on another GPU → merge → main build → deploy moves, with red stopping intake; no Grok turns while it runs) and its tests `test_item_loop.py`, `scrub.py` (the shared scrub rule set: `SECRET_RE` and `scrub`, which
-`item_loop` re-exports and `run-task` imports directly — rule text only, no secret values), `watchdog.py` (the shared
+`item_loop` re-exports and `run-task` imports directly — rule text only, no secret values), `runner.py` (the one
+command runner with a deadline, `run_cmd`: `item_loop` re-exports it and `run-task` imports it directly, so every
+timeout puts the command in its own process group and ends it together with everything that command started — #817,
+#839), `watchdog.py` (the shared
 watchdog checks and their hard-rule guards — excluded items, WIP cap, live-driver skip, scrubbed and spaced comments —
 plus check 1 GPU health and check 2 stalled fix-up hand-offs (a review FAIL 20+ min old with no fix commit, no
 activity and no live driver gets one flag on the issue and the PR); `python3 factory/pi/watchdog.py run` runs them once, and `item_loop` runs them once at the end
