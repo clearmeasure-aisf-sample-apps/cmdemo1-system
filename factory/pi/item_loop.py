@@ -24,6 +24,7 @@ from enum import StrEnum
 import argparse, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, time, urllib.request, uuid
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
+from scrub import SECRET_RE, scrub, add_secret_source   # the one scrub rule set lives in scrub.py (#838), re-exported here so watchdog, run-task and the tests keep importing it from item_loop
 
 # String enums for check states and failure types (values are string literals for JSON compatibility).
 class CheckState(StrEnum):
@@ -89,10 +90,6 @@ GH_RETRY_TICK_S = 60           # while waiting, state.json is re-saved this ofte
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 
-# Tokens, temporary and named tunnel hosts (the GPUs' clearmeasure.ai tunnels, with or without a scheme), bearer headers.
-SECRET_RE = re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|https?://[^\s'\"]*trycloudflare\.com[^\s'\"]*"
-                       r"|(?:https?://)?[A-Za-z0-9.-]*\b(?:pro\d{4}|\d{4}ti)\.clearmeasure\.ai\b[^\s'\"]*"
-                       r"|Bearer\s+\S+|(?i:(?:password|secret|token|apikey|api_key)\s*[=:]\s*)\S+)")
 INFRA_RE = re.compile(r"(?i)(could not resolve host|temporary failure in name resolution|tls handshake timeout|"
                       r"connection reset by peer|econnreset|etimedout|503 service unavailable|502 bad gateway|"
                       r"toomanyrequests|rate limit exceeded|no space left on device|runner .* lost communication|"
@@ -105,14 +102,6 @@ CODE_RE = re.compile(r"(?i)(error CS\d+|error [A-Z]{2,}\d+|\bFailed\b.*\btest|\b
 def now(): return dt.datetime.now(dt.timezone.utc)
 def iso(t=None): return (t or now()).isoformat(timespec="seconds")
 
-def scrub(s):
-    s = SECRET_RE.sub("[redacted]", s or "")
-    if _app_tok["v"] and len(_app_tok["v"]) > 6: s = s.replace(_app_tok["v"], "[redacted]")
-    for name in (*G.secret_env_names(), "GH_TOKEN", "GITHUB_TOKEN", "CM_AI_OPS_BOT_GH_TOKEN", "GH_PROJECT_TOKEN"):
-        v = os.environ.get(name)
-        if v and len(v) > 6: s = s.replace(v, "[redacted]")
-    return s
-
 # ---------------------------------------------------------------- pure helpers (unit-tested)
 
 # ---- GitHub App token for gh (own API quota). Opt-in: set GH_APP_TOKEN_CMD to a command that prints an installation token.
@@ -121,6 +110,9 @@ _APP_DENIED_RE = re.compile(r"HTTP 40[13]\b|Resource not accessible|Forbidden|Ba
 GH_APP_USER_ONLY = {("pr", "create"), ("issue", "create")}   # authored objects stay the bot user's: the merge gate requires PR author == BOT
 GH_APP_MINT_RETRY_S = 5 * 60   # a failed mint is not retried on every gh call
 _app_tok = {"v": None, "at": 0.0}
+# The token itself stays here (scrub.py never imports item_loop, so there is no cycle): it registers as a caller-owned
+# secret source, so scrub() asks this cache for its value before the environment pass.
+add_secret_source(lambda: _app_tok["v"])
 
 def app_denied(output):
     """True when gh's output says the App token was refused (401/403, missing permission, branch rule, App rate limit)."""

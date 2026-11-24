@@ -33,7 +33,7 @@
 import argparse, datetime as dt, fcntl, glob, json, os, re, signal, subprocess, sys, threading, time
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
-from item_loop import scrub   # one scrub rule set (tokens, tunnel hosts, every LOCAL_LLM_*_URL / _TOKEN value)
+from scrub import scrub   # one scrub rule set (tokens, tunnel hosts, every LOCAL_LLM_*_URL / _TOKEN value)
 import gpu as G
 import gpu_gate
 
