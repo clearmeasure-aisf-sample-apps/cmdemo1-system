@@ -11,17 +11,6 @@ PLAN = {"repo": "cmdemo1-workorders", "issue": 1, "branch": "cm-ai-ops-bot/1-x",
         "tasks": [{"name": "t1", "prompt": "Write test A"}], "verify_cmd": "dotnet build", "pr_title": "A"}
 
 @contextlib.contextmanager
-def temp_home():
-    """Save L.HOME, point it at a fresh temp dir, restore on exit."""
-    old = L.HOME
-    h = tempfile.mkdtemp()
-    L.HOME = h
-    try:
-        yield h
-    finally:
-        L.HOME = old
-
-@contextlib.contextmanager
 def fake_home():
     """Create a TemporaryDirectory, set L.HOME to it, yield the path, restore on exit."""
     old = L.HOME
@@ -32,9 +21,9 @@ def fake_home():
         finally:
             L.HOME = old
 
-def make_driver(issue=1, repo="cmdemo1-workorders", **kw):
-    """Create a standard test Driver with the default dry-run settings."""
-    return L.Driver(repo, issue, dry_run=True, **kw)
+def make_driver(issue=1, repo="cmdemo1-workorders", dry_run=True, **kw):
+    """Create a standard test Driver; dry_run is explicit so callers can opt out."""
+    return L.Driver(repo, issue, dry_run=dry_run, **kw)
 
 HDR = '{"type": "session", "id": "s1"}'                                  # Pi session records (one JSON object per line)
 USER = '{"type": "message", "message": {"role": "user", "content": "do it"}}'
@@ -224,7 +213,7 @@ class NoIdleStall(unittest.TestCase):
         self.assertEqual((L.LIMITS["quality_fix"], L.LIMITS["merge_gate"]), (3, 3))
 
     def test_blocker_records_resume_stage_and_dry_run_never_comments(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=8); d.s.update(stage="ci", pr=5, start=L.iso())
             d.blocker("required checks still red."); self.assertEqual((d.s["resume_stage"], d.s["stage"]), ("ci", "blocked"))
             d.s["progress_at"] = (L.now() - L.dt.timedelta(minutes=45)).isoformat(); d.heartbeat()
@@ -238,7 +227,7 @@ class NoIdleStall(unittest.TestCase):
         self.assertTrue(L.hold_resumes("required checks still red after 3 Pi fix passes."))
         self.assertTrue(L.hold_resumes("Qodana did not finish within 60 minutes."))
         self.assertTrue(L.hold_resumes(None))
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=9); d.dry = False
             d.s.update(pr=5, resume_stage="review", blocker="independent review FAIL twice: - x")
             d.pr_checks = lambda: self.fail("a Review FAIL blocker must not wait on checks")
@@ -264,14 +253,14 @@ class ReviewInfraRetry(unittest.TestCase):   # t83u: no / empty findings or no v
         return d
 
     def test_infra_failure_is_retried_then_passes(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = self.driver(h, [(None, "no findings file"), (None, "empty"), (True, "- No findings.")])
             d.st_review()
             self.assertEqual(d.s["stage"], "merge")
             self.assertEqual((d.s["counts"]["review_fail"], d.s["counts"]["review_infra"]), (0, 0))
 
     def test_infra_failure_blocks_after_two_retries_without_a_fail(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = self.driver(h, [(None, "no findings file")] * 3)
             d.st_review()
             self.assertEqual(d.s["stage"], "blocked")
@@ -283,7 +272,7 @@ class ReviewInfraRetry(unittest.TestCase):   # t83u: no / empty findings or no v
         old = (L.research_ok, L.gpu_health)
         L.research_ok = lambda *a: True; L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d = make_driver(issue=32)
                 d.s.update(plan=dict(PLAN), wt=tempfile.mkdtemp(dir=h), gpu="pro5000", pr=7, default="main")
                 d.merge_base = lambda: "abc"; calls = []
@@ -473,7 +462,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         old_gpu_health = L.gpu_health
         L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d, calls = self.driver(h, ["no-start", "stalled", "PASS"])
                 self.assertTrue(d.pi("review-fix-2", "fix it"))
                 arg = lambda c, f: c[c.index(f) + 1]
@@ -502,7 +491,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         old_gpu_health = L.gpu_health
         L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d, calls = self.driver(h, ["stalled", "PASS"], size="large")
                 self.assertTrue(d.pi("t1", "do it"))
                 self.assertEqual(calls[1][calls[1].index("--gpu") + 1], "pro5000,pro6000")   # a 262K GPU only
@@ -515,7 +504,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         old = (L.gpu_health, L.research_ok)
         L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}; L.research_ok = lambda *a: True
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d, calls = self.driver(h, ["stalled", ("PASS", "obs")])   # item on ts3; the relaunch wrote the code on obs
                 self.assertTrue(d.pi("t1", "do it"))
                 self.assertEqual(d.author_gpus(), ["ts3", "obs"])
@@ -535,7 +524,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         old_gpu_health = L.gpu_health
         L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d, _ = self.driver(h, [("no-start", "pro5000,obs,ts3"), "PASS"])
                 self.assertTrue(d.pi("t1", "do it")); self.assertEqual(d.s.get("author_gpus"), ["pro5000"])
         finally:
@@ -547,7 +536,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         old_gpu_health = L.gpu_health
         L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d, _ = self.driver(h, [("PASS", "pro5000")])   # item on ts3; plan drafted on pro5000
                 self.assertTrue(d.pi("draft-plan", "plan it", gpu="pro5000"))
                 d2, _ = self.driver(h, [("PASS", "pro5000")]); d2.pi("refactoring-research-1", "research")
@@ -559,7 +548,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             L.gpu_health = old_gpu_health
 
     def test_hold_mid_pass_stops_push_and_merge(self):   # re-review minor B
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=1946)
             d.sh = lambda cmd, **k: self.fail("a held item must not run git or gh")
             d.gh = lambda *a, **k: self.fail("a held item must not call GitHub")
@@ -574,7 +563,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         old_watchdog = L.watchdog_exit
         L.watchdog_exit = lambda drv: None
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d = make_driver(issue=1944)
                 json.dump(PLAN, open(os.path.join(d.run_dir, "plan.json"), "w"))
                 d.sh = lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "0.1", "")
@@ -598,7 +587,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         old_time = L.time
         L.time = T()
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d = make_driver(issue=1945); d.dry = False
                 d.s.update(pr=5, resume_stage="review", blocker="required checks still red after 3 Pi fix passes.")
                 checks = []
@@ -616,7 +605,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         old_gpu_health = L.gpu_health
         L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d, calls = self.driver(h, ["no-start"] * 3)
                 with self.assertRaises(L.PiNotStarted) as e: d.pi("t1", "do it")
                 self.assertEqual(len(calls), 3); self.assertFalse(L.hold_resumes(str(e.exception)))
@@ -627,7 +616,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
 
     def test_hold_file_stops_start_run_and_watchdog(self):
         import watchdog as W
-        with temp_home() as h:
+        with fake_home() as h:
             os.makedirs(os.path.join(h, "factory-runs", "cmdemo1-workorders-1944"))
             self.assertFalse(W.excluded("cmdemo1-workorders", 1944))
             open(os.path.join(h, "factory-runs", "cmdemo1-workorders-1944", "HOLD"), "w").write("handed-off: FactoryBot1")
@@ -639,7 +628,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
 
 class DryRunDriver(unittest.TestCase):
     def test_writes_are_skipped_in_dry_run(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=7)
             r = d.sh(["false"], write=True)
             self.assertEqual(r.returncode, 0)
@@ -649,7 +638,7 @@ class DryRunDriver(unittest.TestCase):
 
 class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU recorded in state.json, never a silent pro5000 default
     def test_gpu_raises_when_unrecorded(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=21)
             self.assertNotIn("gpu", d.s)
             self.assertRaises(RuntimeError, d.gpu)   # no gpu in state: raise, never default to pro5000
@@ -660,7 +649,7 @@ class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU re
         old = (L.gpu_health, L.time)
         L.time = Clock()
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d = L.Driver("cmdemo1-workorders", 22)   # dry_run=False
                 d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"; d.s["stage"] = "gpu"; d.save()
                 L.gpu_health = lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}
@@ -676,7 +665,7 @@ class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU re
         old = (L.gpu_health, L.time)
         L.time = Clock()
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d = make_driver(issue=23)
                 d.s["plan"] = PLAN; d.save()              # no 'gpu' in state yet
                 L.gpu_health = lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}
@@ -688,7 +677,7 @@ class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU re
             L.gpu_health, L.time = old
 
     def test_pi_targets_the_recorded_gpu(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=24)
             d.s["gpu"] = "ts3"; d.s["wt"] = tempfile.mkdtemp(dir=h)
             capture = []
@@ -699,7 +688,7 @@ class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU re
 
 class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be marked done: retry it under distinct names, then a Blocker
     def test_failed_pi_task_not_done_retried_then_blocked(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=25)
             d.s["plan"] = dict(PLAN, tasks=[{"name": "t1", "prompt": "p"}])
             d.s["stage"] = "implement"
@@ -717,7 +706,7 @@ class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be ma
                             "retries run under distinct retry names")
 
     def test_passing_pi_task_done_and_advances(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=26)
             d.s["plan"] = dict(PLAN, tasks=[{"name": "t1", "prompt": "p"}])
             d.s["stage"] = "implement"
@@ -728,7 +717,7 @@ class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be ma
             self.assertEqual(d.s["stage"], "local-verify")   # and the stage advances as before
 
     def test_pi_task_retried_until_pass(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=27)
             d.s["plan"] = dict(PLAN, tasks=[{"name": "t1", "prompt": "p"}])
             d.s["stage"] = "implement"
@@ -764,7 +753,7 @@ class Concurrency(unittest.TestCase):
         self.assertTrue(L.intake_open({"ui prod": {"what": "x"}}, dict(PLAN, fix_forward=True)))
 
     def test_red_flags_round_trip(self):
-        with temp_home() as h:
+        with fake_home() as h:
             L.red_set("ui uat", "unhealthy"); L.red_set("ui uat", "again")
             self.assertEqual(L.red_load()["ui uat"]["what"], "unhealthy")   # first report kept
             L.red_clear("ui uat"); self.assertEqual(L.red_load(), {})
@@ -778,14 +767,11 @@ class Concurrency(unittest.TestCase):
         """Last result 'healthy' -> healthy (not red)."""
         e = {"health": {"containerApps": [{"name": "ui", "last": {"result": "healthy"}}]}}
         self.assertFalse(L.env_red(e, "ui"))
-        # inline healthy computation: healthy = not env_red(e, dep)
-        self.assertTrue(not L.env_red(e, "ui"))
 
     def test_env_red_unhealthy_result_is_red(self):
         """Last result 'unhealthy' -> not healthy, red."""
         e = {"health": {"containerApps": [{"name": "ui", "last": {"result": "unhealthy"}}]}}
         self.assertTrue(L.env_red(e, "ui"))
-        self.assertFalse(not L.env_red(e, "ui"))
 
     def test_env_red_entry_present_no_last_is_not_red(self):
         """containerApps entry present with no 'last' -> not healthy, not red."""
@@ -1036,7 +1022,7 @@ class RefactoringResearch(PromptMentions, unittest.TestCase):
         self.assertEqual(len(L.new_followups(many, [])), L.FOLLOWUP_MAX)
 
     def test_research_prompt_names_patterns_and_outputs(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=9); d.s["plan"] = PLAN
             out, fu, prompt = d.research_prompt()
             self.assert_mentions(prompt, "duplication", "long methods", "primitive obsession", "missing abstractions",
@@ -1116,7 +1102,7 @@ class ResearchBodyInnerH2(PromptMentions, unittest.TestCase):   # the inner-H2 r
             self.assertEqual([l for l in b.splitlines() if l == line], [line])
 
     def test_research_prompt_uses_only_h3_subheadings(self):   # cmdemo1-dashboard#651: tell Pi, not just the body writer
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(issue=9); d.s["plan"] = PLAN
             out, fu, prompt = d.research_prompt()
             self.assert_mentions(prompt, L.RESEARCH_HEAD, "###", "never `## `")   # starts at the heading, uses H3 subheadings, never an H2 inside
@@ -1183,14 +1169,14 @@ class ReviewFailOnPr(unittest.TestCase):   # cmdemo1-dashboard#1311: a review FA
         return d, sent
 
     def test_fail_goes_to_issue_and_pr(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, sent = self._driver(h, 77)
             d.review_fail_comment("Review → In Progress\n\nReview: FAIL.\n\n- x")
             self.assertEqual([p for p, _ in sent], [False, True])
             self.assertEqual(sent[0][1], sent[1][1])
 
     def test_no_pr_yet_only_the_issue(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, sent = self._driver(h, None)
             d.review_fail_comment("Review: FAIL")
             self.assertEqual([p for p, _ in sent], [False])
@@ -1290,7 +1276,7 @@ class StagedFilesGate(unittest.TestCase):
 
     def test_st_pr_protected_file_gate_diffs_against_the_merge_base(self):
         """The enhancement gate compares the index with merge-base(HEAD, origin/<default>), not main's tip."""
-        with temp_home() as h:
+        with fake_home() as h:
             d = self.st_pr_driver(h, 31, (0, "0f5e8d2c1a4b6973\n"))
             d.st_pr()
             diffs = self.name_only_diffs(d)
@@ -1866,7 +1852,7 @@ class GhChokepoint(unittest.TestCase):   # cmdemo1-system#828: every gh call is 
         return sh, calls
 
     def test_gh_passes_timeout_and_check_to_sh(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(repo="cmdemo1-system", issue=828)
             sh, calls = self.gh_recorder(); d.sh = sh
             d.gh("run", "watch", "1", check=False, timeout=21600)
@@ -1875,7 +1861,7 @@ class GhChokepoint(unittest.TestCase):   # cmdemo1-system#828: every gh call is 
             self.assertEqual((k.get("check"), k.get("timeout"), k.get("write")), (False, 21600, False))
 
     def test_gh_defaults_unchanged(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d = make_driver(repo="cmdemo1-system", issue=828)
             sh, calls = self.gh_recorder(); d.sh = sh
             d.gh("pr", "list")
@@ -1931,7 +1917,7 @@ class StageRegistry(unittest.TestCase):   # cmdemo1-system#829: stage name -> ha
         woke, exits = [], []
         L.watchdog_exit = lambda drv: exits.append(drv)
         try:
-            with temp_home() as h:
+            with fake_home() as h:
                 d = make_driver(issue=1948)
                 json.dump(PLAN, open(os.path.join(d.run_dir, "plan.json"), "w"))
                 d.sh = lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "0.1", "")
@@ -2001,14 +1987,14 @@ class ReleaseSkip(unittest.TestCase):   # #914: a system merge the system pipeli
         return d, moves, comments
 
     def test_factory_only_merge_goes_to_done_without_deploy(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, moves, comments = self.run_main(h, ["factory/pi/item_loop.py", "factory/README.md"])
             self.assertEqual((moves, d.s["stage"]), (["Done"], "done"))
             self.assertIn("live from main (merge `abababab`)", comments[0])
             self.assertIn("no release is needed", comments[0])
 
     def test_mixed_merge_waits_for_its_deploy(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, moves, comments = self.run_main(h, ["factory/pi/item_loop.py", "src/System/Program.cs"])
             self.assertEqual((moves, d.s["stage"]), (["Merged"], "deploy"))
             self.assertNotIn("live from main", comments[0])
@@ -2033,7 +2019,7 @@ class EnsureIssueTests(unittest.TestCase):   # cmdemo1-system#831: the shared en
         return d, calls
 
     def test_creates_when_title_absent_and_returns_issue_number(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, calls = self.driver_and_gh(["Some other followup"])
             self.assertEqual(d.ensure_issue("New followup", "Body text", "enhancement", assignee=L.BOT), "123")
             full = f"{L.ORG}/{self.REPO}"   # the default repo is self.repo, as a full repo name
@@ -2051,7 +2037,7 @@ class EnsureIssueTests(unittest.TestCase):   # cmdemo1-system#831: the shared en
             self.assertEqual(len(calls), 2)
 
     def test_no_assignee_flag_when_assignee_not_given(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, calls = self.driver_and_gh(["Some other followup"])
             self.assertEqual(d.ensure_issue("New followup", "Body text", "enhancement"), "123")
             full = f"{L.ORG}/{self.REPO}"
@@ -2063,19 +2049,19 @@ class EnsureIssueTests(unittest.TestCase):   # cmdemo1-system#831: the shared en
             self.assertNotIn("--assignee", create_args)
 
     def test_existing_title_is_not_created(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, calls = self.driver_and_gh(["New followup"])
             self.assertIsNone(d.ensure_issue("New followup", "Body text", "enhancement"))
             self.assertEqual(len(calls), 1)   # the open-issues list only; no create call
 
     def test_dedup_is_case_insensitive(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, calls = self.driver_and_gh(["Existing"])
             self.assertIsNone(d.ensure_issue("existing", "Body text", "enhancement", case_insensitive=True))
             self.assertEqual(len(calls), 1)   # 'existing' matches the open 'Existing'; no create call
 
     def test_exact_match_when_not_case_insensitive(self):   # fix_forward_issue keeps its exact-match dedup
-        with temp_home() as h:
+        with fake_home() as h:
             d, calls = self.driver_and_gh(["fix: a"])
             full = f"{L.ORG}/{self.REPO}"
             self.assertEqual(d.ensure_issue("Fix: A", "Body text", "fix-forward", assignee=L.BOT, case_insensitive=False), "123")
@@ -2087,7 +2073,7 @@ class EnsureIssueTests(unittest.TestCase):   # cmdemo1-system#831: the shared en
             self.assertEqual(create_kw, {"write": True, "check": False})
 
     def test_explicit_repo_overrides_the_default(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, calls = self.driver_and_gh([])
             self.assertEqual(d.ensure_issue("New followup", "Body text", "enhancement", repo="other"), "123")
             full = f"{L.ORG}/other"
@@ -2096,7 +2082,7 @@ class EnsureIssueTests(unittest.TestCase):   # cmdemo1-system#831: the shared en
             self.assertEqual(create_args[create_args.index("-R") + 1], full)
 
     def test_create_failure_returns_none(self):
-        with temp_home() as h:
+        with fake_home() as h:
             d, calls = self.driver_and_gh([], create_rc=1, create_stdout="HTTP 422: Validation Failed")
             self.assertIsNone(d.ensure_issue("New followup", "Body text", "enhancement"))
             self.assertEqual(len(calls), 2)   # the list ran, the create was attempted and failed
@@ -2105,21 +2091,20 @@ class EnsureIssueTests(unittest.TestCase):   # cmdemo1-system#831: the shared en
 class MoveBoardItem(unittest.TestCase):
     """Driver.move: board item lookup failures log and no-op; a found item is moved via item-edit."""
 
-    def make_driver_and_calls(self, issue=100):
-        """A dry-run driver with its gh call captured; returns (driver, call recorder). Caller must wrap in temp_home."""
+    def make_driver_and_calls(self, issue=100, stdout=""):
+        """A dry-run driver with its gh call captured; returns (driver, call recorder). Caller must wrap in fake_home."""
         d = make_driver(issue=issue)
         calls = []
         def fake_gh(*a, **k):
             calls.append((a, k))
-            return L.subprocess.CompletedProcess(a, 0, "", "")
+            return L.subprocess.CompletedProcess(a, 0, stdout, "")
         d.gh = fake_gh
         return d, calls
 
     def test_move_non_json_gh_output_logs_and_skips(self):
         """Case (1): gh returns non-JSON; move logs 'board lookup failed; skipping move' and does not call item-edit."""
-        with temp_home():
-            d, calls = self.make_driver_and_calls()
-            d.gh = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, "not-json", "")
+        with fake_home():
+            d, calls = self.make_driver_and_calls(stdout="not-json")
             d.move("In Progress")
             log = open(os.path.join(d.run_dir, "driver.log")).read()
             self.assertIn("board lookup failed; skipping move", log)
@@ -2130,7 +2115,7 @@ class MoveBoardItem(unittest.TestCase):
     def test_move_json_no_matching_project_logs_and_skips(self):
         """Case (2): valid JSON with no node matching L.PROJECT; move logs and skips."""
         payload = json.dumps({"data": {"repository": {"issue": {"projectItems": {"nodes": [{"id": "other-id", "project": {"id": "different-project"}}]}}}}})
-        with temp_home():
+        with fake_home():
             d, calls = self.make_driver_and_calls()
             def fake_gh(*a, **k):
                 calls.append((a, k))
@@ -2145,7 +2130,7 @@ class MoveBoardItem(unittest.TestCase):
     def test_move_matching_project_id_calls_item_edit(self):
         """Case (3): matching node found; item_id is saved and item-edit is called with the correct option."""
         payload = json.dumps({"data": {"repository": {"issue": {"projectItems": {"nodes": [{"id": "other-id", "project": {"id": "different-project"}}, {"id": "correct-id", "project": {"id": L.PROJECT}}]}}}}})
-        with temp_home():
+        with fake_home():
             d, calls = self.make_driver_and_calls()
             def fake_gh(*a, **k):
                 calls.append((a, k))

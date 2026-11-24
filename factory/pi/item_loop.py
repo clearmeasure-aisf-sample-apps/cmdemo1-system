@@ -1329,15 +1329,16 @@ class Driver:
                     st = json.loads(self.gh("api", f"repos/{self.full}/compare/{sha}...{x['commit']}", "--jq", "{status:.status}", check=False).stdout or "{}").get("status")
                     rk = f"{dep} {e['name']}"
                     health = dep_health(e, dep)
-                    red = dep != "system" and health not in (None, "healthy")
+                    red = env_red(e, dep)
+                    healthy = dep == "system" or health == "healthy"
                     if red and st in ("ahead", "identical"):
                         if rk not in red_load():
                             red_set(rk, f"{dep} {x.get('version')} unhealthy in {e['name']}")
                             self.fix_forward_issue(rk, f"{dep} {x.get('version')} is not healthy in {e['name']} (delivery.json)", "cmdemo1-system")
                             self.comment(f"Status: {dep} {x.get('version')} (contains merge `{sha[:8]}`) is not healthy in {e['name']}. "
                                          "Intake is stopped and a fix-forward issue is filed; the driver keeps watching.")
-                    elif not red and rk in red_load(): red_clear(rk)
-                    in_env[e["name"]] = st in ("ahead", "identical") and not red; ver[e["name"]] = (x.get("version"), x["commit"])
+                    elif healthy and rk in red_load(): red_clear(rk)
+                    in_env[e["name"]] = st in ("ahead", "identical") and healthy; ver[e["name"]] = (x.get("version"), x["commit"])
                 moves = deploy_moves(self.s.get("column", "Merged"), in_env)
                 if moves:
                     env = {"TDD": "tdd", "UAT": "uat", "Done": "prod"}[moves[-1]]
