@@ -12,6 +12,8 @@
 # (scorecard-site, video) are not added. Each run promotes in order ui, dashboard, system, one after the other in this
 # one job (never two promotions to one environment at once). The per-deployable settings (application paths, health
 # path, build path) are a table at the top of the script.
+# Since 2026-11-24 the candidate is the newest such release whose health window is already complete (else the newest), and
+# a release whose deployments to the next environment all failed (not canceled) is offered again, at most twice.
 # scripts/auto-promote/ui-auto-promote.ps1 -Deployable <name> finds the newest Default channel release that succeeded in the previous environment (tdd before uat, uat before prod) and has no
 # deployment yet to the next (Pull requests channel releases are ignored, issue #655; except: an open pipeline-change hold keeps that release as the candidate so a newer tdd
 # finish does not restart the 60-minute clock; issue #688), one environment step per run, never while a deployment of it to uat or prod is queued,

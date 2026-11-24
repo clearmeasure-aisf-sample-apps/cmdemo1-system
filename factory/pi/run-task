@@ -56,6 +56,7 @@ def session_usage(path):
     return sid, tot
 
 NO_START_RC = 125
+TIMEOUT_RC = 124   # wall-clock timeout: Pi's group is killed, the record says result "timeout"
 
 SLACK_S = 2.0      # mtime granularity: a session file Pi creates after launch is never older than launch - SLACK_S
 CPU_ACTIVE_FRAC = 0.05   # Pi's group using >= 5% of a core between two polls is activity (a build or test running);
@@ -158,7 +159,7 @@ def run_pi(cmd, cwd, timeout, slot_fd=None, env=None, sdir=None, start_s=None, b
                     stderr=subprocess.STDOUT, text=True,
                     pass_fds=gpu_gate.slot_fds(slot_fd) if slot_fd is not None else (), on_spawn=on_spawn)
     except subprocess.TimeoutExpired as e:   # run_cmd already killed and reaped the whole group (#839)
-        return 124, s(e.output)
+        return TIMEOUT_RC, s(e.output)
     if killed_by_watch(ev, r.returncode): run_pi.started = ev.started; return NO_START_RC, s(r.stdout)
     return r.returncode, s(r.stdout)
 
@@ -172,11 +173,22 @@ def gpu_list(v):
     if not gs or any(g not in G.GPUS for g in gs): raise argparse.ArgumentTypeError(f"--gpu: one or more of {list(G.GPUS)}")
     return gs
 
+def result_of(rc, started, last_line):
+    """The record's result: no-start / stalled (NO_START_RC), timeout (TIMEOUT_RC), or PASS / FAIL / exit N
+    from the reply's last non-empty line."""
+    if rc == NO_START_RC: return "no-start" if not started else "stalled"
+    if rc == TIMEOUT_RC: return "timeout"
+    return "PASS" if "PASS" in last_line else ("FAIL" if "FAIL" in last_line else f"exit {rc}")
+
+def exit_code_of(result, rc):
+    """run-task's exit code: 0 PASS, NO_START_RC no-start / stalled, 1 otherwise."""
+    return 0 if result == "PASS" else NO_START_RC if rc == NO_START_RC else 1
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--run-dir", required=True); p.add_argument("--cwd", required=True)
     p.add_argument("--task", required=True); p.add_argument("--prompt-file", required=True)
-    p.add_argument("--timeout", type=int, default=1500); p.add_argument("--top-session")
+    p.add_argument("--timeout", type=int, default=G.PI_TASK_TIMEOUT_S); p.add_argument("--top-session")
     p.add_argument("--gpu", type=gpu_list, default=os.environ.get("FACTORY_PI_GPU") or G.LARGE_GPU)
     p.add_argument("--start-timeout", type=int, default=0); p.add_argument("--stall-timeout", type=int, default=0)
     p.add_argument("--slot-wait", type=int, default=0)
@@ -211,7 +223,7 @@ def main():
     launched = time.time()
     try:
         rc, text = run_pi([pi_gpu, a.gpu, "--session-dir", sdir, "--no-context-files", "--no-skills", "--no-mcp",
-                           "--approve", "-p", prompt], a.cwd, max(a.timeout, G.MIN_CLIENT_TIMEOUT_S), slot, env,
+                           "--approve", "-p", prompt], a.cwd, G.client_timeout(a.timeout), slot, env,
                           sdir=sdir, start_s=a.start_timeout or None, beat=lambda d: progress(**d),
                           stall_s=a.stall_timeout or None)
     finally:
@@ -221,13 +233,13 @@ def main():
     files = session_files(sdir, launched)   # this launch's session only, never an older run's under the same task name
     sid, u = session_usage(files[-1]) if files else (None, {"input": 0, "output": 0, "cacheRead": 0, "turns": 0})
     last = ([l for l in text.strip().splitlines() if l.strip()][-1:] or [""])[0]
-    result = ("no-start" if not run_pi.started else "stalled") if rc == NO_START_RC else "timeout" if rc == 124 else ("PASS" if "PASS" in last else ("FAIL" if "FAIL" in last else f"exit {rc}"))
+    result = result_of(rc, run_pi.started, last)
     rec = {"task": task, "gpu": a.gpu, "session_id": sid, "session_file": files[-1] if files else None,
            "start": t0.isoformat(timespec="seconds"), "end": t1.isoformat(timespec="seconds"),
            "wall_s": round((t1 - t0).total_seconds(), 1), "rc": rc, "result": result, **u}
     with open(os.path.join(run, "tasks.jsonl"), "a") as f: f.write(json.dumps(rec) + "\n")
     progress(state="finished", result=result, rc=rc, end=rec["end"])
     print(json.dumps(rec)); print("--- pi tail ---"); print(text[-1500:])
-    sys.exit(0 if result == "PASS" else NO_START_RC if rc == NO_START_RC else 1)
+    sys.exit(exit_code_of(result, rc))
 
 if __name__ == "__main__": main()
