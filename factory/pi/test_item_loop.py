@@ -21,6 +21,38 @@ def fake_home():
         finally:
             L.HOME = old
 
+@contextlib.contextmanager
+def patched_driver_env(run=None, sleep=None):
+    """fake_home() plus, when given, L.subprocess.run = run and L.time.sleep = sleep, yielding fake_home's
+    temp dir path and restoring the original L.subprocess.run and L.time.sleep in a finally block
+    (fake_home restores L.HOME)."""
+    old_run, old_sleep = L.subprocess.run, L.time.sleep
+    with fake_home() as h:
+        if run is not None: L.subprocess.run = run
+        if sleep is not None: L.time.sleep = sleep
+        try:
+            yield h
+        finally:
+            L.subprocess.run = old_run
+            L.time.sleep = old_sleep
+
+@contextlib.contextmanager
+def fake_modules(**overrides):
+    """Set the named item_loop module attributes (dotted paths, e.g. HOME, subprocess.run, time.sleep)
+    to the given values, saving every original and restoring them in a finally block."""
+    saved = []
+    for name, value in overrides.items():
+        obj, parts = L, name.split(".")
+        for part in parts[:-1]:
+            obj = getattr(obj, part)
+        saved.append((obj, parts[-1], getattr(obj, parts[-1])))
+        setattr(obj, parts[-1], value)
+    try:
+        yield
+    finally:
+        for obj, attr, old in saved:
+            setattr(obj, attr, old)
+
 def make_driver(issue=1, repo="cmdemo1-workorders", dry_run=True, **kw):
     """Create a standard test Driver; dry_run is explicit so callers can opt out."""
     return L.Driver(repo, issue, dry_run=dry_run, **kw)
@@ -51,6 +83,26 @@ def scripted_sh(replies):
         return L.subprocess.CompletedProcess(cmd, 0, "", "")
     sh.calls = calls
     return sh
+
+def pi_stub(result, calls=None):
+    """Driver.pi replacement: returns a callable with the Driver.pi signature (name, prompt, timeout=1800, gpu=None)
+    that appends each call's name to calls (when given) and returns result: a bool, or a callable taking the
+    calls list and returning a bool."""
+    def pi(name, prompt, timeout=1800, gpu=None):
+        if calls is not None: calls.append(name)
+        return result(calls) if callable(result) else result
+    return pi
+
+def scripted_pi(results):
+    """Driver.pi replacement: a callable with the Driver.pi signature (name, prompt, timeout=1800, gpu=None)
+    that records each call's name in the callable's .calls list and returns the scripted booleans from results
+    (the last value repeats)."""
+    calls = []
+    def pi(name, prompt, timeout=1800, gpu=None):
+        calls.append(name)
+        return results[min(len(calls) - 1, len(results) - 1)]
+    pi.calls = calls
+    return pi
 
 class PromptMentions:   # mixin for prompt tests: every phrase the prompt must name, on one line, needle named on failure
     def assert_mentions(self, text, *needles):
@@ -694,7 +746,7 @@ class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be ma
             d.s["stage"] = "implement"
             d.s["wt"] = tempfile.mkdtemp(dir=h)
             calls = []
-            d.pi = lambda name, prompt, timeout=1800, gpu=None: (calls.append(name), False)[1]
+            d.pi = pi_stub(False, calls)
             d.st_implement()
             self.assertEqual(d.s.get("tasks_done", []), [])   # a failed task is never recorded done
             self.assertEqual(len(calls), L.LIMITS["local_fix"] + 1)   # retried up to the limit
@@ -711,7 +763,7 @@ class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be ma
             d.s["plan"] = dict(PLAN, tasks=[{"name": "t1", "prompt": "p"}])
             d.s["stage"] = "implement"
             d.s["wt"] = tempfile.mkdtemp(dir=h)
-            d.pi = lambda name, prompt, timeout=1800, gpu=None: True
+            d.pi = pi_stub(True)
             d.st_implement()
             self.assertEqual(d.s["tasks_done"], ["t1"])   # a passing task lands in tasks_done
             self.assertEqual(d.s["stage"], "local-verify")   # and the stage advances as before
@@ -723,7 +775,7 @@ class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be ma
             d.s["stage"] = "implement"
             d.s["wt"] = tempfile.mkdtemp(dir=h)
             calls = []
-            d.pi = lambda name, prompt, timeout=1800, gpu=None: (calls.append(name), len(calls) > 1)[1]   # fails exactly once
+            d.pi = pi_stub(lambda cs: len(cs) > 1, calls)   # fails exactly once
             d.st_implement()
             self.assertEqual(d.s["tasks_done"], ["t1"])
             self.assertEqual(d.s["stage"], "local-verify")
@@ -831,20 +883,14 @@ class GhRateLimit(unittest.TestCase):
 
     def run_gh(self, replies, issue=8):
         """Call d.gh() with subprocess.run returning `replies` in order (last one repeats); returns (result|exc, calls, sleeps, driver)."""
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
-            L.HOME = h
-            calls, sleeps = [0], []
-            def fake_run(*a, **k):
-                rc, out = replies[min(calls[0], len(replies) - 1)]; calls[0] += 1
-                return L.subprocess.CompletedProcess(a, rc, out, "")
-            L.subprocess.run, L.time.sleep = fake_run, sleeps.append
-            try:
-                d = L.Driver("cmdemo1-workorders", issue)
-                try: res = d.gh("pr", "list")
-                except RuntimeError as e: res = e
-            finally:
-                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        calls, sleeps = [0], []
+        def fake_run(*a, **k):
+            rc, out = replies[min(calls[0], len(replies) - 1)]; calls[0] += 1
+            return L.subprocess.CompletedProcess(a, rc, out, "")
+        with patched_driver_env(run=fake_run, sleep=sleeps.append) as h:
+            d = L.Driver("cmdemo1-workorders", issue)
+            try: res = d.gh("pr", "list")
+            except RuntimeError as e: res = e
         return res, calls[0], sleeps, d
 
     def test_is_rate_limit_matches_real_gh_errors_only(self):
@@ -893,77 +939,51 @@ class GhRateLimit(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         self.assertEqual(sleeps, [50, 10, 50, 50, 20])   # 60s and 120s waits, re-saving state every 50s
         self.assertNotIn("gh_wait", d.s)                 # cleared once gh answered
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_sleep = L.HOME, L.time.sleep
-            L.HOME = h
-            try:
-                d = L.Driver("cmdemo1-workorders", 9)
-                L.time.sleep = lambda s: seen.append(json.load(open(d.state_p)))
-                d.wait_alive(120, "gh rate limit, retry 1")
-            finally: L.time.sleep, L.HOME = old_sleep, old_home
+        with patched_driver_env(sleep=lambda s: seen.append(json.load(open(d.state_p)))) as h:
+            d = L.Driver("cmdemo1-workorders", 9)
+            d.wait_alive(120, "gh rate limit, retry 1")
         self.assertEqual(len(seen), 3)
         self.assertTrue(all(x["gh_wait"]["why"] == "gh rate limit, retry 1" and x["pid"] == os.getpid() for x in seen))
         self.assertTrue(seen[0]["gh_wait"]["until"] >= seen[-1]["gh_wait"]["until"])
 
     def test_non_rate_limit_failure_still_raises(self):
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
-            L.HOME = h
-            calls, sleeps = [0], []
-            try:
-                def fake_run(*a, **k):
-                    calls[0] += 1
-                    return L.subprocess.CompletedProcess(a, 1, "HTTP 404: Not Found", "")
-                def fake_sleep(s): sleeps.append(s)
-                L.subprocess.run = fake_run
-                L.time.sleep = fake_sleep
-                d = L.Driver("cmdemo1-workorders", 8)
-                with self.assertRaises(RuntimeError):
-                    d.gh("pr", "list")
-            finally:
-                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        calls, sleeps = [0], []
+        def fake_run(*a, **k):
+            calls[0] += 1
+            return L.subprocess.CompletedProcess(a, 1, "HTTP 404: Not Found", "")
+        def fake_sleep(s): sleeps.append(s)
+        with patched_driver_env(run=fake_run, sleep=fake_sleep) as h:
+            d = L.Driver("cmdemo1-workorders", 8)
+            with self.assertRaises(RuntimeError):
+                d.gh("pr", "list")
         self.assertEqual(calls[0], 1)   # non-rate-limit failures are never retried
         self.assertEqual(sleeps, [])
 
     def test_gh_retries_rate_limit_with_backoff_then_succeeds(self):
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
-            L.HOME = h
-            calls, sleeps = [0], []
-            try:
-                def fake_run(*a, **k):
-                    calls[0] += 1
-                    if calls[0] <= 2:
-                        return L.subprocess.CompletedProcess(a, 1, "HTTP 403: API rate limit exceeded", "")
-                    return L.subprocess.CompletedProcess(a, 0, "42", "")
-                def fake_sleep(s): sleeps.append(s)
-                L.subprocess.run = fake_run
-                L.time.sleep = fake_sleep
-                d = L.Driver("cmdemo1-workorders", 8)
-                self.assertEqual(d.gh("pr", "list").returncode, 0)   # a later try succeeds; no raise
-            finally:
-                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        calls, sleeps = [0], []
+        def fake_run(*a, **k):
+            calls[0] += 1
+            if calls[0] <= 2:
+                return L.subprocess.CompletedProcess(a, 1, "HTTP 403: API rate limit exceeded", "")
+            return L.subprocess.CompletedProcess(a, 0, "42", "")
+        def fake_sleep(s): sleeps.append(s)
+        with patched_driver_env(run=fake_run, sleep=fake_sleep) as h:
+            d = L.Driver("cmdemo1-workorders", 8)
+            self.assertEqual(d.gh("pr", "list").returncode, 0)   # a later try succeeds; no raise
         self.assertEqual(calls[0], 3)             # two rate-limited tries, then the success
         self.assertEqual(sleeps, [60, 120])       # backoff before each retry
 
     def test_gh_waits_until_reset_after_backoff(self):
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
-            L.HOME = h
-            calls, sleeps = [0], []
-            try:
-                def fake_run(*a, **k):
-                    calls[0] += 1
-                    if calls[0] <= 5:
-                        return L.subprocess.CompletedProcess(a, 1, "HTTP 403: Secondary rate limit in effect. Please try again.", "")
-                    return L.subprocess.CompletedProcess(a, 0, "42", "")
-                def fake_sleep(s): sleeps.append(s)
-                L.subprocess.run = fake_run
-                L.time.sleep = fake_sleep
-                d = L.Driver("cmdemo1-workorders", 8)
-                self.assertEqual(d.gh("pr", "list").returncode, 0)
-            finally:
-                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        calls, sleeps = [0], []
+        def fake_run(*a, **k):
+            calls[0] += 1
+            if calls[0] <= 5:
+                return L.subprocess.CompletedProcess(a, 1, "HTTP 403: Secondary rate limit in effect. Please try again.", "")
+            return L.subprocess.CompletedProcess(a, 0, "42", "")
+        def fake_sleep(s): sleeps.append(s)
+        with patched_driver_env(run=fake_run, sleep=fake_sleep) as h:
+            d = L.Driver("cmdemo1-workorders", 8)
+            self.assertEqual(d.gh("pr", "list").returncode, 0)
         self.assertEqual(calls[0], 6)
         self.assertEqual(sleeps, [60, 120, 240, 600, 600])   # backoff first, then 600s waits until the limit resets
 
@@ -1718,18 +1738,13 @@ class GhAppToken(unittest.TestCase):   # gh reads/writes use the GitHub App toke
 
     def run_gh(self, replies):
         """d.gh() with subprocess.run returning `replies` in order; returns (result, [GH_TOKEN seen per call], driver logs)."""
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run = L.HOME, L.subprocess.run
-            L.HOME = h
-            seen, i = [], [0]
-            def fake_run(*a, **k):
-                seen.append((k.get("env") or {}).get("GH_TOKEN")); rc, out = replies[min(i[0], len(replies) - 1)]; i[0] += 1
-                return L.subprocess.CompletedProcess(a, rc, out, "")
-            L.subprocess.run = fake_run
-            try:
-                d = make_driver(issue=8); logs = []; d.log = logs.append
-                res = d.gh("pr", "list", check=False)
-            finally: L.subprocess.run, L.HOME = old_run, old_home
+        seen, i = [], [0]
+        def fake_run(*a, **k):
+            seen.append((k.get("env") or {}).get("GH_TOKEN")); rc, out = replies[min(i[0], len(replies) - 1)]; i[0] += 1
+            return L.subprocess.CompletedProcess(a, rc, out, "")
+        with patched_driver_env(run=fake_run) as h:
+            d = make_driver(issue=8); logs = []; d.log = logs.append
+            res = d.gh("pr", "list", check=False)
         return res, seen, logs
 
     def test_gh_uses_app_token_when_it_works(self):
@@ -1762,11 +1777,9 @@ class GhAppToken(unittest.TestCase):   # gh reads/writes use the GitHub App toke
     def test_pr_and_issue_create_stay_on_user_login(self):
         os.environ["GH_APP_TOKEN_CMD"] = f"printf {self.FAKE}"
         for args in (("pr", "create", "--title", "t"), ("issue", "create", "--title", "t")):
-            with tempfile.TemporaryDirectory() as h:
-                old_home, old_run = L.HOME, L.subprocess.run; L.HOME = h; seen = []
-                L.subprocess.run = lambda *a, **k: (seen.append(k.get("env")), L.subprocess.CompletedProcess(a, 0, "", ""))[1]
-                try: make_driver(issue=8).gh(*args)
-                finally: L.subprocess.run, L.HOME = old_run, old_home
+            seen = []
+            with patched_driver_env(run=lambda *a, **k: (seen.append(k.get("env")), L.subprocess.CompletedProcess(a, 0, "", ""))[1]) as h:
+                make_driver(issue=8).gh(*args)
             self.assertEqual(seen, [None], args)
 
     def test_failed_mint_is_not_retried_every_call(self):
@@ -1981,9 +1994,8 @@ class ReleaseSkip(unittest.TestCase):   # #914: a system merge the system pipeli
         moves, comments = [], []
         d.gh = lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(files) if a[1].endswith("/commits/" + "ab" * 20) else "[]", "")
         d.move, d.comment, d.usage = moves.append, lambda body, **k: comments.append(body), lambda **k: ""
-        old = L.time.sleep; L.time.sleep = lambda s: None
-        try: d.st_main()
-        finally: L.time.sleep = old
+        with fake_modules(**{"time.sleep": lambda s: None}):
+            d.st_main()
         return d, moves, comments
 
     def test_factory_only_merge_goes_to_done_without_deploy(self):
