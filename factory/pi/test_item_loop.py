@@ -1,5 +1,5 @@
 """Unit tests of the Pi item driver's decision rules (no network, no Pi). Run: python3 -m unittest factory/pi/test_item_loop.py"""
-import argparse, fcntl, importlib.machinery, importlib.util, json, os, re, signal, subprocess, sys, tempfile, time, unittest
+import argparse, fcntl, importlib.machinery, importlib.util, inspect, json, os, re, signal, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import item_loop as L
@@ -74,10 +74,10 @@ def scripted_sh(replies):
     return sh
 
 def pi_stub(result, calls=None):
-    """Driver.pi replacement: returns a callable with the Driver.pi signature (name, prompt, timeout=1800, gpu=None)
+    """Driver.pi replacement: returns a callable with the Driver.pi signature (name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None)
     that appends each call's name to calls (when given) and returns result: a bool, or a callable taking the
     calls list and returning a bool."""
-    def pi(name, prompt, timeout=1800, gpu=None):
+    def pi(name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None):
         if calls is not None: calls.append(name)
         return result(calls) if callable(result) else result
     return pi
@@ -187,6 +187,18 @@ class PlanSpec(unittest.TestCase):   # validate_plan as a specification list: PL
             for p in (absent, dict(PLAN, **{k: None})):
                 self.assertEqual(L.validate_plan(p), errs, k)
                 self.assertEqual(self.spec_errors(p), errs, k)
+
+    def test_task_timeout(self):
+        """A plan task's optional timeout is validated where the other task fields are: every task omits it or
+        gives a positive int at or above MIN_CLIENT_TIMEOUT_S; the message names the offending task index."""
+        self.assertEqual(L.validate_plan(PLAN), [])   # no timeout at all
+        self.assertEqual(L.validate_plan(dict(PLAN, tasks=[{"name": "t1", "prompt": "p", "timeout": 600}])), [])
+        msg = f"timeout must be a positive int at or above {G.MIN_CLIENT_TIMEOUT_S}"
+        self.assert_check(dict(PLAN, tasks=[{"name": "t1", "prompt": "p", "timeout": "90 seconds"}]), f"tasks[0] {msg}")
+        self.assert_check(dict(PLAN, tasks=[{"name": "t1", "prompt": "p", "timeout": 5}]), f"tasks[0] {msg}")
+        self.assert_check(dict(PLAN, tasks=[{"name": "t1", "prompt": "p"},
+                                            {"name": "t2", "prompt": "p", "timeout": "90 seconds"}]),
+                          f"tasks[1] {msg}")
 
     def test_branch_prefix(self):
         self.assert_check(dict(PLAN, branch="feature/x"), "branch must start with cm-ai-ops-bot/")
@@ -1378,6 +1390,54 @@ class RunTaskTimeout(unittest.TestCase):   # cmdemo1-system#817: --timeout must 
                 self.fail("the GPU slot lock is still held after the timeout")
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN); f.close()
+
+    def test_result_of_covers_each_outcome(self):   # the result vocabulary: no-start / stalled, timeout, PASS, FAIL, exit N
+        rt = self.rt
+        self.assertEqual(rt.result_of(rt.NO_START_RC, False, "PASS"), "no-start")
+        self.assertEqual(rt.result_of(rt.NO_START_RC, True, "PASS"), "stalled")
+        self.assertEqual(rt.result_of(rt.TIMEOUT_RC, True, "PASS"), "timeout")
+        self.assertEqual(rt.result_of(0, True, "done, PASS"), "PASS")
+        self.assertEqual(rt.result_of(1, True, "done, FAIL"), "FAIL")
+        self.assertEqual(rt.result_of(3, True, "crashed"), "exit 3")
+
+class SharedTaskTimeout(unittest.TestCase):   # one Pi task's wall-clock budget is one shared constant, not three literals
+    """1800 used to be spelled out in three places: Driver.pi's own default, the review call, and run-task's
+    --timeout default. It now lives once in factory/pi/gpu.py (G.PI_TASK_TIMEOUT_S), is re-exported by item_loop
+    (L.PI_TASK_TIMEOUT_S) and read by run-task. A plan task's own "timeout" must still win over that default."""
+
+    def rt(self):   # run-task has no .py suffix: load it the way HandoffStartWatchdog.rt() does
+        loader = importlib.machinery.SourceFileLoader("run_task_shared_timeout", os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-task"))
+        m = importlib.util.module_from_spec(importlib.util.spec_from_loader("run_task_shared_timeout", loader)); loader.exec_module(m); return m
+
+    def test_driver_pi_default_is_the_shared_constant(self):
+        self.assertEqual(inspect.signature(L.Driver.pi).parameters["timeout"].default, L.G.PI_TASK_TIMEOUT_S,
+                         "Driver.pi must default to the shared constant instead of its own literal or None")
+        self.assertEqual(L.G.PI_TASK_TIMEOUT_S, L.PI_TASK_TIMEOUT_S,
+                         "item_loop must re-export gpu.py's constant, never keep a second copy")
+        self.assertEqual(L.PI_TASK_TIMEOUT_S, 1800, "one Pi task's wall-clock budget is 30 minutes")
+
+    def test_run_task_timeout_default_is_the_shared_constant(self):
+        rt = self.rt()
+        class Parsed(Exception): pass   # raised from inside parse_args so main() stops before launching any Pi
+        real = argparse.ArgumentParser.parse_args
+        def spy(parser, args=None, namespace=None):
+            real(parser, args=args, namespace=namespace)   # parse the patched argv (no --timeout given),
+            raise Parsed(next(x.default for x in parser._actions if "--timeout" in x.option_strings))   # then read --timeout's default
+        argv = ["run-task", "--run-dir", "/tmp/shared-timeout-run", "--cwd", "/tmp", "--task", "t", "--prompt-file", "/dev/null"]
+        with mock.patch.object(argparse.ArgumentParser, "parse_args", spy), mock.patch.object(sys, "argv", argv):
+            with self.assertRaises(Parsed) as cm: rt.main()
+        self.assertEqual(cm.exception.args[0], L.G.PI_TASK_TIMEOUT_S,
+                         "run-task --timeout must default to the shared constant, not its own literal")
+
+    def test_explicit_task_timeout_still_flows_through(self):
+        with fake_home():
+            d = make_driver(issue=1)
+            seen = []
+            def rec(*a, **kw):   # record whatever timeout pi was handed (positional or keyword), then pass the task
+                seen.append(a[2] if len(a) > 2 else kw.get("timeout")); return True
+            d.pi = rec
+            self.assertTrue(d.task_passes({"name": "t1", "prompt": "p", "timeout": 1234}))
+            self.assertEqual(seen, [1234], "a plan task's own timeout must reach Driver.pi untouched")
 
 class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, pro6000 1, obs 1, ts3 1 for every Pi launch
     """On Nov 21 a Pi session ran `rm -f /tmp/factory-pi-*-slot-*.lock`; new run-tasks then took "free" slots on new

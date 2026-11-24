@@ -70,7 +70,7 @@ HANDOFF_SLOT_WAIT_S = 900 # the first attempt waits this long for its own GPU's 
 ANY_SLOT_WAIT_S = 2 * 3600  # a relaunch (any free GPU) or a review waits up to 2 h for a slot: a busy queue is no failure
 DRAFT_PLAN_TIMEOUT_S = 2700  # the draft-plan Pi pass: cold prompt reads on pro5000 made every 1500 s draft-plan time out (cmdemo1-system#884)
 RESEARCH_TIMEOUT_S = 1500    # the mandatory refactoring-research Pi pass
-PI_TASK_TIMEOUT_S = 1800     # the default timeout for one plan task run through task_passes
+PI_TASK_TIMEOUT_S = G.PI_TASK_TIMEOUT_S   # the default timeout for one plan task run through task_passes
 # Not required to merge, but a red one still stalls the PR: route to Pi instead of waiting on it (no-idle-stall).
 QUALITY_CHECKS = ("qodana", "refactoring rationale")
 HEARTBEAT_MIN = 30        # no progress for this long -> one short status comment
@@ -212,6 +212,17 @@ def _entry_fields(field, *keys):
     def bad(p): return [i for i, e in enumerate(p.get(field) or []) if not all(e.get(k) for k in keys)]
     return (lambda p: not bad(p)), lambda p: "; ".join(f"{field}[{i}] needs {' and '.join(keys)}" for i in bad(p))
 
+def _task_timeouts():
+    """Spec for a plan task's optional `timeout`: every task omits it or gives a positive int at or above
+    MIN_CLIENT_TIMEOUT_S (the floor every Pi client timeout has). The message names the offending task index,
+    like _entry_fields."""
+    def bad(p):
+        return [i for i, t in enumerate(p.get("tasks") or [])
+                if "timeout" in t and not (isinstance(t["timeout"], int) and not isinstance(t["timeout"], bool)
+                                           and t["timeout"] >= G.MIN_CLIENT_TIMEOUT_S)]
+    return (lambda p: not bad(p)), lambda p: "; ".join(
+        f"tasks[{i}] timeout must be a positive int at or above {G.MIN_CLIENT_TIMEOUT_S}" for i in bad(p))
+
 def _no_secret_values(p):
     blob = json.dumps(p)
     return scrub(blob) == blob
@@ -225,6 +236,7 @@ PLAN_CHECKS = [
     (lambda p: str(p.get("branch", "")).startswith(f"{BOT}/"), f"branch must start with {BOT}/"),
     _entry_fields("criteria", "text", "evidence_cmd"),
     _entry_fields("tasks", "name", "prompt"),
+    _task_timeouts(),
     (lambda p: (p.get("repo"), p.get("issue")) not in NEVER_MERGE, "this item's PR is never merged"),
     (lambda p: (p.get("repo"), p.get("issue")) not in HANDS_OFF, "this item is hands-off (Jeffrey); do not work it"),
     (lambda p: p.get("size") in (None, "large", "small"), "size must be large or small"),
@@ -689,14 +701,14 @@ class Driver:
         return g
     def gpu_label(self, g=None): return G.GPUS[g or self.gpu()]["label"]
 
-    def pi(self, name, prompt, timeout=1800, gpu=None):
+    def pi(self, name, prompt, timeout=PI_TASK_TIMEOUT_S, gpu=None):
         pf = os.path.join(self.run_dir, "logs", f"{name}.prompt.md")
         suffix = ("\n\nRules: follow the repository's AGENTS.md and CLAUDE.md (read them if this task touches code, tests or "
                   "the build). Make only the change asked. Do not run git commit, git push or gh, and do not read or print "
                   "credentials. When done, run the narrowest relevant build/test, then end your reply with PASS or FAIL as "
                   "the last line.")
         open(pf, "w").write(scrub(prompt) + suffix)
-        timeout = max(int(timeout), G.MIN_CLIENT_TIMEOUT_S)
+        timeout = G.client_timeout(timeout)
         review = name.startswith("independent-review")   # a review keeps its non-author GPUs; no-start = infra retry
         task, g = name, gpu or self.gpu()
         for k in range(LIMITS["pi_relaunch"] + 1):
@@ -738,7 +750,7 @@ class Driver:
         for k in range(LIMITS["local_fix"] + 1):
             name = t["name"] if not k else f"{t['name']}-retry-{k}"
             if k: prompt = t["prompt"] + "\nNote: a previous attempt at this task failed; fix what it left broken."
-            if self.pi(name, prompt, int(t.get("timeout", PI_TASK_TIMEOUT_S))): return True
+            if self.pi(name, prompt, t.get("timeout", PI_TASK_TIMEOUT_S)): return True
         self.blocker(f"Pi task `{t['name']}` still failed after {LIMITS['local_fix'] + 1} attempts (last attempt `{name}`).")
         return False
 
@@ -1243,7 +1255,7 @@ class Driver:
                      "the repository's AGENTS.md / CLAUDE.md rules hold; the code is easy to read (names, small methods, no "
                      "duplication) and the refactoring research is substantive and its in-scope items are done; no secret, "
                      f"credential or production-setup change. Write one bullet per problem to {out} (or `- No findings.`). "
-                     "End your reply with PASS when there is no blocking problem, otherwise FAIL.", 1800, gpu=",".join(rv))
+                     "End your reply with PASS when there is no blocking problem, otherwise FAIL.", PI_TASK_TIMEOUT_S, gpu=",".join(rv))
         rv = self.last_task.get("gpu") or rv[0]; self.save(reviewer_gpu=rv)
         if self.sh(["git", "status", "--porcelain"], cwd=self.s["wt"], check=False).stdout.strip():
             self.log("reviewer changed files; discarding them"); self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"])
