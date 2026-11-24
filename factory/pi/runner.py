@@ -28,30 +28,39 @@ def run_cmd(cmd, cwd=None, timeout=None, env=None, stdin=None, shell=None, stdou
     stderr=None means the child's stderr joins the single captured stream (subprocess.STDOUT, the way run-task reads
     Pi); pass subprocess.STDOUT/PIPE/DEVNULL explicitly to say otherwise. on_spawn(p) runs with the Popen before any
     waiting, so a watchdog (run-task's) can hold the handle while this function waits. shell=None means 'a str is a
-    shell command', which is what the callers being replaced did."""
+    shell command', which is what the callers being replaced did.
+
+    If anything other than the deadline interrupts the wait (KeyboardInterrupt, an exception from on_spawn), the whole
+    group is SIGKILLed and reaped before the exception propagates, as subprocess.run did for its child: the child is in
+    its own session now, so it no longer shares the terminal's Ctrl-C and would otherwise outlive the driver."""
     p = subprocess.Popen(cmd, cwd=cwd, shell=isinstance(cmd, str) if shell is None else shell, text=text, env=env,
                          stdin=stdin, stdout=stdout, stderr=stderr if stderr is not None else subprocess.STDOUT,
                          pass_fds=pass_fds, start_new_session=True)
-    if on_spawn is not None: on_spawn(p)
+    def kill(sig):
+        try: os.killpg(p.pid, sig)
+        except ProcessLookupError: pass                        # already gone: nothing in the group left to signal
     try:
-        out, _ = p.communicate(timeout=timeout)
-        return subprocess.CompletedProcess(cmd, p.returncode, out, "")
-    except subprocess.TimeoutExpired as e:
-        collected = e.output if e.output is not None else ""   # bytes or str, whichever text= asked for
-        def kill(sig):
-            try: os.killpg(p.pid, sig)
-            except ProcessLookupError: pass                    # already gone: nothing in the group left to signal
-        for sig in (signal.SIGTERM, signal.SIGKILL):           # ask first, then end the whole group
-            kill(sig)
-            try:
-                out, _ = p.communicate(timeout=5)
-                collected = out or collected
-                break
-            except subprocess.TimeoutExpired as e2:            # something outside the group still holds the pipe
-                collected = (e2.output if e2.output is not None else "") or collected
+        if on_spawn is not None: on_spawn(p)
+        try:
+            out, _ = p.communicate(timeout=timeout)
+            return subprocess.CompletedProcess(cmd, p.returncode, out, "")
+        except subprocess.TimeoutExpired as e:
+            collected = e.output if e.output is not None else ""   # bytes or str, whichever text= asked for
+            for sig in (signal.SIGTERM, signal.SIGKILL):       # ask first, then end the whole group
+                kill(sig)
+                try:
+                    out, _ = p.communicate(timeout=5)
+                    collected = out or collected
+                    break
+                except subprocess.TimeoutExpired as e2:        # something outside the group still holds the pipe
+                    collected = (e2.output if e2.output is not None else "") or collected
+            raise subprocess.TimeoutExpired(cmd, timeout, output=collected) from None
+    except BaseException as e:
+        if not isinstance(e, subprocess.TimeoutExpired): kill(signal.SIGKILL)   # interrupted (Ctrl-C, ...): subprocess.run
+        raise                                                  # killed its child on any exception; the group goes too
+    finally:
         try:
             if p.stdout is not None and not p.stdout.closed: p.stdout.close()   # stop waiting for EOF from a stranger
         except OSError: pass
         try: p.wait(timeout=5)                                 # always reap: the group is dead, so this returns at once
         except subprocess.TimeoutExpired: pass
-        raise subprocess.TimeoutExpired(cmd, timeout, output=collected) from None

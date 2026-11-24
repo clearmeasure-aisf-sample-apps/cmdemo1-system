@@ -56,6 +56,7 @@ def session_usage(path):
     return sid, tot
 
 NO_START_RC = 125
+PI_VERSION_TIMEOUT_S = 30   # `pi --version` prints at once; a hung probe must not hold the task (or the GPU slot) forever
 TIMEOUT_RC = 124   # wall-clock timeout: Pi's group is killed, the record says result "timeout"
 
 SLACK_S = 2.0      # mtime granularity: a session file Pi creates after launch is never older than launch - SLACK_S
@@ -163,6 +164,12 @@ def run_pi(cmd, cwd, timeout, slot_fd=None, env=None, sdir=None, start_s=None, b
     if killed_by_watch(ev, r.returncode): run_pi.started = ev.started; return NO_START_RC, s(r.stdout)
     return r.returncode, s(r.stdout)
 
+def pi_version(timeout=PI_VERSION_TIMEOUT_S):
+    """`pi --version`'s stdout for run.json, run through run_cmd so a hung probe is killed with its whole group after
+    `timeout`; "" then (the record just lacks a version). stderr is discarded, as it was not part of the value."""
+    try: return (run_cmd(["pi", "--version"], timeout=timeout, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL).stdout or "").strip()
+    except subprocess.TimeoutExpired: return ""
+
 def write_json_atomic(path, obj):
     tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f: json.dump(obj, f)
@@ -198,7 +205,7 @@ def main():
     if not os.path.exists(meta):
         json.dump({"top_session": a.top_session or os.environ.get("FACTORY_TOP_SESSION") or "unnamed",
                    "start": now().isoformat(timespec="seconds"),
-                   "pi_version": subprocess.run(["pi", "--version"], capture_output=True, text=True).stdout.strip()},
+                   "pi_version": pi_version()},
                   open(meta, "w"), indent=1)
     task = re.sub(r"[^A-Za-z0-9._-]", "-", a.task)
     sdir = os.path.join(run, "pi-sessions", task); os.makedirs(sdir, exist_ok=True)

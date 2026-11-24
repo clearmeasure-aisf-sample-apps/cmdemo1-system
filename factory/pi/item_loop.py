@@ -119,9 +119,10 @@ def app_denied(output):
     """True when gh's output says the App token was refused (401/403, missing permission, branch rule, App rate limit)."""
     return bool(_APP_DENIED_RE.search("\n".join((output or "").splitlines()[-8:])))
 
-def app_token(env=None, clock=time.time, runner=subprocess.run):
+def app_token(env=None, clock=time.time, runner=run_cmd):
     """Cached App installation token from $GH_APP_TOKEN_CMD, or None when unset / the command fails (callers then use the user login).
-    Never logged: scrub() redacts it (ghs_ pattern and its exact value) and it is only passed to gh through GH_TOKEN."""
+    Never logged: scrub() redacts it (ghs_ pattern and its exact value) and it is only passed to gh through GH_TOKEN.
+    The mint command runs through run_cmd (#839), so on its 60 s timeout everything it started is killed with it."""
     env = os.environ if env is None else env
     cmd = env.get("GH_APP_TOKEN_CMD")
     if not cmd: return None
