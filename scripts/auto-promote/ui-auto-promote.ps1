@@ -26,6 +26,17 @@
     environment does not supersede it and does not restart the 60-minute pipeline-change clock. The newest $ReleaseWindow
     Default channel releases are listed; a running Default release older than those is found through
     the newest deployments to that environment (issue #314). A newer release that ended otherwise in the previous environment is skipped and the run log says so.
+    Health window first (2026-11-24): among the releases that qualify for an environment, the newest whose health window
+    in the previous environment is already complete by the reads stored so far is the candidate; only when none is
+    complete is the newest one the candidate (it then takes the reads). tdd gets a new dashboard release every 5 to 10
+    minutes, so always taking the newest restarted the 10-minute window and starved uat. A preferred pipeline-change
+    hold (#688) keeps its place. When the window has passed but the verdict still waits (the later read landed seconds
+    before it closed, or only one read since), the run pauses and reads once more (Get-HealthWaitSeconds: up to
+    $HealthWaitMaxSeconds s, within the job budget). A read is recorded for a release only while its commit is what runs in
+    the previous environment (Test-LiveCommitMatches).
+    Failed retry (2026-11-24, after #957): a release whose every deployment to the next environment ended Failed or
+    TimedOut is offered there again on a later run, at most $FailedDeploymentRetryLimit times, with every flag and the
+    health window checked again; a Canceled deployment is still a person's no and is never retried.
     Nothing is promoted while any deployment or runbook run (any project) to the target environment, or any ui
     deployment to a later-than-first environment, is queued, running, cancelling or waiting at an interruption; a call that
     fails or a listing that is incomplete also stops the run (fail closed). When the only busy reason is a short-lived
@@ -220,6 +231,12 @@ $SecurityAdvisoryPackageFiles = @('Directory.Build.props', 'Directory.Build.targ
 # through the newest deployments to that environment, at most this many (issue #314; fewer than one success among them
 # leaves the running release unknown: "comparison incomplete").
 $ReleaseWindow = 40
+# A release whose every deployment to the next environment failed (task Failed or TimedOut, never Canceled: a canceled one
+# is a person's no) is offered there again on a later run, at most this many times (cmdemo1-system #957 follow-up: the
+# dashboard 1.0.839 prod deployment failed on a transient npm ECONNRESET and no prod candidate was offered again until a
+# newer release passed uat). After this many failed deployments the release is left alone, as before.
+$FailedDeploymentRetryLimit = 2
+$RetryableTaskStates = @('Failed', 'TimedOut')
 $RunningLookupDeployments = 100
 $PromotionMarker = 'Promoted by workflow ui-auto-promote'
 # When a short-lived runbook (e.g. Hourly health report) is the only thing busy in the target environment, wait and
@@ -245,6 +262,9 @@ $MasterPendingPause = { param([int] $Seconds) Start-Sleep -Seconds $Seconds }
 # promotes when the budget is exhausted. Job timeout stays 55 minutes.
 $MasterPendingJobTimeoutMinutes = 55
 $SignOffWaitSeconds = 900
+# Longest wait in one run for the read that closes a health window (Get-HealthWaitSeconds); never past the job budget:
+# the reserve below keeps $HealthPauseSeconds for it, and the wait also uses what is left before the deadline.
+$HealthWaitMaxSeconds = 600
 $MasterPendingJobReserveSeconds = $SignOffWaitSeconds + $HealthPauseSeconds + ($RunbookBusyRetrySeconds * $RunbookBusyRetryLimit)
 
 $Settings = $DeployableSettings[$Deployable]
@@ -1387,6 +1407,79 @@ function Get-RunningRelease {
     $null
 }
 
+function Get-FailedTargetRetry {
+    <# Whether a release that already has deployments to the target may be offered there again. TargetStates: the task state
+       of each of its deployments to the target. Retry only when there is at least one and every one ended Failed or
+       TimedOut (a Canceled one is a person's no; Success, Queued, Executing or Waiting is not a failure to retry) and
+       there are no more than Limit of them. Returns @{ Retry = bool; Failed = count }. #>
+    param([string[]] $TargetStates, [int] $Limit = $FailedDeploymentRetryLimit, [string[]] $Retryable = $RetryableTaskStates)
+    $all = @($TargetStates)
+    $failed = @($all | Where-Object { $_ -in $Retryable }).Count
+    @{ Retry = ($all.Count -gt 0 -and $failed -eq $all.Count -and $failed -le $Limit); Failed = $failed }
+}
+
+function Get-RetryBlocker {
+    <# Why a failed deployment to the target must not be retried, or '' when it may. Only a deployment this workflow created
+       ($PromotionMarker in its Comments) whose task has no interruption other than its Sign-off, and that Sign-off was
+       answered Proceed, is a failure of the deployment itself (e.g. an npm ECONNRESET). A person's Abort at a Sign-off, a
+       guided-failure answer or another manual intervention also leaves the task Failed: that is a person's no, never
+       retried. Interruptions: Octopus interruptions regarding the task (Type, Title, IsPending, Form.Values.Result). #>
+    param($Deployment, [object[]] $Interruptions, [string] $Marker = $PromotionMarker)
+    $comments = [string] (Get-BusyItemProperty $Deployment 'Comments')
+    if (-not $comments.StartsWith($Marker)) { return "deployment $(Get-BusyItemProperty $Deployment 'Id') was not created by this workflow" }
+    foreach ($i in @($Interruptions)) {
+        if ($null -eq $i) { continue }
+        $type = [string] (Get-BusyItemProperty $i 'Type'); $title = [string] (Get-BusyItemProperty $i 'Title')
+        if ($type -ne 'ManualIntervention' -or $title -ne 'Sign-off') { return "its task has the interruption '$title' ($type)" }
+        if ([bool] (Get-BusyItemProperty $i 'IsPending')) { return 'its Sign-off is still pending' }
+        $values = Get-BusyItemProperty (Get-BusyItemProperty $i 'Form') 'Values'
+        $result = [string] (Get-BusyItemProperty $values 'Result')
+        if ($result -ne 'Proceed') { return "its Sign-off was answered '$result'" }
+    }
+    ''
+}
+
+function Test-HealthWindowComplete {
+    <# The health window of a deployment is complete from the reads already stored (no new read): HealthRequired false
+       (system) is always complete; else Get-HealthVerdict of Finished, Now and Reads is ok. A missing finish time is
+       not complete. #>
+    param([bool] $HealthRequired, $Finished, [datetime] $Now, [object[]] $Reads)
+    if (-not $HealthRequired) { return $true }
+    if (-not $Finished) { return $false }
+    (Get-HealthVerdict -Finished ([datetime] $Finished) -Now $Now -Reads @($Reads)) -eq 'ok'
+}
+
+function Get-HealthWaitSeconds {
+    <# After this run's read: how long to wait in this run before one more read, or -1 for no wait. Only when the verdict
+       waits (no read failed) and the window can be closed by one more read within MaxSeconds: that read must be at least
+       WindowMinutes after Finished and GapMinutes after the earliest read since Finished. Before 2026-11-24 the run
+       waited only after the window had passed with fewer than two reads, so a release superseded in tdd within about
+       10 to 20 minutes never closed its window (dashboard 1.0.855: reads 15:39:01 and 15:48:48 UTC, window end a few
+       seconds later, and the next run moved on to 1.0.858). MarginSeconds keeps the read clear of the boundary. #>
+    param([datetime] $Finished, [datetime] $Now, [object[]] $Reads, [int] $MaxSeconds, [int] $WindowMinutes = 10, [int] $GapMinutes = 5, [int] $MarginSeconds = 5)
+    if ((Get-HealthVerdict -Finished $Finished -Now $Now -Reads @($Reads) -WindowMinutes $WindowMinutes -GapMinutes $GapMinutes) -ne 'wait') { return -1 }
+    $since = @($Reads | Where-Object { $_.At -ge $Finished })
+    # No read since the deployment finished (the release no longer runs there, or no read was recorded): one more read
+    # cannot close the window, so waiting would only spend job time.
+    if ($since.Count -eq 0) { return -1 }
+    $at = $Finished.AddMinutes($WindowMinutes)
+    $first = ($since | Measure-Object -Property At -Minimum).Minimum
+    if ($first.AddMinutes($GapMinutes) -gt $at) { $at = $first.AddMinutes($GapMinutes) }
+    $wait = [int] [Math]::Ceiling([Math]::Max(0, ($at - $Now).TotalSeconds)) + $MarginSeconds
+    if ($wait -gt $MaxSeconds) { return -1 }
+    $wait
+}
+
+function Test-LiveCommitMatches {
+    <# A health read of the previous environment counts for a release only while that release is what runs there: the
+       commit the running app names at BuildPath (ui /_build, dashboard /build-facts.json) is the release's commit. No
+       BuildPath (system): true. An unreadable or different commit: false, and the read is not recorded (review of the
+       2026-11-24 change: a read of a newer tdd release must never be stored for an older candidate). #>
+    param([string] $BuildPath, [string] $LiveCommit, [string] $ReleaseCommit)
+    if (-not $BuildPath) { return $true }
+    [bool] ($LiveCommit -and $ReleaseCommit -and $LiveCommit -eq $ReleaseCommit)
+}
+
 function Select-Candidate {
     <# Environments ordered; Releases (Id, Version, Assembled); GetDeployments {param($releaseId)} -> deployments (Id, ReleaseId,
        EnvironmentId, TaskId, Created); GetTaskState {param($deployment)} -> Octopus task state; GetRunningOutside
@@ -1395,9 +1488,19 @@ function Select-Candidate {
        says why, and the evaluation flags "comparison incomplete" (no base commit). PreferHeld: @{ Version; Environment }
        from Get-HeldPipelinePrefer — when that version still qualifies for Environment, it is the candidate even if a
        newer release also succeeded in the previous environment (issue #688). Returns
-       @{ Release; Target; Previous; RunningReleaseId; Running; RunningUnknown; Notes } or $null with Notes. Looks at the
-       last environment first. #>
-    param([object[]] $Environments, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState, [scriptblock] $GetRunningOutside = $null, [object[]] $PreferHeld = @())
+       @{ Release; Target; Previous; RunningReleaseId; Running; RunningUnknown; Notes; Retry } or $null with Notes. Looks at the
+       last environment first.
+       Failed retry: a release whose every deployment to the target ended Failed or TimedOut, no more than
+       $FailedDeploymentRetryLimit of them (Get-FailedTargetRetry), is offered there again (Retry = number of failed
+       deployments); a Canceled one is still a person's no. GetRetryBlocker {param($deployment)} -> '' or why a failed
+       deployment is a person's no (Get-RetryBlocker: a Sign-off answered Abort, a guided failure, not this workflow's
+       deployment); without it nothing is retried (fail closed).
+       GetWindowComplete {param($release, $previousDeployment)} -> bool (optional): when given, the newest qualifying
+       release whose health window in the previous environment is complete (stored reads, Test-HealthWindowComplete) is
+       the candidate, so a steady stream of newer tdd releases cannot starve uat; when none is complete, the newest
+       qualifying release is the candidate (it takes the reads), as before. A preferred held release (#688) is never
+       passed over for this. #>
+    param([object[]] $Environments, [object[]] $Releases, [scriptblock] $GetDeployments, [scriptblock] $GetTaskState, [scriptblock] $GetRunningOutside = $null, [object[]] $PreferHeld = @(), [scriptblock] $GetWindowComplete = $null, [scriptblock] $GetRetryBlocker = $null)
     $sorted = @(Get-ReleasesNewestFirst $Releases)
     $cache = @{}; $outside = @{}
     $deps = { param($r) if (-not $cache.ContainsKey($r.Id)) { $cache[$r.Id] = @(& $GetDeployments $r.Id) }; $cache[$r.Id] }
@@ -1430,16 +1533,28 @@ function Select-Candidate {
             if ($heldRel.Count -gt 0) { $tryOrder = @($heldRel[0]) + @($sorted | Where-Object { $_.Id -ne $heldRel[0].Id }) }
         }
         $skipped = $null
+        $fallback = $null; $inWindow = [Collections.Generic.List[string]]::new()
         foreach ($r in $tryOrder) {
             $here = @(& $deps $r)
             $prev = @($here | Where-Object { $_.EnvironmentId -eq $previous.Id } | Sort-Object { [datetimeoffset] $_.Created } -Descending) | Select-Object -First 1
             if (-not $prev) { continue }
             $state = & $GetTaskState $prev
             if ($state -ne 'Success') { if (-not $skipped) { $skipped = "$($r.Version) ended $state in $($previous.Name)" }; continue }
-            if (@($here | Where-Object { $_.EnvironmentId -eq $target.Id }).Count -gt 0) {
+            $inTarget = @($here | Where-Object { $_.EnvironmentId -eq $target.Id })
+            $retry = 0
+            $own = [Collections.Generic.List[string]]::new()
+            if ($inTarget.Count -gt 0) {
                 # Preferred held already in the target: fall through to the newest-first remainder (issue #688).
                 if ($preferVersion -and $r.Version -eq $preferVersion) { continue }
-                break
+                $fr = Get-FailedTargetRetry -TargetStates @($inTarget | ForEach-Object { [string] (& $GetTaskState $_) })
+                if (-not $fr.Retry) {
+                    if ($fr.Failed -gt 0 -and $fr.Failed -eq $inTarget.Count) { $notes.Add("$($r.Version) failed $($fr.Failed) deployments to $($target.Name): the retry limit ($FailedDeploymentRetryLimit) is reached, it is not offered again") }
+                    break
+                }
+                if (-not $GetRetryBlocker) { break }
+                $blockers = @($inTarget | ForEach-Object { [string] (& $GetRetryBlocker $_) } | Where-Object { $_ })
+                if ($blockers.Count -gt 0) { $notes.Add("$($r.Version) failed in $($target.Name) but is not offered again: $($blockers -join '; ')"); break }
+                $retry = $fr.Failed
             }
             $runInfo = & $resolveRunning $target
             $running = $runInfo.Running; $unknown = $runInfo.Unknown
@@ -1461,13 +1576,21 @@ function Select-Candidate {
                         @($h | Where-Object { $_.EnvironmentId -eq $target.Id }).Count -eq 0
                     })
                 if ($newerInPrev.Count -gt 0) {
-                    $notes.Add("$Deployable $($r.Version) is held under the pipeline-change window before $($target.Name): kept as the candidate (issue #688); newer $(@($newerInPrev | ForEach-Object Version) -join ', ') in $($previous.Name) is not considered yet")
+                    $own.Add("$Deployable $($r.Version) is held under the pipeline-change window before $($target.Name): kept as the candidate (issue #688); newer $(@($newerInPrev | ForEach-Object Version) -join ', ') in $($previous.Name) is not considered yet")
                 } else {
-                    $notes.Add("$Deployable $($r.Version) is held under the pipeline-change window before $($target.Name): kept as the candidate (issue #688)")
+                    $own.Add("$Deployable $($r.Version) is held under the pipeline-change window before $($target.Name): kept as the candidate (issue #688)")
                 }
-            } elseif ($skipped) { $notes.Add("newer release ${skipped}: the older release $($r.Version) is considered for $($target.Name)") }
-            return @{ Release = $r; Target = $target; Previous = $previous; RunningReleaseId = $runningId; Running = $running; RunningUnknown = $unknown; Notes = @($notes) }
+            } elseif ($skipped) { $own.Add("newer release ${skipped}: the older release $($r.Version) is considered for $($target.Name)") }
+            $isPreferred = [bool] ($preferVersion -and $r.Version -eq $preferVersion)
+            if ($retry -gt 0) { $own.Add("$($r.Version) is offered to $($target.Name) again after $retry failed deployment$(if ($retry -ne 1) { 's' }) there (retry $retry of $FailedDeploymentRetryLimit)") }
+            $complete = $isPreferred -or -not $GetWindowComplete -or [bool] (& $GetWindowComplete $r $prev)
+            if ($complete -and $inWindow.Count -gt 0) { $own.Add("newer $($inWindow -join ', ') in $($previous.Name) still in the health window: $($r.Version), whose window is complete, is considered for $($target.Name)") }
+            $found = @{ Release = $r; Target = $target; Previous = $previous; RunningReleaseId = $runningId; Running = $running; RunningUnknown = $unknown; Notes = @(@($notes) + @($own)); Retry = $retry }
+            if ($complete) { return $found }
+            if (-not $fallback) { $fallback = $found }
+            $inWindow.Add([string] $r.Version)
         }
+        if ($fallback) { return $fallback }
     }
     @{ Release = $null; Notes = @($notes) }
 }
@@ -2100,13 +2223,27 @@ function Get-Evaluation {
         if ($r.Attempts -gt 1) { Say "Health read: $($r.Status) after $($r.Attempts) attempts." }
         @{ At = [datetime]::UtcNow; Status = $r.Status }
     }
+    # A read counts for this release only while it is what runs in the previous environment (Test-LiveCommitMatches).
+    function Test-StillLive {
+        $buildPath = [string] $Settings.BuildPath
+        if (-not $buildPath) { return $true }
+        $live = try { [string] (Invoke-RestMethod "$prevAddress$buildPath" -TimeoutSec 30).commit } catch { '' }
+        $ok = Test-LiveCommitMatches -BuildPath $buildPath -LiveCommit $live -ReleaseCommit $sha
+        if (-not $ok) { Say "Health read skipped: $($Previous.Name) runs commit '$live', not $sha of $($Release.Version)." }
+        $ok
+    }
+    # Checked before and after the read: a read can retry for about 100 s, and a newer release may go live meanwhile.
+    function Read-LiveHealth { if (Test-StillLive) { $h = Read-Health; if (Test-StillLive) { return $h } }; $null }
     if ($healthRequired -and $addressKnown -and $prevTask.State -eq 'Success') {
-        $reads += Read-Health
+        $h = Read-LiveHealth; if ($h) { $reads += $h }
         $now = [datetime]::UtcNow
-        if ((Get-HealthVerdict -Finished $finished -Now $now -Reads $reads) -eq 'wait' -and $now -ge $finished.AddMinutes(10) -and @($reads | Where-Object { $_.At -ge $finished }).Count -lt 2) {
-            Say "Waiting $HealthPauseSeconds s for the second health read."
-            Start-Sleep -Seconds $HealthPauseSeconds
-            $reads += Read-Health
+        $deadline = Get-MasterPendingDeadline
+        $budget = if ($deadline) { [int] [Math]::Max(0, ($deadline - $now).TotalSeconds + $HealthPauseSeconds) } else { $HealthWaitMaxSeconds }
+        $pause = Get-HealthWaitSeconds -Finished $finished -Now $now -Reads $reads -MaxSeconds ([Math]::Min($HealthWaitMaxSeconds, $budget))
+        if ($pause -ge 0) {
+            Say "Waiting $pause s for the health read that closes the window."
+            Start-Sleep -Seconds $pause
+            $h = Read-LiveHealth; if ($h) { $reads += $h }
         }
         $state[$key] = @($reads | ForEach-Object { @{ at = $_.At.ToString('o'); status = $_.Status } })
         Save-State
@@ -2343,7 +2480,28 @@ if ($recoveryCanceled -and -not $DryRun) {
 
 # 3. Candidate. Prefer an open pipeline-change hold so a newer tdd release does not restart its 60-minute clock (#688).
 $preferHeld = @(Get-HeldPipelinePrefer -HeldIssues $heldIssues)
-$candidate = Select-Candidate -Environments $envs -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t } -PreferHeld $preferHeld
+# Newest release whose health window in the previous environment is already complete (stored reads only, no new read),
+# so a steady stream of newer tdd releases cannot keep restarting the 10-minute window (2026-11-24, dashboard).
+$healthRequiredHere = [string] $Settings.HealthRead -ne 'none'
+$windowComplete = {
+    # Script-scope names: the block runs inside Select-Candidate, whose own $state (a task state) would shadow the reads.
+    param($r, $prevDeployment)
+    if (-not $script:healthRequiredHere) { return $true }
+    $stored = @(Read-StateReads $script:state ([string] $prevDeployment.Id) | ForEach-Object { @{ At = Get-Utc $_.at; Status = [string] $_.status } })
+    if ($stored.Count -lt 2) { return $false }
+    # An unreadable task is not complete (the newest release is then the candidate, as before), never a stopped run.
+    if (-not $script:taskCache.ContainsKey($prevDeployment.TaskId)) { try { $script:taskCache[$prevDeployment.TaskId] = Invoke-Octopus "/api/tasks/$($prevDeployment.TaskId)" } catch { return $false } }
+    $completed = $script:taskCache[$prevDeployment.TaskId].CompletedTime
+    Test-HealthWindowComplete -HealthRequired $true -Finished $(if ($completed) { Get-Utc $completed } else { $null }) -Now ([datetime]::UtcNow) -Reads $stored
+}
+# A failed deployment is retried only when it was this workflow's and no person answered its task (Get-RetryBlocker).
+# An unreadable interruption list blocks the retry (fail closed).
+$retryBlocker = {
+    param($d)
+    try { Get-RetryBlocker -Deployment $d -Interruptions @((Invoke-Octopus "/api/$script:space/interruptions?regarding=$($d.TaskId)").Items) }
+    catch { "the interruptions of $($d.TaskId) could not be read: $($_.Exception.Message)" }
+}
+$candidate = Select-Candidate -Environments $envs -Releases $releases -GetDeployments { param($id) Get-ReleaseDeployments $id } -GetTaskState { param($d) Get-TaskState $d } -GetRunningOutside { param($t) Get-RunningOutsideList $t } -PreferHeld $preferHeld -GetWindowComplete $windowComplete -GetRetryBlocker $retryBlocker
 $candidate.Notes | ForEach-Object { Say $_ }
 if (-not $candidate.Release) {
     # No new promotion candidate: still cancel an older Sign-off/MI when a newer deployment is already Queued (#733).

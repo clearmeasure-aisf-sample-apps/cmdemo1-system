@@ -795,6 +795,96 @@ $c = Select-With @($r2, $r3) @((New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R3' 'E1'
 Test-Case 'a release older than the one running is not promoted' $c.Release $null
 $c = Select-With @($r3, $r1, $r2) @((New-Dep 'R1' 'E1' '05' 't1')) @{ t1 = 'Success' }
 Test-Case 'releases are sorted by Assembled, not by the order given' $c.Release.Id 'R1'
+
+# Failed retry (2026-11-24, dashboard 1.0.839 prod failed on a transient npm ECONNRESET): every deployment to the target
+# Failed or TimedOut, at most $FailedDeploymentRetryLimit of them: offered again. Canceled stays a person's no.
+function Select-Retry($rels, $deps, $states, $blocker = '') {
+    Select-Candidate -Environments $envs3 -Releases $rels -GetDeployments { param($id) @($deps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState { param($d) $states[$d.TaskId] }.GetNewClosure() -GetRetryBlocker { param($d) $blocker }.GetNewClosure()
+}
+Test-Case 'failed retry: one failed is retried' (Get-FailedTargetRetry -TargetStates @('Failed')).Retry $true
+Test-Case 'failed retry: timed out counts as failed' (Get-FailedTargetRetry -TargetStates @('TimedOut', 'Failed')).Retry $true
+Test-Case 'failed retry: limit reached is not retried' (Get-FailedTargetRetry -TargetStates @('Failed', 'Failed', 'Failed')).Retry $false
+Test-Case 'failed retry: a canceled one is a no' (Get-FailedTargetRetry -TargetStates @('Failed', 'Canceled')).Retry $false
+Test-Case 'failed retry: an executing one is not retried' (Get-FailedTargetRetry -TargetStates @('Failed', 'Executing')).Retry $false
+Test-Case 'failed retry: success is not retried' (Get-FailedTargetRetry -TargetStates @('Success')).Retry $false
+Test-Case 'failed retry: none is not a retry' (Get-FailedTargetRetry -TargetStates @()).Retry $false
+$c = Select-Retry @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R3' 'E3' '30' 't3p'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '06' 't2u'), (New-Dep 'R2' 'E3' '07' 't2p')) @{ t3 = 'Success'; t3u = 'Success'; t3p = 'Failed'; t2 = 'Success'; t2u = 'Success'; t2p = 'Success' }
+Test-Case 'failed prod deployment: offered to prod again' @($c.Release.Id, $c.Target.Name, $c.Retry) @('R3', 'prod', 1)
+Test-Case 'failed prod deployment: the note says retry 1' (@($c.Notes | Where-Object { $_ -like '*offered to prod again after 1 failed deployment there (retry 1 of 2)*' }).Count) 1
+$c = Select-Retry @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R3' 'E3' '30' 't3p'), (New-Dep 'R3' 'E3' '35' 't3p2'), (New-Dep 'R3' 'E3' '40' 't3p3'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '06' 't2u'), (New-Dep 'R2' 'E3' '07' 't2p')) @{ t3 = 'Success'; t3u = 'Success'; t3p = 'Failed'; t3p2 = 'Failed'; t3p3 = 'TimedOut'; t2 = 'Success'; t2u = 'Success'; t2p = 'Success' }
+Test-Case 'three failed prod deployments: not offered again, nothing newer for uat' $c.Release $null
+Test-Case 'three failed prod deployments: the note names the limit' (@($c.Notes | Where-Object { $_ -like '*retry limit (2) is reached*' }).Count) 1
+$c = Select-Retry @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R3' 'E3' '30' 't3p'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '06' 't2u'), (New-Dep 'R2' 'E3' '07' 't2p')) @{ t3 = 'Success'; t3u = 'Success'; t3p = 'Canceled'; t2 = 'Success'; t2u = 'Success'; t2p = 'Success' }
+Test-Case 'canceled prod deployment: still not recreated' $c.Release $null
+$c = Select-Retry @($r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u')) @{ t3 = 'Success'; t3u = 'Failed' }
+Test-Case 'failed uat deployment: offered to uat again' @($c.Release.Id, $c.Target.Name, $c.Retry) @('R3', 'uat', 1)
+$c = Select-Retry @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R2' 'E1' '05' 't2')) @{ t3 = 'Success'; t2 = 'Success' }
+Test-Case 'a fresh candidate has Retry 0' $c.Retry 0
+
+$c = Select-Retry @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R3' 'E3' '30' 't3p'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '06' 't2u'), (New-Dep 'R2' 'E3' '07' 't2p')) @{ t3 = 'Success'; t3u = 'Success'; t3p = 'Failed'; t2 = 'Success'; t2u = 'Success'; t2p = 'Success' } "its Sign-off was answered 'Abort'"
+Test-Case 'failed prod deployment a person aborted: not offered again' $c.Release $null
+Test-Case 'failed prod deployment a person aborted: the note says why' (@($c.Notes | Where-Object { $_ -like "*not offered again: its Sign-off was answered 'Abort'*" }).Count) 1
+$c = Select-With @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R3' 'E3' '30' 't3p'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '06' 't2u'), (New-Dep 'R2' 'E3' '07' 't2p')) @{ t3 = 'Success'; t3u = 'Success'; t3p = 'Failed'; t2 = 'Success'; t2u = 'Success'; t2p = 'Success' }
+Test-Case 'failed prod deployment without a blocker check: not retried (fail closed)' $c.Release $null
+$c = Select-Retry @($r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R3' 'E2' '25' 't3u2')) @{ t3 = 'Success'; t3u = 'Failed'; t3u2 = 'Success' }
+Test-Case 'failed then succeeded in uat: goes on to prod, not to uat again' @($c.Release.Id, $c.Target.Name, $c.Retry) @('R3', 'prod', 0)
+# Get-RetryBlocker: only this workflow's deployment whose only interruption is its Sign-off answered Proceed.
+$ownDep = @{ Id = 'Deployments-59369'; Comments = "${PromotionMarker}: https://example/run"; TaskId = 'ServerTasks-1' }
+$signOff = { param($result, $pending = $false) [pscustomobject] @{ Type = 'ManualIntervention'; Title = 'Sign-off'; IsPending = $pending; Form = [pscustomobject] @{ Values = [pscustomobject] @{ Result = $result; Notes = 'x' } } } }
+Test-Case 'retry blocker: own deployment, Sign-off Proceed: none' (Get-RetryBlocker -Deployment $ownDep -Interruptions @((& $signOff 'Proceed'))) ''
+Test-Case 'retry blocker: own deployment, no interruption: none' (Get-RetryBlocker -Deployment $ownDep -Interruptions @()) ''
+Test-Case 'retry blocker: Sign-off answered Abort' (Get-RetryBlocker -Deployment $ownDep -Interruptions @((& $signOff 'Abort'))) "its Sign-off was answered 'Abort'"
+Test-Case 'retry blocker: Sign-off still pending' (Get-RetryBlocker -Deployment $ownDep -Interruptions @((& $signOff '' $true))) 'its Sign-off is still pending'
+Test-Case 'retry blocker: guided failure' (Get-RetryBlocker -Deployment $ownDep -Interruptions @((& $signOff 'Proceed'), [pscustomobject] @{ Type = 'GuidedFailure'; Title = 'Deploy failed'; IsPending = $false; Form = $null })) "its task has the interruption 'Deploy failed' (GuidedFailure)"
+Test-Case 'retry blocker: another manual intervention' (Get-RetryBlocker -Deployment $ownDep -Interruptions @([pscustomobject] @{ Type = 'ManualIntervention'; Title = 'Approve'; IsPending = $false; Form = $null })) "its task has the interruption 'Approve' (ManualIntervention)"
+Test-Case 'retry blocker: a person created the deployment' (Get-RetryBlocker -Deployment @{ Id = 'Deployments-1'; Comments = 'by hand' } -Interruptions @()) 'deployment Deployments-1 was not created by this workflow'
+Test-Case 'retry blocker: no comments at all' (Get-RetryBlocker -Deployment @{ Id = 'Deployments-2' } -Interruptions @()) 'deployment Deployments-2 was not created by this workflow'
+
+# Health window first (2026-11-24): tdd got a new dashboard release every 5 to 10 minutes and the newest was always the
+# candidate, so its 10-minute window never closed. The newest release whose window is complete wins; else the newest.
+function Select-Window($rels, $deps, $states, $complete, $prefer = @()) {
+    Select-Candidate -Environments $envs3 -Releases $rels -GetDeployments { param($id) @($deps | Where-Object { $_.ReleaseId -eq $id }) }.GetNewClosure() -GetTaskState { param($d) $states[$d.TaskId] }.GetNewClosure() -PreferHeld $prefer -GetWindowComplete { param($r, $p) [bool] $complete[$r.Id] }.GetNewClosure()
+}
+$wDeps = @((New-Dep 'R1' 'E1' '01' 't1'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R3' 'E1' '10' 't3'))
+$wStates = @{ t1 = 'Success'; t2 = 'Success'; t3 = 'Success' }
+$c = Select-Window @($r1, $r2, $r3) $wDeps $wStates @{ R1 = $true; R2 = $true; R3 = $false }
+Test-Case 'window first: newest complete release goes to uat' @($c.Release.Id, $c.Target.Name) @('R2', 'uat')
+Test-Case 'window first: the note names the newer one in its window' (@($c.Notes | Where-Object { $_ -like 'newer 3 in tdd still in the health window: 2, whose window is complete*' }).Count) 1
+$c = Select-Window @($r1, $r2, $r3) $wDeps $wStates @{ R1 = $false; R2 = $false; R3 = $false }
+Test-Case 'window first: none complete takes the newest (it takes the reads)' $c.Release.Id 'R3'
+Test-Case 'window first: none complete adds no window note' (@($c.Notes | Where-Object { $_ -like '*still in the health window*' }).Count) 0
+$c = Select-Window @($r1, $r2, $r3) $wDeps $wStates @{ R1 = $true; R2 = $true; R3 = $true }
+Test-Case 'window first: newest complete is the newest' $c.Release.Id 'R3'
+$c = Select-Window @($r1, $r2, $r3) @((New-Dep 'R1' 'E1' '01' 't1'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '07' 't2u'), (New-Dep 'R2' 'E3' '08' 't2p'), (New-Dep 'R3' 'E1' '10' 't3')) @{ t1 = 'Success'; t2 = 'Success'; t2u = 'Success'; t2p = 'Success'; t3 = 'Success' } @{ R1 = $true; R2 = $true; R3 = $false }
+Test-Case 'window first: never older than what runs in uat (falls back to the newest)' @($c.Release.Id, $c.Target.Name) @('R3', 'uat')
+$c = Select-Window @($r1, $r2, $r3) $wDeps $wStates @{ R1 = $true; R2 = $true; R3 = $false } @(@{ Version = '3'; Environment = 'uat' })
+Test-Case 'window first: a preferred pipeline hold keeps its place' $c.Release.Id 'R3'
+$c = Select-Window @($r2, $r3) @((New-Dep 'R3' 'E1' '10' 't3'), (New-Dep 'R3' 'E2' '20' 't3u'), (New-Dep 'R2' 'E1' '05' 't2'), (New-Dep 'R2' 'E2' '06' 't2u')) @{ t3 = 'Success'; t3u = 'Success'; t2 = 'Success'; t2u = 'Success' } @{ R2 = $true; R3 = $false }
+Test-Case 'window first: the uat window decides prod too' @($c.Release.Id, $c.Target.Name) @('R2', 'prod')
+
+# Stored-read window (no new read) and the pause when the window passed but the verdict still waits.
+Test-Case 'stored window: health none is complete' (Test-HealthWindowComplete -HealthRequired $false -Finished $null -Now $t0 -Reads @()) $true
+Test-Case 'stored window: no finish time is not complete' (Test-HealthWindowComplete -HealthRequired $true -Finished $null -Now $t0 -Reads @()) $false
+Test-Case 'stored window: two Healthy reads 5 min apart, later after 10 min' (Test-HealthWindowComplete -HealthRequired $true -Finished $t0 -Now $t0.AddMinutes(20) -Reads @(@{ At = $t0.AddMinutes(4); Status = 'Healthy' }, @{ At = $t0.AddMinutes(11); Status = 'Healthy' })) $true
+Test-Case 'stored window: later read seconds before 10 min is not complete' (Test-HealthWindowComplete -HealthRequired $true -Finished $t0 -Now $t0.AddMinutes(20) -Reads @(@{ At = $t0.AddMinutes(0.1); Status = 'Healthy' }, @{ At = $t0.AddMinutes(9.9); Status = 'Healthy' })) $false
+Test-Case 'stored window: an Unhealthy read is not complete' (Test-HealthWindowComplete -HealthRequired $true -Finished $t0 -Now $t0.AddMinutes(20) -Reads @(@{ At = $t0.AddMinutes(4); Status = 'Healthy' }, @{ At = $t0.AddMinutes(11); Status = 'Unhealthy' })) $false
+# dashboard 1.0.855 (2026-11-24): reads 15:39:01 and 15:48:48 UTC, deployment finished about 15:38:55: no wait before.
+$f855 = [datetime]::Parse('2026-11-24T15:38:55Z').ToUniversalTime()
+$reads855 = @(@{ At = [datetime]::Parse('2026-11-24T15:39:01Z').ToUniversalTime(); Status = 'Healthy' }, @{ At = [datetime]::Parse('2026-11-24T15:48:48Z').ToUniversalTime(); Status = 'Healthy' })
+Test-Case 'health wait: 1.0.855, later read seconds early: wait to the window end' (Get-HealthWaitSeconds -Finished $f855 -Now ([datetime]::Parse('2026-11-24T15:48:49Z').ToUniversalTime()) -Reads $reads855 -MaxSeconds 600) 11
+Test-Case 'health wait: one read 3 min in: wait to 10 min' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(3) -Reads @(@{ At = $t0.AddMinutes(3); Status = 'Healthy' }) -MaxSeconds 600) 425
+Test-Case 'health wait: one read 9 min in: wait for the 5-minute gap' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(9) -Reads @(@{ At = $t0.AddMinutes(9); Status = 'Healthy' }) -MaxSeconds 600) 305
+Test-Case 'health wait: two reads 2 min apart after the window: wait for the gap' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(13) -Reads @(@{ At = $t0.AddMinutes(11); Status = 'Healthy' }, @{ At = $t0.AddMinutes(13); Status = 'Healthy' }) -MaxSeconds 600) 185
+Test-Case 'health wait: one read just after finishing: too long for the budget' (Get-HealthWaitSeconds -Finished $t0 -Now $t0 -Reads @(@{ At = $t0; Status = 'Healthy' }) -MaxSeconds 300) (-1)
+Test-Case 'health wait: no budget left: no wait' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(9) -Reads @(@{ At = $t0.AddMinutes(9); Status = 'Healthy' }) -MaxSeconds 0) (-1)
+Test-Case 'health wait: verdict ok: no wait' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(12) -Reads @(@{ At = $t0.AddMinutes(4); Status = 'Healthy' }, @{ At = $t0.AddMinutes(12); Status = 'Healthy' }) -MaxSeconds 600) (-1)
+Test-Case 'health wait: an Unhealthy read: no wait (it flags)' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(12) -Reads @(@{ At = $t0.AddMinutes(12); Status = 'Unhealthy' }) -MaxSeconds 600) (-1)
+Test-Case 'health wait: no read since finishing (not live): no wait' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(4) -Reads @(@{ At = $t0.AddMinutes(-3); Status = 'Healthy' }) -MaxSeconds 600) (-1)
+# A read counts for a release only while its commit runs in the previous environment.
+Test-Case 'live commit: same commit matches' (Test-LiveCommitMatches -BuildPath '/build-facts.json' -LiveCommit 'abc' -ReleaseCommit 'abc') $true
+Test-Case 'live commit: a newer tdd release runs: no read' (Test-LiveCommitMatches -BuildPath '/build-facts.json' -LiveCommit 'def' -ReleaseCommit 'abc') $false
+Test-Case 'live commit: unreadable: no read' (Test-LiveCommitMatches -BuildPath '/_build' -LiveCommit '' -ReleaseCommit 'abc') $false
+Test-Case 'live commit: no build path (system): read' (Test-LiveCommitMatches -BuildPath '' -LiveCommit '' -ReleaseCommit 'abc') $true
 # Release order: version first (releases can be assembled out of order), Assembled when versions are equal.
 $late = @{ Id = 'R459'; Version = '2.4.459'; Assembled = '2026-10-14T22:53:00+00:00' }
 $early = @{ Id = 'R467'; Version = '2.4.467'; Assembled = '2026-10-14T22:51:00+00:00' }
