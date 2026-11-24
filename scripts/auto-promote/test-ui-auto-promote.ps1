@@ -880,6 +880,47 @@ Test-Case 'health wait: no budget left: no wait' (Get-HealthWaitSeconds -Finishe
 Test-Case 'health wait: verdict ok: no wait' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(12) -Reads @(@{ At = $t0.AddMinutes(4); Status = 'Healthy' }, @{ At = $t0.AddMinutes(12); Status = 'Healthy' }) -MaxSeconds 600) (-1)
 Test-Case 'health wait: an Unhealthy read: no wait (it flags)' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(12) -Reads @(@{ At = $t0.AddMinutes(12); Status = 'Unhealthy' }) -MaxSeconds 600) (-1)
 Test-Case 'health wait: no read since finishing (not live): no wait' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(4) -Reads @(@{ At = $t0.AddMinutes(-3); Status = 'Healthy' }) -MaxSeconds 600) (-1)
+# Environment window (2026-11-24, second fix): tdd gets a new dashboard release every 5 to 10 minutes, so a release's own
+# reads never span 10 minutes (runs 45442775877 and 45445735479 skipped every read of 1.0.875 and 1.0.877). Its own
+# reads plus the environment's reads since it finished decide, once it was read Healthy while live.
+$own1 = @(@{ At = $t0.AddMinutes(2); Status = 'Healthy' })
+$env1 = @(@{ At = $t0.AddMinutes(-4); Status = 'Unhealthy'; Commit = 'old' }, @{ At = $t0.AddMinutes(7); Status = 'Healthy'; Commit = 'newer' }, @{ At = $t0.AddMinutes(12); Status = 'Healthy'; Commit = 'newest' })
+Test-Case 'window reads: own and environment since finishing, in order' @(Get-WindowReads -Own $own1 -Environment $env1 -Finished $t0 | ForEach-Object { $_.At.ToString('HH:mm') }) @('04:02', '04:07', '04:12')
+Test-Case 'window reads: a release superseded in tdd closes its window on the environment reads' (Get-HealthVerdict -Finished $t0 -Now $t0.AddMinutes(13) -Reads @(Get-WindowReads -Own $own1 -Environment $env1 -Finished $t0)) 'ok'
+Test-Case 'window reads: an Unhealthy environment read since finishing fails it' (Get-HealthVerdict -Finished $t0 -Now $t0.AddMinutes(13) -Reads @(Get-WindowReads -Own $own1 -Environment (@($env1) + @(@{ At = $t0.AddMinutes(13); Status = 'Unhealthy'; Commit = 'newest' })) -Finished $t0)) 'fail'
+Test-Case 'window reads: an older Unhealthy read before finishing does not count' (@(Get-WindowReads -Own @() -Environment $env1 -Finished $t0 | Where-Object { $_.Status -ne 'Healthy' }).Count) 0
+Test-Case 'live seen: an own Healthy read since finishing' (Test-LiveHealthSeen -Own $own1 -Environment @() -Finished $t0 -Commit 'abc') $true
+Test-Case 'live seen: an environment read naming its commit' (Test-LiveHealthSeen -Own @() -Environment @(@{ At = $t0.AddMinutes(1); Status = 'Healthy'; Commit = 'abc' }) -Finished $t0 -Commit 'abc') $true
+Test-Case 'live seen: only newer commits read: not seen' (Test-LiveHealthSeen -Own @() -Environment $env1 -Finished $t0 -Commit 'abc') $false
+Test-Case 'live seen: its own read before finishing does not count' (Test-LiveHealthSeen -Own @(@{ At = $t0.AddMinutes(-1); Status = 'Healthy' }) -Environment @() -Finished $t0 -Commit 'abc') $false
+Test-Case 'live seen: an Unhealthy own read is not seen' (Test-LiveHealthSeen -Own @(@{ At = $t0.AddMinutes(1); Status = 'Unhealthy' }) -Environment @() -Finished $t0 -Commit 'abc') $false
+Test-Case 'live seen: no commit known: environment reads do not count' (Test-LiveHealthSeen -Own @() -Environment @(@{ At = $t0.AddMinutes(1); Status = 'Healthy'; Commit = '' }) -Finished $t0 -Commit '') $false
+Test-Case 'environment reads: the last day only' @(Limit-EnvironmentReads -Reads @(@{ At = $t0.AddHours(-25); Status = 'Healthy' }, @{ At = $t0.AddHours(-1); Status = 'Healthy' }) -Now $t0 | ForEach-Object { $_.At.ToString('HH:mm') }) @('03:00')
+Test-Case 'decision: window closed but never read live: wait' (Get-PromotionDecision -Facts (New-Facts @{ LiveHealthSeen = $false })).Decision 'wait'
+Test-Case 'decision: never read live names why' ((Get-PromotionDecision -Facts (New-Facts @{ LiveHealthSeen = $false })).Waiting -join '|') 'health window: no Healthy read of this release while it was live in the previous environment'
+Test-Case 'decision: read live and window closed: promote' (Get-PromotionDecision -Facts (New-Facts @{ LiveHealthSeen = $true })).Decision 'promote'
+Test-Case 'decision: health not required ignores live seen' (Get-PromotionDecision -Facts (New-Facts @{ LiveHealthSeen = $false; HealthRequired = $false })).Decision 'promote'
+# Stream: a release every 6 minutes, a promoter read every 5 minutes. Before, no release ever closed its window. Now the
+# newest release read live whose window is closed by the environment reads qualifies within about 15 minutes.
+$streamEnv = [Collections.Generic.List[object]]::new(); $streamOwn = @{}
+$finishedOf = @{}; for ($k = 0; $k -lt 8; $k++) { $finishedOf["S$k"] = $t0.AddMinutes(6 * $k) }
+function Get-LiveRelease([datetime] $at) { $live = 'S0'; foreach ($k in 0..7) { if ($finishedOf["S$k"] -le $at) { $live = "S$k" } }; $live }
+$qualifiedAt = $null; $qualified = $null
+for ($m = 1; $m -le 45; $m += 5) {
+    $at = $t0.AddMinutes($m); $live = Get-LiveRelease $at
+    $streamEnv.Add(@{ At = $at; Status = 'Healthy'; Commit = $live })
+    if (-not $streamOwn.ContainsKey($live)) { $streamOwn[$live] = @() }
+    $streamOwn[$live] = @($streamOwn[$live]) + @(@{ At = $at; Status = 'Healthy' })
+    $ownOnly = @($finishedOf.Keys | Where-Object { $streamOwn.ContainsKey($_) -and (Get-HealthVerdict -Finished $finishedOf[$_] -Now $at -Reads @($streamOwn[$_])) -eq 'ok' })
+    if ($ownOnly.Count -gt 0) { $ownOnlyOk = $true }
+    $ok = @($finishedOf.Keys | Sort-Object { $finishedOf[$_] } -Descending | Where-Object {
+            (Test-LiveHealthSeen -Own @($streamOwn[$_] | Where-Object { $_ }) -Environment @($streamEnv) -Finished $finishedOf[$_] -Commit $_) -and
+            (Test-HealthWindowComplete -HealthRequired $true -Finished $finishedOf[$_] -Now $at -Reads @(Get-WindowReads -Own @($streamOwn[$_] | Where-Object { $_ }) -Environment @($streamEnv) -Finished $finishedOf[$_]))
+        } | Select-Object -First 1)
+    if ($ok.Count -gt 0 -and -not $qualifiedAt) { $qualifiedAt = $m; $qualified = $ok[0] }
+}
+Test-Case 'stream: own reads alone never close a window' ([bool] (Get-Variable ownOnlyOk -ValueOnly -ErrorAction SilentlyContinue)) $false
+Test-Case 'stream: a release qualifies on the environment window within 16 minutes' @($qualified, ($qualifiedAt -le 16)) @('S0', $true)
 # A read counts for a release only while its commit runs in the previous environment.
 Test-Case 'live commit: same commit matches' (Test-LiveCommitMatches -BuildPath '/build-facts.json' -LiveCommit 'abc' -ReleaseCommit 'abc') $true
 Test-Case 'live commit: a newer tdd release runs: no read' (Test-LiveCommitMatches -BuildPath '/build-facts.json' -LiveCommit 'def' -ReleaseCommit 'abc') $false
