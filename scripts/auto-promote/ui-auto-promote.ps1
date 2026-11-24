@@ -1434,7 +1434,9 @@ function Get-WindowReads {
     param([object[]] $Own, [object[]] $Environment, $Finished)
     $all = @(@($Own) + @($Environment) | Where-Object { $_ })
     if ($Finished) { $all = @($all | Where-Object { $_.At -ge ([datetime] $Finished) }) }
-    @($all | Sort-Object { $_.At })
+    # A read kept both as own and as the environment's is one read.
+    $seen = @{}
+    @($all | Sort-Object { $_.At } | Where-Object { $k = ([datetime] $_.At).ToString('o'); if ($seen.ContainsKey($k)) { $false } else { $seen[$k] = $true; $true } })
 }
 
 function Test-LiveHealthSeen {
@@ -2273,7 +2275,9 @@ function Get-Evaluation {
         $h = Read-Health
         $after = Read-LiveCommit
         $commit = if ($before -eq $after) { $after } else { '' }
-        Set-Variable -Name envReads -Scope 1 -Value (@($envReads) + @(@{ At = $h.At; Status = $h.Status; Commit = $commit }))
+        # A read during a swap (commit unknown) is kept for the environment only when Healthy: an Unreachable read while
+        # tdd swaps to a newer release must not fail every older release (review of this change).
+        if ($commit -or $h.Status -eq 'Healthy') { Set-Variable -Name envReads -Scope 1 -Value (@($envReads) + @(@{ At = $h.At; Status = $h.Status; Commit = $commit })) }
         if (Test-LiveCommitMatches -BuildPath ([string] $Settings.BuildPath) -LiveCommit $commit -ReleaseCommit $sha) {
             Set-Variable -Name reads -Scope 1 -Value (@($reads) + @($h))
         } else { Say "Health read $($h.Status) of $($Previous.Name) at commit '$commit': kept for the environment, not as a read of $($Release.Version)." }

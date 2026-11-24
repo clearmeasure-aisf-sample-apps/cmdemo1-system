@@ -889,6 +889,7 @@ Test-Case 'window reads: own and environment since finishing, in order' @(Get-Wi
 Test-Case 'window reads: a release superseded in tdd closes its window on the environment reads' (Get-HealthVerdict -Finished $t0 -Now $t0.AddMinutes(13) -Reads @(Get-WindowReads -Own $own1 -Environment $env1 -Finished $t0)) 'ok'
 Test-Case 'window reads: an Unhealthy environment read since finishing fails it' (Get-HealthVerdict -Finished $t0 -Now $t0.AddMinutes(13) -Reads @(Get-WindowReads -Own $own1 -Environment (@($env1) + @(@{ At = $t0.AddMinutes(13); Status = 'Unhealthy'; Commit = 'newest' })) -Finished $t0)) 'fail'
 Test-Case 'window reads: an older Unhealthy read before finishing does not count' (@(Get-WindowReads -Own @() -Environment $env1 -Finished $t0 | Where-Object { $_.Status -ne 'Healthy' }).Count) 0
+Test-Case 'window reads: a read kept as own and environment counts once' (@(Get-WindowReads -Own $own1 -Environment @(@{ At = $t0.AddMinutes(2); Status = 'Healthy'; Commit = 'abc' }) -Finished $t0).Count) 1
 Test-Case 'live seen: an own Healthy read since finishing' (Test-LiveHealthSeen -Own $own1 -Environment @() -Finished $t0 -Commit 'abc') $true
 Test-Case 'live seen: an environment read naming its commit' (Test-LiveHealthSeen -Own @() -Environment @(@{ At = $t0.AddMinutes(1); Status = 'Healthy'; Commit = 'abc' }) -Finished $t0 -Commit 'abc') $true
 Test-Case 'live seen: only newer commits read: not seen' (Test-LiveHealthSeen -Own @() -Environment $env1 -Finished $t0 -Commit 'abc') $false
