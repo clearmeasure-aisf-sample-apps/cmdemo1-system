@@ -36,23 +36,6 @@ def patched_driver_env(run=None, sleep=None):
             L.subprocess.run = old_run
             L.time.sleep = old_sleep
 
-@contextlib.contextmanager
-def fake_modules(**overrides):
-    """Set the named item_loop module attributes (dotted paths, e.g. HOME, subprocess.run, time.sleep)
-    to the given values, saving every original and restoring them in a finally block."""
-    saved = []
-    for name, value in overrides.items():
-        obj, parts = L, name.split(".")
-        for part in parts[:-1]:
-            obj = getattr(obj, part)
-        saved.append((obj, parts[-1], getattr(obj, parts[-1])))
-        setattr(obj, parts[-1], value)
-    try:
-        yield
-    finally:
-        for obj, attr, old in saved:
-            setattr(obj, attr, old)
-
 def make_driver(issue=1, repo="cmdemo1-workorders", dry_run=True, **kw):
     """Create a standard test Driver; dry_run is explicit so callers can opt out."""
     return L.Driver(repo, issue, dry_run=dry_run, **kw)
@@ -91,17 +74,6 @@ def pi_stub(result, calls=None):
     def pi(name, prompt, timeout=1800, gpu=None):
         if calls is not None: calls.append(name)
         return result(calls) if callable(result) else result
-    return pi
-
-def scripted_pi(results):
-    """Driver.pi replacement: a callable with the Driver.pi signature (name, prompt, timeout=1800, gpu=None)
-    that records each call's name in the callable's .calls list and returns the scripted booleans from results
-    (the last value repeats)."""
-    calls = []
-    def pi(name, prompt, timeout=1800, gpu=None):
-        calls.append(name)
-        return results[min(len(calls) - 1, len(results) - 1)]
-    pi.calls = calls
     return pi
 
 class PromptMentions:   # mixin for prompt tests: every phrase the prompt must name, on one line, needle named on failure
@@ -1994,7 +1966,7 @@ class ReleaseSkip(unittest.TestCase):   # #914: a system merge the system pipeli
         moves, comments = [], []
         d.gh = lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(files) if a[1].endswith("/commits/" + "ab" * 20) else "[]", "")
         d.move, d.comment, d.usage = moves.append, lambda body, **k: comments.append(body), lambda **k: ""
-        with fake_modules(**{"time.sleep": lambda s: None}):
+        with patched_driver_env(sleep=lambda s: None):
             d.st_main()
         return d, moves, comments
 
