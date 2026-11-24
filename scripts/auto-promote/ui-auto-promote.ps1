@@ -1459,11 +1459,12 @@ function Get-HealthWaitSeconds {
     param([datetime] $Finished, [datetime] $Now, [object[]] $Reads, [int] $MaxSeconds, [int] $WindowMinutes = 10, [int] $GapMinutes = 5, [int] $MarginSeconds = 5)
     if ((Get-HealthVerdict -Finished $Finished -Now $Now -Reads @($Reads) -WindowMinutes $WindowMinutes -GapMinutes $GapMinutes) -ne 'wait') { return -1 }
     $since = @($Reads | Where-Object { $_.At -ge $Finished })
+    # No read since the deployment finished (the release no longer runs there, or no read was recorded): one more read
+    # cannot close the window, so waiting would only spend job time.
+    if ($since.Count -eq 0) { return -1 }
     $at = $Finished.AddMinutes($WindowMinutes)
-    if ($since.Count -gt 0) {
-        $first = ($since | Measure-Object -Property At -Minimum).Minimum
-        if ($first.AddMinutes($GapMinutes) -gt $at) { $at = $first.AddMinutes($GapMinutes) }
-    }
+    $first = ($since | Measure-Object -Property At -Minimum).Minimum
+    if ($first.AddMinutes($GapMinutes) -gt $at) { $at = $first.AddMinutes($GapMinutes) }
     $wait = [int] [Math]::Ceiling([Math]::Max(0, ($at - $Now).TotalSeconds)) + $MarginSeconds
     if ($wait -gt $MaxSeconds) { return -1 }
     $wait
@@ -2231,8 +2232,10 @@ function Get-Evaluation {
         if (-not $ok) { Say "Health read skipped: $($Previous.Name) runs commit '$live', not $sha of $($Release.Version)." }
         $ok
     }
+    # Checked before and after the read: a read can retry for about 100 s, and a newer release may go live meanwhile.
+    function Read-LiveHealth { if (Test-StillLive) { $h = Read-Health; if (Test-StillLive) { return $h } }; $null }
     if ($healthRequired -and $addressKnown -and $prevTask.State -eq 'Success') {
-        if (Test-StillLive) { $reads += Read-Health }
+        $h = Read-LiveHealth; if ($h) { $reads += $h }
         $now = [datetime]::UtcNow
         $deadline = Get-MasterPendingDeadline
         $budget = if ($deadline) { [int] [Math]::Max(0, ($deadline - $now).TotalSeconds + $HealthPauseSeconds) } else { $HealthWaitMaxSeconds }
@@ -2240,7 +2243,7 @@ function Get-Evaluation {
         if ($pause -ge 0) {
             Say "Waiting $pause s for the health read that closes the window."
             Start-Sleep -Seconds $pause
-            if (Test-StillLive) { $reads += Read-Health }
+            $h = Read-LiveHealth; if ($h) { $reads += $h }
         }
         $state[$key] = @($reads | ForEach-Object { @{ at = $_.At.ToString('o'); status = $_.Status } })
         Save-State

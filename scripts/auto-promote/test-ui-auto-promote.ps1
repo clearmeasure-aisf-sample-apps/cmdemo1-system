@@ -879,7 +879,7 @@ Test-Case 'health wait: one read just after finishing: too long for the budget' 
 Test-Case 'health wait: no budget left: no wait' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(9) -Reads @(@{ At = $t0.AddMinutes(9); Status = 'Healthy' }) -MaxSeconds 0) (-1)
 Test-Case 'health wait: verdict ok: no wait' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(12) -Reads @(@{ At = $t0.AddMinutes(4); Status = 'Healthy' }, @{ At = $t0.AddMinutes(12); Status = 'Healthy' }) -MaxSeconds 600) (-1)
 Test-Case 'health wait: an Unhealthy read: no wait (it flags)' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(12) -Reads @(@{ At = $t0.AddMinutes(12); Status = 'Unhealthy' }) -MaxSeconds 600) (-1)
-Test-Case 'health wait: no read (address down or not live): wait to 10 min' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(4) -Reads @() -MaxSeconds 600) 365
+Test-Case 'health wait: no read since finishing (not live): no wait' (Get-HealthWaitSeconds -Finished $t0 -Now $t0.AddMinutes(4) -Reads @(@{ At = $t0.AddMinutes(-3); Status = 'Healthy' }) -MaxSeconds 600) (-1)
 # A read counts for a release only while its commit runs in the previous environment.
 Test-Case 'live commit: same commit matches' (Test-LiveCommitMatches -BuildPath '/build-facts.json' -LiveCommit 'abc' -ReleaseCommit 'abc') $true
 Test-Case 'live commit: a newer tdd release runs: no read' (Test-LiveCommitMatches -BuildPath '/build-facts.json' -LiveCommit 'def' -ReleaseCommit 'abc') $false
