@@ -22,17 +22,23 @@ def fake_home():
             L.HOME = old
 
 @contextlib.contextmanager
-def patched_driver_env(run=None, sleep=None):
-    """fake_home() plus, when given, L.subprocess.run = run and L.time.sleep = sleep, yielding fake_home's
-    temp dir path and restoring the original L.subprocess.run and L.time.sleep in a finally block
-    (fake_home restores L.HOME)."""
+def patched_driver_env(run=None, sleep=None, gpu_health=None, time=None, gpu_for_item=None, research_ok=None):
+    """fake_home() plus, when given, L.subprocess.run = run and L.time.sleep = sleep, and the item_loop module
+    attributes named gpu_health, time, gpu_for_item and research_ok set to the values passed (None leaves an
+    attribute unchanged); yields fake_home's temp dir path and restores every patched attribute in a finally
+    block (fake_home restores L.HOME)."""
     old_run, old_sleep = L.subprocess.run, L.time.sleep
+    overrides = {"gpu_health": gpu_health, "time": time, "gpu_for_item": gpu_for_item, "research_ok": research_ok}
+    old = {name: getattr(L, name) for name, v in overrides.items() if v is not None}
     with fake_home() as h:
         if run is not None: L.subprocess.run = run
         if sleep is not None: L.time.sleep = sleep
+        for name, v in overrides.items():
+            if v is not None: setattr(L, name, v)
         try:
             yield h
         finally:
+            for name in reversed(old): setattr(L, name, old[name])
             L.subprocess.run = old_run
             L.time.sleep = old_sleep
 
@@ -525,24 +531,19 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
     def test_review_excludes_every_authoring_gpu_including_relaunch_gpus(self):   # review major 2
         self.assertEqual(G.reviewer_gpus(["ts3", "obs"], list(G.GPUS)), ["pro5000", "pro6000"])
         self.assertEqual(G.reviewer_gpus("ts3", list(G.GPUS)), ["pro5000", "pro6000", "obs"])
-        old = (L.gpu_health, L.research_ok)
-        L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}; L.research_ok = lambda *a: True
-        try:
-            with fake_home() as h:
-                d, calls = self.driver(h, ["stalled", ("PASS", "obs")])   # item on ts3; the relaunch wrote the code on obs
-                self.assertTrue(d.pi("t1", "do it"))
-                self.assertEqual(d.author_gpus(), ["ts3", "obs"])
-                d.s.update(plan=dict(PLAN), pr=7, default="main"); d.merge_base = lambda: "abc"; review = []
-                rec = json.dumps({"task": "independent-review-1", "gpu": "pro5000", "result": "PASS"})
-                def sh(cmd, **k):
-                    if "--gpu" in cmd: review.append(list(cmd)); return subprocess.CompletedProcess(cmd, 0, rec, "")
-                    return subprocess.CompletedProcess(cmd, 0, "body\n## Refactoring research\n- x" if "pr" in cmd else "", "")
-                d.sh = sh; d.independent_review()
-                self.assertEqual(review[0][review[0].index("--gpu") + 1], "pro5000,pro6000", "neither ts3 nor obs may review")
-                self.assertEqual(int(review[0][review[0].index("--slot-wait") + 1]), L.ANY_SLOT_WAIT_S)   # 2 h, per the docs
-                self.assertEqual(d.author_gpus(), ["ts3", "obs"], "a review never counts as authoring")
-        finally:
-            L.gpu_health, L.research_ok = old
+        with patched_driver_env(gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}, research_ok=lambda *a: True) as h:
+            d, calls = self.driver(h, ["stalled", ("PASS", "obs")])   # item on ts3; the relaunch wrote the code on obs
+            self.assertTrue(d.pi("t1", "do it"))
+            self.assertEqual(d.author_gpus(), ["ts3", "obs"])
+            d.s.update(plan=dict(PLAN), pr=7, default="main"); d.merge_base = lambda: "abc"; review = []
+            rec = json.dumps({"task": "independent-review-1", "gpu": "pro5000", "result": "PASS"})
+            def sh(cmd, **k):
+                if "--gpu" in cmd: review.append(list(cmd)); return subprocess.CompletedProcess(cmd, 0, rec, "")
+                return subprocess.CompletedProcess(cmd, 0, "body\n## Refactoring research\n- x" if "pr" in cmd else "", "")
+            d.sh = sh; d.independent_review()
+            self.assertEqual(review[0][review[0].index("--gpu") + 1], "pro5000,pro6000", "neither ts3 nor obs may review")
+            self.assertEqual(int(review[0][review[0].index("--slot-wait") + 1]), L.ANY_SLOT_WAIT_S)   # 2 h, per the docs
+            self.assertEqual(d.author_gpus(), ["ts3", "obs"], "a review never counts as authoring")
 
     def test_no_slot_record_is_not_an_author_gpu(self):
         old_gpu_health = L.gpu_health
@@ -670,35 +671,25 @@ class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU re
             self.assertEqual(d.gpu(), "obs")
 
     def test_resumed_item_keeps_its_gpu_and_waits(self):
-        old = (L.gpu_health, L.time)
-        L.time = Clock()
-        try:
-            with fake_home() as h:
-                d = L.Driver("cmdemo1-workorders", 22)   # dry_run=False
-                d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"; d.s["stage"] = "gpu"; d.save()
-                L.gpu_health = lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}
-                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
-                d.st_gpu()
-                self.assertEqual(d.s["gpu"], "obs")      # not re-picked to pro5000 or anything else
-                self.assertEqual(d.s["stage"], "blocked")
-                self.assertIn("obs", d.s["blocker"])     # it waited for its own GPU, bounded by GPU_WAIT_H
-        finally:
-            L.gpu_health, L.time = old
+        with patched_driver_env(time=Clock(),
+                                gpu_health=lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}) as h:
+            d = L.Driver("cmdemo1-workorders", 22)   # dry_run=False
+            d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"; d.s["stage"] = "gpu"; d.save()
+            d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+            d.st_gpu()
+            self.assertEqual(d.s["gpu"], "obs")      # not re-picked to pro5000 or anything else
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertIn("obs", d.s["blocker"])     # it waited for its own GPU, bounded by GPU_WAIT_H
 
     def test_new_item_picks_and_persists_its_gpu(self):
-        old = (L.gpu_health, L.time)
-        L.time = Clock()
-        try:
-            with fake_home() as h:
-                d = make_driver(issue=23)
-                d.s["plan"] = PLAN; d.save()              # no 'gpu' in state yet
-                L.gpu_health = lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}
-                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
-                d.st_gpu()
-                self.assertEqual(d.s["stage"], "pickup")
-                self.assertEqual(d.s["gpu"], G.pick_gpu(G.classify_size(PLAN), ["pro5000", "obs", "ts3"], set()))
-        finally:
-            L.gpu_health, L.time = old
+        with patched_driver_env(time=Clock(),
+                                gpu_health=lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}) as h:
+            d = make_driver(issue=23)
+            d.s["plan"] = PLAN; d.save()              # no 'gpu' in state yet
+            d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+            d.st_gpu()
+            self.assertEqual(d.s["stage"], "pickup")
+            self.assertEqual(d.s["gpu"], G.pick_gpu(G.classify_size(PLAN), ["pro5000", "obs", "ts3"], set()))
 
     def test_pi_targets_the_recorded_gpu(self):
         with fake_home() as h:
@@ -1612,54 +1603,44 @@ class ResumeAfterError(unittest.TestCase):   # resuming an error state: keeps th
             self.assertNotIn("gpu", r)   # the recorded gpu is cleared, so the gpu stage re-picks instead of keeping it
 
     def test_errone_gpu_item_repicks_and_waits(self):
-        with tempfile.TemporaryDirectory() as h:
-            old = L.HOME, L.gpu_health, L.time, L.gpu_for_item
-            L.HOME = h; L.time = Clock()
-            try:
-                d = L.Driver("cmdemo1-workorders", 29)   # dry_run=False
-                d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"
-                d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()
-                d.s = L.apply_resume(d.s); d.save()     # the resume rule: saved stage, error dropped, gpu cleared
-                self.assertNotIn("gpu", d.s)
-                rec = []
-                real = L.gpu_for_item
-                L.gpu_for_item = lambda *a: (rec.append(a), real(*a))[1]   # watch what st_gpu passes in
-                L.gpu_health = lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}
-                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
-                d.st_gpu()
-                self.assertEqual(rec[0][0], None)        # st_gpu re-ran gpu_for_item with the cleared gpu
-                self.assertEqual(d.s["gpu"], "pro5000")  # obs is down, so the free healthy pick is pro5000
-                self.assertEqual(d.s["stage"], "pickup")
-            finally:
-                L.HOME, L.gpu_health, L.time, L.gpu_for_item = old
+        rec = []
+        real = L.gpu_for_item
+        with patched_driver_env(time=Clock(),
+                                gpu_for_item=lambda *a: (rec.append(a), real(*a))[1],   # watch what st_gpu passes in
+                                gpu_health=lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}) as h:
+            d = L.Driver("cmdemo1-workorders", 29)   # dry_run=False
+            d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"
+            d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()
+            d.s = L.apply_resume(d.s); d.save()     # the resume rule: saved stage, error dropped, gpu cleared
+            self.assertNotIn("gpu", d.s)
+            d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+            d.st_gpu()
+            self.assertEqual(rec[0][0], None)        # st_gpu re-ran gpu_for_item with the cleared gpu
+            self.assertEqual(d.s["gpu"], "pro5000")  # obs is down, so the free healthy pick is pro5000
+            self.assertEqual(d.s["stage"], "pickup")
 
     def test_errone_gpu_item_waits_while_gpus_held_then_blocks(self):
-        with tempfile.TemporaryDirectory() as h:
-            old = L.HOME, L.gpu_health, L.time
-            L.HOME = h; L.time = Clock()
-            try:
-                # Live items in another repo hold every available GPU: both pro5000 slots, obs and ts3.
-                runs = os.path.join(h, "factory-runs")
-                for i, (gpu, stage) in enumerate((("pro5000", "ci"), ("pro5000", "ci"), ("obs", "implement"), ("ts3", "review"))):
-                    r = os.path.join(runs, f"cmdemo1-dashboard-{11 + i}"); os.makedirs(r)
-                    json.dump({"repo": "cmdemo1-dashboard", "issue": 11 + i, "gpu": gpu, "stage": stage,
-                              "status": "running", "pid": os.getpid()}, open(os.path.join(r, "state.json"), "w"))
-                d = L.Driver("cmdemo1-workorders", 28)   # dry_run=False
-                d.s["plan"] = dict(PLAN, size="large")
-                d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()   # the gpu is already cleared
-                L.gpu_health = lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}
-                d.comment = lambda *a, **k: None; d.usage = lambda final=False: ""; d.wake_bot = lambda reason: None
-                d.st_gpu()
-                self.assertNotIn("gpu", d.s)                        # never re-picked: it stays in the gpu stage
-                self.assertEqual(d.s["stage"], "blocked")
-                self.assertEqual(d.s["status"], "blocked")
-                self.assertEqual(d.s["resume_stage"], "gpu")        # it resumes the gpu stage, never implement or ci
-                self.assertNotIn(d.s["stage"], ("implement", "ci"))
-                self.assertTrue(d.s["wait_why"].startswith("no free GPU"), d.s["wait_why"])
-                self.assertTrue(d.s["blocker"].startswith(f"waited {L.GPU_WAIT_H} hours to start (no free GPU"),
-                                d.s["blocker"])
-            finally:
-                L.HOME, L.gpu_health, L.time = old
+        with patched_driver_env(time=Clock(),
+                                gpu_health=lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}) as h:
+            # Live items in another repo hold every available GPU: both pro5000 slots, obs and ts3.
+            runs = os.path.join(h, "factory-runs")
+            for i, (gpu, stage) in enumerate((("pro5000", "ci"), ("pro5000", "ci"), ("obs", "implement"), ("ts3", "review"))):
+                r = os.path.join(runs, f"cmdemo1-dashboard-{11 + i}"); os.makedirs(r)
+                json.dump({"repo": "cmdemo1-dashboard", "issue": 11 + i, "gpu": gpu, "stage": stage,
+                          "status": "running", "pid": os.getpid()}, open(os.path.join(r, "state.json"), "w"))
+            d = L.Driver("cmdemo1-workorders", 28)   # dry_run=False
+            d.s["plan"] = dict(PLAN, size="large")
+            d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()   # the gpu is already cleared
+            d.comment = lambda *a, **k: None; d.usage = lambda final=False: ""; d.wake_bot = lambda reason: None
+            d.st_gpu()
+            self.assertNotIn("gpu", d.s)                        # never re-picked: it stays in the gpu stage
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertEqual(d.s["status"], "blocked")
+            self.assertEqual(d.s["resume_stage"], "gpu")        # it resumes the gpu stage, never implement or ci
+            self.assertNotIn(d.s["stage"], ("implement", "ci"))
+            self.assertTrue(d.s["wait_why"].startswith("no free GPU"), d.s["wait_why"])
+            self.assertTrue(d.s["blocker"].startswith(f"waited {L.GPU_WAIT_H} hours to start (no free GPU"),
+                            d.s["blocker"])
 
 # Asking unittest for one test as `<file> <Class>.<test>` (e.g. `python3 -m unittest factory/pi/test_item_loop.py
 # RunTaskTimeout.test_run_pi_normal_exit_returns_rc_and_output`) does not work out of the box: unittest resolves every
