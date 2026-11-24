@@ -17,7 +17,9 @@
   Exit code: 0 PASS, 125 no-start / stalled, 1 otherwise. Pi's reply tail is printed with secrets scrubbed.
 - --timeout is hard: Pi runs in its own process group, so the timeout kills Pi AND every process Pi started (its tool
   subprocesses inherit the stdout pipe, so killing only Pi left communicate() blocked on them -- #817: --timeout 1800
-  ran 4263 s with the GPU slot held). The record says result "timeout", rc 124.
+  ran 4263 s with the GPU slot held). That group kill now lives in runner.run_cmd (#839), the one runner every
+  factory command (the driver's sh included) goes through; run-task only maps the timeout to rc 124. The record says
+  result "timeout", rc 124.
 - --start-timeout SEC (drivers pass 900, t85u): a hand-off must really start. Once Pi holds its slot, no model output
   (an assistant record in a session file written by THIS launch; an older session file of a reused task name never
   counts) within SEC kills the whole Pi group: result "no-start". After the first model output the run is "stalled"
@@ -34,6 +36,7 @@ import argparse, datetime as dt, fcntl, glob, json, os, re, signal, subprocess, 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 from scrub import scrub   # one scrub rule set (tokens, tunnel hosts, every LOCAL_LLM_*_URL / _TOKEN value)
+from runner import run_cmd   # one runner with a deadline (#839, runner.py): it owns the process-group rules, shared with the driver's sh
 import gpu as G
 import gpu_gate
 
@@ -134,37 +137,30 @@ def killed_by_watch(ev, rc):
     return ev is not None and ev.is_set() and (rc is None or rc < 0 or rc in (128 + signal.SIGTERM, 128 + signal.SIGKILL))
 
 def run_pi(cmd, cwd, timeout, slot_fd=None, env=None, sdir=None, start_s=None, beat=None, stall_s=None):
-    """Run Pi in its own process group; return (rc, output). On timeout SIGTERM then SIGKILL the whole group (#817),
-    reporting rc 124 with whatever output was collected before the pipe had to be closed. With sdir and start_s, a Pi
-    with no model output within start_s, or no activity for stall_s after it, is killed the same way: rc 125
-    (NO_START_RC); rc 125 with run_pi.started False means it never produced model output."""
+    """Run Pi through runner.run_cmd, the one runner with a deadline (#839): it puts Pi in its own process group
+    and, on timeout, SIGTERMs then SIGKILLs that whole group (the #817 rule, now written once) and hands the output
+    collected before the pipe had to be closed back on the exception. Return (rc, output); a timeout reports rc 124
+    with that output. With sdir and start_s, a Pi with no model output within start_s, or no activity for stall_s
+    after it, is killed the same way by the watch: rc 125 (NO_START_RC); rc 125 with run_pi.started False means it
+    never produced model output."""
     since = time.time()
-    p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                         text=True, start_new_session=True,
-                         pass_fds=gpu_gate.slot_fds(slot_fd) if slot_fd is not None else (), env=env)
-    def kill(sig):
-        try: os.killpg(p.pid, sig)
-        except ProcessLookupError: pass
     def s(v): return (v.decode(errors="replace") if isinstance(v, bytes) else v) or ""
-    text = ""; ev = watch_progress(p, kill, sdir, start_s, beat, stall_s=stall_s, since=since) if sdir and start_s else None
-    run_pi.started = True
+    ev = None
+    def on_spawn(p):   # run_cmd calls this with the live child before any waiting: the watch gets the handle it needs
+        nonlocal ev
+        def kill(sig):
+            try: os.killpg(p.pid, sig)
+            except ProcessLookupError: pass
+        ev = watch_progress(p, kill, sdir, start_s, beat, stall_s=stall_s, since=since) if sdir and start_s else None
+        run_pi.started = True   # the child exists: "not started" from here on means only "no model output"
     try:
-        out, _ = p.communicate(timeout=timeout)
-        if killed_by_watch(ev, p.returncode): run_pi.started = ev.started; return NO_START_RC, s(out)
-        return p.returncode, s(out)
-    except subprocess.TimeoutExpired as e:
-        text = s(e.stdout)
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            kill(sig)
-            try:
-                out, _ = p.communicate(timeout=5); return 124, s(out) or text
-            except subprocess.TimeoutExpired as e2:
-                text = s(e2.stdout) or text
-        try: p.stdout.close()     # a process outside the group still holds the pipe: stop waiting for EOF
-        except OSError: pass
-        try: p.wait(timeout=5)    # always reap: the group is killed, so this returns at once
-        except subprocess.TimeoutExpired: pass
-        return 124, text
+        r = run_cmd(cmd, cwd=cwd, timeout=timeout, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True,
+                    pass_fds=gpu_gate.slot_fds(slot_fd) if slot_fd is not None else (), on_spawn=on_spawn)
+    except subprocess.TimeoutExpired as e:   # run_cmd already killed and reaped the whole group (#839)
+        return 124, s(e.output)
+    if killed_by_watch(ev, r.returncode): run_pi.started = ev.started; return NO_START_RC, s(r.stdout)
+    return r.returncode, s(r.stdout)
 
 def write_json_atomic(path, obj):
     tmp = f"{path}.{os.getpid()}.tmp"

@@ -25,6 +25,7 @@ import argparse, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, ti
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
 from scrub import SECRET_RE, scrub, add_secret_source   # the one scrub rule set lives in scrub.py (#838), re-exported here so watchdog, run-task and the tests keep importing it from item_loop
+from runner import run_cmd   # the one runner with a deadline lives in runner.py (#839), re-exported here for the same reason: run-task uses it without importing this driver
 
 # String enums for check states and failure types (values are string literals for JSON compatibility).
 class CheckState(StrEnum):
@@ -583,14 +584,14 @@ class Driver:
             r = None
             tok = app_token() if is_gh and not (isinstance(cmd, list) and tuple(cmd[1:3]) in GH_APP_USER_ONLY) else None
             if tok:   # App quota first; any refusal (403 / permission / branch rule) re-runs the same call on the user login
-                r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout, env={**os.environ, "GH_TOKEN": tok},
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                r = run_cmd(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout, env={**os.environ, "GH_TOKEN": tok},
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 if r.returncode and app_denied(r.stdout):
                     if re.search(r"HTTP 401|Bad credentials", r.stdout): _app_tok.update(v=None, at=0.0)   # expired: re-mint next call (at=0: no negative cache)
                     self.log("gh: App token refused; retrying this call with the user login"); r = None
             if r is None:
-                r = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                r = run_cmd(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if not (is_gh and r.returncode and is_rate_limit(r.stdout)):
                 break
             wait = gh_retry_wait(attempt, waited)
@@ -744,8 +745,8 @@ class Driver:
 
     def verify(self, name):
         log = os.path.join(self.run_dir, "logs", f"verify-{name}.log"); t0 = time.time()
-        r = subprocess.run(["bash", "-o", "pipefail", "-c", self.s["plan"]["verify_cmd"]], cwd=self.s["wt"], text=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        r = run_cmd(["bash", "-o", "pipefail", "-c", self.s["plan"]["verify_cmd"]], cwd=self.s["wt"], text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         open(log, "w").write(scrub(r.stdout))
         self.s["verify_runs"] = self.s.get("verify_runs", 0) + 1
         self.s["verify_s"] = self.s.get("verify_s", 0) + time.time() - t0; self.save()
@@ -1146,8 +1147,8 @@ class Driver:
     def st_review(self):
         p = self.s["plan"]; ev, failed = [], []
         for i, c in enumerate(p["criteria"], 1):
-            r = subprocess.run(["bash", "-o", "pipefail", "-c", c["evidence_cmd"]], cwd=self.s["wt"], text=True,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=3600)
+            r = run_cmd(["bash", "-o", "pipefail", "-c", c["evidence_cmd"]], cwd=self.s["wt"], text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=3600)
             out = scrub(r.stdout); open(os.path.join(self.run_dir, "logs", f"evidence-{i}.log"), "w").write(out)
             last = ([l for l in out.splitlines() if l.strip()][-1:] or [""])[0][:200]
             (ev if r.returncode == 0 else failed).append((c, last, r.returncode))
