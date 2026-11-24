@@ -20,6 +20,13 @@ SECRET_RE = re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,
                        r"|(?:https?://)?[A-Za-z0-9.-]*\b(?:pro\d{4}|\d{4}ti)\.clearmeasure\.ai\b[^\s'\"]*"
                        r"|Bearer\s+\S+|(?i:(?:password|secret|token|apikey|api_key)\s*[=:]\s*)\S+)")
 
+# A registered / environmental value this long or shorter is left alone (it is too short to be a real token, and redacting
+# it would eat ordinary words); the cutoff lives here once so the source pass and the environment pass can never drift.
+MIN_SECRET_LEN = 6
+
+# The GitHub-token env names beyond gpu.secret_env_names(): the ones gh and the bot's own project access read.
+GH_TOKEN_ENV_NAMES = ("GH_TOKEN", "GITHUB_TOKEN", "CM_AI_OPS_BOT_GH_TOKEN", "GH_PROJECT_TOKEN")
+
 # Callers' own secret values (the cached GitHub App token and anything else a module holds): each is a zero-arg callable
 # returning the value, asked for on every scrub() and before the environment pass. A source that raises is skipped.
 SECRET_SOURCES = []
@@ -35,8 +42,8 @@ def scrub(s):
     for src in list(SECRET_SOURCES):                       # the caller-owned values first, the environment second
         try: v = src()
         except Exception: continue                         # a broken source is skipped, never fatal
-        if v and len(v) > 6: s = s.replace(v, "[redacted]")
-    for name in (*G.secret_env_names(), "GH_TOKEN", "GITHUB_TOKEN", "CM_AI_OPS_BOT_GH_TOKEN", "GH_PROJECT_TOKEN"):
+        if v and len(v) > MIN_SECRET_LEN: s = s.replace(v, "[redacted]")
+    for name in (*G.secret_env_names(), *GH_TOKEN_ENV_NAMES):
         v = os.environ.get(name)
-        if v and len(v) > 6: s = s.replace(v, "[redacted]")
+        if v and len(v) > MIN_SECRET_LEN: s = s.replace(v, "[redacted]")
     return s
