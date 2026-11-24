@@ -28,6 +28,10 @@ PRIORITY = ("pro5000", "pro6000", "obs", "ts3")   # new work goes to the first G
 # shortest client timeout for a Pi / model call (a long call hung up at less is a 499). Tests may lower the floor
 # with FACTORY_MIN_CLIENT_TIMEOUT_S; production leaves it unset, so the floor stays 300.
 MIN_CLIENT_TIMEOUT_S = int(os.environ.get("FACTORY_MIN_CLIENT_TIMEOUT_S", "300"))
+PI_TASK_TIMEOUT_S = 1800   # the standard timeout for one Pi task: run-task's --timeout default, Driver.pi and plan tasks (#842)
+
+def client_timeout(seconds=None):
+    return max(int(seconds) if seconds else PI_TASK_TIMEOUT_S, MIN_CLIENT_TIMEOUT_S)
 
 def env_names(g):
     u = g.upper(); return f"LOCAL_LLM_{u}_URL", f"LOCAL_LLM_{u}_TOKEN"
