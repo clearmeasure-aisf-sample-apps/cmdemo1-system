@@ -21,6 +21,27 @@ def fake_home():
         finally:
             L.HOME = old
 
+@contextlib.contextmanager
+def patched_driver_env(run=None, sleep=None, gpu_health=None, time=None, gpu_for_item=None, research_ok=None):
+    """fake_home() plus, when given, L.subprocess.run = run and L.time.sleep = sleep, and the item_loop module
+    attributes named gpu_health, time, gpu_for_item and research_ok set to the values passed (None leaves an
+    attribute unchanged); yields fake_home's temp dir path and restores every patched attribute in a finally
+    block (fake_home restores L.HOME)."""
+    old_run, old_sleep = L.subprocess.run, L.time.sleep
+    overrides = {"gpu_health": gpu_health, "time": time, "gpu_for_item": gpu_for_item, "research_ok": research_ok}
+    old = {name: getattr(L, name) for name, v in overrides.items() if v is not None}
+    with fake_home() as h:
+        if run is not None: L.subprocess.run = run
+        if sleep is not None: L.time.sleep = sleep
+        for name, v in overrides.items():
+            if v is not None: setattr(L, name, v)
+        try:
+            yield h
+        finally:
+            for name in reversed(old): setattr(L, name, old[name])
+            L.subprocess.run = old_run
+            L.time.sleep = old_sleep
+
 def make_driver(issue=1, repo="cmdemo1-workorders", dry_run=True, **kw):
     """Create a standard test Driver; dry_run is explicit so callers can opt out."""
     return L.Driver(repo, issue, dry_run=dry_run, **kw)
@@ -51,6 +72,15 @@ def scripted_sh(replies):
         return L.subprocess.CompletedProcess(cmd, 0, "", "")
     sh.calls = calls
     return sh
+
+def pi_stub(result, calls=None):
+    """Driver.pi replacement: returns a callable with the Driver.pi signature (name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None)
+    that appends each call's name to calls (when given) and returns result: a bool, or a callable taking the
+    calls list and returning a bool."""
+    def pi(name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None):
+        if calls is not None: calls.append(name)
+        return result(calls) if callable(result) else result
+    return pi
 
 class PromptMentions:   # mixin for prompt tests: every phrase the prompt must name, on one line, needle named on failure
     def assert_mentions(self, text, *needles):
@@ -281,25 +311,20 @@ class ReviewInfraRetry(unittest.TestCase):   # t83u: no / empty findings or no v
             self.assertEqual(d.s["counts"]["review_fail"], 0)
 
     def test_review_runs_on_any_free_non_author_gpu_and_missing_file_is_infra(self):
-        old = (L.research_ok, L.gpu_health)
-        L.research_ok = lambda *a: True; L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
-        try:
-            with fake_home() as h:
-                d = make_driver(issue=32)
-                d.s.update(plan=dict(PLAN), wt=tempfile.mkdtemp(dir=h), gpu="pro5000", pr=7, default="main")
-                d.merge_base = lambda: "abc"; calls = []
-                rec = json.dumps({"task": "independent-review-1", "gpu": "ts3", "result": "exit 1"})
-                def sh(cmd, **k):
-                    calls.append(list(cmd))
-                    out = "body\n## Refactoring research\n- x" if "pr" in cmd else (rec + "\n--- pi tail ---" if "--gpu" in cmd else "")
-                    return subprocess.CompletedProcess(cmd, 1 if "--gpu" in cmd else 0, out, "")
-                d.sh = sh
-                ok, why = d.independent_review()
-                run = next(c for c in calls if "--gpu" in c)
-                self.assertEqual(run[run.index("--gpu") + 1], "pro6000,obs,ts3")   # never the author's pro5000
-                self.assertIsNone(ok); self.assertIn("no findings file", why); self.assertEqual(d.s["reviewer_gpu"], "ts3")
-        finally:
-            L.research_ok, L.gpu_health = old
+        with patched_driver_env(research_ok=lambda *a: True, gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}) as h:
+            d = make_driver(issue=32)
+            d.s.update(plan=dict(PLAN), wt=tempfile.mkdtemp(dir=h), gpu="pro5000", pr=7, default="main")
+            d.merge_base = lambda: "abc"; calls = []
+            rec = json.dumps({"task": "independent-review-1", "gpu": "ts3", "result": "exit 1"})
+            def sh(cmd, **k):
+                calls.append(list(cmd))
+                out = "body\n## Refactoring research\n- x" if "pr" in cmd else (rec + "\n--- pi tail ---" if "--gpu" in cmd else "")
+                return subprocess.CompletedProcess(cmd, 1 if "--gpu" in cmd else 0, out, "")
+            d.sh = sh
+            ok, why = d.independent_review()
+            run = next(c for c in calls if "--gpu" in c)
+            self.assertEqual(run[run.index("--gpu") + 1], "pro6000,obs,ts3")   # never the author's pro5000
+            self.assertIsNone(ok); self.assertIn("no findings file", why); self.assertEqual(d.s["reviewer_gpu"], "ts3")
 
     def test_gate_acquire_any_takes_the_first_free_gpu(self):
         import gpu_gate
@@ -513,24 +538,19 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
     def test_review_excludes_every_authoring_gpu_including_relaunch_gpus(self):   # review major 2
         self.assertEqual(G.reviewer_gpus(["ts3", "obs"], list(G.GPUS)), ["pro5000", "pro6000"])
         self.assertEqual(G.reviewer_gpus("ts3", list(G.GPUS)), ["pro5000", "pro6000", "obs"])
-        old = (L.gpu_health, L.research_ok)
-        L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}; L.research_ok = lambda *a: True
-        try:
-            with fake_home() as h:
-                d, calls = self.driver(h, ["stalled", ("PASS", "obs")])   # item on ts3; the relaunch wrote the code on obs
-                self.assertTrue(d.pi("t1", "do it"))
-                self.assertEqual(d.author_gpus(), ["ts3", "obs"])
-                d.s.update(plan=dict(PLAN), pr=7, default="main"); d.merge_base = lambda: "abc"; review = []
-                rec = json.dumps({"task": "independent-review-1", "gpu": "pro5000", "result": "PASS"})
-                def sh(cmd, **k):
-                    if "--gpu" in cmd: review.append(list(cmd)); return subprocess.CompletedProcess(cmd, 0, rec, "")
-                    return subprocess.CompletedProcess(cmd, 0, "body\n## Refactoring research\n- x" if "pr" in cmd else "", "")
-                d.sh = sh; d.independent_review()
-                self.assertEqual(review[0][review[0].index("--gpu") + 1], "pro5000,pro6000", "neither ts3 nor obs may review")
-                self.assertEqual(int(review[0][review[0].index("--slot-wait") + 1]), L.ANY_SLOT_WAIT_S)   # 2 h, per the docs
-                self.assertEqual(d.author_gpus(), ["ts3", "obs"], "a review never counts as authoring")
-        finally:
-            L.gpu_health, L.research_ok = old
+        with patched_driver_env(gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}, research_ok=lambda *a: True) as h:
+            d, calls = self.driver(h, ["stalled", ("PASS", "obs")])   # item on ts3; the relaunch wrote the code on obs
+            self.assertTrue(d.pi("t1", "do it"))
+            self.assertEqual(d.author_gpus(), ["ts3", "obs"])
+            d.s.update(plan=dict(PLAN), pr=7, default="main"); d.merge_base = lambda: "abc"; review = []
+            rec = json.dumps({"task": "independent-review-1", "gpu": "pro5000", "result": "PASS"})
+            def sh(cmd, **k):
+                if "--gpu" in cmd: review.append(list(cmd)); return subprocess.CompletedProcess(cmd, 0, rec, "")
+                return subprocess.CompletedProcess(cmd, 0, "body\n## Refactoring research\n- x" if "pr" in cmd else "", "")
+            d.sh = sh; d.independent_review()
+            self.assertEqual(review[0][review[0].index("--gpu") + 1], "pro5000,pro6000", "neither ts3 nor obs may review")
+            self.assertEqual(int(review[0][review[0].index("--slot-wait") + 1]), L.ANY_SLOT_WAIT_S)   # 2 h, per the docs
+            self.assertEqual(d.author_gpus(), ["ts3", "obs"], "a review never counts as authoring")
 
     def test_no_slot_record_is_not_an_author_gpu(self):
         old_gpu_health = L.gpu_health
@@ -658,35 +678,25 @@ class GpuResume(unittest.TestCase):   # bug (a): a resumed item keeps the GPU re
             self.assertEqual(d.gpu(), "obs")
 
     def test_resumed_item_keeps_its_gpu_and_waits(self):
-        old = (L.gpu_health, L.time)
-        L.time = Clock()
-        try:
-            with fake_home() as h:
-                d = L.Driver("cmdemo1-workorders", 22)   # dry_run=False
-                d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"; d.s["stage"] = "gpu"; d.save()
-                L.gpu_health = lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}
-                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
-                d.st_gpu()
-                self.assertEqual(d.s["gpu"], "obs")      # not re-picked to pro5000 or anything else
-                self.assertEqual(d.s["stage"], "blocked")
-                self.assertIn("obs", d.s["blocker"])     # it waited for its own GPU, bounded by GPU_WAIT_H
-        finally:
-            L.gpu_health, L.time = old
+        with patched_driver_env(time=Clock(),
+                                gpu_health=lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}) as h:
+            d = L.Driver("cmdemo1-workorders", 22)   # dry_run=False
+            d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"; d.s["stage"] = "gpu"; d.save()
+            d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+            d.st_gpu()
+            self.assertEqual(d.s["gpu"], "obs")      # not re-picked to pro5000 or anything else
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertIn("obs", d.s["blocker"])     # it waited for its own GPU, bounded by GPU_WAIT_H
 
     def test_new_item_picks_and_persists_its_gpu(self):
-        old = (L.gpu_health, L.time)
-        L.time = Clock()
-        try:
-            with fake_home() as h:
-                d = make_driver(issue=23)
-                d.s["plan"] = PLAN; d.save()              # no 'gpu' in state yet
-                L.gpu_health = lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}
-                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
-                d.st_gpu()
-                self.assertEqual(d.s["stage"], "pickup")
-                self.assertEqual(d.s["gpu"], G.pick_gpu(G.classify_size(PLAN), ["pro5000", "obs", "ts3"], set()))
-        finally:
-            L.gpu_health, L.time = old
+        with patched_driver_env(time=Clock(),
+                                gpu_health=lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}) as h:
+            d = make_driver(issue=23)
+            d.s["plan"] = PLAN; d.save()              # no 'gpu' in state yet
+            d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+            d.st_gpu()
+            self.assertEqual(d.s["stage"], "pickup")
+            self.assertEqual(d.s["gpu"], G.pick_gpu(G.classify_size(PLAN), ["pro5000", "obs", "ts3"], set()))
 
     def test_pi_targets_the_recorded_gpu(self):
         with fake_home() as h:
@@ -706,7 +716,7 @@ class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be ma
             d.s["stage"] = "implement"
             d.s["wt"] = tempfile.mkdtemp(dir=h)
             calls = []
-            d.pi = lambda *a, **kw: (calls.append(a[0]), False)[1]
+            d.pi = pi_stub(False, calls)
             d.st_implement()
             self.assertEqual(d.s.get("tasks_done", []), [])   # a failed task is never recorded done
             self.assertEqual(len(calls), L.LIMITS["local_fix"] + 1)   # retried up to the limit
@@ -723,7 +733,7 @@ class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be ma
             d.s["plan"] = dict(PLAN, tasks=[{"name": "t1", "prompt": "p"}])
             d.s["stage"] = "implement"
             d.s["wt"] = tempfile.mkdtemp(dir=h)
-            d.pi = lambda *a, **kw: True
+            d.pi = pi_stub(True)
             d.st_implement()
             self.assertEqual(d.s["tasks_done"], ["t1"])   # a passing task lands in tasks_done
             self.assertEqual(d.s["stage"], "local-verify")   # and the stage advances as before
@@ -735,7 +745,7 @@ class TaskRetry(unittest.TestCase):   # bug (b): a failed Pi task must not be ma
             d.s["stage"] = "implement"
             d.s["wt"] = tempfile.mkdtemp(dir=h)
             calls = []
-            d.pi = lambda *a, **kw: (calls.append(a[0]), len(calls) > 1)[1]   # fails exactly once
+            d.pi = pi_stub(lambda cs: len(cs) > 1, calls)   # fails exactly once
             d.st_implement()
             self.assertEqual(d.s["tasks_done"], ["t1"])
             self.assertEqual(d.s["stage"], "local-verify")
@@ -843,20 +853,14 @@ class GhRateLimit(unittest.TestCase):
 
     def run_gh(self, replies, issue=8):
         """Call d.gh() with subprocess.run returning `replies` in order (last one repeats); returns (result|exc, calls, sleeps, driver)."""
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
-            L.HOME = h
-            calls, sleeps = [0], []
-            def fake_run(*a, **k):
-                rc, out = replies[min(calls[0], len(replies) - 1)]; calls[0] += 1
-                return L.subprocess.CompletedProcess(a, rc, out, "")
-            L.subprocess.run, L.time.sleep = fake_run, sleeps.append
-            try:
-                d = L.Driver("cmdemo1-workorders", issue)
-                try: res = d.gh("pr", "list")
-                except RuntimeError as e: res = e
-            finally:
-                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        calls, sleeps = [0], []
+        def fake_run(*a, **k):
+            rc, out = replies[min(calls[0], len(replies) - 1)]; calls[0] += 1
+            return L.subprocess.CompletedProcess(a, rc, out, "")
+        with patched_driver_env(run=fake_run, sleep=sleeps.append) as h:
+            d = L.Driver("cmdemo1-workorders", issue)
+            try: res = d.gh("pr", "list")
+            except RuntimeError as e: res = e
         return res, calls[0], sleeps, d
 
     def test_is_rate_limit_matches_real_gh_errors_only(self):
@@ -905,77 +909,51 @@ class GhRateLimit(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         self.assertEqual(sleeps, [50, 10, 50, 50, 20])   # 60s and 120s waits, re-saving state every 50s
         self.assertNotIn("gh_wait", d.s)                 # cleared once gh answered
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_sleep = L.HOME, L.time.sleep
-            L.HOME = h
-            try:
-                d = L.Driver("cmdemo1-workorders", 9)
-                L.time.sleep = lambda s: seen.append(json.load(open(d.state_p)))
-                d.wait_alive(120, "gh rate limit, retry 1")
-            finally: L.time.sleep, L.HOME = old_sleep, old_home
+        with patched_driver_env(sleep=lambda s: seen.append(json.load(open(d.state_p)))) as h:
+            d = L.Driver("cmdemo1-workorders", 9)
+            d.wait_alive(120, "gh rate limit, retry 1")
         self.assertEqual(len(seen), 3)
         self.assertTrue(all(x["gh_wait"]["why"] == "gh rate limit, retry 1" and x["pid"] == os.getpid() for x in seen))
         self.assertTrue(seen[0]["gh_wait"]["until"] >= seen[-1]["gh_wait"]["until"])
 
     def test_non_rate_limit_failure_still_raises(self):
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
-            L.HOME = h
-            calls, sleeps = [0], []
-            try:
-                def fake_run(*a, **k):
-                    calls[0] += 1
-                    return L.subprocess.CompletedProcess(a, 1, "HTTP 404: Not Found", "")
-                def fake_sleep(s): sleeps.append(s)
-                L.subprocess.run = fake_run
-                L.time.sleep = fake_sleep
-                d = L.Driver("cmdemo1-workorders", 8)
-                with self.assertRaises(RuntimeError):
-                    d.gh("pr", "list")
-            finally:
-                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        calls, sleeps = [0], []
+        def fake_run(*a, **k):
+            calls[0] += 1
+            return L.subprocess.CompletedProcess(a, 1, "HTTP 404: Not Found", "")
+        def fake_sleep(s): sleeps.append(s)
+        with patched_driver_env(run=fake_run, sleep=fake_sleep) as h:
+            d = L.Driver("cmdemo1-workorders", 8)
+            with self.assertRaises(RuntimeError):
+                d.gh("pr", "list")
         self.assertEqual(calls[0], 1)   # non-rate-limit failures are never retried
         self.assertEqual(sleeps, [])
 
     def test_gh_retries_rate_limit_with_backoff_then_succeeds(self):
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
-            L.HOME = h
-            calls, sleeps = [0], []
-            try:
-                def fake_run(*a, **k):
-                    calls[0] += 1
-                    if calls[0] <= 2:
-                        return L.subprocess.CompletedProcess(a, 1, "HTTP 403: API rate limit exceeded", "")
-                    return L.subprocess.CompletedProcess(a, 0, "42", "")
-                def fake_sleep(s): sleeps.append(s)
-                L.subprocess.run = fake_run
-                L.time.sleep = fake_sleep
-                d = L.Driver("cmdemo1-workorders", 8)
-                self.assertEqual(d.gh("pr", "list").returncode, 0)   # a later try succeeds; no raise
-            finally:
-                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        calls, sleeps = [0], []
+        def fake_run(*a, **k):
+            calls[0] += 1
+            if calls[0] <= 2:
+                return L.subprocess.CompletedProcess(a, 1, "HTTP 403: API rate limit exceeded", "")
+            return L.subprocess.CompletedProcess(a, 0, "42", "")
+        def fake_sleep(s): sleeps.append(s)
+        with patched_driver_env(run=fake_run, sleep=fake_sleep) as h:
+            d = L.Driver("cmdemo1-workorders", 8)
+            self.assertEqual(d.gh("pr", "list").returncode, 0)   # a later try succeeds; no raise
         self.assertEqual(calls[0], 3)             # two rate-limited tries, then the success
         self.assertEqual(sleeps, [60, 120])       # backoff before each retry
 
     def test_gh_waits_until_reset_after_backoff(self):
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run, old_sleep = L.HOME, L.subprocess.run, L.time.sleep
-            L.HOME = h
-            calls, sleeps = [0], []
-            try:
-                def fake_run(*a, **k):
-                    calls[0] += 1
-                    if calls[0] <= 5:
-                        return L.subprocess.CompletedProcess(a, 1, "HTTP 403: Secondary rate limit in effect. Please try again.", "")
-                    return L.subprocess.CompletedProcess(a, 0, "42", "")
-                def fake_sleep(s): sleeps.append(s)
-                L.subprocess.run = fake_run
-                L.time.sleep = fake_sleep
-                d = L.Driver("cmdemo1-workorders", 8)
-                self.assertEqual(d.gh("pr", "list").returncode, 0)
-            finally:
-                L.subprocess.run, L.time.sleep, L.HOME = old_run, old_sleep, old_home
+        calls, sleeps = [0], []
+        def fake_run(*a, **k):
+            calls[0] += 1
+            if calls[0] <= 5:
+                return L.subprocess.CompletedProcess(a, 1, "HTTP 403: Secondary rate limit in effect. Please try again.", "")
+            return L.subprocess.CompletedProcess(a, 0, "42", "")
+        def fake_sleep(s): sleeps.append(s)
+        with patched_driver_env(run=fake_run, sleep=fake_sleep) as h:
+            d = L.Driver("cmdemo1-workorders", 8)
+            self.assertEqual(d.gh("pr", "list").returncode, 0)
         self.assertEqual(calls[0], 6)
         self.assertEqual(sleeps, [60, 120, 240, 600, 600])   # backoff first, then 600s waits until the limit resets
 
@@ -1725,54 +1703,44 @@ class ResumeAfterError(unittest.TestCase):   # resuming an error state: keeps th
             self.assertNotIn("gpu", r)   # the recorded gpu is cleared, so the gpu stage re-picks instead of keeping it
 
     def test_errone_gpu_item_repicks_and_waits(self):
-        with tempfile.TemporaryDirectory() as h:
-            old = L.HOME, L.gpu_health, L.time, L.gpu_for_item
-            L.HOME = h; L.time = Clock()
-            try:
-                d = L.Driver("cmdemo1-workorders", 29)   # dry_run=False
-                d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"
-                d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()
-                d.s = L.apply_resume(d.s); d.save()     # the resume rule: saved stage, error dropped, gpu cleared
-                self.assertNotIn("gpu", d.s)
-                rec = []
-                real = L.gpu_for_item
-                L.gpu_for_item = lambda *a: (rec.append(a), real(*a))[1]   # watch what st_gpu passes in
-                L.gpu_health = lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}
-                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
-                d.st_gpu()
-                self.assertEqual(rec[0][0], None)        # st_gpu re-ran gpu_for_item with the cleared gpu
-                self.assertEqual(d.s["gpu"], "pro5000")  # obs is down, so the free healthy pick is pro5000
-                self.assertEqual(d.s["stage"], "pickup")
-            finally:
-                L.HOME, L.gpu_health, L.time, L.gpu_for_item = old
+        rec = []
+        real = L.gpu_for_item
+        with patched_driver_env(time=Clock(),
+                                gpu_for_item=lambda *a: (rec.append(a), real(*a))[1],   # watch what st_gpu passes in
+                                gpu_health=lambda max_age=600: {"obs": ("UNREACHABLE", "down"), "pro5000": ("HEALTHY", ""), "ts3": ("HEALTHY", "")}) as h:
+            d = L.Driver("cmdemo1-workorders", 29)   # dry_run=False
+            d.s["plan"] = dict(PLAN, size="large"); d.s["gpu"] = "obs"
+            d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()
+            d.s = L.apply_resume(d.s); d.save()     # the resume rule: saved stage, error dropped, gpu cleared
+            self.assertNotIn("gpu", d.s)
+            d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+            d.st_gpu()
+            self.assertEqual(rec[0][0], None)        # st_gpu re-ran gpu_for_item with the cleared gpu
+            self.assertEqual(d.s["gpu"], "pro5000")  # obs is down, so the free healthy pick is pro5000
+            self.assertEqual(d.s["stage"], "pickup")
 
     def test_errone_gpu_item_waits_while_gpus_held_then_blocks(self):
-        with tempfile.TemporaryDirectory() as h:
-            old = L.HOME, L.gpu_health, L.time
-            L.HOME = h; L.time = Clock()
-            try:
-                # Live items in another repo hold every available GPU: both pro5000 slots, obs and ts3.
-                runs = os.path.join(h, "factory-runs")
-                for i, (gpu, stage) in enumerate((("pro5000", "ci"), ("pro5000", "ci"), ("obs", "implement"), ("ts3", "review"))):
-                    r = os.path.join(runs, f"cmdemo1-dashboard-{11 + i}"); os.makedirs(r)
-                    json.dump({"repo": "cmdemo1-dashboard", "issue": 11 + i, "gpu": gpu, "stage": stage,
-                              "status": "running", "pid": os.getpid()}, open(os.path.join(r, "state.json"), "w"))
-                d = L.Driver("cmdemo1-workorders", 28)   # dry_run=False
-                d.s["plan"] = dict(PLAN, size="large")
-                d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()   # the gpu is already cleared
-                L.gpu_health = lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}
-                d.comment = lambda *a, **k: None; d.usage = lambda final=False: ""; d.wake_bot = lambda reason: None
-                d.st_gpu()
-                self.assertNotIn("gpu", d.s)                        # never re-picked: it stays in the gpu stage
-                self.assertEqual(d.s["stage"], "blocked")
-                self.assertEqual(d.s["status"], "blocked")
-                self.assertEqual(d.s["resume_stage"], "gpu")        # it resumes the gpu stage, never implement or ci
-                self.assertNotIn(d.s["stage"], ("implement", "ci"))
-                self.assertTrue(d.s["wait_why"].startswith("no free GPU"), d.s["wait_why"])
-                self.assertTrue(d.s["blocker"].startswith(f"waited {L.GPU_WAIT_H} hours to start (no free GPU"),
-                                d.s["blocker"])
-            finally:
-                L.HOME, L.gpu_health, L.time = old
+        with patched_driver_env(time=Clock(),
+                                gpu_health=lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}) as h:
+            # Live items in another repo hold every available GPU: both pro5000 slots, obs and ts3.
+            runs = os.path.join(h, "factory-runs")
+            for i, (gpu, stage) in enumerate((("pro5000", "ci"), ("pro5000", "ci"), ("obs", "implement"), ("ts3", "review"))):
+                r = os.path.join(runs, f"cmdemo1-dashboard-{11 + i}"); os.makedirs(r)
+                json.dump({"repo": "cmdemo1-dashboard", "issue": 11 + i, "gpu": gpu, "stage": stage,
+                          "status": "running", "pid": os.getpid()}, open(os.path.join(r, "state.json"), "w"))
+            d = L.Driver("cmdemo1-workorders", 28)   # dry_run=False
+            d.s["plan"] = dict(PLAN, size="large")
+            d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()   # the gpu is already cleared
+            d.comment = lambda *a, **k: None; d.usage = lambda final=False: ""; d.wake_bot = lambda reason: None
+            d.st_gpu()
+            self.assertNotIn("gpu", d.s)                        # never re-picked: it stays in the gpu stage
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertEqual(d.s["status"], "blocked")
+            self.assertEqual(d.s["resume_stage"], "gpu")        # it resumes the gpu stage, never implement or ci
+            self.assertNotIn(d.s["stage"], ("implement", "ci"))
+            self.assertTrue(d.s["wait_why"].startswith("no free GPU"), d.s["wait_why"])
+            self.assertTrue(d.s["blocker"].startswith(f"waited {L.GPU_WAIT_H} hours to start (no free GPU"),
+                            d.s["blocker"])
 
 # Asking unittest for one test as `<file> <Class>.<test>` (e.g. `python3 -m unittest factory/pi/test_item_loop.py
 # RunTaskTimeout.test_run_pi_normal_exit_returns_rc_and_output`) does not work out of the box: unittest resolves every
@@ -1823,18 +1791,13 @@ class GhAppToken(unittest.TestCase):   # gh reads/writes use the GitHub App toke
 
     def run_gh(self, replies):
         """d.gh() with subprocess.run returning `replies` in order; returns (result, [GH_TOKEN seen per call], driver logs)."""
-        with tempfile.TemporaryDirectory() as h:
-            old_home, old_run = L.HOME, L.subprocess.run
-            L.HOME = h
-            seen, i = [], [0]
-            def fake_run(*a, **k):
-                seen.append((k.get("env") or {}).get("GH_TOKEN")); rc, out = replies[min(i[0], len(replies) - 1)]; i[0] += 1
-                return L.subprocess.CompletedProcess(a, rc, out, "")
-            L.subprocess.run = fake_run
-            try:
-                d = make_driver(issue=8); logs = []; d.log = logs.append
-                res = d.gh("pr", "list", check=False)
-            finally: L.subprocess.run, L.HOME = old_run, old_home
+        seen, i = [], [0]
+        def fake_run(*a, **k):
+            seen.append((k.get("env") or {}).get("GH_TOKEN")); rc, out = replies[min(i[0], len(replies) - 1)]; i[0] += 1
+            return L.subprocess.CompletedProcess(a, rc, out, "")
+        with patched_driver_env(run=fake_run) as h:
+            d = make_driver(issue=8); logs = []; d.log = logs.append
+            res = d.gh("pr", "list", check=False)
         return res, seen, logs
 
     def test_gh_uses_app_token_when_it_works(self):
@@ -1867,11 +1830,9 @@ class GhAppToken(unittest.TestCase):   # gh reads/writes use the GitHub App toke
     def test_pr_and_issue_create_stay_on_user_login(self):
         os.environ["GH_APP_TOKEN_CMD"] = f"printf {self.FAKE}"
         for args in (("pr", "create", "--title", "t"), ("issue", "create", "--title", "t")):
-            with tempfile.TemporaryDirectory() as h:
-                old_home, old_run = L.HOME, L.subprocess.run; L.HOME = h; seen = []
-                L.subprocess.run = lambda *a, **k: (seen.append(k.get("env")), L.subprocess.CompletedProcess(a, 0, "", ""))[1]
-                try: make_driver(issue=8).gh(*args)
-                finally: L.subprocess.run, L.HOME = old_run, old_home
+            seen = []
+            with patched_driver_env(run=lambda *a, **k: (seen.append(k.get("env")), L.subprocess.CompletedProcess(a, 0, "", ""))[1]) as h:
+                make_driver(issue=8).gh(*args)
             self.assertEqual(seen, [None], args)
 
     def test_failed_mint_is_not_retried_every_call(self):
@@ -2086,9 +2047,8 @@ class ReleaseSkip(unittest.TestCase):   # #914: a system merge the system pipeli
         moves, comments = [], []
         d.gh = lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(files) if a[1].endswith("/commits/" + "ab" * 20) else "[]", "")
         d.move, d.comment, d.usage = moves.append, lambda body, **k: comments.append(body), lambda **k: ""
-        old = L.time.sleep; L.time.sleep = lambda s: None
-        try: d.st_main()
-        finally: L.time.sleep = old
+        with patched_driver_env(sleep=lambda s: None):
+            d.st_main()
         return d, moves, comments
 
     def test_factory_only_merge_goes_to_done_without_deploy(self):
