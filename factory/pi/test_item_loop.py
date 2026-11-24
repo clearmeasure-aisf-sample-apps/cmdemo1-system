@@ -299,25 +299,20 @@ class ReviewInfraRetry(unittest.TestCase):   # t83u: no / empty findings or no v
             self.assertEqual(d.s["counts"]["review_fail"], 0)
 
     def test_review_runs_on_any_free_non_author_gpu_and_missing_file_is_infra(self):
-        old = (L.research_ok, L.gpu_health)
-        L.research_ok = lambda *a: True; L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
-        try:
-            with fake_home() as h:
-                d = make_driver(issue=32)
-                d.s.update(plan=dict(PLAN), wt=tempfile.mkdtemp(dir=h), gpu="pro5000", pr=7, default="main")
-                d.merge_base = lambda: "abc"; calls = []
-                rec = json.dumps({"task": "independent-review-1", "gpu": "ts3", "result": "exit 1"})
-                def sh(cmd, **k):
-                    calls.append(list(cmd))
-                    out = "body\n## Refactoring research\n- x" if "pr" in cmd else (rec + "\n--- pi tail ---" if "--gpu" in cmd else "")
-                    return subprocess.CompletedProcess(cmd, 1 if "--gpu" in cmd else 0, out, "")
-                d.sh = sh
-                ok, why = d.independent_review()
-                run = next(c for c in calls if "--gpu" in c)
-                self.assertEqual(run[run.index("--gpu") + 1], "pro6000,obs,ts3")   # never the author's pro5000
-                self.assertIsNone(ok); self.assertIn("no findings file", why); self.assertEqual(d.s["reviewer_gpu"], "ts3")
-        finally:
-            L.research_ok, L.gpu_health = old
+        with patched_driver_env(research_ok=lambda *a: True, gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}) as h:
+            d = make_driver(issue=32)
+            d.s.update(plan=dict(PLAN), wt=tempfile.mkdtemp(dir=h), gpu="pro5000", pr=7, default="main")
+            d.merge_base = lambda: "abc"; calls = []
+            rec = json.dumps({"task": "independent-review-1", "gpu": "ts3", "result": "exit 1"})
+            def sh(cmd, **k):
+                calls.append(list(cmd))
+                out = "body\n## Refactoring research\n- x" if "pr" in cmd else (rec + "\n--- pi tail ---" if "--gpu" in cmd else "")
+                return subprocess.CompletedProcess(cmd, 1 if "--gpu" in cmd else 0, out, "")
+            d.sh = sh
+            ok, why = d.independent_review()
+            run = next(c for c in calls if "--gpu" in c)
+            self.assertEqual(run[run.index("--gpu") + 1], "pro6000,obs,ts3")   # never the author's pro5000
+            self.assertIsNone(ok); self.assertIn("no findings file", why); self.assertEqual(d.s["reviewer_gpu"], "ts3")
 
     def test_gate_acquire_any_takes_the_first_free_gpu(self):
         import gpu_gate
