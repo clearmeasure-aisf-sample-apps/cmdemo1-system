@@ -2905,5 +2905,134 @@ class MoveBoardItem(unittest.TestCase):
             self.assertIn("--single-select-option-id", args)
             self.assertEqual(args[args.index("--single-select-option-id") + 1], L.STATUS["In Progress"])
 
+class SharedFixPass(unittest.TestCase):   # cmdemo1-system#858: the bump-or-block + fix loop is one helper, four call sites
+    """Driver.fix_pass / Driver.pi_round / FixRound. The ci, quality, review and merge passes used to each
+    re-type the same sequence -- bump a LIMITS counter, Blocker when it is exhausted, move to In Progress,
+    comment the failure, send the Pi fix task, re-verify locally, commit and push -- with their own failure text
+    inlined in each copy. Pinned here: the order of one pass (board move, comment, Pi task `<pi>-<n>`, local
+    verification `<verify><n>`, commit message), that the Blocker text stays the stage's own (hold_resumes keys
+    off "Review FAIL twice"), that an exhausted counter runs nothing else, that a red local verification never
+    commits, and that the plan paste still runs between the verification and the push."""
+
+    def driver(self, **state):
+        d = make_driver(repo="cmdemo1-system", issue=858, dry_run=False)
+        d.events = []; ev = d.events
+        d.s.update(counts={k: 0 for k in L.LIMITS}, plan=dict(PLAN), wt="/tmp/wt", gpu="pro5000", pr=7,
+                   head="h" * 40, stage="ci"); d.s.update(state)
+        d.move = lambda col: ev.append(("move", col))
+        d.comment = lambda body, pr=False: ev.append(("comment", body, pr))
+        d.blocker = lambda what, who="Jeffrey": (ev.append(("blocker", what)), d.save(stage="blocked", blocker=what))[-1]
+        d.commit_push = lambda msg: ev.append(("commit", msg)) or "sha"
+        d.local_green = lambda label: ev.append(("local_green", label)) or True
+        d.pi = lambda name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None: (ev.append(("pi", name, prompt)), True)[-1]
+        return d
+
+    def test_one_pass_moves_comments_fixes_verifies_and_pushes_in_that_order(self):
+        with fake_home():
+            d = self.driver()
+            n = d.fix_pass("ci_fix", "required checks still red after 3 Pi fix passes.", progress="In Progress",
+                           comment=lambda k: d.comment(f"fix pass {k} of {L.LIMITS['ci_fix']}"),
+                           fix=L.FixRound("ci-fix", "the findings", "ci",
+                                          local_red=lambda k: f"local verification red after CI fix pass {k}.",
+                                          commit=lambda k: f"Fix CI ({k})"))
+            self.assertEqual((n, d.s["counts"]["ci_fix"]), (1, 1), "the pass number is the counter after the bump")
+            self.assertEqual(d.events, [("move", "In Progress"), ("comment", "fix pass 1 of 3", False),
+                                        ("pi", "ci-fix-1", "the findings"), ("local_green", "ci1"),
+                                        ("commit", "Fix CI (1)")])
+
+    def test_the_pass_number_names_the_task_and_the_verification_on_every_pass(self):
+        with fake_home():
+            d = self.driver(); d.s["counts"]["quality_fix"] = 1
+            self.assertEqual(d.fix_pass("quality_fix", "Qodana still red after 3 Pi fix passes.",
+                                        fix=L.FixRound("quality-fix", "findings", "quality",
+                                                       local_red="local verification red after quality fix pass.",
+                                                       commit="Fix Qodana")), 2)
+            self.assertEqual([(e[0], e[1] if len(e) > 1 else None) for e in d.events],
+                             [("pi", "quality-fix-2"), ("local_green", "quality2"), ("commit", "Fix Qodana")])
+
+    def test_an_exhausted_counter_blocks_with_the_stages_own_text_and_runs_nothing_else(self):
+        with fake_home():
+            d = self.driver(); d.s["counts"]["review_fail"] = L.LIMITS["review_fail"]
+            self.assertIsNone(d.fix_pass("review_fail", "Review FAIL twice: A works (exit 1)", progress="In Progress",
+                                         comment=lambda k: d.comment("never posted"),
+                                         fix=L.FixRound("review-fix", "never sent", "review",
+                                                        local_red="never", commit="never")))
+            self.assertEqual(d.events, [("blocker", "Review FAIL twice: A works (exit 1)")],
+                             "exhausted: no board move, no comment, no Pi task, no push")
+            self.assertEqual(d.s["counts"]["review_fail"], L.LIMITS["review_fail"] + 1)
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertFalse(L.hold_resumes(d.s["blocker"]),
+                             "the text is the stage's own so a Review FAIL blocker keeps its 'never resume on green checks' prefix")
+
+    def test_a_pass_without_a_fix_round_is_the_bump_alone(self):   # the merge gate shape
+        with fake_home():
+            d = self.driver(stage="merge")
+            self.assertEqual(d.fix_pass("merge_gate", "merge gate not met after 3 tries"), 1)
+            self.assertEqual(d.events, [])
+            d.s["counts"]["merge_gate"] = L.LIMITS["merge_gate"]
+            self.assertIsNone(d.fix_pass("merge_gate", "merge gate not met after 3 tries (checks RED)"))
+            self.assertEqual(d.events, [("blocker", "merge gate not met after 3 tries (checks RED)")])
+            self.assertTrue(L.hold_resumes(d.s["blocker"]), "a merge-gate Blocker is a checks problem: it may resume on green")
+
+    def test_red_local_verification_blocks_and_never_commits(self):
+        with fake_home():
+            d = self.driver(); d.local_green = lambda label: (d.events.append(("local_green", label)), False)[-1]
+            self.assertFalse(d.pi_round("ci-fix-1", "findings", "ci1",
+                                        "local verification red after CI fix pass 1.", "Fix CI (1)"))
+            self.assertEqual([e[0] for e in d.events], ["pi", "local_green", "blocker"])
+            self.assertEqual(d.events[-1][1], "local verification red after CI fix pass 1.")
+
+    def test_the_before_commit_hook_runs_between_the_verification_and_the_push(self):
+        with fake_home():   # where fix_quality pastes the PR's `## Refactoring plan`
+            d = self.driver()
+            d.fix_pass("quality_fix", "Qodana still red after 3 Pi fix passes.",
+                       fix=L.FixRound("quality-fix", "findings", "quality", local_red="red",
+                                      commit=lambda k: f"Fix Qodana ({k})",
+                                      before_commit=lambda: d.events.append(("paste plan",))))
+            self.assertEqual([e[0] for e in d.events], ["pi", "local_green", "paste plan", "commit"])
+            d.local_green = lambda label: (d.events.append(("local_green", label)), False)[-1]
+            d.events.clear()
+            d.fix_pass("quality_fix", "Qodana still red after 3 Pi fix passes.",
+                       fix=L.FixRound("quality-fix", "findings", "quality", local_red="red",
+                                      commit=lambda k: f"Fix Qodana ({k})",
+                                      before_commit=lambda: d.events.append(("paste plan",))))
+            self.assertEqual([e[0] for e in d.events], ["pi", "local_green", "blocker"],
+                             "a red verification skips the paste and the push, exactly as before #858")
+
+    def test_a_fix_round_text_is_a_literal_or_a_function_of_the_pass_number(self):
+        r = L.FixRound("review-fix", "p", "review", local_red="local verification red after a review fix.",
+                       commit="Fix review findings")
+        self.assertEqual((r.local_red(2), r.commit(2)), ("local verification red after a review fix.", "Fix review findings"))
+        r = L.FixRound("ci-fix", "p", "ci", local_red=lambda k: f"pass {k}", commit=lambda k: f"Fix CI ({k})")
+        self.assertEqual((r.local_red(3), r.commit(3)), ("pass 3", "Fix CI (3)"))
+
+    def test_the_four_stages_use_the_helper_and_no_longer_bump_their_own_counter(self):
+        import inspect
+        for name, key in (("st_ci", "ci_fix"), ("fix_quality", "quality_fix"), ("st_review", "review_fail"), ("st_merge", "merge_gate")):
+            with self.subTest(stage=name):
+                src = inspect.getsource(getattr(L.Driver, name))
+                self.assertIn("self.fix_pass(", src, f"Driver.{name} still writes the fix loop itself")
+                self.assertNotIn(f'bump("{key}")', src, f"Driver.{name} still bumps {key} outside the helper")
+
+    def test_ci_fix_passes_still_end_in_the_same_blocker(self):
+        with fake_home():
+            d = self.driver(stage="ci"); d.s["counts"]["ci_fix"] = L.LIMITS["ci_fix"]
+            d.wait_ci = lambda: (L.CheckState.RED, [{"name": "Build result", "bucket": "fail", "link": "https://x/actions/runs/1"}])
+            d.failed_logs = lambda cs: ({"1"}, "src/A.cs(1,1): error CS1002: ; expected")
+            d.st_ci()
+            self.assertEqual(d.s["blocker"], "required checks still red after 3 Pi fix passes.")
+            self.assertTrue(L.hold_resumes(d.s["blocker"]))
+            self.assertEqual([e[0] for e in d.events], ["blocker"])
+
+    def test_the_merge_gate_still_blocks_after_its_limit_from_the_merge_stage(self):
+        with fake_home():
+            d = self.driver(stage="merge"); d.s["counts"]["merge_gate"] = L.LIMITS["merge_gate"]
+            d.pr_checks = lambda: (L.CheckState.RED, [])
+            d.gh = lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps({"author": {"login": L.BOT},
+                                                                                "headRefOid": "h" * 40, "state": "MERGED"}), "")
+            d.st_merge()
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertIn("merge gate not met after 3 tries", d.s["blocker"])
+
 
 if __name__ == "__main__": unittest.main()
