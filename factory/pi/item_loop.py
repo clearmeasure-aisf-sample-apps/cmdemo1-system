@@ -1489,13 +1489,7 @@ class Driver:
         os.remove(plan)
 
     def st_review(self):
-        p = self.s["plan"]; ev, failed = [], []
-        for i, c in enumerate(p["criteria"], 1):
-            r = run_cmd(["bash", "-o", "pipefail", "-c", c["evidence_cmd"]], cwd=self.s["wt"], text=True,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=3600)
-            out = scrub(r.stdout); open(os.path.join(self.run_dir, "logs", f"evidence-{i}.log"), "w").write(out)
-            last = ([l for l in out.splitlines() if l.strip()][-1:] or [""])[0][:200]
-            (ev if r.returncode == 0 else failed).append((c, last, r.returncode))
+        p = self.s["plan"]; ev, failed = self.evidence_results()
         if failed:
             evidence = "\n".join(f"- {c['text']}: evidence `{c['evidence_cmd']}` exit {rc}: {last}" for c, last, rc in failed)
             criteria = "\n".join(f"- {c['text']}: `{c['evidence_cmd']}` -> {last}" for c, last, _ in failed)
@@ -1520,11 +1514,7 @@ class Driver:
                                                                          f"{findings[:3000]}\n\nSending the findings to Pi."))
             if n is None: return
             if not self.s.get("research_in_body"):   # the section is the driver's to write: redo the research, fix the body
-                if not research_ok(self.research_text(), p["files"]):
-                    self.s["counts"]["research"] = 0; self.save(stage="research", refactors_done=True)
-                    self.st_research()
-                    if self.s.get("stage") == "blocked": return
-                    self.save(stage="review")
+                if not self.ensure_research_in_body(p): return
                 self.sync_pr_research()
                 self.comment("Research re-done after the review FAIL; the PR body's `## Refactoring research` section is updated.")   # journal activity: no commit on this path
             else:   # Pi fixes the code: the same fix round, on the pass the bump above already counted
@@ -1535,6 +1525,33 @@ class Driver:
             self.move("Review")
             return self.save(stage="ci")
         self.save(stage="merge")
+
+    def evidence_results(self):
+        """The per-criterion evidence pass of the review stage (cmdemo1-system#859): run each criterion's evidence_cmd
+        through the one runner, keep the scrubbed output in logs/evidence-<i>.log, and return (ev, failed) -- the criteria
+        that passed and the ones that did not, each as (criterion, last non-empty line, returncode). st_review branches
+        on failed and saves the evidence list from ev."""
+        ev, failed = [], []
+        for i, c in enumerate(self.s["plan"]["criteria"], 1):
+            r = run_cmd(["bash", "-o", "pipefail", "-c", c["evidence_cmd"]], cwd=self.s["wt"], text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=3600)
+            out = scrub(r.stdout); open(os.path.join(self.run_dir, "logs", f"evidence-{i}.log"), "w").write(out)
+            last = ([l for l in out.splitlines() if l.strip()][-1:] or [""])[0][:200]
+            (ev if r.returncode == 0 else failed).append((c, last, r.returncode))
+        return ev, failed
+
+    def ensure_research_in_body(self, p):
+        """Re-establish the PR body's `## Refactoring research` section after an independent-review FAIL
+        (cmdemo1-system#859): when the section is missing or not substantive, reset the research count, run the research
+        stage and set the stage back to review. Returns False when the research redo blocked the item (st_review then
+        leaves); True when the section is (re)written and st_review may continue (sync_pr_research and the journal
+        comment stay with the caller, as the source guard test_research_only_fix_path_leaves_journal_activity requires)."""
+        if not research_ok(self.research_text(), p["files"]):
+            self.s["counts"]["research"] = 0; self.save(stage="research", refactors_done=True)
+            self.st_research()
+            if self.s.get("stage") == "blocked": return False
+            self.save(stage="review")
+        return True
 
     def review_until_verdict(self):
         """The independent review, retried on any free GPU while it ends in an infrastructure failure (t83u, #887): an
@@ -1669,21 +1686,9 @@ class Driver:
                 d = json.load(urllib.request.urlopen(DELIVERY, timeout=30))
                 in_env, ver = {}, {}
                 for e in d["environments"]:
-                    x = next((x for x in e["deployables"] if x.get("name") == dep), None)
-                    if not x: continue
-                    st = json.loads(self.gh("api", f"repos/{self.full}/compare/{sha}...{x['commit']}", "--jq", "{status:.status}", check=False).stdout or "{}").get("status")
-                    rk = f"{dep} {e['name']}"
-                    health = dep_health(e, dep)
-                    red = env_red(e, dep)
-                    healthy = dep == "system" or health == "healthy"
-                    if red and st in ("ahead", "identical"):
-                        if rk not in red_load():
-                            red_set(rk, f"{dep} {x.get('version')} unhealthy in {e['name']}")
-                            self.fix_forward_issue(rk, f"{dep} {x.get('version')} is not healthy in {e['name']} (delivery.json)", "cmdemo1-system")
-                            self.comment(f"Status: {dep} {x.get('version')} (contains merge `{sha[:8]}`) is not healthy in {e['name']}. "
-                                         "Intake is stopped and a fix-forward issue is filed; the driver keeps watching.")
-                    elif healthy and rk in red_load(): red_clear(rk)
-                    in_env[e["name"]] = st in ("ahead", "identical") and healthy; ver[e["name"]] = (x.get("version"), x["commit"])
+                    r = self.deploy_env_check(e, dep, sha)
+                    if r is None: continue
+                    in_env[e["name"]], ver[e["name"]] = r
                 moves = deploy_moves(self.s.get("column", "Merged"), in_env)
                 if moves:
                     env = {"TDD": "tdd", "UAT": "uat", "Done": "prod"}[moves[-1]]
@@ -1698,6 +1703,28 @@ class Driver:
             self.heartbeat(); time.sleep(600)
         self.log("deploy follow-through window ended; the bot's Deployments sweep takes over")
         self.save(stage="done", deploy_handoff=True)
+
+    def deploy_env_check(self, env, dep, sha):
+        """One environment's half of the st_deploy watch (cmdemo1-system#859): the deployable's compare status, its
+        health and the red-flag side effects for this environment (set the red flag + fix-forward issue + comment when it
+        is red at the merge commit, clear it when it turns healthy), returning the (in_env, (version, commit)) pair the
+        board moves are built from. None when this environment has no entry for the deployable (the watch skips it)."""
+        x = next((x for x in env.get("deployables") or [] if x.get("name") == dep), None)
+        if not x: return None
+        st = json.loads(self.gh("api", f"repos/{self.full}/compare/{sha}...{x['commit']}", "--jq", "{status:.status}",
+                                check=False).stdout or "{}").get("status")
+        rk = f"{dep} {env['name']}"
+        health = dep_health(env, dep)
+        red = env_red(env, dep)
+        healthy = dep == "system" or health == "healthy"
+        if red and st in ("ahead", "identical"):
+            if rk not in red_load():
+                red_set(rk, f"{dep} {x.get('version')} unhealthy in {env['name']}")
+                self.fix_forward_issue(rk, f"{dep} {x.get('version')} is not healthy in {env['name']} (delivery.json)", "cmdemo1-system")
+                self.comment(f"Status: {dep} {x.get('version')} (contains merge `{sha[:8]}`) is not healthy in {env['name']}. "
+                             "Intake is stopped and a fix-forward issue is filed; the driver keeps watching.")
+        elif healthy and rk in red_load(): red_clear(rk)
+        return st in ("ahead", "identical") and healthy, (x.get("version"), x["commit"])
 
     def fix_forward_issue(self, key, what, repo=None):
         """One open `fix-forward` issue per red key, assigned to the factory bot so its issue-assigned wake works it
