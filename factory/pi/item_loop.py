@@ -169,6 +169,14 @@ def trim_log(text, limit=12000):
     out = "\n".join(keep[-150:]) + "\n--- tail ---\n" + "\n".join(lines[-60:])
     return out[-limit:]
 
+def task_slug(name):
+    """The file-safe form of a Pi task name: letters, digits, . _ - and '-', everything else one '-'. run-task keeps
+    the same mapping (it slugs the --task name for pi-sessions/ and the per-task prompt.md / .out / .progress.json),
+    so the driver's prompt path and run-task's session and progress paths always agree (cmdemo1-system#959: a plan
+    task name with '/' crashed the raw-name prompt-file write). Idempotent: slugging an already-slugged name is a
+    no-op, so run-task re-slugging the driver's --task value changes nothing."""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", str(name))
+
 def checks_state(checks, required):
     """checks: [{name, bucket}] from `gh pr checks --json`. required: names, or None = every check."""
     st = {}
@@ -747,7 +755,8 @@ class Driver:
     def gpu_label(self, g=None): return G.GPUS[g or self.gpu()]["label"]
 
     def pi(self, name, prompt, timeout=PI_TASK_TIMEOUT_S, gpu=None):
-        pf = os.path.join(self.run_dir, "logs", f"{name}.prompt.md")
+        slug = task_slug(name)   # every per-task log path uses run-task's slug (cmdemo1-system#959): a raw '/' in a plan task name crashed this write
+        pf = os.path.join(self.run_dir, "logs", f"{slug}.prompt.md")
         suffix = ("\n\nRules: follow the repository's AGENTS.md and CLAUDE.md (read them if this task touches code, tests or "
                   "the build). Make only the change asked. Do not run git commit, git push or gh, and do not read or print "
                   "credentials. When done, run the narrowest relevant build/test, then end your reply with PASS or FAIL as "
@@ -755,7 +764,7 @@ class Driver:
         open(pf, "w").write(scrub(prompt) + suffix)
         timeout = G.client_timeout(timeout)
         review = name.startswith("independent-review")   # a review keeps its non-author GPUs; no-start = infra retry
-        task, g = name, gpu or self.gpu()
+        task, g = slug, gpu or self.gpu()
         for k in range(LIMITS["pi_relaunch"] + 1):
             slot_wait = ANY_SLOT_WAIT_S if review or k else HANDOFF_SLOT_WAIT_S
             r = self.sh([os.path.join(HERE, "run-task"), "--run-dir", self.run_dir, "--cwd", self.s["wt"], "--task", task,
@@ -769,7 +778,7 @@ class Driver:
             if review or self.last_task.get("result") not in ("no-start", "stalled"): return r.returncode == 0
             if k == LIMITS["pi_relaunch"]: break
             up = G.available(self.gpu_health()) or list(G.PRIORITY)
-            task, g = f"{name}-relaunch-{k + 1}", G.gpu_arg(relaunch_gpus(self.s.get("size"), up))   # a free GPU of the item's size
+            task, g = f"{slug}-relaunch-{k + 1}", G.gpu_arg(relaunch_gpus(self.s.get("size"), up))   # a free GPU of the item's size
             pf = os.path.join(self.run_dir, "logs", f"{task}.prompt.md")
             open(pf, "w").write(scrub(prompt) + RELAUNCH_NOTE.format(name=name) + suffix)
             self.log(f"Pi hand-off {name} {self.last_task.get('result')} (start {HANDOFF_START_S} s / stall {HANDOFF_STALL_S} s / "
@@ -1063,7 +1072,7 @@ class Driver:
         refs = [t for t in (extra.get("in_scope") or []) if t.get("name") and t.get("prompt")][:3]
         if refs and not self.s.get("refactors_done"):
             for t in refs:
-                self.pi(re.sub(r"[^A-Za-z0-9._-]", "-", str(t["name"]))[:60], t["prompt"] + "\n\nBehavior must not change. Keep every "
+                self.pi(task_slug(t["name"])[:60], t["prompt"] + "\n\nBehavior must not change. Keep every "
                         "test green; never skip, delete or weaken a test. If this refactoring turns out larger than a small, "
                         "safe change inside the item's files, change nothing and end with FAIL.")
             if not self.local_green("refactor"):
