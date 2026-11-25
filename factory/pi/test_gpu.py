@@ -84,6 +84,80 @@ class Gpus(unittest.TestCase):
         self.assertEqual(G.health_exit(G.health(env={}, opener=opener)), 3)
         self.assertEqual(G.health_exit({"pro5000": ("UNREACHABLE", ""), "obs": ("MISSING_SECRETS", ""), "ts3": ("REFUSED", "")}), 4)
 
+class GpuGateTasks(unittest.TestCase):
+    """cmdemo1-system#865: an old-code run-task that keeps a legacy /tmp slot while its child pi holds the new slot
+    is ONE task, not two. Unit test with a fake /proc (no real processes, no /tmp)."""
+
+    def _fake_proc(self, root, procs):
+        """procs: {pid: (ppid, [slot paths])} -> <root>/proc/<pid>/stat plus <pid>/fd/ symlinks onto the slot files."""
+        proc = os.path.join(root, "proc")
+        for pid, (ppid, slots) in procs.items():
+            d = os.path.join(proc, str(pid)); fd = os.path.join(d, "fd"); os.makedirs(fd)
+            with open(os.path.join(d, "stat"), "w") as f:
+                f.write(f"{pid} (fake) S {ppid} 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {pid}")
+            for i, s in enumerate(slots): os.symlink(s, os.path.join(fd, str(i)))
+        return proc
+
+    def _slot_dirs(self, tmp):
+        import gpu_gate as GG
+        new, legacy = os.path.join(tmp, "new"), os.path.join(tmp, "legacy")
+        for d in (new, legacy): os.makedirs(d)
+        for g in ("pro5000",):
+            for i in range(2):
+                for d in (new, legacy): open(os.path.join(d, f"factory-pi-{g}-slot-{i}.lock"), "w").close()
+        old = {k: os.environ.get(k) for k in ("FACTORY_PI_LOCK_DIR", "FACTORY_PI_LEGACY_LOCK_DIR")}
+        os.environ.update({"FACTORY_PI_LOCK_DIR": new, "FACTORY_PI_LEGACY_LOCK_DIR": legacy})
+        self.addCleanup(self._restore_env, old)
+        return new, legacy, GG
+
+    @staticmethod
+    def _restore_env(old):
+        for k, v in old.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+
+    def test_parent_legacy_and_child_new_count_as_one_task(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            new, legacy, GG = self._slot_dirs(tmp)
+            s0_leg = os.path.join(legacy, "factory-pi-pro5000-slot-0.lock")
+            s0_new = os.path.join(new, "factory-pi-pro5000-slot-0.lock")
+            s1_leg = os.path.join(legacy, "factory-pi-pro5000-slot-1.lock")
+            # run-task (old code) keeps the legacy slot-0; its child pi holds the new slot-0; a third old run-task
+            # waits on the legacy slot-1. The Nov 21 shape that showed pro5000 3/2 with one Pi running.
+            proc = self._fake_proc(tmp, {100: (1, [s0_leg]), 200: (100, [s0_new]), 300: (1, [s1_leg])})
+            h = GG.holders("pro5000", proc=proc)
+            self.assertEqual(len(h), 3)                       # three distinct slot files really are open
+            self.assertEqual(GG.tasks(h, proc=proc), 2)       # parent+child are one task; the waiter is the second
+
+    def test_twin_slots_of_one_process_and_unrelated_holders_still_count(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            new, legacy, GG = self._slot_dirs(tmp)
+            s0_leg = os.path.join(legacy, "factory-pi-pro5000-slot-0.lock")
+            s0_new = os.path.join(new, "factory-pi-pro5000-slot-0.lock")
+            s1_leg = os.path.join(legacy, "factory-pi-pro5000-slot-1.lock")
+            # one process holding both the new slot and its legacy twin is one task (the old dedupe, kept)
+            with tempfile.TemporaryDirectory() as tmp2:
+                proc = self._fake_proc(tmp2, {100: (1, [s0_leg, s0_new])})
+                self.assertEqual(GG.tasks(GG.holders("pro5000", proc=proc), proc=proc), 1)
+            # two unrelated holders are still two tasks: ancestry only merges parent/child, not siblings
+            with tempfile.TemporaryDirectory() as tmp2:
+                proc = self._fake_proc(tmp2, {100: (1, [s0_leg]), 300: (1, [s1_leg])})
+                self.assertEqual(GG.tasks(GG.holders("pro5000", proc=proc), proc=proc), 2)
+
+    def test_mine_exclusion_still_hides_the_launchers_own_slots(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            new, legacy, GG = self._slot_dirs(tmp)
+            s0_leg = os.path.join(legacy, "factory-pi-pro5000-slot-0.lock")
+            s0_new = os.path.join(new, "factory-pi-pro5000-slot-0.lock")
+            proc = self._fake_proc(tmp, {100: (1, [s0_leg]), 200: (100, [s0_new])})
+            h = GG.holders("pro5000", proc=proc)
+            # the child pi counting its own parent chain as `mine` sees no other task (the #861 own-parent rule)
+            self.assertEqual(GG.tasks(h, mine=frozenset(GG.ancestors(200, proc=proc)), proc=proc), 0)
+
+
 class GpuArg(unittest.TestCase):   # cmdemo1-system#907: one place renders run-task's --gpu argument
     def test_a_gpu_list_becomes_a_comma_list_in_the_order_given(self):
         self.assertEqual(G.gpu_arg(G.LARGE_GPUS), "pro5000,pro6000")
