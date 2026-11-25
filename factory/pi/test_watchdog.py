@@ -448,3 +448,36 @@ class ExitHook(unittest.TestCase):
             self.assertIn("watchdog exit hook failed: checks down", log)
         self.assertEqual(d.s["status"], "error")
         self.assertEqual(len(calls), 1)
+
+class SharedScrubImport(unittest.TestCase):
+    """#931: the watchdog reaches the shared scrub rule set directly (watchdog -> scrub): the module-level
+    scrub is the leaf function itself, no delegating wrapper, and it redacts exactly as the driver's does."""
+
+    def test_watchdog_binds_the_leaf_scrub_function(self):
+        import importlib
+        scrub = importlib.import_module("scrub")
+        self.assertIs(W.scrub, scrub.scrub, "the watchdog must scrub through the shared rule set itself, not a wrapper")
+        self.assertIs(W.scrub, L.scrub, "...and it is still the one rule set the driver re-exports")
+
+    def test_watchdog_source_imports_the_leaf_and_keeps_no_wrapper(self):
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchdog.py")
+        src = open(p).read()
+        self.assertIn("from scrub import scrub", src)
+        self.assertNotIn("def scrub(", src)   # the delegating wrapper is gone: the module name binds the leaf function
+
+    def test_scrub_redacts_a_runtime_token_a_local_llm_token_and_a_tunnel_host(self):
+        fake = lambda c: "fake" + c * 12   # built at run time so the secret scan sees no literal
+        env = {"LOCAL_LLM_OBS_TOKEN": fake("o"), "LOCAL_LLM_TS3_TOKEN": fake("t")}
+        old = {k: os.environ.get(k) for k in env}; os.environ.update(env)
+        try:
+            out = W.scrub(f"a {fake('o')} b {fake('t')} c https://pro5000.clearmeasure.ai/v1/models")
+            for v in env.values(): self.assertNotIn(v, out)   # the LOCAL_LLM_*_TOKEN values are redacted
+            self.assertNotIn("pro5000.clearmeasure.ai", out)  # and the tunnel hostname
+            self.assertIn("[redacted]", out)
+        finally:
+            for k, v in old.items():
+                if v is None: os.environ.pop(k, None)
+                else: os.environ[k] = v
+        tok = "ghp_" + "k" * 30   # a runtime-built token value
+        out = W.scrub(f"x {tok} y")
+        self.assertNotIn(tok, out); self.assertIn("[redacted]", out)
