@@ -2299,6 +2299,112 @@ class ResumeAfterError(unittest.TestCase):   # resuming an error state: keeps th
             self.assertTrue(d.s["blocker"].startswith(f"waited {L.GPU_WAIT_H} hours to start (no free GPU"),
                             d.s["blocker"])
 
+class GpuHealthCacheDi(unittest.TestCase):   # cmdemo1-system#868: the GPU health cache is injectable; GPU health is fully faked with no network
+    def test_cache_probes_once_within_max_age_and_again_after(self):
+        probes = []
+        def health():
+            probes.append(1)
+            return {g: ("HEALTHY", "") for g in G.GPUS}
+        t = [1000.0]
+        cache = L.GpuHealthCache(now=lambda: t[0], health=health)
+        self.assertEqual(cache(600), {g: ("HEALTHY", "") for g in G.GPUS})
+        t[0] += 300
+        self.assertEqual(cache(600), {g: ("HEALTHY", "") for g in G.GPUS})
+        self.assertEqual(probes, [1], "300 s old is inside max_age 600: no second probe")
+        t[0] += 301
+        cache(600)
+        self.assertEqual(len(probes), 2, "601 s old: the injected health probes again")
+
+    def test_zero_max_age_reprobes_on_the_next_tick(self):
+        probes = []
+        def health():
+            probes.append(1)
+            return {g: ("HEALTHY", "") for g in G.GPUS}
+        t = [1000.0]
+        cache = L.GpuHealthCache(now=lambda: t[0], health=health)
+        cache(0); t[0] += 1; cache(0)
+        self.assertEqual(len(probes), 2, "max_age 0: a probe on every tick (the reviewer_waited path re-checks each loop)")
+        t[0] += 1; cache(600)
+        self.assertEqual(len(probes), 2, "max_age 600: a 1 s tick is still fresh")
+
+    def test_module_gpu_health_delegates_to_the_shared_instance(self):
+        fake = {g: ("HEALTHY", "") for g in G.GPUS}
+        def boom(**kw):
+            raise AssertionError("no probe: the shared cache already holds the result")
+        old = (L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h)
+        L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h = (lambda: 1e9, boom, 1e9, fake)
+        try:
+            self.assertEqual(L.gpu_health(600), fake)
+            self.assertIs(L.gpu_health(600), fake)   # the cached dict, not a copy
+        finally:
+            L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h = old
+
+    def test_driver_default_health_is_the_module_gpu_health_resolved_at_construction(self):
+        with fake_home():
+            self.assertIs(make_driver(issue=101).gpu_health, L.gpu_health)   # default: the shared module probe
+        fake = lambda max_age=600: {g: ("HEALTHY", "") for g in G.GPUS}
+        old = L.gpu_health
+        L.gpu_health = fake
+        try:
+            with fake_home():
+                self.assertIs(make_driver(issue=102).gpu_health, fake)   # a patch before construction is honored
+        finally:
+            L.gpu_health = old
+
+    def test_injected_cache_fakes_st_gpu_with_no_network(self):
+        seen = []
+        def health():
+            seen.append(1)
+            return {g: ("HEALTHY", "") for g in G.GPUS}
+        cache = L.GpuHealthCache(now=lambda: 1e9, health=health)
+        with patched_driver_env(time=Clock()) as h:
+            d = make_driver(issue=104, health=cache)
+            self.assertIs(d.gpu_health, cache)
+            d.s["plan"] = dict(PLAN); d.save()
+            d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+            d.st_gpu()
+        self.assertEqual(d.s["stage"], "pickup")
+        self.assertEqual(d.s["gpu"], G.pick_gpu(G.classify_size(PLAN), list(G.GPUS), set()))
+        self.assertEqual(seen, [1], "probed exactly once, through the injected cache")
+
+    def test_default_driver_uses_the_shared_cache_without_network(self):
+        fake = {g: ("HEALTHY", "") for g in G.GPUS}
+        def no_probe(**kw):
+            raise AssertionError("no network: the shared cache is fresh, nothing may probe")
+        old = (L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h)
+        L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h = (lambda: 1e9, no_probe, 1e9, fake)
+        try:
+            with patched_driver_env(time=Clock()) as h:
+                d = L.Driver("cmdemo1-workorders", 103)   # dry_run=False, default health = the shared module probe
+                d.s["plan"] = dict(PLAN); d.s["stage"] = "gpu"; d.save()
+                d.comment = lambda *a, **k: None; d.wake_bot = lambda reason: None
+                d.st_gpu()
+        finally:
+            L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h = old
+        self.assertEqual(d.s["stage"], "pickup")
+        self.assertEqual(d.s["gpu"], G.pick_gpu(G.classify_size(PLAN), list(G.GPUS), set()))
+
+    def test_independent_review_uses_the_injected_cache(self):
+        seen = []
+        def health():
+            seen.append(1)
+            return {g: ("HEALTHY", "") for g in G.GPUS}
+        cache = L.GpuHealthCache(now=lambda: 1e9, health=health)
+        with patched_driver_env(research_ok=lambda *a: True) as h:
+            d = make_driver(issue=105, health=cache)
+            d.s.update(gpu="ts3", size="small", wt=tempfile.mkdtemp(dir=h), plan=dict(PLAN), pr=7, default="main")
+            d.save()
+            d.merge_base = lambda: "abc"
+            review = []
+            rec = json.dumps({"task": "independent-review-1", "gpu": "pro5000", "result": "PASS"})
+            def sh(cmd, **k):
+                if "--gpu" in cmd: review.append(list(cmd)); return subprocess.CompletedProcess(cmd, 0, rec, "")
+                return subprocess.CompletedProcess(cmd, 0, "body\n## Refactoring research\n- x" if "pr" in cmd else "", "")
+            d.sh = sh
+            d.independent_review()
+        self.assertEqual(review[0][review[0].index("--gpu") + 1], "pro5000,pro6000,obs")   # every healthy GPU but the author's ts3
+        self.assertEqual(seen, [1], "the reviewer wait probed exactly once, through the injected cache")
+
 # Asking unittest for one test as `<file> <Class>.<test>` (e.g. `python3 -m unittest factory/pi/test_item_loop.py
 # RunTaskTimeout.test_run_pi_normal_exit_returns_rc_and_output`) does not work out of the box: unittest resolves every
 # CLI name on its own, so it never reads <Class> off the file given before it -- it imports it as a module and the whole

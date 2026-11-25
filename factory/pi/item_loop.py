@@ -532,10 +532,22 @@ def all_states():
         except Exception: pass
     return out
 
-_HEALTH = {"at": 0, "h": {}}
+class GpuHealthCache:
+    """The gpu.py health probe behind an injectable cache (cmdemo1-system#868): `now` and `health` are injected
+    (defaults `time.time` and `G.health`), the probe runs only when the cached result is older than the `max_age`
+    requested at call time, and the cache state (at / h) lives on this object instead of a module-global dict, so a
+    fake probe (no network) is a plain construction argument."""
+    def __init__(self, now=time.time, health=G.health):
+        self.now, self.health, self.at, self.h = now, health, 0, {}
+    def __call__(self, max_age=600):
+        if self.now() - self.at > max_age: self.at, self.h = self.now(), self.health()
+        return self.h
+
+# Shared default cache: Driver's st_gpu / pi relaunch / independent_review use it through Driver.gpu_health and
+# watchdog.run_checks' default health, so a driver and its exit hook share one probe (never three fresh GETs).
+_HEALTH = GpuHealthCache()
 def gpu_health(max_age=600):
-    if time.time() - _HEALTH["at"] > max_age: _HEALTH.update(at=time.time(), h=G.health())
-    return _HEALTH["h"]
+    return _HEALTH(max_age)
 
 # ---------------------------------------------------------------- side-effect layer
 def _json_or_none(line):
@@ -558,8 +570,12 @@ def stage_handler(driver, stage):
     return getattr(driver, STAGES[stage])
 
 class Driver:
-    def __init__(self, repo, issue, dry_run=False, top_session=None):
+    def __init__(self, repo, issue, dry_run=False, top_session=None, health=None):
         self.repo, self.issue, self.dry = repo, int(issue), dry_run
+        # The GPU health probe st_gpu / the pi relaunch / independent_review use (cmdemo1-system#868): injectable
+        # (a GpuHealthCache or any callable returning a gpu.py health dict), defaulting to the shared module
+        # gpu_health resolved at construction time, so a test that patches L.gpu_health before building the Driver is honored.
+        self.gpu_health = health if health is not None else gpu_health
         self.run_dir = os.path.join(HOME, "factory-runs", f"{repo}-{issue}")
         os.makedirs(os.path.join(self.run_dir, "logs"), exist_ok=True)
         self.state_p = os.path.join(self.run_dir, "state.json")
@@ -725,7 +741,7 @@ class Driver:
                 self.note_author_gpu(self.last_task.get("gpu"))
             if review or self.last_task.get("result") not in ("no-start", "stalled"): return r.returncode == 0
             if k == LIMITS["pi_relaunch"]: break
-            up = G.available(gpu_health()) or list(G.PRIORITY)
+            up = G.available(self.gpu_health()) or list(G.PRIORITY)
             task, g = f"{name}-relaunch-{k + 1}", ",".join(relaunch_gpus(self.s.get("size"), up))   # a free GPU of the item's size
             pf = os.path.join(self.run_dir, "logs", f"{task}.prompt.md")
             open(pf, "w").write(scrub(prompt) + RELAUNCH_NOTE.format(name=name) + suffix)
@@ -824,13 +840,19 @@ class Driver:
         return runs, "\n".join(out)[-16000:]
 
     # ---------------------------------------------------------------- stages
-    def setup_worktree(self):
-        p = self.s["plan"]; clone = os.path.join(HOME, "factory-clones", self.repo)
+    def _clone_ready(self):
+        """The clone (when missing) + fetch + default-branch lookup shared by setup_worktree and plan_worktree:
+        returns (clone path, default branch name)."""
+        clone = os.path.join(HOME, "factory-clones", self.repo)
         if not os.path.isdir(os.path.join(clone, ".git")):
             os.makedirs(os.path.dirname(clone), exist_ok=True)
             self.gh("repo", "clone", self.full, clone, "--", "-q")
         self.sh(["git", "fetch", "-q", "origin"], cwd=clone)
         default = self.gh("repo", "view", self.full, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").stdout.strip()
+        return clone, default
+
+    def setup_worktree(self):
+        p = self.s["plan"]; clone, default = self._clone_ready()
         wt = os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}")
         if os.path.isdir(wt + "-plan"): self.sh(["git", "worktree", "remove", "--force", wt + "-plan"], cwd=clone, check=False)
         if not os.path.isdir(wt):
@@ -843,12 +865,7 @@ class Driver:
 
     def plan_worktree(self):
         """Detached worktree at the default branch for Pi to read while drafting the plan (no branch is created)."""
-        clone = os.path.join(HOME, "factory-clones", self.repo)
-        if not os.path.isdir(os.path.join(clone, ".git")):
-            os.makedirs(os.path.dirname(clone), exist_ok=True)
-            self.gh("repo", "clone", self.full, clone, "--", "-q")
-        self.sh(["git", "fetch", "-q", "origin"], cwd=clone)
-        default = self.gh("repo", "view", self.full, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").stdout.strip()
+        clone, default = self._clone_ready()
         wt = os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}-plan")
         if os.path.isdir(wt): self.sh(["git", "worktree", "remove", "--force", wt], cwd=clone, check=False)
         self.sh(["git", "worktree", "add", "-q", "--detach", wt, f"origin/{default}"], cwd=clone)
@@ -927,7 +944,7 @@ class Driver:
             else:
                 with open(os.path.join(_runs_dir(), "gpu.lock"), "w") as lk:
                     fcntl.flock(lk, fcntl.LOCK_EX); states = all_states()
-                    up = G.available(gpu_health())
+                    up = G.available(self.gpu_health())
                     if repo_wip(states, self.repo, me, pid_alive) >= wip_limit(self.repo): why = f"WIP is full for {self.repo} ({wip_limit(self.repo)})"
                     else:
                         g, why = gpu_for_item(self.s.get("gpu"), size, up, busy_gpus(states, me, pid_alive))
@@ -1234,7 +1251,7 @@ class Driver:
         self.save(research_in_body=True)
         t_end = time.time() + REVIEWER_WAIT_H * 3600
         while True:
-            rv = G.reviewer_gpus(self.author_gpus(), G.available(gpu_health(0 if self.s.get("reviewer_waited") else 600)))
+            rv = G.reviewer_gpus(self.author_gpus(), G.available(self.gpu_health(0 if self.s.get("reviewer_waited") else 600)))
             if rv or self.dry or time.time() > t_end: break
             self.save(reviewer_waited=True); self.heartbeat(); time.sleep(RECHECK_S)
         if not rv and not self.dry:

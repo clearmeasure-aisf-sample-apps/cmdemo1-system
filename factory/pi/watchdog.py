@@ -118,7 +118,7 @@ def run_checks(repos=REPOS, gh=None, health=None, clock=None, log=None):
     Returns [(check name, result), ...]; the caller's result is never changed."""
     log = log or print
     gh = gh or gh_subprocess
-    health = health or L.gpu_health   # the driver's cached probe, so an exit hook never fires three fresh GETs
+    health = health or L.gpu_health   # the driver's shared GpuHealthCache probe (cmdemo1-system#868), so an exit hook never fires three fresh GETs
     clock = clock or L.now
     results = []
     for c in CHECKS:

@@ -182,6 +182,42 @@ class GpuHealthCheck(unittest.TestCase):
         self.assertNotIn("ghp_", r[0][1])
         self.assertNotIn("ghp_", "".join(logs))
 
+class GpuHealthDefault(unittest.TestCase):
+    """Check 1's health injection (cmdemo1-system#868): run_checks with no health= uses the driver's shared
+    GpuHealthCache, so a fresh cached probe means no network; an injected cache is used as given."""
+
+    def test_run_checks_default_health_is_faked_with_a_fresh_shared_cache(self):
+        fake = {g: ("HEALTHY", "serves a loaded model (Pi asks for `auto`)") for g in G.GPUS}
+        def no_probe(**kw):
+            raise AssertionError("no network: the shared cache is fresh, nothing may probe")
+        old = (L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h)
+        L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h = (lambda: 1e9, no_probe, 1e9, fake)
+        try:
+            with tempfile.TemporaryDirectory() as home:
+                old_home = L.HOME; L.HOME = home
+                try:
+                    r = W.run_checks(gh=no_prs, log=lambda s: None)   # no health=: the default is the shared cache
+                finally:
+                    L.HOME = old_home
+        finally:
+            L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h = old
+        self.assertEqual(r, [("gpu_health_check", "ok"), ("fix_handoff_check", "ok")])
+
+    def test_run_checks_uses_an_injected_health_cache(self):
+        calls = []
+        def health():
+            calls.append(1)
+            return {g: ("UNREACHABLE", "down") for g in G.GPUS}
+        cache = L.GpuHealthCache(now=lambda: 1e9, health=health)
+        with tempfile.TemporaryDirectory() as home:
+            old_home = L.HOME; L.HOME = home
+            try:
+                r = W.run_checks(health=cache, gh=no_prs, log=lambda s: None)
+            finally:
+                L.HOME = old_home
+        self.assertEqual(r, [("gpu_health_check", "no healthy GPU"), ("fix_handoff_check", "ok")])
+        self.assertEqual(calls, [1], "the injected cache probed exactly once")
+
 FAIL = "Review → In Progress\n\nReview: FAIL (independent review on the RTX 5070 Ti).\n\n- a finding\n\nSending the findings to Pi."
 
 def c(body, minutes_after_t0):
