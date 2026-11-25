@@ -3271,4 +3271,223 @@ class SharedFixPass(unittest.TestCase):   # cmdemo1-system#858: the bump-or-bloc
             self.assertIn("merge gate not met after 3 tries", d.s["blocker"])
 
 
+class CommandShapeHelpers(unittest.TestCase):   # cmdemo1-system#889: "is this a gh call" / "may it use the App quota" are pure rules, not loop internals
+    def test_gh_command_recognises_the_argv_and_the_shell_form(self):
+        for cmd in (["gh", "pr", "list"], ["gh"], "gh pr list", "gh run watch 1 --verbose"):
+            self.assertTrue(L.gh_command(cmd), cmd)
+        for cmd in (["git", "status"], [], "", "ghpython script.py", ["bash", "-c", "gh pr list"], None, "echo gh"):
+            self.assertFalse(L.gh_command(cmd), cmd)
+
+    def test_app_quota_first_is_every_gh_call_but_the_two_the_bot_user_must_author(self):
+        self.assertTrue(L.app_quota_first(["gh", "pr", "view", "1"]))
+        self.assertTrue(L.app_quota_first("gh pr comment 1 --body hi"))
+        for cmd in ((["gh", "pr", "create", "--title", "t"], ["gh", "issue", "create", "--title", "t"])):
+            self.assertFalse(L.app_quota_first(cmd), cmd)     # GH_APP_USER_ONLY: the merge gate wants author == BOT
+        for cmd in (["git", "push"], ["git", "commit", "-m", "gh"], [], None, "sleep 1"):
+            self.assertFalse(L.app_quota_first(cmd), cmd)     # never a token for a command gh is not
+
+    def test_shown_cmd_quotes_an_argv_and_leaves_a_shell_string_alone(self):
+        self.assertEqual(L.shown_cmd(["gh", "pr", "comment", "1", "--body", "hi"]), "gh pr comment 1 --body hi")
+        self.assertEqual(L.shown_cmd(["bash", "-c", "echo a b"]), "bash -c 'echo a b'")
+        self.assertEqual(L.shown_cmd("sleep 1; echo verify"), "sleep 1; echo verify")
+
+
+class RunLoggedSeam(unittest.TestCase):   # cmdemo1-system#889: _run_logged is one command out, once (App token, then the user login)
+    APP_TOKEN = "ghs_" + "B" * 36
+
+    def setUp(self):
+        self._app_env = os.environ.get("GH_APP_TOKEN_CMD")
+        L._app_tok.update(v=None, at=0.0)
+    def tearDown(self):
+        L._app_tok.update(v=None, at=0.0)
+        if self._app_env is None: os.environ.pop("GH_APP_TOKEN_CMD", None)
+        else: os.environ["GH_APP_TOKEN_CMD"] = self._app_env
+
+    def test_a_gh_call_goes_out_once_on_the_app_token(self):
+        os.environ["GH_APP_TOKEN_CMD"] = f"printf {self.APP_TOKEN}"
+        captured = []
+        with patched_driver_env(run=FakeGhProcess([(0, "[]")], captured)):
+            d = make_driver(repo="cmdemo1-system", issue=889, dry_run=False)
+            r = d._run_logged(["gh", "pr", "list"])
+        self.assertEqual((r.returncode, r.stdout), (0, "[]"))
+        self.assertEqual([((k.get("env") or {}).get("GH_TOKEN")) for k in captured], [self.APP_TOKEN],
+                         "one attempt, on the App quota; no user-login round after an accepted call")
+
+    def test_a_refused_app_token_re_sends_the_same_call_on_the_user_login(self):
+        os.environ["GH_APP_TOKEN_CMD"] = f"printf {self.APP_TOKEN}"
+        captured = []
+        with patched_driver_env(run=FakeGhProcess([(1, "HTTP 401: Bad credentials"), (0, "[]")], captured)):
+            d = make_driver(repo="cmdemo1-system", issue=889, dry_run=False); logs = []; d.log = logs.append
+            r = d._run_logged(["gh", "pr", "list"])
+        self.assertEqual((r.returncode, r.stdout), (0, "[]"))
+        self.assertEqual([((k.get("env") or {}).get("GH_TOKEN")) for k in captured], [self.APP_TOKEN, None],
+                         "the refused App attempt, then the same call on the bot user's login")
+        self.assertEqual(L._app_tok, {"v": None, "at": 0.0}, "a 401 drops the cached token: the next call mints a fresh one")
+        self.assertTrue(any("user login" in m for m in logs))
+
+    def test_a_non_gh_command_never_sees_a_token_and_never_mints_one(self):
+        os.environ["GH_APP_TOKEN_CMD"] = f"printf {self.APP_TOKEN}"
+        captured = []
+        with patched_driver_env(run=FakeGhProcess([(0, "")], captured)):
+            d = make_driver(repo="cmdemo1-system", issue=889, dry_run=False)
+            d._run_logged(["git", "status"])
+        self.assertEqual(len(captured), 1, "one attempt, no App round for a local command")
+        self.assertIsNone((captured[0].get("env") or {}).get("GH_TOKEN"))
+        self.assertEqual(L._app_tok, {"v": None, "at": 0.0}, "a git call never asks for a token, so it never mints one")
+
+
+class RateLimitLoopSeam(unittest.TestCase):   # cmdemo1-system#889: _retry_rate_limit owns only the backoff / wait / re-send loop
+    def rl(self, text="GraphQL: API rate limit exceeded for user ID 1."):
+        return subprocess.CompletedProcess(["gh", "pr", "list"], 1, text, "")
+
+    def test_waits_with_the_backoff_then_returns_the_answer_that_stands(self):
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=889, dry_run=False)
+            slept = []; d.wait_alive = lambda s, why: slept.append((s, why))
+            bad, ok = self.rl(), subprocess.CompletedProcess(["gh", "pr", "list"], 0, "[]", "")
+            sends = []
+            def run():
+                sends.append(1)
+                return ok if len(sends) >= 2 else bad
+            r = d._retry_rate_limit(bad, run)
+            self.assertIs(r, ok, "the reply that is not a rate limit is what the caller gets")
+            self.assertEqual(slept, [(60, "gh rate limit, retry 1"), (120, "gh rate limit, retry 2")])
+            self.assertEqual(len(sends), 2, "one re-send per wait: the rate limit is re-checked only on a fresh reply")
+
+    def test_gives_up_with_the_last_rate_limit_once_the_caps_are_reached(self):
+        saved = (L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S)
+        L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S = 1, 10 ** 6
+        try:
+            with fake_home():
+                d = make_driver(repo="cmdemo1-system", issue=889, dry_run=False)
+                slept = []; d.wait_alive = lambda s, why: slept.append(s)
+                bad = self.rl(); sends = []
+                def run():
+                    sends.append(1); return bad
+                self.assertIs(d._retry_rate_limit(bad, run), bad, "giving up returns the last reply, which fails like any other gh error")
+                self.assertEqual((slept, len(sends)), ([60], 1), "one retry under the cap, then the give-up")
+        finally:
+            L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S = saved
+
+    def test_a_reply_that_is_not_a_rate_limit_never_re_sends(self):
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=889, dry_run=False)
+            ok = subprocess.CompletedProcess(["gh", "pr", "list"], 0, "[]", "")
+            self.assertIs(d._retry_rate_limit(ok, lambda: self.fail("a clean reply is never re-sent")), ok)
+            failed = subprocess.CompletedProcess(["gh", "pr", "list"], 1, "HTTP 404: Not Found", "")
+            self.assertIs(d._retry_rate_limit(failed, lambda: self.fail("a non-rate-limit failure is never retried")), failed)
+
+    def test_sh_delegates_to_the_two_extracts_and_stays_the_stubbed_seam(self):
+        src = inspect.getsource(L.Driver.sh)
+        self.assertIn("self._run_logged(", src, "sh must send every command through the one App-token/user-login attempt")
+        self.assertIn("self._retry_rate_limit(", src, "sh must hand a rate-limited gh reply to the backoff loop")
+        self.assertNotIn("app_token(", src, "the App-token fallback lives in _run_logged, not in sh")
+        self.assertNotIn("gh_retry_wait(", src, "the backoff arithmetic lives in _retry_rate_limit, not in sh")
+        self.assertIn("self.wait_alive(", inspect.getsource(L.Driver._retry_rate_limit))
+
+
+class PiHandoffObject(unittest.TestCase):   # cmdemo1-system#889: the hand-off owns task name, prompt, gpu list, attempt and slot wait
+    def arg(self, cmd, flag): return cmd[cmd.index(flag) + 1]
+
+    def handoff(self, h, name="review-fix-2", prompt="fix it", size="small", gpu=None, issue=889):
+        d = make_driver(issue=issue); d.s.update(gpu="ts3", size=size, wt=os.path.join(h, "wt"))
+        return L.PiHandoff(d, name, prompt, gpu=gpu), d
+
+    def test_first_attempt_runs_the_slug_on_the_item_gpu_with_the_short_slot_wait(self):
+        with fake_home() as h:
+            ho, d = self.handoff(h)
+            c = ho.cmd()
+            self.assertEqual(c[0], os.path.join(L.HERE, "run-task"))
+            self.assertEqual(self.arg(c, "--task"), "review-fix-2")
+            self.assertEqual(self.arg(c, "--gpu"), "ts3")
+            self.assertEqual(self.arg(c, "--run-dir"), d.run_dir)
+            self.assertEqual(self.arg(c, "--cwd"), d.s["wt"])
+            self.assertEqual(self.arg(c, "--start-timeout"), str(L.HANDOFF_START_S))
+            self.assertEqual(self.arg(c, "--stall-timeout"), str(L.HANDOFF_STALL_S))
+            self.assertEqual(int(self.arg(c, "--slot-wait")), L.HANDOFF_SLOT_WAIT_S)
+            self.assertEqual(int(self.arg(c, "--timeout")), G.client_timeout(L.PI_TASK_TIMEOUT_S))
+
+    def test_the_prompt_file_is_the_attempt_s_own_and_ends_with_the_rules(self):
+        with fake_home() as h:
+            ho, d = self.handoff(h, name="test: whole suite", prompt="fix it")
+            first = self.arg(ho.cmd(), "--prompt-file")
+            self.assertEqual(first, os.path.join(d.run_dir, "logs", "test--whole-suite.prompt.md"))
+            self.assertTrue(os.path.exists(first))
+            text = open(first).read()
+            self.assertIn("fix it", text); self.assertTrue(text.endswith(L.PiHandoff.RULES))
+            self.assertTrue(text.rstrip().endswith("the last line."))
+            self.assertNotIn("partial edits", text, "only a relaunch says an earlier attempt was stopped")
+
+    def test_relaunch_names_a_new_task_widens_the_gpu_list_and_says_so_in_the_prompt(self):
+        with patched_driver_env(gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}):
+            with fake_home() as h:
+                ho, d = self.handoff(h)
+                first = self.arg(ho.cmd(), "--prompt-file")
+                ho.relaunch()
+                c = ho.cmd()
+                self.assertEqual(self.arg(c, "--task"), "review-fix-2-relaunch-1")
+                self.assertEqual(self.arg(c, "--gpu"), "pro5000,pro6000,obs,ts3")
+                self.assertEqual(int(self.arg(c, "--slot-wait")), L.ANY_SLOT_WAIT_S)
+                p = self.arg(c, "--prompt-file")
+                self.assertEqual(p, os.path.join(d.run_dir, "logs", "review-fix-2-relaunch-1.prompt.md"))
+                self.assertNotEqual(p, first, "each attempt keeps its own prompt file")
+                text = open(p).read()
+                self.assertIn("fix it", text)
+                self.assertIn("`review-fix-2`", text, "the note names the attempt that was stopped")
+                self.assertIn("partial edits", text); self.assertTrue(text.rstrip().endswith("the last line."))
+                ho.relaunch()
+                self.assertEqual(self.arg(ho.cmd(), "--task"), "review-fix-2-relaunch-2")
+                self.assertEqual(ho.attempt, 2)
+                self.assertEqual(int(self.arg(ho.cmd(), "--slot-wait")), L.ANY_SLOT_WAIT_S)
+
+    def test_a_large_item_relaunch_asks_only_for_the_262k_gpus(self):
+        with patched_driver_env(gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}):
+            with fake_home() as h:
+                ho, _ = self.handoff(h, size="large")
+                ho.relaunch()
+                self.assertEqual(self.arg(ho.cmd(), "--gpu"), "pro5000,pro6000")
+
+    def test_an_answerless_health_probe_still_names_every_gpu_in_priority_order(self):
+        with patched_driver_env(gpu_health=lambda *a: {}):
+            with fake_home() as h:
+                ho, d = self.handoff(h)
+                self.assertEqual(d.gpus_to_try(), list(G.PRIORITY), "a stalled hand-off is retried somewhere, not failed on a GET")
+                ho.relaunch()
+                self.assertEqual(self.arg(ho.cmd(), "--gpu"), G.gpu_arg(list(G.PRIORITY)))
+
+    def test_a_review_always_waits_the_long_slot_and_is_never_relaunched_here(self):
+        with fake_home() as h:
+            ho, _ = self.handoff(h, name="independent-review-1")
+            self.assertEqual(int(self.arg(ho.cmd(), "--slot-wait")), L.ANY_SLOT_WAIT_S)
+            for result in ("no-start", "stalled", "PASS", None):
+                self.assertFalse(ho.relaunches(result), result)
+
+    def test_relaunches_is_only_the_two_results_that_never_ran(self):
+        with fake_home() as h:
+            ho, _ = self.handoff(h)
+            for result in ("no-start", "stalled"):
+                self.assertTrue(ho.relaunches(result), result)
+            for result in ("PASS", "FAIL", "exit 7", None):
+                self.assertFalse(ho.relaunches(result), result)
+
+    def test_leaves_edits_is_an_authoring_task_that_actually_replied(self):
+        with fake_home() as h:
+            for name, expect in (("t1", True), ("review-fix-1", True), ("draft-plan", False),
+                                 ("refactoring-research-1", False), ("independent-review-2", False)):
+                ho, _ = self.handoff(h, name=name)
+                self.assertEqual(ho.leaves_edits("PASS"), expect, name)
+                self.assertFalse(ho.leaves_edits("no-start"), f"{name}: no model output, so no edits")
+
+    def test_not_started_is_the_blocker_text_hold_resumes_refuses(self):
+        with fake_home() as h:
+            ho, _ = self.handoff(h)
+            exc = ho.not_started("no-start")
+            self.assertIsInstance(exc, L.PiNotStarted)
+            text = str(exc)
+            self.assertIn("Pi hand-off `review-fix-2` did not start or stalled (no-start:", text)
+            self.assertIn(f"{L.HANDOFF_START_S // 60} min", text); self.assertIn(f"{L.HANDOFF_STALL_S // 60} min", text)
+            self.assertIn(f"{L.LIMITS['pi_relaunch']} relaunches on any free GPU.", text)
+            self.assertFalse(L.hold_resumes(text), "a Pi hand-off Blocker never clears itself on a green PR")
+
+
 if __name__ == "__main__": unittest.main()

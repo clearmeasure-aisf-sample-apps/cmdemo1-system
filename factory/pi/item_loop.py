@@ -178,6 +178,20 @@ def task_slug(name):
     no-op, so run-task re-slugging the driver's --task value changes nothing."""
     return re.sub(r"[^A-Za-z0-9._-]", "-", str(name))
 
+def gh_command(cmd):
+    """True for a GitHub CLI step however it is written: an argv list starting with 'gh', or a shell string starting
+    with 'gh '. Only those go on the App quota, get retried on a rate limit and clear the `gh_wait` state field."""
+    return (isinstance(cmd, list) and bool(cmd) and cmd[0] == "gh") or (isinstance(cmd, str) and cmd.startswith("gh "))
+
+def app_quota_first(cmd):
+    """True when this call should go out on the GitHub App's quota first: a gh call, and not one of the two whose
+    authored object must stay the bot user's (GH_APP_USER_ONLY -- the merge gate requires PR author == BOT)."""
+    return gh_command(cmd) and not (isinstance(cmd, list) and tuple(cmd[1:3]) in GH_APP_USER_ONLY)
+
+def shown_cmd(cmd):
+    """A command as one line for a log or a failure message: a str as it is, an argv shell-quoted."""
+    return cmd if isinstance(cmd, str) else " ".join(shlex.quote(c) for c in cmd)
+
 def checks_state(checks, required):
     """checks: [{name, bucket}] from `gh pr checks --json`. required: names, or None = every check."""
     st = {}
@@ -574,6 +588,84 @@ class PiHeld(Exception):
 class PiNotStarted(Exception):
     """A Pi hand-off still did not start after LIMITS['pi_relaunch'] relaunches: the stage ends in a Blocker."""
 
+class PiHandoff:
+    """One Pi hand-off: what `run-task` is called with, and what changes when an attempt never started or stalled
+    (cmdemo1-system#889). It holds the current attempt's task name (`<slug>`, then `<slug>-relaunch-<n>`), its prompt
+    file and text (the caller's prompt, the relaunch note and the rules suffix), the GPU list to run on and the start /
+    stall / slot waits; it says whether a result is worth another attempt and where the next attempt runs, so
+    `Driver.pi()` only drives the attempts and does the item's own bookkeeping.
+
+    `driver` supplies the run dir (a prompt lives with the item's other logs), the item's recorded GPU, its size and
+    its health probe. The prompt file is written here in the constructor and in `relaunch()`, so the `--prompt-file`
+    `cmd()` passes and the text run-task reads are always the pair belonging to the same attempt."""
+
+    RULES = ("\n\nRules: follow the repository's AGENTS.md and CLAUDE.md (read them if this task touches code, tests or "
+             "the build). Make only the change asked. Do not run git commit, git push or gh, and do not read or print "
+             "credentials. When done, run the narrowest relevant build/test, then end your reply with PASS or FAIL as "
+             "the last line.")
+
+    def __init__(self, driver, name, prompt, timeout=PI_TASK_TIMEOUT_S, gpu=None):
+        self.d, self.name, self.prompt = driver, name, prompt
+        # every per-task log path uses run-task's slug (cmdemo1-system#959): a raw '/' in a plan task name crashed this write
+        self.slug = task_slug(name)
+        self.review = name.startswith("independent-review")   # a review keeps its non-author GPUs; no-start = infra retry
+        self.timeout = G.client_timeout(timeout)
+        self.start_s, self.stall_s = HANDOFF_START_S, HANDOFF_STALL_S
+        self.attempt = 0
+        self.task, self.gpu = self.slug, gpu or driver.gpu()
+        self.write_prompt()
+
+    @property
+    def slot_wait(self):
+        """How long this attempt may queue for a slot: the item's own GPU only for the first one (HANDOFF_SLOT_WAIT_S),
+        then ANY_SLOT_WAIT_S on any free GPU; a review always waits the long way, since its GPUs are chosen."""
+        return ANY_SLOT_WAIT_S if self.review or self.attempt else HANDOFF_SLOT_WAIT_S
+
+    @property
+    def prompt_file(self):
+        return os.path.join(self.d.run_dir, "logs", f"{self.task}.prompt.md")
+
+    def cmd(self):
+        """The run-task argv for the current attempt."""
+        return [os.path.join(HERE, "run-task"), "--run-dir", self.d.run_dir, "--cwd", self.d.s["wt"], "--task", self.task,
+                "--prompt-file", self.prompt_file, "--timeout", str(self.timeout), "--gpu", self.gpu,
+                "--start-timeout", str(self.start_s), "--stall-timeout", str(self.stall_s), "--slot-wait", str(self.slot_wait)]
+
+    def write_prompt(self):
+        """This attempt's prompt: the caller's text, the relaunch note when this is a relaunch, and the rules suffix
+        (both belong to the hand-off, not to the loop that runs it)."""
+        text = scrub(self.prompt) + (RELAUNCH_NOTE.format(name=self.name) if self.attempt else "") + self.RULES
+        open(self.prompt_file, "w").write(text)
+
+    def relaunches(self, result):
+        """Whether this result means the attempt never really ran, so another one is worth the GPU time: a review
+        never relaunches here (its no-start is an infrastructure failure the review stage retries on another GPU)."""
+        return not self.review and result in ("no-start", "stalled")
+
+    def leaves_edits(self, result):
+        """True when this attempt's GPU must be recorded as an author GPU: an authoring task (a plan / research /
+        review pass changes no files) that actually produced model output -- a no-start run changed nothing."""
+        return writes_code(self.name) and result != "no-start"
+
+    def relaunch(self):
+        """Move to the next attempt: a new task name, a free GPU of the item's size (so the longer slot wait that
+        follows), and the prompt saying the attempt before it may have left partial edits in the worktree."""
+        self.attempt += 1
+        self.task = f"{self.slug}-relaunch-{self.attempt}"
+        self.gpu = self.next_gpu()
+        self.write_prompt()
+
+    def next_gpu(self):
+        """The GPUs a relaunch may take, as run-task's --gpu list: the 262K pair for a large item, anything healthy
+        for a small one (relaunch_gpus), everything in priority order when the health probe answered nothing."""
+        return G.gpu_arg(relaunch_gpus(self.d.s.get("size"), self.d.gpus_to_try()))
+
+    def not_started(self, result):
+        """The failure a stage turns into a Blocker when the last relaunch never ran either."""
+        return PiNotStarted(f"Pi hand-off `{self.name}` did not start or stalled ({result}: no GPU slot, no model "
+                            f"output within {self.start_s // 60} min of getting one, or no activity for {self.stall_s // 60} min) "
+                            f"after {LIMITS['pi_relaunch']} relaunches on any free GPU.")
+
 def red_load():
     try: return json.load(open(os.path.join(_runs_dir(), "red.json")))
     except Exception: return {}
@@ -690,26 +782,48 @@ class Driver:
         open(os.path.join(self.run_dir, "driver.log"), "a").write(line + "\n")
 
     def sh(self, cmd, cwd=None, check=True, timeout=None, write=False):
-        """write=True marks a GitHub- or remote-changing step: skipped (logged) in dry-run."""
-        shown = cmd if isinstance(cmd, str) else " ".join(shlex.quote(c) for c in cmd)
+        """THE command seam (tests stub this one). write=True marks a GitHub- or remote-changing step: skipped
+        (logged) in dry-run. Everything else goes out through `_run_logged` (one command, App token then user login)
+        and, when GitHub answers a rate limit, through `_retry_rate_limit`. The runner's own CompletedProcess comes
+        back to the caller; `check=True` is what turns a non-zero exit into a RuntimeError."""
+        shown = shown_cmd(cmd)
         if write and self.dry:
             self.log(f"DRY-RUN skip: {shown[:300]}"); return subprocess.CompletedProcess(cmd, 0, "", "")
-        is_gh = (isinstance(cmd, list) and cmd and cmd[0] == "gh") or (isinstance(cmd, str) and cmd.startswith("gh "))
+        is_gh = gh_command(cmd)
+        r = self._run_logged(cmd, cwd=cwd, timeout=timeout)
+        if is_gh and r.returncode:
+            r = self._retry_rate_limit(r, lambda: self._run_logged(cmd, cwd=cwd, timeout=timeout))
+        if is_gh and "gh_wait" in self.s: self.s.pop("gh_wait"); self.save()
+        if check and r.returncode:
+            raise RuntimeError(f"failed ({r.returncode}): {shown[:300]}\n{scrub(r.stdout)[-2000:]}")
+        return r
+
+    def _run_logged(self, cmd, cwd=None, timeout=None):
+        """One command out, once: on the GitHub App's quota when the item has a token and this call may use it
+        (app_quota_first), and -- after any refusal (403 / missing permission / branch rule) -- the same call again on
+        the bot user's login, with a 401 dropping the cached token so the next call mints a fresh one. An accepted
+        first attempt is never re-run. Returns the runner's CompletedProcess of the attempt that stood."""
+        r = None
+        tok = app_token() if app_quota_first(cmd) else None
+        if tok:   # App quota first; any refusal (403 / permission / branch rule) re-runs the same call on the user login
+            r = run_cmd(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout, env={**os.environ, "GH_TOKEN": tok},
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if r.returncode and app_denied(r.stdout):
+                if re.search(r"HTTP 401|Bad credentials", r.stdout): _app_tok.update(v=None, at=0.0)   # expired: re-mint next call (at=0: no negative cache)
+                self.log("gh: App token refused; retrying this call with the user login"); r = None
+        if r is None:
+            r = run_cmd(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return r
+
+    def _retry_rate_limit(self, r, run):
+        """The backoff loop for a rate-limited gh reply (cmdemo1-system#889): wait, re-send, wait again -- backoff
+        first, then GH_RETRY_RESET_WAIT until the limit resets -- until gh answers something other than a rate limit,
+        or gh_retry_wait says the caps (GH_RETRY_MAX_ATTEMPTS / GH_RETRY_MAX_WAIT_S) are reached and this same result
+        fails like any other gh error. `run` re-sends the command, App-token fallback included, so a token that
+        expired during a wait is re-minted; wait_alive keeps state.json alive through every sleep."""
         attempt = waited = 0
-        while True:
-            r = None
-            tok = app_token() if is_gh and not (isinstance(cmd, list) and tuple(cmd[1:3]) in GH_APP_USER_ONLY) else None
-            if tok:   # App quota first; any refusal (403 / permission / branch rule) re-runs the same call on the user login
-                r = run_cmd(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout, env={**os.environ, "GH_TOKEN": tok},
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                if r.returncode and app_denied(r.stdout):
-                    if re.search(r"HTTP 401|Bad credentials", r.stdout): _app_tok.update(v=None, at=0.0)   # expired: re-mint next call (at=0: no negative cache)
-                    self.log("gh: App token refused; retrying this call with the user login"); r = None
-            if r is None:
-                r = run_cmd(cmd, cwd=cwd, shell=isinstance(cmd, str), text=True, timeout=timeout,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            if not (is_gh and r.returncode and is_rate_limit(r.stdout)):
-                break
+        while r.returncode and is_rate_limit(r.stdout):
             wait = gh_retry_wait(attempt, waited)
             if wait is None:
                 self.log(f"gh rate-limited (exit {r.returncode}); giving up after {attempt} retries / {waited}s")
@@ -717,9 +831,7 @@ class Driver:
             self.log(f"gh rate-limited (exit {r.returncode}); retry {attempt + 1} in {wait}s")
             self.wait_alive(wait, f"gh rate limit, retry {attempt + 1}")
             waited += wait; attempt += 1
-        if is_gh and "gh_wait" in self.s: self.s.pop("gh_wait"); self.save()
-        if check and r.returncode:
-            raise RuntimeError(f"failed ({r.returncode}): {shown[:300]}\n{scrub(r.stdout)[-2000:]}")
+            r = run()
         return r
     def gh(self, *a, write=False, check=True, timeout=None): return self.sh(list(("gh", *a)), check=check, timeout=timeout, write=write)
     def wait_alive(self, seconds, why):
@@ -815,39 +927,31 @@ class Driver:
             raise RuntimeError(f"no GPU is recorded for this item ({self.full}#{self.issue}); it must pass the gpu stage first")
         return g
     def gpu_label(self, g=None): return G.GPUS[g or self.gpu()]["label"]
+    def gpus_to_try(self):
+        """The GPUs healthy now in gpu.py's priority order, for a Pi relaunch to be pointed at; every GPU when the
+        health probe answers nothing (a stalled hand-off is retried somewhere rather than failed on a GET). st_gpu
+        does NOT use this: there an empty list is the answer that means 'wait, nothing is free'."""
+        return G.available(self.gpu_health()) or list(G.PRIORITY)
 
     def pi(self, name, prompt, timeout=PI_TASK_TIMEOUT_S, gpu=None):
-        slug = task_slug(name)   # every per-task log path uses run-task's slug (cmdemo1-system#959): a raw '/' in a plan task name crashed this write
-        pf = os.path.join(self.run_dir, "logs", f"{slug}.prompt.md")
-        suffix = ("\n\nRules: follow the repository's AGENTS.md and CLAUDE.md (read them if this task touches code, tests or "
-                  "the build). Make only the change asked. Do not run git commit, git push or gh, and do not read or print "
-                  "credentials. When done, run the narrowest relevant build/test, then end your reply with PASS or FAIL as "
-                  "the last line.")
-        open(pf, "w").write(scrub(prompt) + suffix)
-        timeout = G.client_timeout(timeout)
-        review = name.startswith("independent-review")   # a review keeps its non-author GPUs; no-start = infra retry
-        task, g = slug, gpu or self.gpu()
-        for k in range(LIMITS["pi_relaunch"] + 1):
-            slot_wait = ANY_SLOT_WAIT_S if review or k else HANDOFF_SLOT_WAIT_S
-            r = self.sh([os.path.join(HERE, "run-task"), "--run-dir", self.run_dir, "--cwd", self.s["wt"], "--task", task,
-                         "--prompt-file", pf, "--timeout", str(timeout), "--gpu", g, "--start-timeout", str(HANDOFF_START_S),
-                         "--stall-timeout", str(HANDOFF_STALL_S), "--slot-wait", str(slot_wait)], check=False)
-            self.log(f"pi {task}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
+        """Hand one task to Pi (cmdemo1-system#889): the attempt's arguments, task names, prompt files and GPU choices
+        are the PiHandoff's; all this drives is the attempts themselves -- run one, record what it reported on the
+        item, and stop, relaunching while the hand-off says the attempt never really ran and ending in PiNotStarted
+        once LIMITS['pi_relaunch'] relaunches have not helped. True when the run passed."""
+        handoff = PiHandoff(self, name, prompt, timeout=timeout, gpu=gpu)
+        while True:
+            r = self.sh(handoff.cmd(), check=False)
+            self.log(f"pi {handoff.task}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
             self.last_task = next((rec for rec in map(_json_or_none, (r.stdout or "").splitlines()) if isinstance(rec, dict)),
                                   {"result": f"exit {r.returncode}"})
-            if writes_code(name) and self.last_task.get("result") != "no-start":   # no model output = no edits
-                self.note_author_gpu(self.last_task.get("gpu"))
-            if review or self.last_task.get("result") not in ("no-start", "stalled"): return r.returncode == 0
-            if k == LIMITS["pi_relaunch"]: break
-            up = G.available(self.gpu_health()) or list(G.PRIORITY)
-            task, g = f"{slug}-relaunch-{k + 1}", G.gpu_arg(relaunch_gpus(self.s.get("size"), up))   # a free GPU of the item's size
-            pf = os.path.join(self.run_dir, "logs", f"{task}.prompt.md")
-            open(pf, "w").write(scrub(prompt) + RELAUNCH_NOTE.format(name=name) + suffix)
-            self.log(f"Pi hand-off {name} {self.last_task.get('result')} (start {HANDOFF_START_S} s / stall {HANDOFF_STALL_S} s / "
-                     f"slot {slot_wait} s); relaunch {k + 1} of {LIMITS['pi_relaunch']} on any free GPU ({g})")
-        raise PiNotStarted(f"Pi hand-off `{name}` did not start or stalled ({self.last_task.get('result')}: no GPU slot, no model "
-                           f"output within {HANDOFF_START_S // 60} min of getting one, or no activity for {HANDOFF_STALL_S // 60} min) "
-                           f"after {LIMITS['pi_relaunch']} relaunches on any free GPU.")
+            result = self.last_task.get("result")
+            if handoff.leaves_edits(result): self.note_author_gpu(self.last_task.get("gpu"))
+            if not handoff.relaunches(result): return r.returncode == 0
+            if handoff.attempt == LIMITS["pi_relaunch"]: raise handoff.not_started(result)
+            slot_wait = handoff.slot_wait   # the wait this attempt queued on, for the relaunch line below
+            handoff.relaunch()
+            self.log(f"Pi hand-off {name} {result} (start {handoff.start_s} s / stall {handoff.stall_s} s / "
+                     f"slot {slot_wait} s); relaunch {handoff.attempt} of {LIMITS['pi_relaunch']} on any free GPU ({handoff.gpu})")
 
     def note_author_gpu(self, g):
         """Record a GPU that ran an authoring Pi call (any non-review call, a relaunch on another GPU included): the
