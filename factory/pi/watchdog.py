@@ -27,6 +27,7 @@ import argparse, datetime as dt, json, os, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
 import item_loop as L
+from scrub import scrub   # the shared rule set directly (leaf import, #931): watchdog -> scrub, never through the driver module
 
 REPOS = ("cmdemo1-workorders", "cmdemo1-dashboard", "cmdemo1-system")
 
@@ -46,10 +47,6 @@ def excluded(repo, issue):
 def wip_limit(repo):
     """Hard rule: the per-repo WIP cap, reused from item_loop (3 per repo, dashboard 8)."""
     return L.wip_limit(repo)
-
-def scrub(text):
-    """Shared scrub: no secret or tunnel URL ever reaches a log line or a comment."""
-    return L.scrub(text or "")
 
 def alive_progressing(state, at=None):
     """Skip guard: True while the item's driver is alive and still progressing (a live pid with progress no
