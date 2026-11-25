@@ -46,6 +46,20 @@ def make_driver(issue=1, repo="cmdemo1-workorders", dry_run=True, **kw):
     """Create a standard test Driver; dry_run is explicit so callers can opt out."""
     return L.Driver(repo, issue, dry_run=dry_run, **kw)
 
+class FakeGhProcess:   # scripted subprocess for Driver.gh() (#936): one query/command object the gh test classes share
+    def __init__(self, replies, capture=None):
+        """Answers from `replies` -- an ordered list of (returncode, stdout) pairs, the last one repeating -- wrapped in
+        L.subprocess.CompletedProcess exactly as the real runner's result is read. When `capture` is a list it receives
+        the kwargs of every call; when callable it is called with them. .calls counts the calls made."""
+        self.replies, self.capture, self.calls = list(replies), capture, 0
+    def __call__(self, *a, **k):
+        if self.capture is not None:
+            if isinstance(self.capture, list): self.capture.append(k)
+            else: self.capture(k)
+        rc, out = self.replies[min(self.calls, len(self.replies) - 1)]
+        self.calls += 1
+        return L.subprocess.CompletedProcess(a, rc, out, "")
+
 HDR = '{"type": "session", "id": "s1"}'                                  # Pi session records (one JSON object per line)
 USER = '{"type": "message", "message": {"role": "user", "content": "do it"}}'
 ASSISTANT = '{"type": "message", "message": {"role": "assistant", "usage": {"input": 1, "output": 1}}}'
@@ -867,15 +881,12 @@ class GhRateLimit(unittest.TestCase):
 
     def run_gh(self, replies, issue=8):
         """Call d.gh() with subprocess.run returning `replies` in order (last one repeats); returns (result|exc, calls, sleeps, driver)."""
-        calls, sleeps = [0], []
-        def fake_run(*a, **k):
-            rc, out = replies[min(calls[0], len(replies) - 1)]; calls[0] += 1
-            return L.subprocess.CompletedProcess(a, rc, out, "")
-        with patched_driver_env(run=fake_run, sleep=sleeps.append) as h:
+        run, sleeps = FakeGhProcess(replies), []
+        with patched_driver_env(run=run, sleep=sleeps.append) as h:
             d = L.Driver("cmdemo1-workorders", issue)
             try: res = d.gh("pr", "list")
             except RuntimeError as e: res = e
-        return res, calls[0], sleeps, d
+        return res, run.calls, sleeps, d
 
     def test_is_rate_limit_matches_real_gh_errors_only(self):
         for real in ("GraphQL: API rate limit already exceeded for user ID 337178629.",
@@ -2348,14 +2359,11 @@ class GhAppToken(unittest.TestCase):   # gh reads/writes use the GitHub App toke
 
     def run_gh(self, replies):
         """d.gh() with subprocess.run returning `replies` in order; returns (result, [GH_TOKEN seen per call], driver logs)."""
-        seen, i = [], [0]
-        def fake_run(*a, **k):
-            seen.append((k.get("env") or {}).get("GH_TOKEN")); rc, out = replies[min(i[0], len(replies) - 1)]; i[0] += 1
-            return L.subprocess.CompletedProcess(a, rc, out, "")
-        with patched_driver_env(run=fake_run) as h:
+        captured = []
+        with patched_driver_env(run=FakeGhProcess(replies, captured)) as h:
             d = make_driver(issue=8); logs = []; d.log = logs.append
             res = d.gh("pr", "list", check=False)
-        return res, seen, logs
+        return res, [(k.get("env") or {}).get("GH_TOKEN") for k in captured], logs
 
     def test_gh_uses_app_token_when_it_works(self):
         os.environ["GH_APP_TOKEN_CMD"] = f"printf {self.FAKE}"
