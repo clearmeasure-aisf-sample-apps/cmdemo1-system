@@ -178,30 +178,99 @@ def task_slug(name):
     no-op, so run-task re-slugging the driver's --task value changes nothing."""
     return re.sub(r"[^A-Za-z0-9._-]", "-", str(name))
 
-def checks_state(checks, required):
-    """checks: [{name, bucket}] from `gh pr checks --json`. required: names, or None = every check."""
+# ---- the one "latest attempt wins" rule for a `gh pr checks --json name,bucket` list (cmdemo1-system#886)
+# gh lists one entry per attempt, so a rerun puts the same check name in the list twice. Which attempt counts is
+# decided by latest_attempt() and nowhere else: a name that has passed stays green (the rerun's pass beats the
+# earlier failure), and the last entry of a name that never passed is its current state. MergeGate is its only
+# reader, so the required checks and the quality checks can no longer disagree about the same list.
+GREEN_BUCKETS = ("pass", "skipping")   # gh's buckets that mean "finished and good" (skipping counts: not applicable)
+RED_BUCKETS = ("fail", "cancel")       # ... "finished and bad"; every other bucket (pending, queued) is still running
+
+def bucket(check):
+    """One check entry's bucket; gh omits it while the check is still queued, which means pending."""
+    return check.get("bucket") or "pending"
+
+def bucket_green(b): return b in GREEN_BUCKETS
+def bucket_red(b): return b in RED_BUCKETS
+def bucket_running(b): return not bucket_green(b) and not bucket_red(b)
+
+def latest_attempt(checks):
+    """name -> the bucket of the attempt that counts, for a `gh pr checks --json` list (the rule above)."""
     st = {}
-    for c in checks:
-        b = c.get("bucket") or "pending"
-        if st.get(c["name"]) in ("pass", "skipping") and b not in ("pass", "skipping"): continue
+    for c in checks or []:
+        b = bucket(c)
+        if bucket_green(st.get(c["name"])) and not bucket_green(b): continue   # a passed check stays passed
         st[c["name"]] = b
-    names = required or list(st)
-    if not names: return CheckState.PENDING
-    rs = [st.get(n, "pending") for n in names]
-    if any(b in ("fail", "cancel") for b in rs): return CheckState.RED
-    if all(b in ("pass", "skipping") for b in rs): return CheckState.GREEN
-    return CheckState.PENDING
+    return st
+
+def is_quality_check(name):
+    """True for the Qodana / Refactoring-rationale checks: not required to merge, but a red or unfinished one holds the PR."""
+    return any(q in str(name).lower() for q in QUALITY_CHECKS)
+
+class MergeGate:
+    """The merge gate as a Specification-style value object (cmdemo1-system#886): the PR's `gh pr checks --json` list
+    plus the names required to merge, answering the questions the gate asks so no caller re-derives them from raw
+    buckets -- `red() / pending() / green()` for the gate as a whole (required checks AND the Qodana /
+    Refactoring-rationale hard gate), `required_state()` for the required names alone, and `quality_red() /
+    quality_pending()` for the quality checks. Pure: it reads the list once through latest_attempt() and nothing else
+    decides which attempt of a check counts.
+
+    `required=None` means every check in the list is required (what checks_state has always meant); a name required
+    but missing from the list counts as pending, and an empty required-and-present list is PENDING, never GREEN.
+    """
+
+    def __init__(self, checks, required=None):
+        self.buckets = latest_attempt(checks)
+        self.required = list(required) if required else None
+
+    def __repr__(self):
+        return f"MergeGate(required={self.required!r}, buckets={self.buckets!r})"
+
+    def _state(self, names):
+        if not names: return CheckState.PENDING
+        rs = [self.buckets.get(n, "pending") for n in names]
+        if any(bucket_red(b) for b in rs): return CheckState.RED
+        if all(bucket_green(b) for b in rs): return CheckState.GREEN
+        return CheckState.PENDING
+
+    def required_state(self):
+        """GREEN / RED / PENDING for the required names only: what checks_state answers."""
+        return self._state(self.required or list(self.buckets))
+
+    def quality_names(self):
+        return [n for n in self.buckets if is_quality_check(n)]
+
+    def quality_red(self):
+        """Names of the quality checks that failed: the hard gate that sends the findings to Pi."""
+        return sorted(n for n in self.quality_names() if bucket_red(self.buckets[n]))
+
+    def quality_pending(self):
+        """Names of the quality checks still running: the gate waits for them, never merges past them."""
+        return sorted(n for n in self.quality_names() if bucket_running(self.buckets[n]))
+
+    def red(self): return self.required_state() == CheckState.RED or bool(self.quality_red())
+    def pending(self): return self.required_state() == CheckState.PENDING or bool(self.quality_pending())
+    def green(self): return not self.red() and not self.pending()
+
+    def state(self):
+        """The whole gate as the CheckState the stages log: what gate_state answers."""
+        if self.red(): return CheckState.RED
+        if self.pending(): return CheckState.PENDING
+        return CheckState.GREEN
+
+def checks_state(checks, required):
+    """checks: [{name, bucket}] from `gh pr checks --json`. required: names, or None = every check.
+    Thin wrapper over MergeGate.required_state (the latest-attempt rule lives in latest_attempt)."""
+    return MergeGate(checks, required).required_state()
 
 def quality_states(checks):
-    """name -> bucket for the Qodana / Refactoring-rationale checks (latest attempt of each name wins)."""
-    st = {}
-    for c in checks:
-        if any(q in c["name"].lower() for q in QUALITY_CHECKS): st[c["name"]] = c.get("bucket") or "pending"
-    return st
+    """name -> bucket for the Qodana / Refactoring-rationale checks, on the same latest_attempt rule as the rest."""
+    g = MergeGate(checks)
+    return {n: g.buckets[n] for n in g.quality_names()}
 
 def quality_failures(checks):
     """Names of failing Qodana / Refactoring-rationale checks (latest attempt of each name wins)."""
-    return sorted(n for n, b in quality_states(checks).items() if b in ("fail", "cancel"))
+    return MergeGate(checks).quality_red()
 
 def heartbeat_due(progress_at, last_heartbeat, at, minutes=HEARTBEAT_MIN):
     """True when nothing progressed for `minutes` and no heartbeat was posted in the last `minutes` (ISO strings)."""
@@ -279,14 +348,13 @@ def staged_files(sh, wt, default):
 
 def gate_state(checks, required):
     """Merge gate: required checks GREEN and the quality checks (Qodana zero new problems, Refactoring rationale)
-    passed. RED when either is red, PENDING while either is still running, else GREEN."""
-    req = checks_state(checks, required)
-    if req == CheckState.RED or quality_failures(checks): return CheckState.RED
-    if req == CheckState.PENDING or quality_pending(checks): return CheckState.PENDING
-    return CheckState.GREEN
+    passed. RED when either is red, PENDING while either is still running, else GREEN.
+    Thin wrapper over MergeGate.state; the merge rule itself is latest_attempt."""
+    return MergeGate(checks, required).state()
 
 def quality_pending(checks):
-    return sorted(n for n, b in quality_states(checks).items() if b not in ("pass", "skipping", "fail", "cancel"))
+    """Names of the Qodana / Refactoring-rationale checks still running (same rule as quality_failures)."""
+    return MergeGate(checks).quality_pending()
 
 def merge_args(full, pr, head):
     """Squash merge pinned to the reviewed head. Never --delete-branch (the branch stays for the record)."""
@@ -939,7 +1007,12 @@ class Driver:
         r = self.gh("pr", "checks", str(self.s["pr"]), "-R", self.full, "--json", "name,bucket,link", check=False)
         try: cs = json.loads(r.stdout or "[]")
         except Exception: cs = []
-        return checks_state(cs, REQUIRED.get(self.repo)), cs
+        return self.merge_gate(cs).required_state(), cs
+
+    def merge_gate(self, cs):
+        """This repo's MergeGate for a `gh pr checks --json` list: the one place the repo's required-check names are
+        looked up, so every stage asks the gate object instead of re-deriving it from raw buckets (#886)."""
+        return MergeGate(cs, REQUIRED.get(self.repo))
 
     def wait_ci(self, max_s=4 * 3600):
         """Zero-LLM wait: gh's own watch; falls back to a sleep loop until checks exist."""
@@ -958,7 +1031,7 @@ class Driver:
     def failed_logs(self, cs):
         out, runs = [], set()
         for c in cs:
-            if c.get("bucket") in ("fail", "cancel"):
+            if bucket_red(bucket(c)):   # every attempt with a red bucket: the log is wanted even when a rerun passed
                 m = re.search(r"/actions/runs/(\d+)", c.get("link") or "")
                 if m: runs.add(m.group(1))
         for rid in sorted(runs):
@@ -1053,8 +1126,8 @@ class Driver:
         while time.time() < t_end:
             time.sleep(RECHECK_S)
             if self.stop_if_held(): return False   # handed off while blocked: never clear the Blocker or resume
-            state, cs = self.pr_checks()
-            if gate_state(cs, REQUIRED.get(self.repo)) == CheckState.GREEN:
+            _, cs = self.pr_checks()
+            if self.merge_gate(cs).green():
                 self.log("blocked PR is clean now; resuming")
                 self.comment("Status: checks are green now (including Qodana and Refactoring rationale); the driver cleared its "
                              "Blocker and is resuming the Review.")
@@ -1246,16 +1319,16 @@ class Driver:
     def st_ci(self):
         state, cs = self.wait_ci()
         self.log(f"required checks {state}")
-        bad = quality_failures(cs)
-        if state == CheckState.GREEN and not bad:
-            if quality_pending(cs):   # hard gate: Qodana and Refactoring rationale must finish green, never skipped
+        gate = self.merge_gate(cs)
+        if state == CheckState.GREEN and not gate.quality_red():
+            if gate.quality_pending():   # hard gate: Qodana and Refactoring rationale must finish green, never skipped
                 since = self.s.setdefault("quality_wait_since", iso()); self.save()
                 if (now() - dt.datetime.fromisoformat(since)).total_seconds() > QUALITY_WAIT_MIN * 60:
-                    return self.blocker(f"{', '.join(quality_pending(cs))} did not finish within {QUALITY_WAIT_MIN} minutes.")
+                    return self.blocker(f"{', '.join(gate.quality_pending())} did not finish within {QUALITY_WAIT_MIN} minutes.")
                 self.heartbeat(); time.sleep(120); return
             self.s.pop("quality_wait_since", None)
             return self.save(stage="review")
-        if state == CheckState.GREEN: return self.fix_quality(bad, cs)
+        if state == CheckState.GREEN: return self.fix_quality(gate.quality_red(), cs)
         if state == CheckState.PENDING: return self.blocker("required checks did not finish within 4 hours.")
         runs, logs = self.failed_logs(cs)
         if classify_failure(logs) == FailureClass.INFRA:
@@ -1415,9 +1488,9 @@ class Driver:
 
     def st_merge(self):
         self.check_held()
-        pr = int(self.s["pr"]); _, cs = self.pr_checks(); state = gate_state(cs, REQUIRED.get(self.repo))
+        pr = int(self.s["pr"]); _, cs = self.pr_checks(); gate = self.merge_gate(cs); state = gate.state()
         info = json.loads(self.gh("pr", "view", str(pr), "-R", self.full, "--json", "author,headRefOid,state").stdout)
-        if (self.repo, pr) in NEVER_MERGE or info["author"]["login"] != BOT or state != CheckState.GREEN or info["headRefOid"] != self.s["head"]:
+        if (self.repo, pr) in NEVER_MERGE or info["author"]["login"] != BOT or not gate.green() or info["headRefOid"] != self.s["head"]:
             self.log(f"merge gate not met (checks {state}, head {info['headRefOid'][:8]})")
             exhausted = (f"merge gate not met after {LIMITS['merge_gate']} tries (checks {state}, PR head "
                          f"`{info['headRefOid'][:8]}` vs driver head `{str(self.s.get('head'))[:8]}`, author {info['author']['login']}).")
