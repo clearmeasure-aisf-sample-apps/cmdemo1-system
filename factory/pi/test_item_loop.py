@@ -3271,4 +3271,165 @@ class SharedFixPass(unittest.TestCase):   # cmdemo1-system#858: the bump-or-bloc
             self.assertIn("merge gate not met after 3 tries", d.s["blocker"])
 
 
+class LatestAttemptMergeRule(unittest.TestCase):   # cmdemo1-system#886: ONE "latest attempt wins" rule + a MergeGate object
+    """`gh pr checks --json name,bucket` lists one entry per attempt, so a rerun puts the same check name in the list
+    twice. item_loop.latest_attempt() is now the only place that decides which entry counts, and MergeGate is its only
+    reader: checks_state, quality_states, quality_failures, quality_pending and gate_state are thin wrappers over it,
+    so the required checks and the Qodana / Refactoring-rationale hard gate can no longer disagree about the same
+    list. Pinned here for BOTH kinds of check (the old tests pinned one half each: test_checks_state the sticky pass
+    of a required check, NoIdleStall a quality fail-then-pass), plus the gate's red / pending / green answers, the
+    hard gate end to end through st_ci, and the guard that no wrapper or stage re-derives it from raw buckets."""
+
+    REQ = ["Build result", "secret-scan"]
+    OK = [{"name": "Build result", "bucket": "pass"}, {"name": "secret-scan", "bucket": "pass"}]
+
+    # ---- the shared rule itself
+    def test_latest_attempt_is_the_one_rule_for_any_check_name(self):
+        self.assertEqual(L.latest_attempt([{"name": "a", "bucket": "fail"}, {"name": "a", "bucket": "pass"}]), {"a": "pass"},
+                         "a rerun's pass beats the earlier failure")
+        self.assertEqual(L.latest_attempt([{"name": "a", "bucket": "pass"}, {"name": "a", "bucket": "fail"}]), {"a": "pass"},
+                         "and it wins in either list order: a name that has passed stays passed")
+        self.assertEqual(L.latest_attempt([{"name": "a", "bucket": "fail"}, {"name": "a", "bucket": "cancel"}]), {"a": "cancel"},
+                         "a name that never passed: the last entry is its state")
+        self.assertEqual(L.latest_attempt([{"name": "a", "bucket": "pass"}, {"name": "a", "bucket": "skipping"}]), {"a": "skipping"},
+                         "green buckets replace each other (both mean finished and good)")
+        self.assertEqual(L.latest_attempt([{"name": "a"}, {"name": "b", "bucket": "pass"}]), {"a": "pending", "b": "pass"},
+                         "gh omits the bucket while a check is queued")
+        self.assertEqual(L.latest_attempt([]), {}); self.assertEqual(L.latest_attempt(None), {})
+
+    def test_the_bucket_predicates_say_finished_good_and_running_once(self):
+        for b in ("pass", "skipping"):
+            self.assertTrue(L.bucket_green(b), b); self.assertFalse(L.bucket_red(b), b); self.assertFalse(L.bucket_running(b), b)
+        for b in ("fail", "cancel"):
+            self.assertTrue(L.bucket_red(b), b); self.assertFalse(L.bucket_green(b), b); self.assertFalse(L.bucket_running(b), b)
+        for b in ("pending", "queued"):
+            self.assertTrue(L.bucket_running(b), b)
+            self.assertFalse(L.bucket_green(b), b); self.assertFalse(L.bucket_red(b), b)
+        self.assertEqual(L.bucket({"name": "a"}), "pending", "a missing bucket reads as pending, not as an empty string")
+        self.assertEqual(L.bucket({"bucket": None}), "pending", "and so does an explicit null")
+        self.assertTrue(L.bucket_running(L.bucket({"bucket": None})), "so a queued check holds the gate pending")
+
+    def test_required_and_quality_names_cannot_disagree_about_the_same_list(self):
+        cs = [{"name": "env-checks", "bucket": "fail"}, {"name": "env-checks", "bucket": "pass"},
+              {"name": "Qodana", "bucket": "pass"}, {"name": "Qodana", "bucket": "fail"},
+              {"name": "Refactoring rationale", "bucket": "fail"}, {"name": "Refactoring rationale", "bucket": "pass"}]
+        self.assertEqual(L.checks_state(cs, ["env-checks"]), "GREEN", "the rerun's pass wins for a required check")
+        self.assertEqual(L.quality_states(cs), {"Qodana": "pass", "Refactoring rationale": "pass"},
+                         "and the same rule answers for the quality checks -- no second merge loop")
+        self.assertEqual(L.quality_failures(cs), []); self.assertEqual(L.quality_pending(cs), [])
+        self.assertEqual(L.gate_state(cs, ["env-checks"]), "GREEN")
+        still_red = [{"name": "Qodana", "bucket": "pending"}, {"name": "Qodana", "bucket": "fail"}]
+        self.assertEqual((L.quality_states(still_red), L.quality_failures(still_red)), ({"Qodana": "fail"}, ["Qodana"]),
+                         "a name that never passed keeps its red")
+
+    # ---- the gate as a value object, built on that rule
+    def test_merge_gate_answers_red_pending_green_for_the_whole_gate(self):
+        for cs, want in ((self.OK, "GREEN"),
+                         (self.OK + [{"name": "Qodana", "bucket": "pass"}, {"name": "Refactoring rationale", "bucket": "pass"}], "GREEN"),
+                         (self.OK + [{"name": "Qodana", "bucket": "fail"}], "RED"),
+                         (self.OK + [{"name": "Refactoring rationale", "bucket": "pending"}], "PENDING"),
+                         ([{"name": "Build result", "bucket": "fail"}, {"name": "secret-scan", "bucket": "pass"}], "RED")):
+            g = L.MergeGate(cs, self.REQ)
+            with self.subTest(checks=cs):
+                self.assertEqual(g.state(), want)
+                self.assertEqual(g.red(), want == "RED"); self.assertEqual(g.pending(), want == "PENDING")
+                self.assertEqual(g.green(), want == "GREEN")
+        g = L.MergeGate(self.OK + [{"name": "Qodana", "bucket": "fail"}], self.REQ)
+        self.assertEqual(g.required_state(), "GREEN", "a quality red is the gate's, not the required checks' red")
+        self.assertEqual(g.quality_red(), ["Qodana"]); self.assertEqual(g.quality_pending(), [])
+
+    def test_merge_gate_is_built_on_latest_attempt_and_reads_the_list_once(self):
+        cs = self.OK + [{"name": "Qodana", "bucket": "fail"}, {"name": "Qodana", "bucket": "pass"},
+                        {"name": "Refactoring rationale", "bucket": "queued"}]
+        g = L.MergeGate(cs, self.REQ)
+        self.assertEqual(g.buckets, L.latest_attempt(cs), "the gate reads the list through the shared merge rule")
+        self.assertEqual(g.quality_red(), [])
+        self.assertEqual(g.quality_pending(), ["Refactoring rationale"])
+        self.assertEqual((L.gate_state(cs, self.REQ), g.state()), (g.state(), g.state()))
+        self.assertEqual((L.quality_failures(cs), g.quality_red()), (g.quality_red(), g.quality_red()))
+        self.assertEqual((L.quality_pending(cs), g.quality_pending()), (g.quality_pending(), g.quality_pending()))
+
+    def test_merge_gate_with_no_required_list_treats_every_check_as_required(self):
+        self.assertEqual(L.MergeGate([{"name": "a", "bucket": "pass"}, {"name": "b", "bucket": "fail"}]).state(), "RED")
+        self.assertEqual(L.MergeGate([]).state(), "PENDING", "no checks at all is never GREEN")
+        self.assertEqual(L.MergeGate([], []).state(), "PENDING", "an empty required list means every check, as before")
+        self.assertEqual(L.MergeGate([{"name": "a", "bucket": "pass"}], ["a", "b"]).state(), "PENDING",
+                         "a required check missing from the list is still pending")
+
+    def test_the_quality_hard_gate_answers_for_skipped_and_non_exact_names(self):
+        self.assertEqual(L.quality_failures([{"name": "Qodana code quality", "bucket": "cancel"}]), ["Qodana code quality"],
+                         "the quality match is the same substring test for red and for pending")
+        self.assertEqual(L.quality_pending([{"name": "Refactoring Rationale for src/A.cs", "bucket": "queued"}]),
+                         ["Refactoring Rationale for src/A.cs"])
+        self.assertEqual((L.quality_failures([{"name": "Qodana", "bucket": "skipping"}]),
+                          L.quality_pending([{"name": "Qodana", "bucket": "skipping"}])), ([], []),
+                         "a skipped quality check is neither red nor still running (behaviour unchanged)")
+
+    # ---- the gate end to end where the merge decision is made
+    def ci_driver(self, cs):
+        """A driver in the ci stage whose PR answers `cs` (required green), with nothing posted and nothing slept."""
+        d = make_driver(repo="cmdemo1-system", issue=886, dry_run=False)
+        d.events = []
+        d.s.update(counts={k: 0 for k in L.LIMITS}, plan=dict(PLAN), wt="/tmp/wt", gpu="pro5000", pr=7,
+                   head="h" * 40, stage="ci")
+        cs_all = [{"name": "env-checks", "bucket": "pass"}] + cs
+        d.wait_ci = lambda: (L.CheckState.GREEN, cs_all)
+        d.pr_checks = lambda: (L.CheckState.GREEN, cs_all)   # the same PR answers when the merge stage re-reads it
+        d.heartbeat = lambda *a, **k: None
+        d.comment = lambda body, pr=False: d.events.append(("comment", body))
+        d.blocker = lambda what, who="Jeffrey": (d.events.append(("blocker", what)), d.save(stage="blocked", blocker=what))[-1]
+        return d
+
+    def test_ci_waits_for_an_unfinished_quality_check_and_blocks_when_it_never_finishes(self):
+        with patched_driver_env(sleep=lambda s: None), fake_home():
+            d = self.ci_driver([{"name": "Qodana", "bucket": "pending"}])
+            d.st_ci()
+            self.assertIn("quality_wait_since", d.s, "required green + Qodana pending: the gate holds at ci")
+            self.assertEqual(d.s["stage"], "ci"); self.assertEqual(d.events, [])
+            d.s["quality_wait_since"] = (L.now() - L.dt.timedelta(minutes=L.QUALITY_WAIT_MIN + 1)).isoformat()
+            d.st_ci()
+            self.assertEqual(d.events, [("blocker", f"Qodana did not finish within {L.QUALITY_WAIT_MIN} minutes.")],
+                             "the hard gate names the quality check that never finished")
+
+    def test_ci_moves_to_review_once_required_and_quality_are_both_green(self):
+        with patched_driver_env(sleep=lambda s: None), fake_home():
+            d = self.ci_driver([{"name": "Qodana", "bucket": "fail"}, {"name": "Qodana", "bucket": "pass"},
+                                {"name": "Refactoring rationale", "bucket": "pass"}])
+            d.s["quality_wait_since"] = L.iso()
+            d.st_ci()
+            self.assertEqual(d.s["stage"], "review", "the rerun's pass beats the earlier Qodana failure")
+            self.assertNotIn("quality_wait_since", d.s)
+            self.assertEqual(d.events, [])
+
+    def test_merge_stage_asks_the_gate_object_for_the_merge_decision(self):
+        with patched_driver_env(sleep=lambda s: None), fake_home():
+            d = self.ci_driver([{"name": "Qodana", "bucket": "pending"}])
+            d.s.update(stage="merge", head="h" * 40)
+            d.gh = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, json.dumps(
+                {"author": {"login": L.BOT}, "headRefOid": "h" * 40, "state": "OPEN"}), "")
+            d.st_merge()
+            self.assertEqual(d.s["stage"], "ci", "a pending quality check keeps the gate from merging")
+
+    # ---- the guard: one rule, and no re-derivation of it
+    def test_the_wrappers_answer_through_the_gate_not_their_own_merge_loop(self):
+        bucket_literal = re.compile(r'"(?:pass|skipping|fail|cancel)"')
+        for name in ("checks_state", "quality_states", "quality_failures", "quality_pending", "gate_state"):
+            src = inspect.getsource(getattr(L, name))
+            with self.subTest(fn=name):
+                self.assertIn("MergeGate", src, f"{name} must answer through MergeGate (or latest_attempt), not its own merge loop")
+                self.assertIsNone(bucket_literal.search(src), f"{name} re-types a gh bucket literal instead of using the predicates")
+
+    def test_the_stages_ask_this_repos_gate_instead_of_re_deriving_buckets(self):
+        bucket_literal = re.compile(r'"(?:pass|skipping|fail|cancel)"')
+        for name in ("merge_gate", "pr_checks", "st_ci", "st_merge", "hold_blocked"):
+            src = inspect.getsource(getattr(L.Driver, name))
+            with self.subTest(site=name):
+                self.assertIn("merge_gate", src, f"Driver.{name} must ask the repo's gate object")
+                self.assertIsNone(re.search(r"(?<![.\w])(?:gate_state|quality_failures|quality_pending)\(", src),
+                                  f"Driver.{name} re-derives the gate from raw checks instead of asking MergeGate")
+                self.assertIsNone(bucket_literal.search(src), f"Driver.{name} re-types a gh bucket literal")
+        self.assertIn("latest_attempt", inspect.getsource(L.MergeGate.__init__),
+                      "the gate is built on the one merge rule")
+
+
 if __name__ == "__main__": unittest.main()
