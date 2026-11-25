@@ -569,6 +569,23 @@ def stage_handler(driver, stage):
         raise UnknownStage(f"unknown stage {stage!r}; known stages: " + ", ".join(sorted(STAGES)))
     return getattr(driver, STAGES[stage])
 
+def fix_text(value):
+    """A FixRound text (cmdemo1-system#858): a literal, or a function of the pass number n."""
+    return value if callable(value) else lambda n: value
+
+class FixRound:
+    """What one Pi fix round does, as the ci / quality / review stages build it and Driver.fix_pass runs it
+    (cmdemo1-system#858): the Pi task name prefix (`<pi>-<n>`), its prompt with the findings, the local
+    verification label prefix (`<verify><n>`), the Blocker text when verification stays red and the commit
+    message. The last two are functions of the pass number because only the driver knows n after bumping the
+    counter; `before_commit` runs between the local verification and the push (fix_quality pastes the
+    refactoring plan into the PR body there)."""
+
+    def __init__(self, pi, prompt, verify, local_red, commit, before_commit=None):
+        self.pi, self.prompt, self.verify = pi, prompt, verify
+        self.local_red, self.commit = fix_text(local_red), fix_text(commit)
+        self.before_commit = before_commit
+
 class Driver:
     def __init__(self, repo, issue, dry_run=False, top_session=None, health=None):
         self.repo, self.issue, self.dry = repo, int(issue), dry_run
@@ -661,6 +678,16 @@ class Driver:
         (cmdemo1-dashboard#1311: the FAIL was on the issue only and the PR sat green and idle for two hours)."""
         self.comment(body)
         if self.s.get("pr"): self.comment(body, pr=True)
+
+    def pr_body(self, check=True):
+        """The PR body as GitHub has it now. check=False answers '' when the read fails: the research mirror and
+        the independent review treat a body they cannot read as an empty one."""
+        return self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body", check=check).stdout
+
+    def edit_pr_body(self, body, name):
+        """Replace the PR body with `body`, drafted (scrubbed) to logs/pr-body-<name>.md first."""
+        p = os.path.join(self.run_dir, "logs", f"pr-body-{name}.md"); open(p, "w").write(scrub(body))
+        self.gh("pr", "edit", str(self.s["pr"]), "-R", self.full, "--body-file", p, write=True)
 
     def lookup_board_item(self):
         """Return the board item id, looking it up if necessary. Logs and returns None on failure."""
@@ -795,6 +822,35 @@ class Driver:
                     f"Relevant output:\n```\n{trim_log(out)}\n```\nFix the root cause with the smallest change. Do not skip, "
                     "delete, weaken or retry-wrap tests or gates, and add no baseline entries.")
         return False
+
+    def pi_round(self, name, prompt, label, local_red, commit, before_commit=None):
+        """The fix half of a pass: Pi gets the findings as task `name`, the item re-verifies locally under label
+        `label`, and the fix is committed and pushed as `commit` (`before_commit` in between, for a stage's own
+        GitHub bookkeeping). Verification still red: Blocker `local_red` and nothing is committed, False -- the
+        caller leaves the stage."""
+        self.pi(name, prompt)
+        if not self.local_green(label): self.blocker(local_red); return False
+        if before_commit: before_commit()
+        self.commit_push(commit)
+        return True
+
+    def fix_pass(self, limit_key, blocked, *, progress=None, comment=None, fix=None):
+        """One fix pass: the loop the ci / quality / review / merge stages share instead of each inlining it with
+        its own failure text (cmdemo1-system#858). Bump LIMITS[limit_key]; exhausted, post `blocked` as the
+        Blocker and return None, so the caller leaves the stage. Otherwise: move the board item to `progress`
+        when given, post `comment(n)` (a callable, so a review FAIL keeps its PR mirror in its own stage), then
+        run the `fix` FixRound (Pi task `<pi>-<n>`, local verification `<verify><n>`, Blocker and commit message
+        of n) and return the pass number n. With no `fix` the pass is the bump alone -- all the merge gate is.
+        Every Blocker text is the caller's: hold_resumes keys off "Review FAIL twice" / "independent review
+        FAIL twice" / "independent review infra", so the helper never generates one."""
+        if not self.bump(limit_key):
+            self.blocker(blocked); return None
+        n = self.s["counts"][limit_key]
+        if progress: self.move(progress)
+        if comment: comment(n)
+        if fix and not self.pi_round(f"{fix.pi}-{n}", fix.prompt, f"{fix.verify}{n}", fix.local_red(n),
+                                     fix.commit(n), fix.before_commit): return None
+        return n
 
     def commit_push(self, msg):
         self.check_held()
@@ -1140,39 +1196,40 @@ class Driver:
                     self.sh(["git", *BOT_GIT, "commit", "-q", "--allow-empty", "-m", "Re-run CI after an infrastructure failure"], cwd=self.s["wt"])
                     self.commit_push("Re-run CI"); break
             return
-        if not self.bump("ci_fix"):
-            return self.blocker(f"required checks still red after {LIMITS['ci_fix']} Pi fix passes.")
-        n = self.s["counts"]["ci_fix"]
-        self.pi(f"ci-fix-{n}", "Required CI checks failed on this branch. Failing job output (trimmed):\n```\n" + logs +
-                "\n```\nFirst write three lines: the root cause, the file, the fix. Then fix the root cause with the smallest "
-                "change. Never skip, delete, weaken or retry-wrap a test or gate, and add no baseline entries.")
-        if not self.local_green(f"ci{n}"):
-            return self.blocker(f"local verification red after CI fix pass {n}.")
-        self.commit_push(f"Fix CI ({n})")
+        if self.fix_pass("ci_fix", f"required checks still red after {LIMITS['ci_fix']} Pi fix passes.",
+                         fix=FixRound("ci-fix", "Required CI checks failed on this branch. Failing job output (trimmed):\n```\n" + logs +
+                                      "\n```\nFirst write three lines: the root cause, the file, the fix. Then fix the root cause with the "
+                                      "smallest change. Never skip, delete, weaken or retry-wrap a test or gate, and add no baseline entries.",
+                                      "ci", local_red=lambda n: f"local verification red after CI fix pass {n}.",
+                                      commit=lambda n: f"Fix CI ({n})")) is None: return
 
     def fix_quality(self, bad, cs):
         """Qodana / Refactoring-rationale red while required checks are green: hand the findings to Pi, never idle."""
-        if not self.bump("quality_fix"):
-            return self.blocker(f"{', '.join(bad)} still red after {LIMITS['quality_fix']} Pi fix passes.")
-        n = self.s["counts"]["quality_fix"]
+        bad_list = ", ".join(bad)
         links = "\n".join(f"- {c['name']}: {c.get('link') or 'no link'}" for c in cs if c["name"] in bad)
         _, logs = self.failed_logs([c for c in cs if c["name"] in bad])
-        self.comment(f"Status: {', '.join(bad)} failed on PR #{self.s['pr']}; sending the findings to Pi (fix pass {n} of {LIMITS['quality_fix']}).")
-        self.pi(f"quality-fix-{n}", f"These non-required checks failed and block the PR: {', '.join(bad)}.\n{links}\n"
-                f"Findings (trimmed):\n```\n{logs or '(open the check link; no Actions log)'}\n```\n"
-                "Qodana: fix every new problem in the code, with no baseline entries. Refactoring rationale: the PR description "
-                "needs a `## Refactoring plan` section when a size-baselined file changes; write it to refactoring-plan.md in the "
-                "repo root of this tree (the driver pastes it into the PR body) and shrink the file when you can. Smallest change.")
-        if not self.local_green(f"quality{n}"): return self.blocker(f"local verification red after quality fix pass {n}.")
+        if self.fix_pass("quality_fix", f"{bad_list} still red after {LIMITS['quality_fix']} Pi fix passes.",
+                         comment=lambda n: self.comment(f"Status: {bad_list} failed on PR #{self.s['pr']}; sending the findings to Pi "
+                                                        f"(fix pass {n} of {LIMITS['quality_fix']})."),
+                         fix=FixRound("quality-fix", f"These non-required checks failed and block the PR: {bad_list}.\n{links}\n"
+                                      f"Findings (trimmed):\n```\n{logs or '(open the check link; no Actions log)'}\n```\n"
+                                      "Qodana: fix every new problem in the code, with no baseline entries. Refactoring rationale: the PR description "
+                                      "needs a `## Refactoring plan` section when a size-baselined file changes; write it to refactoring-plan.md in the "
+                                      "repo root of this tree (the driver pastes it into the PR body) and shrink the file when you can. Smallest change.",
+                                      "quality", local_red=lambda n: f"local verification red after quality fix pass {n}.",
+                                      commit=lambda n: f"Fix {bad_list} ({n})",
+                                      before_commit=self.paste_refactoring_plan)) is None: return
+
+    def paste_refactoring_plan(self):
+        """Pi writes `refactoring-plan.md` in the tree when a size-baselined file changed; the driver pastes it into
+        the PR body's `## Refactoring plan` section and removes it from the tree so the fix commit stays clean
+        (fix_quality runs it between the local verification and the push)."""
         plan = os.path.join(self.s["wt"], "refactoring-plan.md")
-        if os.path.exists(plan):
-            body = os.path.join(self.run_dir, "logs", "pr-body-plan.md")
-            cur = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body").stdout
-            if "## Refactoring plan" not in cur:
-                open(body, "w").write(scrub(cur.rstrip() + "\n\n" + open(plan).read().strip() + "\n"))
-                self.gh("pr", "edit", str(self.s["pr"]), "-R", self.full, "--body-file", body, write=True)
-            os.remove(plan)
-        self.commit_push(f"Fix {', '.join(bad)} ({n})")
+        if not os.path.exists(plan): return
+        cur = self.pr_body()
+        if "## Refactoring plan" not in cur:
+            self.edit_pr_body(cur.rstrip() + "\n\n" + open(plan).read().strip() + "\n", "plan")
+        os.remove(plan)
 
     def st_review(self):
         p = self.s["plan"]; ev, failed = [], []
@@ -1183,16 +1240,17 @@ class Driver:
             last = ([l for l in out.splitlines() if l.strip()][-1:] or [""])[0][:200]
             (ev if r.returncode == 0 else failed).append((c, last, r.returncode))
         if failed:
-            if not self.bump("review_fail"):
-                return self.blocker("Review FAIL twice: " + "; ".join(f"{c['text']} (exit {rc})" for c, _, rc in failed))
-            self.move("In Progress")
-            self.review_fail_comment("Review → In Progress\n\nReview: FAIL.\n\n" + "\n".join(f"- {c['text']}: evidence `{c['evidence_cmd']}` exit {rc}: {last}" for c, last, rc in failed)
-                                     + "\n\nSending the failed criteria to Pi.")
-            self.pi(f"review-fix-{self.s['counts']['review_fail']}", "These acceptance criteria fail their evidence commands:\n" +
-                    "\n".join(f"- {c['text']}: `{c['evidence_cmd']}` -> {last}" for c, last, _ in failed) + "\nFix the code so each passes.")
-            if not self.local_green(f"review{self.s['counts']['review_fail']}"):
-                return self.blocker("local verification red after a review fix.")
-            self.commit_push("Fix review findings"); self.move("Review")
+            evidence = "\n".join(f"- {c['text']}: evidence `{c['evidence_cmd']}` exit {rc}: {last}" for c, last, rc in failed)
+            criteria = "\n".join(f"- {c['text']}: `{c['evidence_cmd']}` -> {last}" for c, last, _ in failed)
+            if self.fix_pass("review_fail", "Review FAIL twice: " + "; ".join(f"{c['text']} (exit {rc})" for c, _, rc in failed),
+                             progress="In Progress",
+                             comment=lambda n: self.review_fail_comment(f"Review → In Progress\n\nReview: FAIL.\n\n{evidence}"
+                                                                        "\n\nSending the failed criteria to Pi."),
+                             fix=FixRound("review-fix", "These acceptance criteria fail their evidence commands:\n" + criteria +
+                                          "\nFix the code so each passes.", "review",
+                                          local_red="local verification red after a review fix.",
+                                          commit="Fix review findings")) is None: return
+            self.move("Review")
             return self.save(stage="ci")
         self.save(evidence=[[c["text"], c["evidence_cmd"], last] for c, last, _ in ev])
         verdict = self.independent_review()
@@ -1207,12 +1265,10 @@ class Driver:
         ok, findings = verdict
         self.s["counts"]["review_infra"] = 0; self.save()
         if not ok:
-            if not self.bump("review_fail"):
-                return self.blocker("independent review FAIL twice: " + findings[:600])
-            n = self.s["counts"]["review_fail"]
-            self.move("In Progress")
-            self.review_fail_comment(f"Review → In Progress\n\nReview: FAIL (independent review on the {self.gpu_label(self.s.get('reviewer_gpu'))}).\n\n"
-                                     f"{findings[:3000]}\n\nSending the findings to Pi.")
+            n = self.fix_pass("review_fail", "independent review FAIL twice: " + findings[:600], progress="In Progress",
+                              comment=lambda n: self.review_fail_comment(f"Review → In Progress\n\nReview: FAIL (independent review on the {self.gpu_label(self.s.get('reviewer_gpu'))}).\n\n"
+                                                                         f"{findings[:3000]}\n\nSending the findings to Pi."))
+            if n is None: return
             if not self.s.get("research_in_body"):   # the section is the driver's to write: redo the research, fix the body
                 if not research_ok(self.research_text(), p["files"]):
                     self.s["counts"]["research"] = 0; self.save(stage="research", refactors_done=True)
@@ -1221,21 +1277,19 @@ class Driver:
                     self.save(stage="review")
                 self.sync_pr_research()
                 self.comment("Research re-done after the review FAIL; the PR body's `## Refactoring research` section is updated.")   # journal activity: no commit on this path
-            else:
-                self.pi(f"review-fix-{n}", "An independent review of this branch failed. Findings:\n" + findings[:6000] +
-                        "\nFix each finding with the smallest change. Never skip, delete or weaken a test or gate.")
-                if not self.local_green(f"review{n}"): return self.blocker("local verification red after an independent-review fix.")
-                self.commit_push("Fix independent review findings")
+            else:   # Pi fixes the code: the same fix round, on the pass the bump above already counted
+                if not self.pi_round(f"review-fix-{n}", "An independent review of this branch failed. Findings:\n" + findings[:6000] +
+                                     "\nFix each finding with the smallest change. Never skip, delete or weaken a test or gate.",
+                                     f"review{n}", "local verification red after an independent-review fix.",
+                                     "Fix independent review findings"): return
             self.move("Review")
             return self.save(stage="ci")
         self.save(stage="merge")
 
     def sync_pr_research(self):
-        cur = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body", check=False).stdout
+        cur = self.pr_body(check=False)
         new = with_research(cur, self.research_text())
-        if new.strip() != (cur or "").strip():
-            body = os.path.join(self.run_dir, "logs", "pr-body-research.md"); open(body, "w").write(scrub(new))
-            self.gh("pr", "edit", str(self.s["pr"]), "-R", self.full, "--body-file", body, write=True)
+        if new.strip() != (cur or "").strip(): self.edit_pr_body(new, "research")
 
     def independent_review(self):
         """Pi on a different GPU than the author reviews the diff, the issue's criteria and the `## Refactoring
@@ -1243,7 +1297,7 @@ class Driver:
         Blocker when no second GPU came up. ok is None for a review-infra failure (review_verdict): no / empty findings
         file or no verdict. The review runs on whichever non-author GPU has a free slot first."""
         p = self.s["plan"]
-        body = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body", check=False).stdout
+        body = self.pr_body(check=False)
         if not research_ok(body, p["files"]):
             self.save(research_in_body=False)
             return False, (f"- The PR body has no substantive `{RESEARCH_HEAD}` section (findings per touched file, in-scope "
@@ -1293,9 +1347,9 @@ class Driver:
         info = json.loads(self.gh("pr", "view", str(pr), "-R", self.full, "--json", "author,headRefOid,state").stdout)
         if (self.repo, pr) in NEVER_MERGE or info["author"]["login"] != BOT or state != CheckState.GREEN or info["headRefOid"] != self.s["head"]:
             self.log(f"merge gate not met (checks {state}, head {info['headRefOid'][:8]})")
-            if not self.bump("merge_gate"):   # was an unbounded ci -> review -> merge spin
-                return self.blocker(f"merge gate not met after {LIMITS['merge_gate']} tries (checks {state}, PR head "
-                                    f"`{info['headRefOid'][:8]}` vs driver head `{str(self.s.get('head'))[:8]}`, author {info['author']['login']}).")
+            exhausted = (f"merge gate not met after {LIMITS['merge_gate']} tries (checks {state}, PR head "
+                         f"`{info['headRefOid'][:8]}` vs driver head `{str(self.s.get('head'))[:8]}`, author {info['author']['login']}).")
+            if self.fix_pass("merge_gate", exhausted) is None: return   # was an unbounded ci -> review -> merge spin
             time.sleep(120); return self.save(stage="ci")
         if info["state"] != "MERGED":
             self.gh(*merge_args(self.full, pr, self.s["head"]), write=True)
