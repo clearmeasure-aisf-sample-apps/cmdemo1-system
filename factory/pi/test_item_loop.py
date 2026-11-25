@@ -3505,4 +3505,178 @@ class LatestAttemptMergeRule(unittest.TestCase):   # cmdemo1-system#886: ONE "la
                       "the gate is built on the one merge rule")
 
 
+class BodyFileWriter(unittest.TestCase):   # cmdemo1-system#898: one writer (Driver.log_file) for every gh --body-file
+    def test_log_file_writes_scrubbed_text_under_logs_and_returns_the_path(self):
+        with fake_home() as h:
+            d = make_driver(issue=898)
+            tok = "ghp_" + "c" * 30
+            p = d.log_file("comment-123.md", f"hello {tok} world")
+            self.assertEqual(p, os.path.join(d.run_dir, "logs", "comment-123.md"))
+            self.assertTrue(os.path.exists(p))
+            self.assertEqual(L.read_text(p), L.scrub(f"hello {tok} world"))
+            self.assertNotIn(tok, L.read_text(p), "log_file scrubs, as the old open(p, 'w').write(scrub(body)) did")
+
+    def test_write_text_and_read_text_round_trip(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "x.txt")
+            L.write_text(p, "line1\nline2")
+            self.assertEqual(L.read_text(p), "line1\nline2")
+
+    def test_comment_ensure_issue_and_pr_bodies_keep_their_file_names(self):
+        """The gh --body-file paths the six sites used to build inline -- comment-<ts>.md, ensure-issue-<ts>.md,
+        pr-body.md, pr-body-<name>.md -- keep the same names, the same scrubbed contents and the same argv."""
+        with fake_home() as h:
+            d = make_driver(repo="cmdemo1-system", issue=898)
+            d.usage = lambda final=False: ""   # no usage-report subprocess in this case
+            old_time = L.time
+            class T:   # a time that advances past the second boundary: two comments keep distinct comment-<ts>.md names
+                def __init__(self, t=1.7e9): self.t = t
+                def time(self): self.t += 7; return self.t
+            T.sleep = staticmethod(lambda s: None)
+            calls = []
+            L.time = T()
+            try:
+                self._comment_ensure_issue_and_pr_bodies(d, calls)
+            finally:
+                L.time = old_time
+            bodies = [a[a.index("--body-file") + 1] for a in calls if "--body-file" in a]
+            self.assertEqual(len(bodies), 5, calls)   # comment, ensure-issue, pr body, the PR's own comment, pr-body edit
+            for b in bodies:
+                self.assertTrue(b.startswith(d.run_dir + os.sep + "logs" + os.sep), b)
+                self.assertTrue(os.path.exists(b), b)
+            self.assertTrue(os.path.basename(bodies[0]).startswith("comment-") and bodies[0].endswith(".md"), bodies[0])
+            self.assertTrue(os.path.basename(bodies[1]).startswith("ensure-issue-"), bodies[1])
+            self.assertEqual(bodies[2], os.path.join(d.run_dir, "logs", "pr-body.md"), bodies[2])
+            self.assertTrue(os.path.basename(bodies[3]).startswith("comment-"), bodies[3])
+            self.assertEqual(bodies[4], os.path.join(d.run_dir, "logs", "pr-body-research.md"), bodies[4])
+            self.assertEqual(L.read_text(bodies[0]), L.scrub("issue comment"))
+            self.assertEqual(L.read_text(bodies[1]), L.scrub("Body text"))
+            self.assertIn("Closes #898", L.read_text(bodies[2]))
+            self.assertEqual(L.read_text(bodies[4]), "edited body")
+
+    def _comment_ensure_issue_and_pr_bodies(self, d, calls):
+        def gh(*a, **k):
+            calls.append(list(a))
+            if a and a[0] == "api":
+                return subprocess.CompletedProcess(("gh",) + a, 0, "[]", "")
+            return subprocess.CompletedProcess(("gh",) + a, 0, "456\n", "")
+        d.gh = gh
+        d.comment("issue comment")
+        d.ensure_issue("New followup", "Body text", "enhancement")
+        d.s.update(plan=dict(PLAN), default="main", gpu="pro5000", run_id="r1")
+        d.create_pr("abcdef1234567890")
+        d.edit_pr_body("edited body", "research")
+
+    def test_file_followups_and_fix_forward_issue_bodies_go_through_log_file(self):
+        with fake_home() as h:
+            d = make_driver(repo="cmdemo1-system", issue=898)
+            calls = []
+            def gh(*a, **k):
+                calls.append(list(a))
+                if a and a[0] == "api":
+                    return subprocess.CompletedProcess(("gh",) + a, 0, "[]", "")
+                return subprocess.CompletedProcess(("gh",) + a, 0, "789\n", "")
+            d.gh = gh
+            d.file_followups([{"title": "Refactor: x", "body": "smell"}])
+            d.fix_forward_issue("key", "what")
+            creates = [a for a in calls if a[:2] == ["issue", "create"]]
+            self.assertEqual(len(creates), 2, calls)
+            for a in creates:   # both sites reach the shared ensure_issue body writer
+                b = a[a.index("--body-file") + 1]
+                self.assertTrue(os.path.basename(b).startswith("ensure-issue-"), b)
+                self.assertTrue(os.path.exists(b), b)
+
+
+class NoUnclosedFileHandles(unittest.TestCase):   # cmdemo1-system#898: no unclosed handle left in the module
+    def assert_no_resource_warning(self, fn):
+        import gc, warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ResourceWarning)
+            try:
+                fn()
+            finally:
+                gc.collect()   # a leaked handle warns when its object is collected, not when it is opened
+
+    def test_driver_state_log_comment_and_verify_close_their_handles(self):
+        with fake_home() as h:
+            d = make_driver(issue=898)
+            d.s.update(plan=dict(PLAN), wt=tempfile.mkdtemp(dir=h))
+            old = L.run_cmd
+            L.run_cmd = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, "ok\n", "")
+            try:
+                def work():
+                    d.save(stage="ci")
+                    d.log("a line")
+                    d.comment("issue body")   # dry-run: writes the local body file, posts nothing remote
+                    rc, out = d.verify("x")
+                    self.assertEqual((rc, out), (0, "ok\n"))
+                    self.assertEqual(L.read_text(os.path.join(d.run_dir, "logs", "verify-x.log")), "ok\n")
+                self.assert_no_resource_warning(work)
+            finally:
+                L.run_cmd = old
+
+    def test_driver_lock_closes_its_handle_on_exit(self):
+        with fake_home() as h:
+            run_dir = os.path.join(h, "factory-runs", "cmdemo1-workorders-899")
+            os.makedirs(run_dir, exist_ok=True)
+            def use():
+                with L.driver_lock(run_dir):
+                    self.assertTrue(os.path.exists(os.path.join(run_dir, "driver.lock")))
+            self.assert_no_resource_warning(use)
+
+    def test_driver_lock_still_exits_when_contended(self):
+        """The contention path keeps its behavior: the same message, exit 0, and the handle closed on the way out."""
+        with fake_home() as h:
+            run_dir = os.path.join(h, "factory-runs", "cmdemo1-workorders-900")
+            os.makedirs(run_dir, exist_ok=True)
+            lk = open(os.path.join(run_dir, "driver.lock"), "w")
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                with self.assertRaises(SystemExit) as e:
+                    with L.driver_lock(run_dir):
+                        pass
+                self.assertEqual(e.exception.code, 0)
+            finally:
+                lk.close()
+
+    def test_item_loop_keeps_no_unclosed_file_handle(self):
+        """Static guard: every open() in item_loop.py is a with item, or its handle is closed in a finally (the
+        driver_lock context manager) -- so the ResourceWarnings of #898 cannot come back."""
+        import ast
+        src = L.read_text(os.path.join(os.path.dirname(os.path.abspath(__file__)), "item_loop.py"))
+        tree = ast.parse(src)
+
+        def closed_in_finally(fn, name):
+            for t in ast.walk(fn):
+                if isinstance(t, ast.Try):
+                    for stmt in t.finalbody:
+                        for c in ast.walk(stmt):
+                            if (isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "close"
+                                    and isinstance(c.func.value, ast.Name) and c.func.value.id == name):
+                                return True
+            return False
+
+        bad = []
+        class V(ast.NodeVisitor):
+            def __init__(self):
+                self.stack = []
+            def visit(self, node):
+                self.stack.append(node)
+                try:
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "open":
+                        if not any(isinstance(a, ast.With) for a in self.stack[:-1]):
+                            stmt = [a for a in self.stack[:-1] if isinstance(a, ast.stmt)][-1]   # the nearest statement
+                            fn = next((a for a in self.stack[:-1]
+                                       if isinstance(a, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
+                            name = (stmt.targets[0].id if (isinstance(stmt, ast.Assign) and stmt.value is node
+                                                            and isinstance(stmt.targets[0], ast.Name)) else None)
+                            if not (name and fn and closed_in_finally(fn, name)):
+                                bad.append(node.lineno)
+                    self.generic_visit(node)
+                finally:
+                    self.stack.pop()
+        V().visit(tree)
+        self.assertEqual(bad, [], "unclosed open() call(s) at line(s) " + ", ".join(map(str, bad)))
+
+
 if __name__ == "__main__": unittest.main()

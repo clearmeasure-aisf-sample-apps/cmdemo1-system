@@ -22,7 +22,7 @@ comment or Pi prompt (scrubbed).
 from collections import Counter
 from enum import StrEnum
 from typing import NamedTuple
-import argparse, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, time, urllib.request, uuid
+import argparse, contextlib, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, time, urllib.request, uuid
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
 from scrub import SECRET_RE, scrub, add_secret_source   # the one scrub rule set lives in scrub.py (#838), re-exported here so watchdog, run-task and the tests keep importing it from item_loop
@@ -104,6 +104,17 @@ CODE_RE = re.compile(r"(?i)(error CS\d+|error [A-Z]{2,}\d+|\bFailed\b.*\btest|\b
 
 def now(): return dt.datetime.now(dt.timezone.utc)
 def iso(t=None): return (t or now()).isoformat(timespec="seconds")
+
+def write_text(path, text):
+    """Write text to path and close the handle: the one writer for a file whose contents are ready. item_loop keeps
+    no bare open() (the ResourceWarnings of cmdemo1-system#898): every handle in this module is a with item."""
+    with open(path, "w") as f:
+        f.write(text)
+
+def read_text(path):
+    """Read a whole file and close the handle: the one reader for a file the driver or Pi wrote."""
+    with open(path) as f:
+        return f.read()
 
 # ---------------------------------------------------------------- pure helpers (unit-tested)
 
@@ -652,7 +663,7 @@ def _runs_dir(): return os.path.join(HOME, "factory-runs")
 def held(repo, issue):
     """The text of <run dir>/HOLD (an item handed off or held by Jeffrey), or None. A held item is never started,
     resumed or touched by a watchdog check (t85u: #1944 handed to FactoryBot1)."""
-    try: return open(os.path.join(_runs_dir(), f"{repo}-{int(issue)}", "HOLD")).read().strip() or "held"
+    try: return read_text(os.path.join(_runs_dir(), f"{repo}-{int(issue)}", "HOLD")).strip() or "held"
     except (OSError, TypeError, ValueError): return None
 
 RELAUNCH_NOTE = ("\n\nNote: an earlier attempt at this task (`{name}`) was stopped because it never started or stalled. It "
@@ -681,14 +692,15 @@ class PiNotStarted(Exception):
     """A Pi hand-off still did not start after LIMITS['pi_relaunch'] relaunches: the stage ends in a Blocker."""
 
 def red_load():
-    try: return json.load(open(os.path.join(_runs_dir(), "red.json")))
+    try: return json.loads(read_text(os.path.join(_runs_dir(), "red.json")))
     except Exception: return {}
 
 def _red_write(fn):
     os.makedirs(_runs_dir(), exist_ok=True)
     with open(os.path.join(_runs_dir(), "red.lock"), "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX); r = red_load(); fn(r)
-        tmp = os.path.join(_runs_dir(), "red.json.tmp"); json.dump(r, open(tmp, "w"), indent=1)
+        tmp = os.path.join(_runs_dir(), "red.json.tmp")
+        with open(tmp, "w") as f: json.dump(r, f, indent=1)
         os.replace(tmp, os.path.join(_runs_dir(), "red.json"))
 
 def red_set(key, what): _red_write(lambda r: r.setdefault(key, {"what": scrub(what), "at": iso()}))
@@ -704,7 +716,7 @@ def all_states():
     except FileNotFoundError: return out
     for n in names:
         sp = os.path.join(_runs_dir(), n, "state.json")
-        try: out.append((n, json.load(open(sp))))
+        try: out.append((n, json.loads(read_text(sp))))
         except Exception: pass
     return out
 
@@ -762,6 +774,20 @@ class FixRound:
         self.local_red, self.commit = fix_text(local_red), fix_text(commit)
         self.before_commit = before_commit
 
+@contextlib.contextmanager
+def driver_lock(run_dir):
+    """The driver's per-item lock (<run dir>/driver.lock): non-blocking flock, the "driver already running" exit on
+    contention (run() used to do it inline), held open for the with block and the handle closed on exit -- the process
+    exits right after run() returns, so nothing observable changes."""
+    lock = open(os.path.join(run_dir, "driver.lock"), "w")
+    try:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("driver already running for this item"); sys.exit(0)
+        yield
+    finally:
+        lock.close()
+
 class Driver:
     def __init__(self, repo, issue, dry_run=False, top_session=None, health=None):
         self.repo, self.issue, self.dry = repo, int(issue), dry_run
@@ -772,7 +798,7 @@ class Driver:
         self.run_dir = os.path.join(HOME, "factory-runs", f"{repo}-{issue}")
         os.makedirs(os.path.join(self.run_dir, "logs"), exist_ok=True)
         self.state_p = os.path.join(self.run_dir, "state.json")
-        self.s = json.load(open(self.state_p)) if os.path.exists(self.state_p) else {}
+        self.s = json.loads(read_text(self.state_p)) if os.path.exists(self.state_p) else {}
         self.s.setdefault("repo", repo); self.s.setdefault("issue", self.issue)
         self.s.setdefault("counts", fresh_counts())
         if top_session: self.s["top_session"] = top_session
@@ -781,7 +807,7 @@ class Driver:
     # state / log
     def save(self, **kw):
         self.s.update(kw); self.s["updated"] = iso(); self.s["pid"] = os.getpid()
-        tmp = self.state_p + ".tmp"; json.dump(self.s, open(tmp, "w"), indent=1); os.replace(tmp, self.state_p)
+        tmp = self.state_p + ".tmp"; write_text(tmp, json.dumps(self.s, indent=1)); os.replace(tmp, self.state_p)   # atomic tmp + replace, as before
     def progress(self): self.save(progress_at=iso())
     def heartbeat(self, minutes=HEARTBEAT_MIN):
         """Short status comment when the item has made no progress for `minutes`; never silent, never spammy."""
@@ -793,7 +819,15 @@ class Driver:
     def log(self, msg):
         line = f"{iso()} {scrub(msg)}"
         print(line, flush=True)
-        open(os.path.join(self.run_dir, "driver.log"), "a").write(line + "\n")
+        with open(os.path.join(self.run_dir, "driver.log"), "a") as f: f.write(line + "\n")
+
+    def log_file(self, name, text):
+        """Write scrub(text) to <run dir>/logs/<name>, close the handle, and return the path: the one writer for every
+        file the driver hands to gh --body-file (issue / PR comments, follow-up and fix-forward issue bodies, the PR
+        body and its edits)."""
+        p = os.path.join(self.run_dir, "logs", name)
+        write_text(p, scrub(text))
+        return p
 
     def sh(self, cmd, cwd=None, check=True, timeout=None, write=False):
         """write=True marks a GitHub- or remote-changing step: skipped (logged) in dry-run."""
@@ -843,8 +877,7 @@ class Driver:
         if last and not self.dry:
             wait = 65 - (now() - dt.datetime.fromisoformat(last)).total_seconds()
             if wait > 0: time.sleep(wait)   # never two comments within a minute on one item
-        p = os.path.join(self.run_dir, "logs", f"comment-{int(time.time())}.md")
-        open(p, "w").write(scrub(body))
+        p = self.log_file(f"comment-{int(time.time())}.md", body)
         target = str(self.s["pr"]) if pr else str(self.issue)
         self.gh("pr" if pr else "issue", "comment", target, "-R", self.full, "--body-file", p, write=True)
         self.save(last_comment_at=iso()); self.log(f"comment {'drafted (dry-run)' if self.dry else 'posted'}: {p}")
@@ -862,7 +895,7 @@ class Driver:
 
     def edit_pr_body(self, body, name):
         """Replace the PR body with `body`, drafted (scrubbed) to logs/pr-body-<name>.md first."""
-        p = os.path.join(self.run_dir, "logs", f"pr-body-{name}.md"); open(p, "w").write(scrub(body))
+        p = self.log_file(f"pr-body-{name}.md", body)
         self.gh("pr", "edit", str(self.s["pr"]), "-R", self.full, "--body-file", p, write=True)
 
     def lookup_board_item(self):
@@ -929,7 +962,7 @@ class Driver:
                   "the build). Make only the change asked. Do not run git commit, git push or gh, and do not read or print "
                   "credentials. When done, run the narrowest relevant build/test, then end your reply with PASS or FAIL as "
                   "the last line.")
-        open(pf, "w").write(scrub(prompt) + suffix)
+        write_text(pf, scrub(prompt) + suffix)
         timeout = G.client_timeout(timeout)
         review = name.startswith("independent-review")   # a review keeps its non-author GPUs; no-start = infra retry
         task, g = slug, gpu or self.gpu()
@@ -948,7 +981,7 @@ class Driver:
             up = G.available(self.gpu_health()) or list(G.PRIORITY)
             task, g = f"{slug}-relaunch-{k + 1}", G.gpu_arg(relaunch_gpus(self.s.get("size"), up))   # a free GPU of the item's size
             pf = os.path.join(self.run_dir, "logs", f"{task}.prompt.md")
-            open(pf, "w").write(scrub(prompt) + RELAUNCH_NOTE.format(name=name) + suffix)
+            write_text(pf, scrub(prompt) + RELAUNCH_NOTE.format(name=name) + suffix)
             self.log(f"Pi hand-off {name} {self.last_task.get('result')} (start {HANDOFF_START_S} s / stall {HANDOFF_STALL_S} s / "
                      f"slot {slot_wait} s); relaunch {k + 1} of {LIMITS['pi_relaunch']} on any free GPU ({g})")
         raise PiNotStarted(f"Pi hand-off `{name}` did not start or stalled ({self.last_task.get('result')}: no GPU slot, no model "
@@ -980,7 +1013,7 @@ class Driver:
         log = os.path.join(self.run_dir, "logs", f"verify-{name}.log"); t0 = time.time()
         r = run_cmd(["bash", "-o", "pipefail", "-c", self.s["plan"]["verify_cmd"]], cwd=self.s["wt"], text=True,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        open(log, "w").write(scrub(r.stdout))
+        write_text(log, scrub(r.stdout))
         self.s["verify_runs"] = self.s.get("verify_runs", 0) + 1
         self.s["verify_s"] = self.s.get("verify_s", 0) + time.time() - t0; self.save()
         self.log(f"verify {name}: exit {r.returncode} in {time.time() - t0:.0f}s")
@@ -1110,39 +1143,37 @@ class Driver:
         self.save(wt=wt, default=default, clone=clone)
 
     def run(self):
-        lock = open(os.path.join(self.run_dir, "driver.lock"), "w")
-        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError: print("driver already running for this item"); sys.exit(0)
-        self.s.setdefault("run_id", now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6])
-        self.s.setdefault("start", iso()); self.s.setdefault("stage", "gpu")
-        self.s["plan"] = json.load(open(os.path.join(self.run_dir, PLAN_FILE)))
-        self.save(status="running")
-        meta_p = os.path.join(self.run_dir, "run.json")
-        meta = json.load(open(meta_p)) if os.path.exists(meta_p) else {"start": self.s["start"]}
-        meta.update(driver_run_id=self.s["run_id"], top_sessions=self.s.get("top_sessions") or [self.s.get("top_session", "unnamed")])
-        meta.setdefault("top_session", self.s.get("top_session", "unnamed"))
-        meta.setdefault("pi_version", self.sh(["pi", "--version"], check=False).stdout.strip().splitlines()[-1:] and
-                        self.sh(["pi", "--version"], check=False).stdout.strip().splitlines()[-1])
-        json.dump(meta, open(meta_p, "w"), indent=1)
-        self.progress()
-        try:
-            while True:
-                while self.s["stage"] not in TERMINAL_STAGES:
-                    if self.stop_if_held(): break
-                    stage = self.s["stage"]; self.log(f"stage {stage}")
-                    try: stage_handler(self, stage)()
-                    except PiNotStarted as e: self.blocker(str(e))
-                    except PiHeld:   # HOLD appeared mid-pass: stop before the push / merge (no comment)
-                        self.stop_if_held(); break
-                    self.progress()
-                if self.s.get("status") == "held" or self.s["stage"] != "blocked" or not self.hold_blocked(): break
-        except Exception as e:  # unexpected: record, wake the bot once, never guess
-            self.log(f"driver error: {e}")
-            self.save(status="error", error=scrub(str(e))[-1500:]); self.wake_bot("driver error")
+        with driver_lock(self.run_dir):
+            self.s.setdefault("run_id", now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6])
+            self.s.setdefault("start", iso()); self.s.setdefault("stage", "gpu")
+            self.s["plan"] = json.loads(read_text(os.path.join(self.run_dir, PLAN_FILE)))
+            self.save(status="running")
+            meta_p = os.path.join(self.run_dir, "run.json")
+            meta = json.loads(read_text(meta_p)) if os.path.exists(meta_p) else {"start": self.s["start"]}
+            meta.update(driver_run_id=self.s["run_id"], top_sessions=self.s.get("top_sessions") or [self.s.get("top_session", "unnamed")])
+            meta.setdefault("top_session", self.s.get("top_session", "unnamed"))
+            meta.setdefault("pi_version", self.sh(["pi", "--version"], check=False).stdout.strip().splitlines()[-1:] and
+                            self.sh(["pi", "--version"], check=False).stdout.strip().splitlines()[-1])
+            with open(meta_p, "w") as f: json.dump(meta, f, indent=1)
+            self.progress()
+            try:
+                while True:
+                    while self.s["stage"] not in TERMINAL_STAGES:
+                        if self.stop_if_held(): break
+                        stage = self.s["stage"]; self.log(f"stage {stage}")
+                        try: stage_handler(self, stage)()
+                        except PiNotStarted as e: self.blocker(str(e))
+                        except PiHeld:   # HOLD appeared mid-pass: stop before the push / merge (no comment)
+                            self.stop_if_held(); break
+                        self.progress()
+                    if self.s.get("status") == "held" or self.s["stage"] != "blocked" or not self.hold_blocked(): break
+            except Exception as e:  # unexpected: record, wake the bot once, never guess
+                self.log(f"driver error: {e}")
+                self.save(status="error", error=scrub(str(e))[-1500:]); self.wake_bot("driver error")
+                watchdog_exit(self)
+                raise
+            self.save(status="held" if self.s.get("status") == "held" else self.s["stage"], end=iso())
             watchdog_exit(self)
-            raise
-        self.save(status="held" if self.s.get("status") == "held" else self.s["stage"], end=iso())
-        watchdog_exit(self)
 
     def stop_if_held(self):
         """True (and status `held`) when the run dir has a HOLD file: an item handed off or held while this driver runs
@@ -1237,7 +1268,7 @@ class Driver:
             self.pi(f"refactoring-research-{self.s['counts']['research']}", prompt, RESEARCH_TIMEOUT_S)
             self.sh(["git", "checkout", "--", "."], cwd=self.s["wt"], check=False); self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"], check=False)
             text = self.research_text()
-        try: extra = json.load(open(fu))
+        try: extra = json.loads(read_text(fu))
         except Exception: extra = {}
         if not self.s.get("research_posted"):
             self.comment(f"Refactoring research (journal)\n\n{text.strip()}"); self.save(research_posted=True)
@@ -1251,8 +1282,8 @@ class Driver:
                         "safe change inside the item's files, change nothing and end with FAIL.")
             if not self.local_green("refactor"):
                 self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"]); self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"])
-                open(out, "a").write("\n- In-scope refactors were reverted: verification stayed red after the fix passes; "
-                                     "they are left to a follow-up.\n")
+                with open(out, "a") as f: f.write("\n- In-scope refactors were reverted: verification stayed red after the fix passes; "
+                                                  "they are left to a follow-up.\n")
                 self.log("in-scope refactors reverted (red)")
             self.save(refactors_done=True)
         self.save(stage="implement")
@@ -1267,8 +1298,7 @@ class Driver:
         have = {t.lower() for t in titles} if case_insensitive else titles
         q = title.lower() if case_insensitive else title
         if q in have: return None
-        body_f = os.path.join(self.run_dir, "logs", f"ensure-issue-{int(time.time())}.md")
-        open(body_f, "w").write(scrub(body))
+        body_f = self.log_file(f"ensure-issue-{int(time.time())}.md", body)
         x = self.gh("issue", "create", "-R", full, "--title", title, "--body-file", body_f, "--label", label,
                     *(("--assignee", assignee) if assignee is not None else ()), write=True, check=False)
         return x.stdout.strip().rsplit("/", 1)[-1] if x.returncode == 0 and x.stdout.strip() else None
@@ -1309,7 +1339,7 @@ class Driver:
 
     def research_text(self):
         f = os.path.join(self.run_dir, RESEARCH_FILE)
-        return open(f).read() if os.path.exists(f) else ""
+        return read_text(f) if os.path.exists(f) else ""
 
     def merge_base(self):
         """Merge base of HEAD and origin/<default>, or origin/<default> when git cannot resolve it."""
@@ -1333,10 +1363,9 @@ class Driver:
     def create_pr(self, head):
         """Open the PR (research section in the body), move the board to Review and say so on the issue."""
         p = self.s["plan"]
-        body = os.path.join(self.run_dir, "logs", "pr-body.md")
-        open(body, "w").write(scrub(with_research(f"Closes #{self.issue}\n\n{p.get('pr_summary', '')}\n\nCode by Pi on the {self.gpu_label()}; "
-                                    f"planned, verified and merged by the factory bot's Pi driver (run `{self.s['run_id']}`).\n\n{DRIVER_MARK}\n",
-                                    self.research_text())))
+        body = self.log_file("pr-body.md", with_research(f"Closes #{self.issue}\n\n{p.get('pr_summary', '')}\n\nCode by Pi on the {self.gpu_label()}; "
+                                     f"planned, verified and merged by the factory bot's Pi driver (run `{self.s['run_id']}`).\n\n{DRIVER_MARK}\n",
+                                     self.research_text()))
         r = self.gh("pr", "create", "-R", self.full, "--head", p["branch"], "--base", self.s["default"],
                     "--title", p["pr_title"], "--body-file", body, write=True)
         self.save(pr=int(r.stdout.strip().rstrip("/").split("/")[-1]))
@@ -1411,7 +1440,7 @@ class Driver:
         if not os.path.exists(plan): return
         cur = self.pr_body()
         if "## Refactoring plan" not in cur:
-            self.edit_pr_body(cur.rstrip() + "\n\n" + open(plan).read().strip() + "\n", "plan")
+            self.edit_pr_body(cur.rstrip() + "\n\n" + read_text(plan).strip() + "\n", "plan")
         os.remove(plan)
 
     def st_review(self):
@@ -1419,7 +1448,7 @@ class Driver:
         for i, c in enumerate(p["criteria"], 1):
             r = run_cmd(["bash", "-o", "pipefail", "-c", c["evidence_cmd"]], cwd=self.s["wt"], text=True,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=3600)
-            out = scrub(r.stdout); open(os.path.join(self.run_dir, "logs", f"evidence-{i}.log"), "w").write(out)
+            out = scrub(r.stdout); write_text(os.path.join(self.run_dir, "logs", f"evidence-{i}.log"), out)
             last = ([l for l in out.splitlines() if l.strip()][-1:] or [""])[0][:200]
             (ev if r.returncode == 0 else failed).append((c, last, r.returncode))
         if failed:
@@ -1527,7 +1556,7 @@ class Driver:
         if self.sh(["git", "status", "--porcelain"], cwd=self.s["wt"], check=False).stdout.strip():
             self.log("reviewer changed files; discarding them"); self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"])
             self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"])
-        verdict = review_verdict(self.last_task.get("result"), scrub(open(out).read()) if os.path.exists(out) else None)
+        verdict = review_verdict(self.last_task.get("result"), scrub(read_text(out)) if os.path.exists(out) else None)
         self.log(f"independent review on {rv}: {verdict.label}")
         return verdict
 
@@ -1685,7 +1714,7 @@ def cmd_draft_plan(a):
     try: ok = d.pi("draft-plan", prompt, DRAFT_PLAN_TIMEOUT_S, gpu=G.gpu_arg(G.LARGE_GPUS))
     except PiNotStarted as e: draft_result(out, False, [str(e)]); sys.exit(1)
     try:
-        p = json.load(open(out)); errs = validate_plan(p)
+        p = json.loads(read_text(out)); errs = validate_plan(p)
     except Exception as e:
         p, errs = None, [f"no valid JSON plan: {e}"]
     draft_result(out, ok, errs)
@@ -1699,7 +1728,7 @@ def refuse_held(a):
 def cmd_start(a):
     refuse_held(a)
     d = Driver(a.repo, a.issue, top_session=a.top_session)
-    plan_p = os.path.join(d.run_dir, PLAN_FILE); p = json.load(open(plan_p))
+    plan_p = os.path.join(d.run_dir, PLAN_FILE); p = json.loads(read_text(plan_p))
     labels = d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "[.labels[].name]", check=False).stdout
     try: labels = json.loads(labels or "[]")
     except Exception: labels = []
@@ -1707,7 +1736,7 @@ def cmd_start(a):
     if "fix-forward" in labels: p["fix_forward"] = True
     errs = validate_plan(p)
     if errs: print("plan.json invalid:\n- " + "\n- ".join(errs)); sys.exit(2)
-    json.dump(p, open(plan_p, "w"), indent=1)
+    with open(plan_p, "w") as f: json.dump(p, f, indent=1)
     red = red_load()
     if not intake_open(red, p):
         print("NOTE: intake is stopped while red (" + "; ".join(red) + "); the driver waits in Todo until it is green.")
@@ -1715,9 +1744,10 @@ def cmd_start(a):
     if a.top_session and a.top_session not in d.s["top_sessions"]: d.s["top_sessions"].append(a.top_session)
     if a.resume: d.s = apply_resume(d.s)   # Jeffrey answered the Blocker: the one resume rule picks the stage, clears the pause and zeroes the limits (no-op unless the item is paused)
     d.save()
-    log = open(os.path.join(d.run_dir, "driver.out"), "a")
     cmd = [sys.executable, os.path.abspath(__file__), "run", "--repo", a.repo, "--issue", str(a.issue)] + (["--dry-run"] if a.dry_run else [])
-    p = subprocess.Popen(["nohup", *cmd], stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+    with open(os.path.join(d.run_dir, "driver.out"), "a") as log:
+        # the parent's handle closes right after Popen: the nohup'd child keeps its own dup of the fd
+        p = subprocess.Popen(["nohup", *cmd], stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     print(f"driver started pid {p.pid}; state {d.state_p}. End your turn; GitHub events wake you.")
 
 def cmd_run(a): refuse_held(a); Driver(a.repo, a.issue, dry_run=a.dry_run).run()
@@ -1737,7 +1767,8 @@ def cmd_note_wake(a):
     if a.top_session not in d.s["top_sessions"]: d.s["top_sessions"].append(a.top_session)
     d.save(); meta_p = os.path.join(d.run_dir, "run.json")
     if os.path.exists(meta_p):
-        m = json.load(open(meta_p)); m["top_sessions"] = d.s["top_sessions"]; json.dump(m, open(meta_p, "w"), indent=1)
+        m = json.loads(read_text(meta_p)); m["top_sessions"] = d.s["top_sessions"]
+        with open(meta_p, "w") as f: json.dump(m, f, indent=1)
 
 def cmd_red(a):
     if a.action == "set": red_set(a.key, a.what or "red")
