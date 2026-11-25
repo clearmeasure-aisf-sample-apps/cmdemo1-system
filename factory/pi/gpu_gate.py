@@ -43,14 +43,19 @@ def slot_dirs():
     legacy = os.environ.get("FACTORY_PI_LEGACY_LOCK_DIR", "" if os.environ.get("FACTORY_PI_LOCK_DIR") else "/tmp")
     return [lock_dir()] + ([os.path.realpath(legacy)] if legacy else [])
 
-def ancestors(pid=None):
+def _parent(proc, pid):
+    """pid's parent pid, from <proc>/<pid>/stat; 0 when the process is gone or unreadable."""
+    try:
+        with open(f"{proc}/{pid}/stat") as f: return int(f.read().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError): return 0
+
+def ancestors(pid=None, proc="/proc"):
     """This process and its parents. A legacy run-task parent's /tmp slot is this launch's own slot, not another task's
     (else the new pi-gpu under an old run-task would wait on its own parent forever)."""
     out, pid = set(), pid or os.getpid()
     while pid > 1 and pid not in out:
         out.add(pid)
-        try: pid = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
-        except (OSError, ValueError, IndexError): break
+        pid = _parent(proc, pid)
     return out
 
 def holders(g, proc="/proc"):
@@ -70,9 +75,24 @@ def holders(g, proc="/proc"):
             found.setdefault((st.st_dev, st.st_ino), set()).add(int(pid))
     return found
 
-def tasks(h, mine=frozenset()):
-    """Live tasks among holders h: a slot and its legacy twin are held by the same processes, so they count once."""
-    return len({frozenset(p) for p in h.values() if not p <= mine})
+def tasks(h, mine=frozenset(), proc="/proc"):
+    """Live tasks among holders h. A slot and its legacy twin are held by the same processes, so they count once;
+    and a slot held by a process whose descendant holds another slot of the same GPU is one task, not two (an
+    old-code run-task keeping a legacy /tmp slot while its child pi holds the new slot, cmdemo1-system#865)."""
+    sets = list({frozenset(p) for p in h.values() if not p <= mine})   # a slot and its legacy twin: same pids, one task
+    ancs = []
+    for s in sets:                                                     # strict ancestors of each set's pids
+        out = set()
+        for pid in s:
+            p = _parent(proc, pid)
+            while p > 1 and p not in out:
+                out.add(p)
+                p = _parent(proc, p)
+        ancs.append(out - set(s))
+    # a set is not its own task when another set holds a slot in its ancestry: the old-code run-task parent and its
+    # child pi's new slot are one task (cmdemo1-system#865)
+    return sum(1 for i in range(len(sets))
+               if not any(sets[j] & ancs[i] for j in range(len(sets)) if j != i))
 
 def try_acquire(g):
     """An inheritable fd holding one of g's slots, or None when g already has cap live holders."""
