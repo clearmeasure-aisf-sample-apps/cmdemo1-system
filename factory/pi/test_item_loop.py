@@ -2386,6 +2386,171 @@ class ResumeAfterError(unittest.TestCase):   # resuming an error state: keeps th
             self.assertTrue(d.s["blocker"].startswith(f"waited {L.GPU_WAIT_H} hours to start (no free GPU"),
                             d.s["blocker"])
 
+class OneResumeRule(unittest.TestCase):   # cmdemo1-system#855: resume_plan(state) -> Resume is the ONE resume rule;
+    # start --resume, hold_blocked's wake of a blocked item and an error resume all ask it and apply its answer.
+    GREEN = [{"name": "Build result", "bucket": "pass"}, {"name": "secret-scan", "bucket": "pass"}]
+
+    def paused(self, **kw):
+        """A blocked item with the limits burnt out, as a Blocker leaves it; `kw` overrides any field."""
+        s = {"status": "blocked", "stage": "blocked", "resume_stage": "ci", "pr": 5, "gpu": "obs",
+             "blocker": "required checks still red after 3 Pi fix passes.", "counts": {k: 5 for k in L.LIMITS}}
+        s.update(kw); return s
+
+    def start(self, state, resume=True):
+        """`item-loop start --resume` on a run dir whose state.json holds `state`, with gh and the detached launch
+        faked out and `resume_plan` spied on. Returns (the state.json the command left, the rule calls it saw)."""
+        seen, launched = [], []
+        real = L.resume_plan
+        def spy(st, wake=False):
+            seen.append(bool(wake)); return real(st, wake=wake)
+        class Proc: pid = 4242
+        def fake_popen(*c, **k):
+            launched.append(c); return Proc()
+        a = argparse.Namespace(repo="cmdemo1-workorders", issue=31, top_session=None, dry_run=False, resume=resume)
+        with fake_home():
+            d = L.Driver("cmdemo1-workorders", 31, dry_run=False)
+            json.dump(dict(PLAN, repo="cmdemo1-workorders", issue=31), open(os.path.join(d.run_dir, "plan.json"), "w"))
+            d.s.update(state); d.save()
+            with patch_run(FakeGhProcess([(0, "[]")])), fake_modules({(L, "resume_plan"): spy, (L.subprocess, "Popen"): fake_popen}):
+                L.cmd_start(a)
+            self.assertEqual(len(launched), 1, "start still launches the driver exactly once")
+            return json.load(open(d.state_p)), seen
+
+    def hold(self, **kw):
+        """A blocked driver holding for its PR to turn clean (its own checks answer GREEN, nothing is posted)."""
+        d = make_driver(issue=33, dry_run=False)
+        d.s.update(self.paused(resume_stage="review"))
+        d.s.update(kw)
+        d.pr_checks = lambda: ("GREEN", self.GREEN)
+        d.comment = lambda *a, **k: None
+        return d
+
+    # ---- the rule itself: one decision object, stage + fields cleared + counters
+    def test_the_rule_answers_each_pause_shape_with_one_decision(self):
+        self.assertEqual(L.resume_plan(self.paused()), L.Resume("ci", clears=("blocker",)))
+        self.assertEqual(L.resume_plan(self.paused(resume_stage="merge")), L.Resume("merge", clears=("blocker",)))
+        self.assertEqual(L.resume_plan(self.paused(resume_stage=None)), L.Resume("ci", clears=("blocker",)))
+        self.assertEqual(L.resume_plan(self.paused(resume_stage=None, pr=None)), L.Resume("implement", clears=("blocker",)))
+        self.assertEqual(L.resume_plan({"status": "error", "stage": "ci", "pr": 5, "error": "boom"}),
+                         L.Resume("ci", clears=("error",)))
+        self.assertEqual(L.resume_plan({"status": "error", "stage": "gpu", "gpu": "obs"}),
+                         L.Resume("gpu", clears=("error",), clear_gpu=True))
+        self.assertIsNone(L.resume_plan({"status": "running", "stage": "ci"}), "a live item is not resumable")
+        self.assertIsNone(L.resume_plan(None), "no state at all is not resumable either")
+
+    def test_the_wake_half_of_the_rule_is_the_rules_own(self):
+        self.assertEqual(L.resume_plan(self.paused(resume_stage="merge"), wake=True),
+                         L.Resume("review", clears=("blocker",), status="running"))
+        self.assertIsNone(L.resume_plan(self.paused(resume_stage="implement"), wake=True),
+                          "a pause raised before the PR gate does not wake itself")
+        self.assertIsNone(L.resume_plan(self.paused(resume_stage=None), wake=True))
+        self.assertIsNone(L.resume_plan(self.paused(pr=None), wake=True), "no PR: nothing turned green")
+        self.assertIsNone(L.resume_plan(self.paused(blocker="independent review FAIL twice: - x"), wake=True),
+                          "a Review FAIL Blocker never clears itself (hold_resumes)")
+
+    def test_apply_is_pure_and_clears_only_what_the_rule_says(self):
+        st = self.paused()
+        out = L.resume_plan(st).apply(st)
+        self.assertEqual(st["counts"], {k: 5 for k in L.LIMITS}, "apply never touches the caller's state dict")
+        self.assertIn("blocker", st)
+        self.assertEqual(out["stage"], "ci"); self.assertNotIn("blocker", out)
+        self.assertEqual(out["counts"], L.fresh_counts())
+        hurt = self.paused(error="driver boom")
+        both = L.resume_plan(hurt).apply(hurt)
+        self.assertNotIn("blocker", both); self.assertEqual(both["error"], "driver boom",
+                                                            "a blocked item clears its Blocker, not an unrelated error field")
+        self.assertEqual(out["gpu"], "obs", "a blocked item keeps its GPU: only a gpu/pickup error clears it")
+        self.assertEqual(out["status"], "blocked", "the start resume leaves the status to the driver's own run()")
+        err = {"status": "error", "stage": "pickup", "gpu": "obs", "error": "boom"}
+        got = L.resume_plan(err).apply(err)
+        self.assertEqual((got["stage"], "gpu" in got, "error" in got), ("gpu", False, False))
+        self.assertEqual(L.Resume("ci", reset_counts=False).apply({"counts": {"ci_fix": 2}})["counts"], {"ci_fix": 2})
+
+    # ---- path 1: item-loop start --resume (Jeffrey answered the Blocker)
+    def test_start_resume_goes_through_the_rule(self):
+        s, seen = self.start(self.paused(resume_stage="review"))
+        self.assertEqual(seen, [False], "start --resume asks the one resume rule once, and nothing else decides")
+        self.assertEqual(s["stage"], "review")
+        self.assertNotIn("blocker", s)
+        self.assertEqual(s["counts"], {k: 0 for k in L.LIMITS})
+
+    def test_start_without_the_resume_flag_never_asks_the_rule(self):
+        s, seen = self.start(self.paused(resume_stage="review"), resume=False)
+        self.assertEqual(seen, [], "only --resume resumes; a plain start never touches a paused item")
+        self.assertEqual(s["stage"], "blocked"); self.assertIn("blocker", s)
+        self.assertEqual(s["counts"], {k: 5 for k in L.LIMITS})
+
+    # ---- path 2: the wake-resume of a blocked item (its PR turned clean on its own)
+    def test_wake_resume_goes_through_the_rule(self):
+        seen = []
+        real = L.resume_plan
+        def spy(st, wake=False):
+            seen.append(bool(wake)); return real(st, wake=wake)
+        with patched_driver_env(sleep=lambda s: None):
+            d = self.hold()
+            with fake_modules({(L, "resume_plan"): spy}):
+                self.assertTrue(d.hold_blocked())
+            self.assertEqual(seen, [True], "the blocked driver's wake-up asks the one resume rule (wake=True)")
+            s = json.load(open(d.state_p))
+            self.assertEqual((s["stage"], s["status"]), ("review", "running"))
+            self.assertNotIn("blocker", s)
+            self.assertEqual(s["counts"], {k: 0 for k in L.LIMITS})
+
+    def test_wake_resume_applies_the_rules_decision_and_no_knowledge_of_its_own(self):
+        with patched_driver_env(sleep=lambda s: None):
+            d = self.hold()
+            with fake_modules({(L, "resume_plan"): lambda st, wake=False: L.Resume("merge", clears=("blocker", "error"),
+                                                                               status="running")}):
+                self.assertTrue(d.hold_blocked())
+            self.assertEqual((d.s["stage"], d.s["status"]), ("merge", "running"),
+                             "hold_blocked runs the stage the rule chose, never one of its own")
+            self.assertNotIn("blocker", d.s); self.assertNotIn("error", d.s)
+            self.assertEqual(d.s["counts"], L.fresh_counts(), "the counters reset because the rule said reset_counts")
+
+    def test_hold_blocked_holds_no_resume_knowledge_of_its_own(self):
+        src = inspect.getsource(L.Driver.hold_blocked)
+        for frag in ('"ci", "review", "merge"', "resume_stage", "counts", "LIMITS", 'pop("blocker"', "status="):
+            self.assertNotIn(frag, src, frag)
+        self.assertIn("resume_plan", src, "hold_blocked asks the one resume rule")
+
+    # ---- path 3: an error resume (start --resume of an item that died instead of blocking)
+    def test_error_resume_goes_through_the_rule(self):
+        s, seen = self.start({"status": "error", "stage": "pickup", "gpu": "obs", "error": "boom",
+                             "counts": {k: 5 for k in L.LIMITS}})
+        self.assertEqual(seen, [False], "the error resume asks the same rule as the Blocker resume")
+        self.assertEqual(s["stage"], "gpu", "a gpu/pickup error re-enters the gpu stage")
+        self.assertNotIn("error", s); self.assertNotIn("gpu", s, "and re-picks a GPU instead of keeping the old record")
+        self.assertEqual(s["counts"], {k: 0 for k in L.LIMITS})
+
+    def test_error_resume_keeps_a_later_stage_and_its_gpu(self):
+        s, seen = self.start({"status": "error", "stage": "review", "gpu": "ts3", "pr": 5, "error": "boom",
+                             "counts": {k: 5 for k in L.LIMITS}})
+        self.assertEqual(seen, [False])
+        self.assertEqual((s["stage"], s["gpu"]), ("review", "ts3"), "a mid-review error resumes the review, GPU kept")
+        self.assertNotIn("error", s)
+
+    # ---- the writing half: what blocker() records for the rule to read back
+    def test_blocker_records_the_resume_target_through_the_rule(self):
+        with fake_home():
+            d = make_driver(issue=34)
+            d.usage = lambda final=False: ""; d.comment = lambda body, pr=False: None
+            d.s["stage"] = "review"; d.blocker("checks still red")
+            self.assertEqual(d.s["resume_stage"], "review")
+            d.blocker("still red after the wake-up")
+            self.assertEqual(d.s["resume_stage"], "review", "a second Blocker never moves the recorded resume target")
+            self.assertIn("paused_resume_stage", inspect.getsource(L.Driver.blocker))
+            self.assertEqual((L.paused_resume_stage({"stage": "ci"}), L.paused_resume_stage({"stage": "blocked", "resume_stage": "merge"})),
+                             ("ci", "merge"))
+            self.assertEqual(L.resume_plan({"status": "blocked", "stage": "blocked", "resume_stage": "review", "blocker": "x"}),
+                             L.Resume("review", clears=("blocker",)), "and the rule reads that target back")
+
+    def test_cmd_start_routes_through_the_rule(self):
+        src = inspect.getsource(L.cmd_start)
+        self.assertIn("apply_resume", src, "start --resume goes through the rule's functional entry point")
+        self.assertNotIn('"blocked", "error"', src, "cmd_start no longer lists the paused statuses itself")
+        self.assertEqual(L.PAUSED_STATUSES, ("blocked", "error"))
+        self.assertEqual(L.WAKE_RESUME_STAGES, ("ci", "review", "merge"))
+
 class GpuHealthCacheDi(unittest.TestCase):   # cmdemo1-system#868: the GPU health cache is injectable; GPU health is fully faked with no network
     def test_cache_probes_once_within_max_age_and_again_after(self):
         probes = []
