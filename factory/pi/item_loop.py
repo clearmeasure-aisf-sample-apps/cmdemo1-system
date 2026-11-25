@@ -105,6 +105,97 @@ GH_RETRY_TICK_S = 60           # while waiting, state.json is re-saved this ofte
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 
+
+class HandoffBudgets:
+    """The Pi hand-off budget as one value object (cmdemo1-system#954): the start / stall / slot clocks, the per-pass
+    task timeouts (draft-plan, research, the shared default task timeout) and the GPU-wait pacing, held as
+    `datetime.timedelta`s with the relationships that decide whether a driver kills its own healthy run asserted on
+    construction -- every clock positive, `stall > start` (a run that has produced model output is given a longer
+    no-activity clock than the no-start clock), `task_timeout > start` (the wall-clock budget outlasts the no-start
+    clock, so a healthy run is never timed out before it has had its full no-start window) and `any_slot_wait > start`
+    (a relaunch / review queued on a busy GPU is not killed before it has had its no-start window either). The gh
+    rate-limit retry knobs (the `GH_RETRY_*` family) are the driver's own pacing and stay live-tunable: the object
+    documents them as read live through (the driver retunes them by rebinding the module names) rather than frozen
+    on the object.
+
+    Built once (HANDOFF_BUDGETS) from the module constants and handed to `Driver.pi` and the run-task launch
+    (`run_task_args`), so the numbers and the one message that names them live in exactly one place. `.describe()`
+    owns the user-facing no-start text (the `// 60` conversions), `.slot_wait()` owns the first-attempt-vs-relaunch
+    rule. The module ints (HANDOFF_START_S, ...) remain the single source of truth and the wire format: this object is
+    built from them, never the reverse, so every value sent to run-task and every message string is unchanged.
+    """
+
+    def __init__(self, start=HANDOFF_START_S, stall=HANDOFF_STALL_S, first_slot_wait=HANDOFF_SLOT_WAIT_S,
+                 any_slot_wait=ANY_SLOT_WAIT_S, draft_plan=DRAFT_PLAN_TIMEOUT_S, research=RESEARCH_TIMEOUT_S,
+                 task_timeout=PI_TASK_TIMEOUT_S, gpu_wait=GPU_WAIT_S, gpu_wait_h=GPU_WAIT_H):
+        self.start = dt.timedelta(seconds=start)
+        self.stall = dt.timedelta(seconds=stall)
+        self.first_slot_wait = dt.timedelta(seconds=first_slot_wait)   # the item's own GPU slot, first attempt
+        self.any_slot_wait = dt.timedelta(seconds=any_slot_wait)       # any free GPU: a relaunch or a review
+        self.draft_plan = dt.timedelta(seconds=draft_plan)
+        self.research = dt.timedelta(seconds=research)
+        self.task_timeout = dt.timedelta(seconds=task_timeout)
+        self.gpu_wait = dt.timedelta(seconds=gpu_wait)
+        self.gpu_wait_h = int(gpu_wait_h)
+        for name, td in (("start", self.start), ("stall", self.stall), ("first_slot_wait", self.first_slot_wait),
+                         ("any_slot_wait", self.any_slot_wait), ("draft_plan", self.draft_plan), ("research", self.research),
+                         ("task_timeout", self.task_timeout), ("gpu_wait", self.gpu_wait)):
+            if td <= dt.timedelta(0):
+                raise ValueError(f"HandoffBudgets.{name} must be positive, got {td}")
+        if self.gpu_wait_h <= 0:
+            raise ValueError(f"HandoffBudgets.gpu_wait_h must be positive, got {self.gpu_wait_h}")
+        if self.stall <= self.start:
+            raise ValueError("the stall budget must exceed the start budget: a run that has produced model output is "
+                             f"given a longer no-activity clock ({self.stall}) than the no-start clock ({self.start})")
+        if self.task_timeout <= self.start:
+            raise ValueError("the task timeout must outlast the start clock, or a healthy run is timed out before it has "
+                             f"had its full no-start window (task {self.task_timeout} <= start {self.start})")
+        if self.any_slot_wait <= self.start:
+            raise ValueError("the any-slot wait (a relaunch / review on a busy queue) must exceed the start clock, so a "
+                             f"queued hand-off is not killed before it has had its no-start window "
+                             f"({self.any_slot_wait} <= {self.start})")
+
+    # ---- the seconds the run-task launch is sent (int, the wire format)
+    @property
+    def start_s(self): return int(self.start.total_seconds())
+    @property
+    def stall_s(self): return int(self.stall.total_seconds())
+    @property
+    def slot_wait_s(self): return int(self.first_slot_wait.total_seconds())
+    @property
+    def any_slot_wait_s(self): return int(self.any_slot_wait.total_seconds())
+    @property
+    def draft_plan_s(self): return int(self.draft_plan.total_seconds())
+    @property
+    def research_s(self): return int(self.research.total_seconds())
+    @property
+    def task_timeout_s(self): return int(self.task_timeout.total_seconds())
+    @property
+    def gpu_wait_s(self): return int(self.gpu_wait.total_seconds())
+
+    def slot_wait(self, review, attempt):
+        """The slot wait of one attempt in seconds: the item's own GPU slot on the first attempt; any free slot (a
+        busy queue is no failure) on a relaunch or a review."""
+        return self.any_slot_wait_s if review or attempt else self.slot_wait_s
+
+    def describe(self, name, result):
+        """The PiNotStarted message after the last relaunch (the stage ends in a Blocker with this text): the one place
+        that turns the start / stall clocks into the human `// 60` minutes the bot reads."""
+        return (f"Pi hand-off `{name}` did not start or stalled ({result}: no GPU slot, no model "
+                f"output within {int(self.start.total_seconds()) // 60} min of getting one, "
+                f"or no activity for {int(self.stall.total_seconds()) // 60} min) "
+                f"after {LIMITS['pi_relaunch']} relaunches on any free GPU.")
+
+    def __repr__(self):
+        return (f"HandoffBudgets(start={self.start_s}s, stall={self.stall_s}s, slot_wait={self.slot_wait_s}s, "
+                f"any_slot_wait={self.any_slot_wait_s}s, draft_plan={self.draft_plan_s}s, research={self.research_s}s, "
+                f"task_timeout={self.task_timeout_s}s, gpu_wait={self.gpu_wait_s}s, gpu_wait_h={self.gpu_wait_h})")
+
+
+# The one hand-off budget, built from the module constants above (their single source of truth). Driver.pi and the
+# run-task launch read the clocks and the no-start message from here; the gh rate-limit knobs stay live on the module.
+HANDOFF_BUDGETS = HandoffBudgets()
+
 INFRA_RE = re.compile(r"(?i)(could not resolve host|temporary failure in name resolution|tls handshake timeout|"
                       r"connection reset by peer|econnreset|etimedout|503 service unavailable|502 bad gateway|"
                       r"toomanyrequests|rate limit exceeded|no space left on device|runner .* lost communication|"
@@ -800,8 +891,8 @@ class PiHandoff:
 
     def slot_wait(self):
         """The current attempt's slot wait: the item's own GPU slot on the first attempt; any free slot (a busy queue
-        is no failure) on a relaunch or a review."""
-        return ANY_SLOT_WAIT_S if self.review or self.attempt else HANDOFF_SLOT_WAIT_S
+        is no failure) on a relaunch or a review. The rule lives on the HandoffBudgets (cmdemo1-system#954)."""
+        return self.d.budgets.slot_wait(self.review, self.attempt)
 
     def prompt_text(self):
         """The current attempt's prompt file text: a relaunch adds the partial-edits note of the ORIGINAL task (an
@@ -814,10 +905,13 @@ class PiHandoff:
         open(self.pf, "w").write(self.prompt_text())
 
     def run_task_args(self):
-        """The run-task command of the current attempt: the slot/timeout argument assembly the loop used to inline."""
+        """The run-task command of the current attempt: the slot/timeout argument assembly the loop used to inline.
+        The start / stall / slot clocks come from the HandoffBudgets (cmdemo1-system#954); the ints are the wire
+        format and are unchanged."""
+        b = self.d.budgets
         return [os.path.join(HERE, "run-task"), "--run-dir", self.d.run_dir, "--cwd", self.d.s["wt"], "--task", self.task,
-                "--prompt-file", self.pf, "--timeout", str(self.timeout), "--gpu", self.gpu, "--start-timeout", str(HANDOFF_START_S),
-                "--stall-timeout", str(HANDOFF_STALL_S), "--slot-wait", str(self.slot_wait())]
+                "--prompt-file", self.pf, "--timeout", str(self.timeout), "--gpu", self.gpu, "--start-timeout", str(b.start_s),
+                "--stall-timeout", str(b.stall_s), "--slot-wait", str(self.slot_wait())]
 
     def advance(self, k, result):
         """Attempt k (1-based) after a failed one: a new task name, a free GPU of the item's size and its prompt
@@ -828,14 +922,14 @@ class PiHandoff:
         up = G.available(self.d.gpu_health()) or list(G.PRIORITY)
         self.task, self.gpu = f"{self.slug}-relaunch-{k}", G.gpu_arg(relaunch_gpus(self.d.s.get("size"), up))   # a free GPU of the item's size
         self._write_prompt()
-        return (f"Pi hand-off {self.name} {result} (start {HANDOFF_START_S} s / stall {HANDOFF_STALL_S} s / "
+        b = self.d.budgets
+        return (f"Pi hand-off {self.name} {result} (start {b.start_s} s / stall {b.stall_s} s / "
                 f"slot {old_slot} s); relaunch {k} of {LIMITS['pi_relaunch']} on any free GPU ({self.gpu})")
 
     def not_started(self, result):
-        """The PiNotStarted message after the last relaunch: the stage ends in a Blocker with this text."""
-        return (f"Pi hand-off `{self.name}` did not start or stalled ({result}: no GPU slot, no model "
-                f"output within {HANDOFF_START_S // 60} min of getting one, or no activity for {HANDOFF_STALL_S // 60} min) "
-                f"after {LIMITS['pi_relaunch']} relaunches on any free GPU.")
+        """The PiNotStarted message after the last relaunch: the stage ends in a Blocker with this text. The text is
+        owned by the HandoffBudgets (cmdemo1-system#954), the one place that names the start / stall clocks."""
+        return self.d.budgets.describe(self.name, result)
 
 class Driver:
     def __init__(self, repo, issue, dry_run=False, top_session=None, health=None):
@@ -844,6 +938,10 @@ class Driver:
         # (a GpuHealthCache or any callable returning a gpu.py health dict), defaulting to the shared module
         # gpu_health resolved at construction time, so a test that patches L.gpu_health before building the Driver is honored.
         self.gpu_health = health if health is not None else gpu_health
+        # The hand-off budget (#954): the start / stall / slot clocks, the per-pass task timeouts and the GPU-wait
+        # pacing, one value object whose invariants are asserted on construction and whose .describe() owns the
+        # no-start message. PiHandoff reads the run-task clocks and the message from here.
+        self.budgets = HANDOFF_BUDGETS
         self.run_dir = os.path.join(HOME, "factory-runs", f"{repo}-{issue}")
         os.makedirs(os.path.join(self.run_dir, "logs"), exist_ok=True)
         self.state_p = os.path.join(self.run_dir, "state.json")
@@ -1250,7 +1348,7 @@ class Driver:
     def st_gpu(self):
         """Wait (no Grok turn, no comment; the item stays in Todo) until intake is open, the repo has WIP room on this
         box and a GPU of the right size is free; then take it. One active item per GPU slot (pro5000 has 2), so up to 5 items at once."""
-        p = self.s["plan"]; size = G.classify_size(p); t_end = time.time() + GPU_WAIT_H * 3600; me = os.path.basename(self.run_dir)
+        p = self.s["plan"]; size = G.classify_size(p); t_end = time.time() + self.budgets.gpu_wait_h * 3600; me = os.path.basename(self.run_dir)
         while time.time() < t_end:
             red = red_load()
             if not intake_open(red, p): why = "intake stopped while red: " + "; ".join(f"{k}: {v['what']}" for k, v in red.items())
@@ -1268,8 +1366,8 @@ class Driver:
                 g = self.s.get("gpu") or G.LARGE_GPU
                 self.log(f"DRY-RUN: {why}; taking {g}"); return self.save(gpu=g, size=size, stage="pickup")
             if self.s.get("wait_why") != why: self.save(wait_why=why); self.log(f"waiting: {why}")
-            time.sleep(GPU_WAIT_S)
-        self.blocker(f"waited {GPU_WAIT_H} hours to start ({self.s.get('wait_why')}).")
+            time.sleep(self.budgets.gpu_wait_s)
+        self.blocker(f"waited {self.budgets.gpu_wait_h} hours to start ({self.s.get('wait_why')}).")
 
     def st_pickup(self):
         p = self.s["plan"]; self.setup_worktree()
@@ -1308,7 +1406,7 @@ class Driver:
             if not self.bump("research"):
                 return self.blocker("the refactoring research is missing or not substantive after "
                                     f"{LIMITS['research']} Pi passes (`{RESEARCH_HEAD}` with findings per touched file).")
-            self.pi(f"refactoring-research-{self.s['counts']['research']}", prompt, RESEARCH_TIMEOUT_S)
+            self.pi(f"refactoring-research-{self.s['counts']['research']}", prompt, self.budgets.research_s)
             self.sh(["git", "checkout", "--", "."], cwd=self.s["wt"], check=False); self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"], check=False)
             text = self.research_text()
         try: extra = json.load(open(fu))
@@ -1784,7 +1882,7 @@ def cmd_draft_plan(a):
     d.plan_worktree()
     out, prompt = draft_plan_prompt(a.repo, a.issue, iss["title"], iss["body"], os.path.join(d.run_dir, PLAN_DRAFT_FILE))
     # plan drafting runs before the gpu stage: no gpu recorded yet, so ask for any free 262K GPU (#907) rather than queueing on pro5000
-    try: ok = d.pi("draft-plan", prompt, DRAFT_PLAN_TIMEOUT_S, gpu=G.gpu_arg(G.LARGE_GPUS))
+    try: ok = d.pi("draft-plan", prompt, d.budgets.draft_plan_s, gpu=G.gpu_arg(G.LARGE_GPUS))
     except PiNotStarted as e: draft_result(out, False, [str(e)]); sys.exit(1)
     try:
         p = json.load(open(out)); errs = validate_plan(p)
