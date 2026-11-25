@@ -38,6 +38,18 @@ class FailureClass(StrEnum):
     INFRA = "infra"
     CODE = "code"
 
+class CheckBucket(StrEnum):
+    """The gh `pr checks --json name,bucket` buckets as a value object (cmdemo1-system#870): the one place that
+    names gh's check-bucket vocabulary, so the green / red / running classification and the pending default are
+    built from these members instead of re-typing the raw literals. Values are string literals for JSON
+    compatibility (a StrEnum member == its string value). gh also emits buckets outside this set (e.g. `queued`),
+    which stay open strings and read as running -- `bucket()` never coerces, it only defaults to PENDING."""
+    PASS = "pass"
+    FAIL = "fail"
+    PENDING = "pending"
+    CANCEL = "cancel"
+    SKIPPING = "skipping"
+
 ORG = "clearmeasure-aisf-sample-apps"
 BOT = "cm-ai-ops-bot"
 BOT_GIT = ["-c", f"user.name={BOT}", "-c", "user.email=jeffrey+ai-ops@clear-measure.com"]
@@ -184,12 +196,12 @@ def task_slug(name):
 # decided by latest_attempt() and nowhere else: a name that has passed stays green (the rerun's pass beats the
 # earlier failure), and the last entry of a name that never passed is its current state. MergeGate is its only
 # reader, so the required checks and the quality checks can no longer disagree about the same list.
-GREEN_BUCKETS = ("pass", "skipping")   # gh's buckets that mean "finished and good" (skipping counts: not applicable)
-RED_BUCKETS = ("fail", "cancel")       # ... "finished and bad"; every other bucket (pending, queued) is still running
+GREEN_BUCKETS = (CheckBucket.PASS, CheckBucket.SKIPPING)   # gh's buckets that mean "finished and good" (skipping counts: not applicable)
+RED_BUCKETS = (CheckBucket.FAIL, CheckBucket.CANCEL)       # ... "finished and bad"; every other bucket (pending, queued) is still running
 
 def bucket(check):
     """One check entry's bucket; gh omits it while the check is still queued, which means pending."""
-    return check.get("bucket") or "pending"
+    return check.get("bucket") or CheckBucket.PENDING
 
 def bucket_green(b): return b in GREEN_BUCKETS
 def bucket_red(b): return b in RED_BUCKETS
@@ -229,7 +241,7 @@ class MergeGate:
 
     def _state(self, names):
         if not names: return CheckState.PENDING
-        rs = [self.buckets.get(n, "pending") for n in names]
+        rs = [self.buckets.get(n, CheckBucket.PENDING) for n in names]
         if any(bucket_red(b) for b in rs): return CheckState.RED
         if all(bucket_green(b) for b in rs): return CheckState.GREEN
         return CheckState.PENDING
