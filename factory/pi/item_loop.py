@@ -65,6 +65,7 @@ RESEARCH_MIN_CHARS = 300
 DRIVER_MARK = "<!-- factory-pi-driver -->"
 # Existing limits (operating-instructions): 2 Review FAILs, 3 infrastructure reruns; then a Blocker.
 LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3, "research": 2, "review_infra": 2, "pi_relaunch": 2}
+def fresh_counts(): return {k: 0 for k in LIMITS}   # one place says what "every limit back to zero" is (a new item's, and a resume's)
 HANDOFF_START_S = 900     # a Pi hand-off with no model output 15 min after it got its slot is killed and relaunched (t85u)
 HANDOFF_STALL_S = 1800    # ... or, once started, no session record and no CPU work in its process group for 30 min
 HANDOFF_SLOT_WAIT_S = 900 # the first attempt waits this long for its own GPU's slot, then relaunches on any free GPU
@@ -362,11 +363,49 @@ def new_followups(items, existing_titles, limit=FOLLOWUP_MAX):
         if len(out) == limit: break
     return out
 
+# ---------------------------------------------------------------- the one resume rule (cmdemo1-system#855)
+# A paused item -- a Blocker or an unexpected driver error -- resumes through resume_plan below and nowhere else:
+# `item-loop start --resume` after Jeffrey answers the Blocker, hold_blocked's wake-up of a blocked driver whose PR
+# turned clean on its own, and the error resume. The rule owns the three decisions every one of them needs: the stage
+# to run next, which pause fields to clear (blocker / error, and the recorded gpu when it died at gpu / pickup) and
+# which counters start again. blocker() writes the half the rule reads back with paused_resume_stage().
+PAUSED_STATUSES = ("blocked", "error")        # the two statuses that pause an item until something resumes it
+WAKE_RESUME_STAGES = ("ci", "review", "merge")   # a blocked driver wakes itself only inside the PR gate
+
+class Resume:
+    """One resume as a decision object (cmdemo1-system#855): the `stage` to run next, the state fields the pause leaves
+    behind (`clears`), `clear_gpu` (a gpu/pickup error re-picks a GPU instead of keeping the record of the one it died
+    on), `reset_counts` (the fix limits start again) and the `status` to save (None leaves the status alone: `start
+    --resume` keeps `blocked` / `error` until the driver's own run() sets it running). Built only by resume_plan(), so
+    the stage choice and the clearing live in exactly one place; apply() is pure."""
+
+    def __init__(self, stage, clears=(), clear_gpu=False, reset_counts=True, status=None):
+        self.stage, self.clears, self.clear_gpu = stage, tuple(clears), clear_gpu
+        self.reset_counts, self.status = reset_counts, status
+
+    def __eq__(self, other):
+        return isinstance(other, Resume) and (self.stage, self.clears, self.clear_gpu, self.reset_counts,
+                                             self.status) == (other.stage, other.clears, other.clear_gpu,
+                                                              other.reset_counts, other.status)
+    def __hash__(self): return hash((self.stage, self.clears, self.clear_gpu, self.reset_counts, self.status))
+    def __repr__(self):
+        return (f"Resume(stage={self.stage!r}, clears={self.clears!r}, clear_gpu={self.clear_gpu!r}, "
+                f"reset_counts={self.reset_counts!r}, status={self.status!r})")
+
+    def apply(self, state):
+        """The paused `state` with this resume applied: a new dict, the caller's never touched."""
+        st = dict(state or {})
+        st["stage"] = self.stage
+        for f in self.clears + (("gpu",) if self.clear_gpu else ()):
+            st.pop(f, None)
+        if self.reset_counts: st["counts"] = fresh_counts()
+        if self.status: st["status"] = self.status
+        return st
+
 def resume_target(state):
-    """(stage, clear_gpu) where a paused item (status `blocked` or `error`) resumes, from the state dict alone.
-    Blocked: `resume_stage` when set, else `ci` when a PR exists, else `implement`; the GPU is never cleared.
-    Error: resume the saved stage (falling back to implement when no stage is saved); a gpu/pickup error maps to the
-    gpu stage with the recorded GPU cleared."""
+    """(stage, clear_gpu): the stage half of the resume rule, from the state dict alone. Blocked: `resume_stage` when
+    set, else `ci` when a PR exists, else `implement`; the GPU is never cleared. Error: the saved stage (falling back
+    to implement when no stage is saved); a gpu/pickup error maps to the gpu stage with the recorded GPU cleared."""
     st = state or {}
     if st.get("status") == "error":
         stage = st.get("stage")
@@ -375,20 +414,43 @@ def resume_target(state):
         return stage or "implement", False
     return st.get("resume_stage") or ("ci" if st.get("pr") else "implement"), False
 
-def apply_resume(state):
-    """Resume a paused item (status `blocked` or `error`) from the state dict alone and return the new state: the
-    target stage from resume_target (the saved stage for an error, falling back to implement when none is saved,
-    `resume_stage` / ci / implement for a blocked),
-    with the `error` (or `blocker`) field dropped, the recorded GPU cleared only when the saved stage was gpu or
-    pickup, and the fix counts reset to zero."""
-    st = dict(state or {})
-    if st.get("status") in ("blocked", "error"):
-        stage, clear_gpu = resume_target(st)
-        st["stage"] = stage
-        st.pop("blocker" if st.get("status") == "blocked" else "error", None)
-        if clear_gpu: st.pop("gpu", None)
-        st["counts"] = {k: 0 for k in LIMITS}
-    return st
+def resume_plan(state, wake=False):
+    """THE resume rule (cmdemo1-system#855): the Resume for a paused item, or None when this pause does not resume.
+
+    `start --resume` (wake=False): the stage from resume_target (the saved stage for an error, `resume_stage` / ci /
+    implement for a blocked), the pause flag dropped (`blocker` when blocked, `error` when errored), the recorded GPU
+    cleared only for a gpu/pickup error, the fix counters reset, and the status left as the pause wrote it.
+
+    wake=True is the blocked driver's own wake-up (hold_blocked re-reads the PR while it holds, and the checks turned
+    clean on their own): it resumes only a pause raised inside the PR gate (WAKE_RESUME_STAGES) on an item that has a
+    PR, only when hold_resumes says that Blocker may clear itself (a Review FAIL never does), and resumes the Review
+    gate -- the checks are green, so there is nothing to re-run before it -- with the status back to running. The item
+    is paused by definition there (the driver only holds while its stage is blocked), so the wake half reads the
+    fields the pause left (pr, resume_stage, blocker) rather than the status.
+    """
+    st = state or {}
+    if wake:
+        if not st.get("pr") or st.get("resume_stage") not in WAKE_RESUME_STAGES or not hold_resumes(st.get("blocker")):
+            return None
+        return Resume("review", clears=("blocker",), status="running")
+    if st.get("status") not in PAUSED_STATUSES: return None
+    stage, clear_gpu = resume_target(st)
+    return Resume(stage, clears=("blocker",) if st.get("status") == "blocked" else ("error",), clear_gpu=clear_gpu)
+
+def apply_resume(state, wake=False):
+    """The paused state with the one resume rule applied, and a copy of it unchanged when the rule does not resume
+    (nothing paused, or a wake that this Blocker may not self-clear). The functional entry point for
+    `item-loop start --resume`; hold_blocked asks resume_plan directly because it decides before the wait and applies
+    after the PR turns green."""
+    plan = resume_plan(state, wake=wake)
+    return plan.apply(state) if plan else dict(state or {})
+
+def paused_resume_stage(state):
+    """The `resume_stage` a Blocker records: the stage the item is in, or the one already recorded when the item was
+    already blocked -- a second Blocker (the wake loop's own, an error after a Blocker) must not move the resume
+    target the rule will read back. The writing half of the resume rule."""
+    st = state or {}
+    return st.get("resume_stage") if st.get("stage") == "blocked" else st.get("stage")
 
 def busy_gpus(states, me=None, alive=lambda pid: False):
     """GPUs whose slots are all held by other live items in an active stage (pro5000 has 2, pro6000, obs and ts3 have 1).
@@ -598,7 +660,7 @@ class Driver:
         self.state_p = os.path.join(self.run_dir, "state.json")
         self.s = json.load(open(self.state_p)) if os.path.exists(self.state_p) else {}
         self.s.setdefault("repo", repo); self.s.setdefault("issue", self.issue)
-        self.s.setdefault("counts", {k: 0 for k in LIMITS})
+        self.s.setdefault("counts", fresh_counts())
         if top_session: self.s["top_session"] = top_session
         self.full = f"{ORG}/{repo}"; self.last_task = {}
 
@@ -731,8 +793,8 @@ class Driver:
     def blocker(self, what, who="Jeffrey"):
         self.comment(f"Blocker: {what} Needed from {who}. The Pi driver stopped (run `{self.s.get('run_id')}`). "
                      f"Reply on this issue or in chat.\n\n{self.usage()}")
-        self.save(resume_stage=self.s.get("stage") if self.s.get("stage") != "blocked" else self.s.get("resume_stage"),
-                  stage="blocked", status="blocked", blocker=what); self.wake_bot("blocked")
+        self.save(resume_stage=paused_resume_stage(self.s), stage="blocked", status="blocked", blocker=what)
+        self.wake_bot("blocked")
 
     def usage(self, final=False):
         a = [os.path.join(HERE, "usage-report"), "--run-dir", self.run_dir] + (["--final"] if final else [])
@@ -973,9 +1035,11 @@ class Driver:
     def hold_blocked(self):
         """After a Blocker the driver stays up (status stays `blocked`, the bot was woken) and re-checks the PR every
         RECHECK_S for BLOCKED_HOLD_H. When the PR turns clean on its own (or Jeffrey's fix landed) it clears the
-        Blocker and resumes; otherwise it posts a heartbeat. Returns True when it resumed."""
-        if not self.s.get("pr") or self.s.get("resume_stage") not in ("ci", "review", "merge") or self.dry: return False
-        if not hold_resumes(self.s.get("blocker")): return False
+        Blocker and resumes; otherwise it posts a heartbeat. Returns True when it resumed. Where it resumes, what the
+        pause leaves behind and which limits start again are the one resume rule's, not this stage's."""
+        if self.dry: return False
+        plan = resume_plan(self.s, wake=True)
+        if plan is None: return False
         t_end = time.time() + BLOCKED_HOLD_H * 3600
         while time.time() < t_end:
             time.sleep(RECHECK_S)
@@ -985,8 +1049,7 @@ class Driver:
                 self.log("blocked PR is clean now; resuming")
                 self.comment("Status: checks are green now (including Qodana and Refactoring rationale); the driver cleared its "
                              "Blocker and is resuming the Review.")
-                self.s["counts"] = {k: 0 for k in LIMITS}; self.s.pop("blocker", None)
-                self.save(stage="review", status="running"); self.progress(); return True
+                self.s = plan.apply(self.s); self.save(); self.progress(); return True
             self.heartbeat(BLOCKED_HEARTBEAT_MIN)
         return False
 
@@ -1519,8 +1582,7 @@ def cmd_start(a):
         print("NOTE: intake is stopped while red (" + "; ".join(red) + "); the driver waits in Todo until it is green.")
     d.s.setdefault("top_sessions", [])
     if a.top_session and a.top_session not in d.s["top_sessions"]: d.s["top_sessions"].append(a.top_session)
-    if d.s.get("status") in ("blocked", "error") and a.resume:
-        d.s = apply_resume(d.s)   # Jeffrey answered the Blocker: the limits start again
+    if a.resume: d.s = apply_resume(d.s)   # Jeffrey answered the Blocker: the one resume rule picks the stage, clears the pause and zeroes the limits (no-op unless the item is paused)
     d.save()
     log = open(os.path.join(d.run_dir, "driver.out"), "a")
     cmd = [sys.executable, os.path.abspath(__file__), "run", "--repo", a.repo, "--issue", str(a.issue)] + (["--dry-run"] if a.dry_run else [])
