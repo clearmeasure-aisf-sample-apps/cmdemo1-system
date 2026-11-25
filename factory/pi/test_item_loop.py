@@ -42,6 +42,23 @@ def patched_driver_env(run=None, sleep=None, gpu_health=None, time=None, gpu_for
             L.subprocess.run, L.run_cmd = old_run, old_run_cmd
             L.time.sleep = old_sleep
 
+@contextlib.contextmanager
+def fake_modules(swaps):
+    """Shared save/swap/restore: `swaps` maps (module, "attribute") to the value it holds for the block --
+    fake_modules({(L, "HOME"): home, (W.time, "sleep"): lambda s: None}) -- and puts every original value back in a
+    finally, in reverse order, whether the block raises or not. The one replacement for the
+    `old = X.a; X.a = fake; try: ... finally: X.a = old` scaffolding (#940); it covers any attribute of any module,
+    so a test can patch item_loop and watchdog in one line, which fake_home and patched_driver_env cannot.
+    An attribute that does not already exist raises AttributeError instead of being created, so a typo fails loudly."""
+    old = [(obj, name, getattr(obj, name)) for obj, name in swaps]
+    try:
+        for (obj, name), value in swaps.items():
+            setattr(obj, name, value)
+        yield
+    finally:
+        for obj, name, value in reversed(old):
+            setattr(obj, name, value)
+
 def make_driver(issue=1, repo="cmdemo1-workorders", dry_run=True, **kw):
     """Create a standard test Driver; dry_run is explicit so callers can opt out."""
     return L.Driver(repo, issue, dry_run=dry_run, **kw)
