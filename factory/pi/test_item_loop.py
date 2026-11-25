@@ -3505,4 +3505,122 @@ class LatestAttemptMergeRule(unittest.TestCase):   # cmdemo1-system#886: ONE "la
                       "the gate is built on the one merge rule")
 
 
+class SplitReviewAndDeploy(unittest.TestCase):   # cmdemo1-system#859: the extracted stage helpers are small and unit-testable
+    """The three methods #859 pulls out of the long st_review / st_deploy bodies -- Driver.evidence_results,
+    Driver.ensure_research_in_body and Driver.deploy_env_check -- each tested on its own: a small seam the stage
+    orchestrators call, unit-testable without the whole stage. Behavior is unchanged (the stage methods keep their
+    branching); these cases pin the extracted units' contracts so the split is provably only a split."""
+
+    run_recorder = DriverShGroupKill.run_recorder
+
+    def _driver(self, h, repo="cmdemo1-system", issue=859):
+        d = make_driver(repo=repo, issue=issue, dry_run=False)
+        wt = os.path.join(h, "wt"); os.makedirs(wt, exist_ok=True)
+        d.s.update(plan=dict(PLAN, criteria=[dict(PLAN["criteria"][0])]), wt=wt, gpu="pro5000", pr=7, stage="review")
+        return d
+
+    # -- Driver.evidence_results: the per-criterion evidence pass, ev/failed and the log file
+    def test_evidence_results_splits_passed_and_failed_and_writes_the_log(self):
+        out = "line one\nPassed!  - failed: 0, passed: 3\n"
+        with fake_home() as h:
+            d = self._driver(h)
+            run = self.run_recorder([(0, out)])
+            with patch_run(run):
+                ev, failed = d.evidence_results()
+            self.assertEqual(len(run.calls), 1, "one criterion, one evidence run")
+            self.assertEqual(len(ev), 1, "a passing criterion lands in ev")
+            self.assertEqual(failed, [], "a passing criterion leaves failed empty")
+            c, last, rc = ev[0]
+            self.assertEqual(c["text"], PLAN["criteria"][0]["text"])
+            self.assertEqual(rc, 0)
+            self.assertEqual(last, "Passed!  - failed: 0, passed: 3")
+            log_text = open(os.path.join(d.run_dir, "logs", "evidence-1.log")).read()
+            self.assertEqual(log_text, out, "logs/evidence-<i>.log keeps the same (scrubbed) content")
+
+    def test_evidence_results_a_failed_criterion_lands_in_failed_with_its_exit(self):
+        with fake_home() as h:
+            d = self._driver(h)
+            run = self.run_recorder([(7, "boom\n")])
+            with patch_run(run):
+                ev, failed = d.evidence_results()
+            self.assertEqual(ev, [], "a failing criterion does not land in ev")
+            self.assertEqual(len(failed), 1, "a failing criterion lands in failed")
+            c, last, rc = failed[0]
+            self.assertEqual(rc, 7, "the returncode is carried for st_review's FAIL comment")
+            self.assertEqual(last, "boom", "the last non-empty line is the one st_review shows")
+
+    # -- Driver.ensure_research_in_body: the research-redo mechanics after an independent-review FAIL
+    def test_ensure_research_in_body_runs_st_research_when_the_section_is_missing(self):
+        with fake_modules({(L, "research_ok"): lambda *a: False}) :
+            with fake_home() as h:
+                d = self._driver(h)
+                saw_stage = []
+                d.st_research = lambda: saw_stage.append(d.s.get("stage")) or d.save(stage="review")
+                self.assertTrue(d.ensure_research_in_body(d.s["plan"]), "a research redo that does not block returns True")
+                self.assertIn("research", saw_stage, "st_research ran (the stage was set to research before the redo)")
+                self.assertEqual(d.s.get("stage"), "review", "the stage is set back to review")
+                self.assertEqual(d.s["counts"]["research"], 0, "the research count resets before the redo")
+
+    def test_ensure_research_in_body_skips_the_redo_when_the_section_is_there(self):
+        with fake_modules({(L, "research_ok"): lambda *a: True}):
+            with fake_home() as h:
+                d = self._driver(h)
+                d.st_research = lambda: self.fail("a substantive section does not re-run st_research")
+                self.assertTrue(d.ensure_research_in_body(d.s["plan"]), "a present section returns True without redoing")
+
+    def test_ensure_research_in_body_returns_false_when_the_redo_blocks(self):
+        with fake_modules({(L, "research_ok"): lambda *a: False}):
+            with fake_home() as h:
+                d = self._driver(h)
+                d.st_research = lambda: d.save(stage="blocked")
+                self.assertFalse(d.ensure_research_in_body(d.s["plan"]),
+                                 "a research redo that blocks the item returns False so st_review leaves")
+
+    # -- Driver.deploy_env_check: one environment's half of the st_deploy watch
+    def test_deploy_env_check_none_when_the_env_has_no_entry_for_the_dep(self):
+        with fake_home() as h:
+            d = self._driver(h, repo="cmdemo1-system")
+            env = {"name": "tdd", "deployables": []}
+            self.assertIsNone(d.deploy_env_check(env, "system", "abc"),
+                              "no entry for the deployable -> None so the watch skips the env")
+
+    def test_deploy_env_check_healthy_identical_returns_in_env_and_version(self):
+        with fake_home() as h:
+            d = self._driver(h, repo="cmdemo1-system")
+            d.gh = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, '{"status": "identical"}', "")
+            env = {"name": "tdd", "deployables": [{"name": "system", "version": "v1", "commit": "c" * 8}]}
+            in_env, (version, commit) = d.deploy_env_check(env, "system", "abc")
+            self.assertTrue(in_env, "identical + healthy -> in_env True (system has no HTTP health, so it is never red)")
+            self.assertEqual((version, commit), ("v1", "c" * 8))
+
+    def test_deploy_env_check_behind_is_not_in_env(self):
+        with fake_home() as h:
+            d = self._driver(h, repo="cmdemo1-system")
+            d.gh = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, '{"status": "behind"}', "")
+            env = {"name": "tdd", "deployables": [{"name": "system", "version": "v1", "commit": "c" * 8}]}
+            in_env, _ = d.deploy_env_check(env, "system", "abc")
+            self.assertFalse(in_env, "a behind commit is not in_env even when healthy")
+
+    def test_deploy_env_check_unhealthy_at_the_merge_sets_the_red_flag(self):
+        with fake_home() as h:
+            d = self._driver(h, repo="cmdemo1-workorders")
+            d.gh = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, '{"status": "identical"}', "")
+            d.fix_forward_issue = lambda *a, **k: None
+            comments = []; d.comment = lambda body, **k: comments.append(body)
+            env = {"name": "tdd", "deployables": [{"name": "ui", "version": "v9", "commit": "c" * 8}],
+                   "health": {"containerApps": [{"name": "ui", "last": {"result": "unhealthy"}}]}}
+            in_env, _ = d.deploy_env_check(env, "ui", "abc")
+            self.assertFalse(in_env, "an unhealthy env at the merge commit is not in_env")
+            self.assertIn("ui tdd", red_keys_of(h), "the red flag is set for the dep+env key")
+            self.assertEqual(len(comments), 1, "one status comment when the flag is set")
+
+
+def red_keys_of(h):
+    """The keys currently in <h>/factory-runs/red.json ({} when the file is absent)."""
+    try:
+        return set(json.load(open(os.path.join(h, "factory-runs", "red.json"))))
+    except (OSError, ValueError):
+        return set()
+
+
 if __name__ == "__main__": unittest.main()
