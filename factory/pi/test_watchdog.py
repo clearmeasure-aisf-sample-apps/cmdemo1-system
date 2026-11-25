@@ -481,3 +481,270 @@ class SharedScrubImport(unittest.TestCase):
         tok = "ghp_" + "k" * 30   # a runtime-built token value
         out = W.scrub(f"x {tok} y")
         self.assertNotIn(tok, out); self.assertIn("[redacted]", out)
+
+
+# ---------------------------------------------------------------- check 3: own green, mergeable, unmerged PRs
+GREEN_CHECKS = [{"name": "Build result", "bucket": "pass"}, {"name": "secret-scan", "bucket": "pass"}]
+HEALTHY = {g: ("HEALTHY", "serves a loaded model (Pi asks for `auto`)") for g in G.GPUS}
+
+class GreenPrHoldRule(unittest.TestCase):
+    """Check 3's pure rule: a green, mergeable, unmerged bot PR merges only with no Jeffrey hold and no
+    unaddressed Review: FAIL / Blocker: in its journal."""
+
+    def test_clean_journal_is_mergeable(self):
+        self.assertIsNone(W.green_pr_hold([c("In Progress → Review", 0), c("Status: no progress", 1)], None))
+        self.assertIsNone(W.green_pr_hold([], None))
+
+    def test_jeffrey_hold_is_unconditional(self):
+        head = (T0 + dt.timedelta(minutes=50)).isoformat()   # even a commit after it, and a PASS, do not lift it
+        h = W.green_pr_hold([c("Not merging until Jeffrey confirms", 5), c("Review: PASS", 10)], head)
+        self.assertEqual(h[0], "jeffrey")
+
+    def test_unaddressed_review_fail_holds(self):
+        self.assertEqual(W.green_pr_hold([c(FAIL, 5)], (T0 + dt.timedelta(minutes=1)).isoformat())[0], "fail")   # commit predates the FAIL
+
+    def test_unaddressed_blocker_holds(self):
+        self.assertEqual(W.green_pr_hold([c("Blocker: needs Jeffrey. The Pi driver stopped.", 5)], None)[0], "blocker")
+
+    def test_a_commit_after_the_hold_clears_it(self):
+        self.assertIsNone(W.green_pr_hold([c(FAIL, 5)], (T0 + dt.timedelta(minutes=12)).isoformat()))
+        self.assertIsNone(W.green_pr_hold([c("Blocker: needs Jeffrey.", 5)], (T0 + dt.timedelta(minutes=9)).isoformat()))
+
+    def test_a_pass_comment_after_the_fail_clears_it(self):
+        self.assertIsNone(W.green_pr_hold([c(FAIL, 5), c("Review: PASS", 9)], None))
+
+    def test_the_latest_hold_is_the_one_judged(self):
+        # an old addressed FAIL, then a fresh unaddressed Blocker: the Blocker holds
+        self.assertEqual(W.green_pr_hold([c(FAIL, 0), c("Review: PASS", 2), c("Blocker: needs Jeffrey.", 8)], None)[0], "blocker")
+
+class OwnGreenPrsCheck(unittest.TestCase):
+    """Check 3 end to end with a stub gh, a fake health and a fake review: a green, mergeable, unmerged
+    cm-ai-ops-bot PR is reviewed on a non-author GPU and squash-merged with --match-head-commit (never
+    --delete-branch) only on PASS; the no-op cases act on nothing and post no comment."""
+
+    PR = {"number": 100, "author": {"login": L.BOT}, "headRefOid": "abc123def456", "mergeable": "MERGEABLE",
+          "closingIssuesReferences": [{"number": 99}]}
+
+    def setUp(self):
+        W._last_comment.clear()
+
+    def _gh(self, prs, comments, checks, posted, merged):
+        def gh(args):
+            if args[:2] == ["pr", "list"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps(prs if "cmdemo1-workorders" in args[3] else []), "")
+            if args[:2] == ["pr", "checks"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps(checks), "")
+            if args[:2] == ["pr", "merge"]:
+                merged.append(args)
+                return subprocess.CompletedProcess(args, 0, "Merged", "")
+            if args[:2] == ["issue", "comment"]:
+                with open(args[args.index("--body-file") + 1]) as f: posted.append((args[2], f.read()))
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[0] == "api" and "/commits/" in args[1]:
+                return subprocess.CompletedProcess(args, 0, (T0 - dt.timedelta(hours=1)).isoformat() + "\n", "")
+            if args[0] == "api":
+                return subprocess.CompletedProcess(args, 0, "\n".join(json.dumps(x) for x in comments), "")
+            raise AssertionError(args)
+        return gh
+
+    def _run(self, prs, comments, checks, review=None, states=None, health=None, logs=None):
+        posted, merged, reviews = [], [], []
+        def fake_review(repo, pr, issue, gpu):
+            reviews.append((repo, pr, issue, gpu))
+            return review(repo, pr, issue, gpu)
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):
+            if states is not None:
+                rd = os.path.join(home, "factory-runs", "run1"); os.makedirs(rd)
+                with open(os.path.join(rd, "state.json"), "w") as f: json.dump(states, f)
+            r = W.own_green_prs_check(repos=("cmdemo1-workorders",), gh=self._gh(prs, comments, checks, posted, merged),
+                                      health=lambda: health or dict(HEALTHY), review=fake_review,
+                                      clock=lambda: T0, log=logs.append if logs is not None else (lambda s: None))
+        return r, posted, merged, reviews
+
+    def test_green_mergeable_bot_pr_is_reviewed_off_author_gpu_and_merged(self):
+        def review(repo, pr, issue, gpu):
+            self.assertNotIn(gpu, ("pro5000",))   # never the author's GPU
+            return L.ReviewVerdict(True, "- No findings.")
+        r, posted, merged, reviews = self._run([self.PR], [], GREEN_CHECKS, review=review,
+                                               states={"repo": "cmdemo1-workorders", "issue": 99, "gpu": "pro5000",
+                                                       "author_gpus": ["pro5000"], "pid": 2 ** 22})
+        self.assertEqual(reviews, [("cmdemo1-workorders", 100, 99, "pro6000")])   # the strongest non-author GPU
+        self.assertEqual(merged, [L.merge_args("clearmeasure-aisf-sample-apps/cmdemo1-workorders", 100, "abc123def456")])
+        self.assertIn("--squash", merged[0]); self.assertIn("--match-head-commit", merged[0])
+        self.assertNotIn("--delete-branch", merged[0])
+        self.assertIn("PR #100", r)
+        self.assertEqual([n for n, _ in posted], ["99", "100"])   # the PASS comment lands on the issue and the PR
+        self.assertTrue(all("Review: PASS" in b and "abc123de" in b for _, b in posted))
+
+    def test_review_fail_comments_but_never_merges(self):
+        def review(repo, pr, issue, gpu):
+            return L.ReviewVerdict(False, "- a real finding")
+        r, posted, merged, _ = self._run([self.PR], [], GREEN_CHECKS, review=review)
+        self.assertEqual(merged, [])
+        self.assertIn("review-fail", r)
+        self.assertEqual([n for n, _ in posted], ["99", "100"])
+        self.assertTrue(all("Review: FAIL" in b and "a real finding" in b for _, b in posted))
+
+    def test_infra_review_is_a_wait_with_no_comment_and_no_merge(self):
+        def review(repo, pr, issue, gpu):
+            return L.ReviewVerdict(None, "the review ended with no PASS/FAIL verdict (run result: timeout)")
+        r, posted, merged, _ = self._run([self.PR], [], GREEN_CHECKS, review=review)
+        self.assertEqual((merged, posted), ([], []))
+        self.assertIn("waiting: cmdemo1-workorders PR #100", r)
+
+    def test_human_pr_conflicting_pr_and_red_checks_are_left_alone(self):
+        for pr in (dict(self.PR, author={"login": "some-human"}),
+                   dict(self.PR, mergeable="CONFLICTING")):
+            r, posted, merged, reviews = self._run([pr], [], GREEN_CHECKS)
+            self.assertEqual((r, posted, merged, reviews), ("ok", [], [], []))
+        r, posted, merged, reviews = self._run([self.PR], [], [{"name": "Build result", "bucket": "fail"}])
+        self.assertEqual((r, posted, merged, reviews), ("ok", [], [], []))
+
+    def test_jeffrey_hold_and_unaddressed_fail_skip_the_review(self):
+        for comments in ([c("Not merging until Jeffrey confirms", 5)], [c(FAIL, 5)]):   # the head commit is 1 h old
+            r, posted, merged, reviews = self._run([self.PR], comments, GREEN_CHECKS)
+            self.assertEqual((r, posted, merged, reviews), ("ok", [], [], []))
+
+    def test_live_driver_is_left_alone_progressing_or_not(self):
+        # a live driver owns the PR whether it is progressing or just waiting (a GPU / CI / review stall):
+        # the watchdog never races it into a merge
+        for progress_at in ((T0 - dt.timedelta(seconds=60)).isoformat(), (T0 - dt.timedelta(minutes=60)).isoformat()):
+            states = {"repo": "cmdemo1-workorders", "issue": 99, "pid": os.getpid(), "progress_at": progress_at}
+            r, posted, merged, reviews = self._run([self.PR], [], GREEN_CHECKS, states=states)
+            self.assertEqual((r, posted, merged, reviews), ("ok", [], [], []))
+        self.assertTrue(W.driver_alive([("run", {"repo": "cmdemo1-workorders", "issue": 99, "pid": os.getpid()})],
+                                       "cmdemo1-workorders", 99))
+        self.assertFalse(W.driver_alive([("run", {"repo": "cmdemo1-workorders", "issue": 99, "pid": 2 ** 22})],
+                                        "cmdemo1-workorders", 99))
+
+    def test_workorders_pr_1918_is_never_reviewed_or_merged(self):
+        pr = dict(self.PR, number=1918, closingIssuesReferences=[{"number": 1917}])
+        def review(repo, p, issue, gpu):
+            raise AssertionError("PR 1918 must never be reviewed for a merge")
+        r, posted, merged, reviews = self._run([pr], [], GREEN_CHECKS, review=review)
+        self.assertEqual((r, posted, merged, reviews), ("ok", [], [], []))
+
+    def test_no_non_author_gpu_free_is_a_wait_with_no_comment(self):
+        def review(repo, pr, issue, gpu):
+            raise AssertionError("no review expected: no non-author GPU is free")
+        h = {g: ("HEALTHY" if g in ("pro5000", "pro6000") else "UNREACHABLE", "x") for g in G.GPUS}
+        # the author owns pro5000 + pro6000 (the only healthy GPUs): every reviewer candidate is excluded
+        r, posted, merged, reviews = self._run([self.PR], [], GREEN_CHECKS, review=review, health=h,
+                                               states={"repo": "cmdemo1-workorders", "issue": 99, "gpu": "pro5000",
+                                                       "author_gpus": ["pro6000"], "pid": 2 ** 22})
+        self.assertIn("waiting: cmdemo1-workorders PR #100", r)
+        self.assertEqual((posted, merged, reviews), ([], [], []))
+
+    def test_one_bad_pr_does_not_hide_the_others(self):
+        bad = dict(self.PR, number=200, closingIssuesReferences=[{"number": 199}])
+        def review(repo, pr, issue, gpu):
+            return L.ReviewVerdict(True, "- No findings.")
+        posted, merged, logs = [], [], []
+        def gh(args):
+            if args[:2] == ["pr", "list"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps([bad, self.PR]), "")
+            if args[:2] == ["pr", "checks"]:
+                if args[2] == "200": return subprocess.CompletedProcess(args, 0, "not json", "")   # the bad PR
+                return subprocess.CompletedProcess(args, 0, json.dumps(GREEN_CHECKS), "")
+            if args[:2] == ["pr", "merge"]:
+                merged.append(args)
+                return subprocess.CompletedProcess(args, 0, "Merged", "")
+            if args[:2] == ["issue", "comment"]:
+                with open(args[args.index("--body-file") + 1]) as f: posted.append((args[2], f.read()))
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[0] == "api":
+                return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(args)
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):
+            r = W.own_green_prs_check(repos=("cmdemo1-workorders",), gh=gh, health=lambda: dict(HEALTHY),
+                                      review=review, clock=lambda: T0, log=logs.append)
+        self.assertEqual(merged, [L.merge_args("clearmeasure-aisf-sample-apps/cmdemo1-workorders", 100, "abc123def456")])
+        self.assertTrue(any("PR #200 skipped" in l for l in logs))
+        self.assertIn("PR #100", r)
+
+    def test_failed_pr_list_is_in_the_result(self):
+        def gh(args):
+            if args[:2] == ["pr", "list"]: return subprocess.CompletedProcess(args, 1, "gh: boom", "")
+            raise AssertionError(args)
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):
+            r = W.own_green_prs_check(repos=("cmdemo1-workorders",), gh=gh, health=lambda: dict(HEALTHY),
+                                      review=lambda *a: None, clock=lambda: T0, log=lambda s: None)
+        self.assertEqual(r, "ok; list failed: cmdemo1-workorders")
+
+class OwnGreenPrsEntry(unittest.TestCase):
+    """Check 3's wiring: run_checks(own_prs=True) and the `run-own-prs` CLI run the full set (the driver-exit
+    hook's); the default run_checks() and `run` keep the registered checks only."""
+
+    def test_run_checks_own_prs_runs_check_3_after_the_registered_checks(self):
+        seen = []
+        def fake(**kw): seen.append("own"); return "ok"
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home, (W, "own_green_prs_check"): fake}):
+            r = W.run_checks(gh=no_prs, own_prs=True, log=lambda s: None)
+        self.assertEqual([n for n, _ in r], ["gpu_health_check", "fix_handoff_check", "fake"])
+        self.assertEqual(seen, ["own"])
+        self.assertEqual(r[2], ("fake", "ok"))
+
+    def test_default_run_checks_keeps_the_registered_checks_only(self):
+        def no_check3(**kw): raise AssertionError("check 3 must not run without own_prs=True")
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home, (W, "own_green_prs_check"): no_check3}):
+            r = W.run_checks(gh=no_prs, log=lambda s: None)
+        self.assertEqual([n for n, _ in r], ["gpu_health_check", "fix_handoff_check"])
+
+    def test_cli_run_own_prs_passes_the_flag(self):
+        calls = []
+        with fake_modules({(W, "run_checks"): lambda **kw: (calls.append(kw), [["own_green_prs_check", "ok"]])[1]}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(W.main(["run-own-prs"]), 0)
+        self.assertEqual(calls, [{"own_prs": True}])
+
+    def test_exit_hook_runs_the_full_set(self):
+        """item_loop.watchdog_exit passes own_prs=True: the driver-exit hook gets check 3 with the rest."""
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "item_loop.py")).read()
+        self.assertIn("watchdog.run_checks(log=drv.log, own_prs=True)", src)
+
+class PiReviewDefault(unittest.TestCase):
+    """Check 3's default review runner: one run-task on the given (non-author) GPU with the diff in the prompt;
+    the record's result and the findings file become the ReviewVerdict pair."""
+
+    def _gh(self, diff="diff --git a/a b/b"):
+        def gh(args):
+            if args[:2] == ["pr", "view"]: return subprocess.CompletedProcess(args, 0, "the PR body\n", "")
+            if args[:2] == ["issue", "view"]: return subprocess.CompletedProcess(args, 0, "the issue body\n", "")
+            if args[:2] == ["pr", "diff"]: return subprocess.CompletedProcess(args, 0, diff, "")
+            raise AssertionError(args)
+        return gh
+
+    def test_fail_reads_the_findings_file_and_keeps_the_diff_in_the_prompt(self):
+        def runner(cmd, **kw):
+            self.assertEqual(cmd[0], os.path.join(L.HERE, "run-task"))
+            self.assertEqual(cmd[cmd.index("--task") + 1], "watchdog-review-cmdemo1-workorders-100")
+            self.assertEqual(cmd[cmd.index("--gpu") + 1], "ts3")
+            d = cmd[cmd.index("--run-dir") + 1]
+            self.assertEqual(cmd[cmd.index("--cwd") + 1], d)
+            with open(cmd[cmd.index("--prompt-file") + 1]) as f: prompt = f.read()
+            self.assertIn("diff --git a/a b/b", prompt)
+            self.assertIn("End your reply with PASS", prompt)
+            self.assertIn("the issue body", prompt)
+            self.assertIn("the PR body", prompt)
+            open(os.path.join(d, "independent-review.md"), "w").write("- a real finding\n")
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"result": "FAIL", "gpu": "ts3"}) + "\n", "")
+        result, findings = W.pi_review("cmdemo1-workorders", 100, 99, "ts3", gh=self._gh(), runner=runner)
+        v = L.review_verdict(result, findings)
+        self.assertTrue(v.is_fail)
+        self.assertIn("a real finding", findings)
+
+    def test_pass_with_no_findings_file_is_infra_not_a_code_verdict(self):
+        def runner(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"result": "PASS", "gpu": "obs"}) + "\n", "")
+        result, findings = W.pi_review("cmdemo1-workorders", 100, 99, "obs", gh=self._gh(), runner=runner)
+        v = L.review_verdict(result, findings)
+        self.assertTrue(v.is_infra)   # PASS with no findings file: the reviewer wrote nothing, not a code verdict
+        self.assertFalse(v.is_fail)
+
+    def test_timeout_with_no_issue_is_infra(self):
+        def runner(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"result": "timeout", "gpu": "obs"}) + "\n", "")
+        result, findings = W.pi_review("cmdemo1-workorders", 100, None, "obs", gh=self._gh(diff=""), runner=runner)
+        v = L.review_verdict(result, findings)
+        self.assertTrue(v.is_infra)
+        self.assertFalse(v.is_fail)
