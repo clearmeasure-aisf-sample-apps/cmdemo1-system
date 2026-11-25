@@ -3047,4 +3047,190 @@ class SharedFixPass(unittest.TestCase):   # cmdemo1-system#858: the bump-or-bloc
             self.assertIn("merge gate not met after 3 tries", d.s["blocker"])
 
 
+class ShPiOneResponsibility(unittest.TestCase):   # cmdemo1-system#889: sh and pi each keep one responsibility; sh / pi stay the seams the tests stub
+    """Driver.sh's App-token fallback and its rate-limit backoff are _run_logged and _retry_rate_limit, and
+    Driver.pi's slot / timeout argument assembly, relaunch naming and prompt rewriting are a PiHandoff pi drives.
+    The seams are unchanged: DriverShGroupKill, GhRateLimit, GhAppToken, GhChokepoint and HandoffStartWatchdog still
+    stub sh / pi and pin their observable behaviour (runner kwargs, GH_TOKEN order, sleep lists, relaunch names,
+    --gpu lists, --slot-wait values, prompt files, the PiNotStarted text). These cases pin the new structure itself,
+    additively."""
+
+    APP_TOKEN = "ghs_" + "A" * 36                       # the same shape GhAppToken mints with printf
+
+    def setUp(self):
+        self._app_env = os.environ.get("GH_APP_TOKEN_CMD")
+        os.environ.pop("GH_APP_TOKEN_CMD", None)        # an App token only where a test asks for one
+        L._app_tok.update(v=None, at=0.0)
+    def tearDown(self):
+        L._app_tok.update(v=None, at=0.0)
+        if self._app_env is None: os.environ.pop("GH_APP_TOKEN_CMD", None)
+        else: os.environ["GH_APP_TOKEN_CMD"] = self._app_env
+
+    # -- Driver.sh: dry-run skip + one run (_run_logged) + the rate-limit backoff (_retry_rate_limit)
+    def test_sh_delegates_the_run_and_the_backoff(self):
+        src = inspect.getsource(L.Driver.sh)
+        self.assertIn("self._run_logged(", src)
+        self.assertIn("self._retry_rate_limit(", src)
+        self.assertNotIn("while", src, "sh no longer owns a retry loop")
+        self.assertNotIn("app_token", src, "the App-token fallback is _run_logged's")
+        self.assertNotIn("wait_alive", src, "the backoff wait is _retry_rate_limit's")
+
+    def test_run_logged_app_token_then_user_login(self):
+        os.environ["GH_APP_TOKEN_CMD"] = "unused-mint"  # the cached token answers; the mint command never runs
+        L._app_tok.update(v=self.APP_TOKEN, at=time.time())
+        seen = []
+        def runner(cmd, **k):
+            seen.append((k.get("env") or {}).get("GH_TOKEN"))
+            if len(seen) == 1:
+                return L.subprocess.CompletedProcess(cmd, 1, "gh: Resource not accessible by integration (HTTP 403)", "")
+            return L.subprocess.CompletedProcess(cmd, 0, "[]", "")
+        with patched_driver_env(run=runner) as h:
+            d = make_driver(issue=889, dry_run=False)
+            r = d._run_logged(["gh", "pr", "list"])
+        self.assertEqual((r.returncode, r.stdout), (0, "[]"))
+        self.assertEqual(seen, [self.APP_TOKEN, None], "the App attempt goes out with GH_TOKEN, the fallback without one")
+
+    def test_run_logged_401_drops_the_cached_token(self):
+        os.environ["GH_APP_TOKEN_CMD"] = "unused-mint"
+        L._app_tok.update(v=self.APP_TOKEN, at=time.time())
+        replies = iter([(1, "HTTP 401: Bad credentials"), (0, "[]")])
+        def runner(cmd, **k):
+            rc, out = next(replies)
+            return L.subprocess.CompletedProcess(cmd, rc, out, "")
+        with patched_driver_env(run=runner) as h:
+            make_driver(issue=889, dry_run=False)._run_logged(["gh", "pr", "list"])
+        self.assertEqual(L._app_tok, {"v": None, "at": 0.0}, "a 401 / bad-credentials re-mints on the next call")
+
+    def test_run_logged_gives_no_token_to_non_gh_and_authored_calls(self):
+        os.environ["GH_APP_TOKEN_CMD"] = "unused-mint"
+        L._app_tok.update(v=self.APP_TOKEN, at=time.time())
+        seen = []
+        def runner(cmd, **k):
+            seen.append((k.get("env") or {}).get("GH_TOKEN"))
+            return L.subprocess.CompletedProcess(cmd, 0, "", "")
+        with patched_driver_env(run=runner) as h:
+            d = make_driver(issue=889, dry_run=False)
+            d._run_logged(["git", "status"])
+            d._run_logged(["gh", "pr", "create", "--title", "t"])
+            d._run_logged(["gh", "issue", "create", "--title", "t"])
+        self.assertEqual(seen, [None, None, None], "git never gets a token; authored objects stay the bot user's")
+
+    def test_retry_rate_limit_waits_in_backoff_and_reruns(self):
+        with fake_home() as h:
+            d = make_driver(issue=889, dry_run=False)
+            sleeps, reruns = [], []
+            d.wait_alive = lambda s, why: sleeps.append((s, why))
+            d._run_logged = lambda cmd, cwd=None, timeout=None: (reruns.append(list(cmd)),
+                                                                 L.subprocess.CompletedProcess(cmd, 0, "[]", ""))[1]
+            rl = L.subprocess.CompletedProcess(["gh", "pr", "list"], 1, "HTTP 403: API rate limit exceeded for user ID 1.", "")
+            r = d._retry_rate_limit(["gh", "pr", "list"], rl)
+        self.assertEqual((r.returncode, r.stdout), (0, "[]"))
+        self.assertEqual(reruns, [["gh", "pr", "list"]], "one re-run after the rate-limited reply")
+        self.assertEqual(sleeps, [(60, "gh rate limit, retry 1")])
+
+    def test_retry_rate_limit_gives_up_when_the_budget_is_exhausted(self):
+        with fake_home() as h:
+            d = make_driver(issue=889, dry_run=False)
+            sleeps, reruns = [], []
+            d.wait_alive = lambda s, why: sleeps.append(s)
+            def rerun(cmd, cwd=None, timeout=None):
+                reruns.append(1)
+                return L.subprocess.CompletedProcess(cmd, 1, "GraphQL: API rate limit exceeded for user ID 1.", "")
+            d._run_logged = rerun
+            old = (L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S)
+            L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S = 2, 10 ** 6
+            try:
+                r = d._retry_rate_limit(["gh", "pr", "list"],
+                                        L.subprocess.CompletedProcess(["gh", "pr", "list"], 1,
+                                                                      "HTTP 429: Secondary rate limit.", ""))
+            finally:
+                L.GH_RETRY_MAX_ATTEMPTS, L.GH_RETRY_MAX_WAIT_S = old
+        self.assertEqual(r.returncode, 1, "exhausted: the last rate-limited reply is what sh fails on")
+        self.assertEqual(reruns, [1, 1])
+        self.assertEqual(sleeps, [60, 120])
+
+    def test_retry_rate_limit_passes_a_non_rate_limit_reply_through(self):
+        with fake_home() as h:
+            d = make_driver(issue=889, dry_run=False)
+            sleeps = []
+            d.wait_alive = lambda s, why: sleeps.append(s)
+            made = L.subprocess.CompletedProcess(["gh", "pr", "list"], 1, "HTTP 404: Not Found", "")
+            r = d._retry_rate_limit(["gh", "pr", "list"], made)
+        self.assertIs(r, made, "the runner's own CompletedProcess comes back unchanged")
+        self.assertEqual(sleeps, [])
+
+    # -- Driver.pi: the PiHandoff owns the arguments, the naming and the prompt; pi drives it through self.sh
+    def test_pi_drives_a_pi_handoff_and_keeps_the_sh_seam(self):
+        src = inspect.getsource(L.Driver.pi)
+        self.assertIn("PiHandoff(", src)
+        self.assertNotIn("RELAUNCH_NOTE", src, "the relaunch prompt suffix is the handoff's")
+        self.assertNotIn("--slot-wait", src, "the run-task argv is the handoff's")
+        self.assertNotIn("--start-timeout", src)
+        with fake_home() as h:
+            d = make_driver(issue=889, dry_run=False)
+            d.s.update(gpu="ts3", size="small", wt=tempfile.mkdtemp(dir=h))
+            calls = []
+            def sh(cmd, **k):
+                calls.append(list(cmd))
+                return L.subprocess.CompletedProcess(cmd, 0, json.dumps({"task": cmd[cmd.index("--task") + 1],
+                                                                         "gpu": "ts3", "result": "PASS"}), "")
+            d.sh = sh
+            self.assertTrue(d.pi("t1", "do it"))
+        self.assertEqual(len(calls), 1, "pi still runs its attempts through self.sh, the seam the tests stub")
+        self.assertEqual(calls[0][calls[0].index("--task") + 1], "t1")
+
+    def test_handoff_first_attempt_is_the_recorded_gpu_and_the_short_slot_wait(self):
+        with fake_home() as h:
+            d = make_driver(issue=889, dry_run=False)
+            d.s.update(gpu="ts3", size="small", wt=tempfile.mkdtemp(dir=h))
+            hd = L.PiHandoff(d, "t1", "do it", timeout=600)
+            self.assertEqual((hd.name, hd.task, hd.attempt, hd.gpu), ("t1", "t1", 0, "ts3"))
+            self.assertFalse(hd.review)
+            self.assertEqual(hd.slot_wait, L.HANDOFF_SLOT_WAIT_S)
+            self.assertEqual(hd.timeout, G.client_timeout(600))
+            self.assertEqual(hd.prompt_file, os.path.join(d.run_dir, "logs", "t1.prompt.md"))
+            text = open(hd.prompt_file).read()
+            self.assertEqual(text, L.scrub("do it") + L.PI_RULES_SUFFIX)
+            self.assertNotIn("partial edits", text)
+            self.assertTrue(text.rstrip().endswith("the last line."))
+
+    def test_handoff_relaunch_renames_the_task_and_writes_the_partial_edits_note(self):
+        with patched_driver_env(gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}) as h:
+            d = make_driver(issue=889, dry_run=False)
+            d.s.update(gpu="ts3", size="small", wt=tempfile.mkdtemp(dir=h))
+            hd = L.PiHandoff(d, "t1", "do it")
+            hd.relaunch()
+            self.assertEqual((hd.attempt, hd.task, hd.gpu), (1, "t1-relaunch-1", "pro5000,pro6000,obs,ts3"))
+            self.assertEqual(hd.slot_wait, L.ANY_SLOT_WAIT_S)
+            text = open(hd.prompt_file).read()
+            self.assertIn("partial edits", text)
+            self.assertIn("`t1`", text)
+            self.assertTrue(text.rstrip().endswith("the last line."))
+            first = open(os.path.join(d.run_dir, "logs", "t1.prompt.md")).read()
+            self.assertNotIn("partial edits", first)
+
+    def test_handoff_review_waits_the_long_slot_from_the_first_attempt(self):
+        with fake_home() as h:
+            d = make_driver(issue=889, dry_run=False)
+            d.s.update(gpu="ts3", size="small", wt=tempfile.mkdtemp(dir=h))
+            hd = L.PiHandoff(d, "independent-review-1", "review", gpu="obs")
+            self.assertTrue(hd.review)
+            self.assertEqual(hd.gpu, "obs")
+            self.assertEqual(hd.slot_wait, L.ANY_SLOT_WAIT_S)
+
+    def test_handoff_run_task_args_assemble_the_argv(self):
+        with patched_driver_env(gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}) as h:
+            d = make_driver(issue=889, dry_run=False)
+            d.s.update(gpu="ts3", size="small", wt=tempfile.mkdtemp(dir=h))
+            hd = L.PiHandoff(d, "t1", "do it", timeout=600)
+            self.assertEqual(hd.run_task_args(),
+                             [os.path.join(L.HERE, "run-task"), "--run-dir", d.run_dir, "--cwd", d.s["wt"],
+                              "--task", "t1", "--prompt-file", hd.prompt_file, "--timeout", str(G.client_timeout(600)),
+                              "--gpu", "ts3", "--start-timeout", str(L.HANDOFF_START_S),
+                              "--stall-timeout", str(L.HANDOFF_STALL_S), "--slot-wait", str(L.HANDOFF_SLOT_WAIT_S)])
+            hd.relaunch()
+            args = hd.run_task_args()
+            self.assertEqual(args[args.index("--task") + 1], "t1-relaunch-1")
+            self.assertEqual(args[args.index("--slot-wait") + 1], str(L.ANY_SLOT_WAIT_S))
+
 if __name__ == "__main__": unittest.main()
