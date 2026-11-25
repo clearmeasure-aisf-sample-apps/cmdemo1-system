@@ -353,6 +353,79 @@ class ReviewInfraRetry(unittest.TestCase):   # t83u: no / empty findings or no v
             self.assertIn("not a code FAIL", d.s["blocker"])
             self.assertEqual(d.s["counts"]["review_fail"], 0)
 
+    # ---- cmdemo1-system#887: the same three states, asked of a ReviewVerdict instead of unwrapped from a tuple. ----
+    # The five assertions above stay exactly as they were; these re-run the same cases through the value object.
+    def test_review_verdict_answers_the_three_states_it_always_carried(self):
+        v = L.ReviewVerdict.of(L.review_verdict("exit 1", None))       # #1944: no findings file
+        self.assertTrue(v.is_infra); self.assertFalse(v.is_pass); self.assertFalse(v.is_fail)
+        v = L.ReviewVerdict.of(L.review_verdict("FAIL", " \n\t"))     # whitespace only
+        self.assertTrue(v.is_infra); self.assertFalse(v.is_pass); self.assertFalse(v.is_fail)
+        v = L.ReviewVerdict.of(L.review_verdict("timeout", "- partial"))   # #820: timed out, no verdict
+        self.assertTrue(v.is_infra); self.assertFalse(v.is_pass); self.assertFalse(v.is_fail)
+        v = L.ReviewVerdict.of(L.review_verdict("PASS", "- No findings."))
+        self.assertTrue(v.is_pass); self.assertFalse(v.is_fail); self.assertFalse(v.is_infra)
+        v = L.ReviewVerdict.of(L.review_verdict("FAIL", "- bug"))
+        self.assertTrue(v.is_fail); self.assertFalse(v.is_pass); self.assertFalse(v.is_infra)
+        self.assertFalse(L.hold_resumes("independent review infra failed 3 times (x)"))
+
+    def test_verdict_labels_and_the_of_seam_read_the_three_states(self):
+        self.assertEqual([v.label for v in (L.review_verdict("PASS", "- x"), L.review_verdict("FAIL", "- x"),
+                                            L.review_verdict("exit 1", None))], ["PASS", "FAIL", "INFRA (retry)"])
+        self.assertEqual(L.ReviewVerdict.of((False, "- bug")), L.ReviewVerdict(False, "- bug"))   # a bare pair still normalizes
+        self.assertIsNone(L.ReviewVerdict.of(None))       # no review ran at all: independent_review blocked the item, the stage leaves
+        self.assertIs(L.ReviewVerdict.of(L.ReviewVerdict(True, "- No findings.")).ok, True)
+
+    def test_infra_value_objects_are_retried_then_pass(self):
+        with fake_home() as h:
+            d = self.driver(h, [L.ReviewVerdict(None, "no findings file"), L.ReviewVerdict(None, "empty"),
+                                L.ReviewVerdict(True, "- No findings.")])
+            d.st_review()
+            self.assertEqual(d.s["stage"], "merge")
+            self.assertEqual((d.s["counts"]["review_fail"], d.s["counts"]["review_infra"]), (0, 0))
+
+    def test_infra_value_objects_block_after_two_retries_without_a_fail(self):
+        with fake_home() as h:
+            d = self.driver(h, [L.ReviewVerdict(None, "no findings file")] * 3)
+            d.st_review()
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertTrue(d.s["blocker"].startswith("independent review infra failed 3 times"))
+            self.assertIn("not a code FAIL", d.s["blocker"])
+            self.assertEqual(d.s["counts"]["review_fail"], 0)
+
+    def test_a_fail_verdict_is_a_code_fail_and_still_resets_the_infra_retries(self):
+        with fake_home() as h:
+            d = self.driver(h, [L.ReviewVerdict(None, "no findings file"), L.ReviewVerdict(False, "- a finding")])
+            asked = []
+            d.fix_pass = lambda key, *a, **k: (asked.append(key), None)[1]   # None: the stage leaves, as after a FAIL
+            d.st_review()
+            self.assertEqual(asked, ["review_fail"], "a FAIL verdict still goes to the review_fail fix pass")
+            self.assertEqual((d.s["counts"]["review_fail"], d.s["counts"]["review_infra"]), (0, 0),
+                             "a real verdict of either kind puts the infra retries back to zero")
+
+    def test_independent_review_hands_back_a_review_verdict(self):   # the real review, not a double
+        with patched_driver_env(research_ok=lambda *a: True, gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}) as h:
+            d = make_driver(issue=887)
+            d.s.update(plan=dict(PLAN), wt=tempfile.mkdtemp(dir=h), gpu="pro5000", pr=7, default="main")
+            d.merge_base = lambda: "abc"
+            rec = json.dumps({"task": "independent-review-1", "gpu": "ts3", "result": "exit 1"})
+            def sh(cmd, **k):
+                out = "body\n## Refactoring research\n- x" if "pr" in cmd else (rec + "\n--- pi tail ---" if "--gpu" in cmd else "")
+                return subprocess.CompletedProcess(cmd, 1 if "--gpu" in cmd else 0, out, "")
+            d.sh = sh
+            v = d.independent_review()
+            self.assertIsInstance(v, L.ReviewVerdict)
+            self.assertTrue(v.is_infra); self.assertFalse(v.is_fail)
+            self.assertIn("no findings file", v.findings); self.assertEqual(v.label, "INFRA (retry)")
+            self.assertEqual(d.s["reviewer_gpu"], "ts3")
+
+    def test_st_review_asks_the_verdict_a_question_instead_of_unwrapping_a_pair(self):   # the smell #887 names
+        import inspect
+        src = inspect.getsource(L.Driver.st_review)
+        self.assertIn("self.review_until_verdict()", src, "the retry-an-INFRA-verdict policy has one home")
+        self.assertIn("verdict.is_fail", src, "st_review branches on the value object")
+        for unwrapped in ("verdict[0]", "verdict[1]", "ok, findings = verdict"):
+            self.assertNotIn(unwrapped, src, f"st_review still unwraps the pair with `{unwrapped}`")
+
     def test_review_runs_on_any_free_non_author_gpu_and_missing_file_is_infra(self):
         with patched_driver_env(research_ok=lambda *a: True, gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}) as h:
             d = make_driver(issue=32)

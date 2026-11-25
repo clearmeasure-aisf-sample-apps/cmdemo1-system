@@ -21,6 +21,7 @@ comment or Pi prompt (scrubbed).
 """
 from collections import Counter
 from enum import StrEnum
+from typing import NamedTuple
 import argparse, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, time, urllib.request, uuid
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
@@ -557,14 +558,51 @@ def hold_resumes(blocker):
     return not str(blocker or "").lstrip().lower().startswith(("review fail", "independent review fail", "independent review infra",
                                                                "pi hand-off"))
 
+class ReviewVerdict(NamedTuple):
+    """One independent-review run as a value object (cmdemo1-system#887): the `ok` of the review and its `findings`
+    text, answering the question the stages actually ask -- `is_pass` / `is_fail` / `is_infra` -- instead of unwrapping
+    a pair and reading `verdict[0] is None` as "the infrastructure failed".
+
+    INFRA is the third state, the one `review_verdict` used to carry in its docstring alone (t83u, #1944 / #820): the
+    reviewer ran on broken plumbing -- no findings file, an empty one, or a reply with no PASS / FAIL verdict. It is
+    retried on any free GPU under LIMITS['review_infra'], never handed to Pi as findings and never counted as a code
+    FAIL. `label` is how the driver logs the three states.
+
+    The tuple shape stays on purpose (`ok, findings = v` still unpacks and a ReviewVerdict still equals the bare pair):
+    that pair is what every log line, test double and older call site already speaks, and the shape is saved in nothing.
+    `of()` is the single seam that turns a bare pair -- or None, meaning no review ran at all because the caller had
+    already blocked the item -- into the value object."""
+
+    ok: bool | None
+    findings: str
+
+    @property
+    def is_pass(self): return self.ok is True
+
+    @property
+    def is_fail(self): return self.ok is False
+
+    @property
+    def is_infra(self): return self.ok is None      # the review could not run: retry it, this says nothing about the code
+
+    @property
+    def label(self): return "INFRA (retry)" if self.is_infra else "PASS" if self.is_pass else "FAIL"
+
+    @classmethod
+    def of(cls, v):
+        """`v` as a ReviewVerdict: itself, a bare (ok, findings) pair, or None when no review ran (a Blocker is up)."""
+        if v is None or isinstance(v, cls): return v
+        return cls(*v)
+
 def review_verdict(result, findings):
-    """(ok, text) for one independent-review run. ok None = an infrastructure failure, never a code FAIL (t83u, #1944 / #820):
-    no findings file (findings None), an empty / whitespace-only one, or a reply with no PASS / FAIL verdict (timeout,
+    """The ReviewVerdict for one independent-review run. INFRA (`is_infra`, never a code FAIL; t83u, #1944 / #820): no
+    findings file (findings None), an empty / whitespace-only one, or a reply with no PASS / FAIL verdict (timeout,
     crash). Those are retried on any free GPU and never handed to Pi as findings."""
-    if findings is None: return None, f"the reviewer wrote no findings file (run result: {result})"
-    if not findings.strip(): return None, f"the reviewer's findings file is empty (run result: {result})"
-    if result not in ("PASS", "FAIL"): return None, f"the review ended with no PASS/FAIL verdict (run result: {result})"
-    return result == "PASS", findings
+    if findings is None: return ReviewVerdict(None, f"the reviewer wrote no findings file (run result: {result})")
+    if not findings.strip(): return ReviewVerdict(None, f"the reviewer's findings file is empty (run result: {result})")
+    if result not in ("PASS", "FAIL"):
+        return ReviewVerdict(None, f"the review ended with no PASS/FAIL verdict (run result: {result})")
+    return ReviewVerdict(result == "PASS", findings)
 
 def intake_open(red, plan):
     """While anything is red only fix-forward items start."""
@@ -1398,18 +1436,11 @@ class Driver:
             self.move("Review")
             return self.save(stage="ci")
         self.save(evidence=[[c["text"], c["evidence_cmd"], last] for c, last, _ in ev])
-        verdict = self.independent_review()
-        while verdict is not None and verdict[0] is None:   # review infra failure: retry, never a FAIL, never sent to Pi
-            if not self.bump("review_infra"):
-                return self.blocker(f"independent review infra failed {LIMITS['review_infra'] + 1} times ({verdict[1]}); "
-                                    "this is not a code FAIL and no findings were sent to Pi. Check the review GPUs, then resume.")
-            self.log(f"independent review infra failure: {verdict[1]}; retry {self.s['counts']['review_infra']} of "
-                     f"{LIMITS['review_infra']} on any free GPU")
-            verdict = self.independent_review()
-        if verdict is None: return
-        ok, findings = verdict
-        self.s["counts"]["review_infra"] = 0; self.save()
-        if not ok:
+        verdict = self.review_until_verdict()
+        if verdict is None: return   # no verdict at all: review_until_verdict / independent_review already blocked the item
+        findings = verdict.findings
+        self.s["counts"]["review_infra"] = 0; self.save()   # any real verdict, PASS or FAIL: the infra retries start over
+        if verdict.is_fail:
             n = self.fix_pass("review_fail", "independent review FAIL twice: " + findings[:600], progress="In Progress",
                               comment=lambda n: self.review_fail_comment(f"Review → In Progress\n\nReview: FAIL (independent review on the {self.gpu_label(self.s.get('reviewer_gpu'))}).\n\n"
                                                                          f"{findings[:3000]}\n\nSending the findings to Pi."))
@@ -1431,6 +1462,22 @@ class Driver:
             return self.save(stage="ci")
         self.save(stage="merge")
 
+    def review_until_verdict(self):
+        """The independent review, retried on any free GPU while it ends in an infrastructure failure (t83u, #887): an
+        INFRA verdict says nothing about the code, so it is never a code FAIL and its text never reaches Pi. Returns
+        the ReviewVerdict st_review branches on, or None when this stage must leave: `independent_review` blocked the
+        item because no second GPU came up, or the LIMITS['review_infra'] retries of an INFRA verdict raised this
+        Blocker. Bare (ok, findings) pairs are taken through ReviewVerdict.of so the stage asks one kind of question."""
+        while True:
+            verdict = ReviewVerdict.of(self.independent_review())
+            if verdict is None or not verdict.is_infra: return verdict
+            if not self.bump("review_infra"):
+                self.blocker(f"independent review infra failed {LIMITS['review_infra'] + 1} times ({verdict.findings}); "
+                             "this is not a code FAIL and no findings were sent to Pi. Check the review GPUs, then resume.")
+                return None
+            self.log(f"independent review infra failure: {verdict.findings}; retry {self.s['counts']['review_infra']} of "
+                     f"{LIMITS['review_infra']} on any free GPU")
+
     def sync_pr_research(self):
         cur = self.pr_body(check=False)
         new = with_research(cur, self.research_text())
@@ -1438,15 +1485,17 @@ class Driver:
 
     def independent_review(self):
         """Pi on a different GPU than the author reviews the diff, the issue's criteria and the `## Refactoring
-        research` section of the PR body (missing or not substantive = FAIL). Returns (ok, findings), or None after a
-        Blocker when no second GPU came up. ok is None for a review-infra failure (review_verdict): no / empty findings
-        file or no verdict. The review runs on whichever non-author GPU has a free slot first."""
+        research` section of the PR body (missing or not substantive = FAIL). Returns the ReviewVerdict (PASS / FAIL /
+        INFRA, see review_verdict: no / empty findings file or no verdict), or None after a Blocker when no second GPU
+        came up -- no review ran, so the stage leaves. The review runs on whichever non-author GPU has a free slot
+        first."""
         p = self.s["plan"]
         body = self.pr_body(check=False)
         if not research_ok(body, p["files"]):
             self.save(research_in_body=False)
-            return False, (f"- The PR body has no substantive `{RESEARCH_HEAD}` section (findings per touched file, in-scope "
-                           "refactors done, follow-ups filed). Every item needs it.")
+            return ReviewVerdict(False, f"- The PR body has no substantive `{RESEARCH_HEAD}` section "
+                                        "(findings per touched file, in-scope refactors done, follow-ups filed). "
+                                        "Every item needs it.")
         self.save(research_in_body=True)
         t_end = time.time() + REVIEWER_WAIT_H * 3600
         while True:
@@ -1478,9 +1527,9 @@ class Driver:
         if self.sh(["git", "status", "--porcelain"], cwd=self.s["wt"], check=False).stdout.strip():
             self.log("reviewer changed files; discarding them"); self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"])
             self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"])
-        ok, findings = review_verdict(self.last_task.get("result"), scrub(open(out).read()) if os.path.exists(out) else None)
-        self.log(f"independent review on {rv}: {'INFRA (retry)' if ok is None else 'PASS' if ok else 'FAIL'}")
-        return ok, findings
+        verdict = review_verdict(self.last_task.get("result"), scrub(open(out).read()) if os.path.exists(out) else None)
+        self.log(f"independent review on {rv}: {verdict.label}")
+        return verdict
 
     def check_held(self):
         """Raise PiHeld when a HOLD file appeared during a long stage pass (CI wait, review wait, deploy watch)."""
