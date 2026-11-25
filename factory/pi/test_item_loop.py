@@ -703,6 +703,65 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
                 with self.assertRaises(SystemExit) as e: cmd(a)
                 self.assertEqual(e.exception.code, 0)
 
+class TaskNameSlug(unittest.TestCase):   # cmdemo1-system#959: a plan task name with '/' or ':' must not crash the prompt-file write
+    def driver_with_scripted_run(self, h, issue, results):
+        """A driver whose sh is faked to replay `results` (PASS / no-start / stalled, in order) for every run-task call."""
+        d = make_driver(issue=issue); d.s.update(gpu="ts3", size="small", wt=tempfile.mkdtemp(dir=h))
+        calls, it = [], iter(results)
+        def sh(cmd, **k):
+            calls.append(list(cmd))
+            res = next(it)
+            return subprocess.CompletedProcess(cmd, 0 if res == "PASS" else 1,
+                                               json.dumps({"task": cmd[cmd.index("--task") + 1], "gpu": "ts3", "result": res}), "")
+        d.sh = sh
+        return d, calls
+
+    def test_task_slug_is_the_run_task_file_mapping(self):
+        self.assertEqual(L.task_slug("test: whole factory/pi suite green and no orphans left"),
+                         "test--whole-factory-pi-suite-green-and-no-orphans-left")
+        self.assertEqual(L.task_slug("t1"), "t1")   # a safe name is unchanged
+        self.assertEqual(L.task_slug("review-fix-2-relaunch-1"), "review-fix-2-relaunch-1")
+        self.assertEqual(L.task_slug(L.task_slug("a/b c:d")), L.task_slug("a/b c:d"))   # idempotent
+
+    def test_pi_slashes_and_colons_run_without_error_and_write_the_slug_path(self):
+        with fake_home() as h:
+            d, calls = self.driver_with_scripted_run(h, 959, ["PASS"])
+            name = "test: whole factory/pi suite green and no orphans left"
+            self.assertTrue(d.pi(name, "do it"))   # used to raise FileNotFoundError (raw '/' in the prompt path)
+            arg = lambda c, f: c[c.index(f) + 1]
+            pf = arg(calls[0], "--prompt-file")
+            self.assertEqual(pf, os.path.join(d.run_dir, "logs", "test--whole-factory-pi-suite-green-and-no-orphans-left.prompt.md"))
+            self.assertTrue(os.path.exists(pf))
+            self.assertIn("do it", open(pf).read())
+            self.assertEqual(arg(calls[0], "--task"), "test--whole-factory-pi-suite-green-and-no-orphans-left")
+
+    def test_pi_safe_name_keeps_its_existing_log_names(self):
+        with fake_home() as h:
+            d, calls = self.driver_with_scripted_run(h, 960, ["PASS"])
+            self.assertTrue(d.pi("t1", "do it"))
+            arg = lambda c, f: c[c.index(f) + 1]
+            self.assertEqual(arg(calls[0], "--task"), "t1")
+            self.assertEqual(arg(calls[0], "--prompt-file"), os.path.join(d.run_dir, "logs", "t1.prompt.md"))
+            self.assertTrue(os.path.exists(os.path.join(d.run_dir, "logs", "t1.prompt.md")))
+
+    def test_pi_relaunch_prompt_paths_are_slugged_too(self):
+        old_gpu_health = L.gpu_health
+        L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
+        try:
+            with fake_home() as h:
+                d, calls = self.driver_with_scripted_run(h, 961, ["no-start", "PASS"])
+                name = "test: whole factory/pi suite green"
+                self.assertTrue(d.pi(name, "do it"))
+                arg = lambda c, f: c[c.index(f) + 1]
+                self.assertEqual([arg(c, "--task") for c in calls],
+                                 ["test--whole-factory-pi-suite-green", "test--whole-factory-pi-suite-green-relaunch-1"])
+                for c in calls:
+                    pf = arg(c, "--prompt-file")
+                    self.assertTrue(os.path.exists(pf), pf)
+                self.assertIn("partial edits", open(arg(calls[1], "--prompt-file")).read())
+        finally:
+            L.gpu_health = old_gpu_health
+
 class DryRunDriver(unittest.TestCase):
     def test_writes_are_skipped_in_dry_run(self):
         with fake_home() as h:
