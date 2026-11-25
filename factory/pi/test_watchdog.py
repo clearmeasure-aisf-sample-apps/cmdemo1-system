@@ -10,8 +10,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gpu as G
 import watchdog as W
 import item_loop as L
+from test_item_loop import fake_modules   # the shared save/swap/restore helper, kept with the sibling test file's helpers (#940)
 
 T0 = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+
+def clock_swaps(now, sleeps):
+    """The (L.now, W.time.sleep) swaps for fake_modules in the comment-gap tests: the clock is frozen at now[0] and a
+    sleep(secs) records secs in sleeps and moves now[0] on, so COMMENT_GAP_S is tested without waiting a minute."""
+    return {(L, "now"): lambda: now[0],
+            (W.time, "sleep"): lambda secs: (sleeps.append(secs), now.__setitem__(0, now[0] + dt.timedelta(seconds=secs)))[1]}
 
 class Guards(unittest.TestCase):
     """The shared hard-rule guards every watchdog check must obey."""
@@ -82,16 +89,11 @@ class Comments(unittest.TestCase):
         def gh(args):
             calls.append(args)
             return subprocess.CompletedProcess(args, 0, "", "")
-        old_now, old_sleep = L.now, W.time.sleep
-        L.now = lambda: now[0]
-        W.time.sleep = lambda secs: (sleeps.append(secs), now.__setitem__(0, now[0] + dt.timedelta(seconds=secs)))[1]
-        try:
+        with fake_modules(clock_swaps(now, sleeps)):
             W.post_comment("cmdemo1-workorders", 7, "action A", states=[], gh=gh)
             st = {"repo": "cmdemo1-workorders", "issue": 7, "last_comment_at": T0.isoformat()}   # action A commented at T0
             now[0] = T0 + dt.timedelta(seconds=10)                                           # the check acts again ten seconds later
             W.post_comment("cmdemo1-workorders", 7, "action B", [("x", st)], gh=gh)
-        finally:
-            L.now, W.time.sleep = old_now, old_sleep
         self.assertEqual(len(calls), 2)
         self.assertEqual(sleeps[-1], 51.0)                    # sleeps so action B lands 61 s after action A
         self.assertGreaterEqual((now[0] - T0).total_seconds(), W.COMMENT_GAP_S)
@@ -103,14 +105,9 @@ class Comments(unittest.TestCase):
         def gh(args):
             calls.append(args)
             return subprocess.CompletedProcess(args, 0, "", "")
-        old_now, old_sleep = L.now, W.time.sleep
-        L.now = lambda: now[0]
-        W.time.sleep = lambda secs: (sleeps.append(secs), now.__setitem__(0, now[0] + dt.timedelta(seconds=secs)))[1]
-        try:
+        with fake_modules(clock_swaps(now, sleeps)):
             self.assertIsNotNone(W.post_comment("cmdemo1-workorders", 7, "action A", states=[], gh=gh))
             self.assertIsNotNone(W.post_comment("cmdemo1-workorders", 7, "action B", states=[], gh=gh))
-        finally:
-            L.now, W.time.sleep = old_now, old_sleep
         self.assertEqual(len(calls), 2)
         self.assertEqual(sleeps, [W.COMMENT_GAP_S])           # the second action waited the whole gap on its own
         self.assertGreaterEqual((now[0] - T0).total_seconds(), W.COMMENT_GAP_S)
@@ -130,13 +127,8 @@ class GpuHealthCheck(unittest.TestCase):
     select it; all GPUs healthy is a no-op with no comment."""
 
     def _run(self, health, log):
-        with tempfile.TemporaryDirectory() as home:
-            old_home = L.HOME
-            L.HOME = home     # no real drivers on disk: all_states() sees no live items
-            try:
-                return W.run_checks(health=health, log=log, gh=no_prs)
-            finally:
-                L.HOME = old_home
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):   # no real drivers on disk: all_states() sees no live items
+            return W.run_checks(health=health, log=log, gh=no_prs)
 
     def test_down_gpu_reported_and_selection_routes_to_the_others(self):
         h = {g: ("HEALTHY", "serves a loaded model (Pi asks for `auto`)") for g in G.GPUS}
@@ -156,25 +148,17 @@ class GpuHealthCheck(unittest.TestCase):
     def test_all_healthy_is_a_no_op_with_no_comment(self):
         def no_comment(*a, **kw):
             raise AssertionError("a no-op check must not comment")
-        old = W.post_comment
-        W.post_comment = no_comment
-        try:
+        with fake_modules({(W, "post_comment"): no_comment}):
             r = self._run(lambda: {g: ("HEALTHY", "serves a loaded model (Pi asks for `auto`)") for g in G.GPUS},
                           lambda s: None)
-        finally:
-            W.post_comment = old
         self.assertEqual(r, [("gpu_health_check", "ok"), ("fix_handoff_check", "ok")])
 
     def test_check_failure_is_caught_logged_and_in_the_result(self):
         logs = []
         def boom(repos, gh, health, clock, log):
             raise RuntimeError("token ghp_" + "a" * 30 + " leaked")
-        old = W.CHECKS
-        W.CHECKS = [boom]
-        try:
+        with fake_modules({(W, "CHECKS"): [boom]}):
             r = W.run_checks(log=logs.append)
-        finally:
-            W.CHECKS = old
         self.assertEqual(len(r), 1)
         self.assertEqual(r[0][0], "boom")
         self.assertTrue(r[0][1].startswith("error: "))
@@ -241,12 +225,9 @@ class FixHandoffCheck(unittest.TestCase):
 
     def _run(self, prs, comments):
         posted = []
-        with tempfile.TemporaryDirectory() as home:
-            old = L.HOME; L.HOME = home
-            try:
-                r = W.fix_handoff_check(gh=self._gh(prs, comments, posted), clock=lambda: T0 + dt.timedelta(minutes=40),
-                                        log=lambda s: None)
-            finally: L.HOME = old
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):   # no real drivers on disk
+            r = W.fix_handoff_check(gh=self._gh(prs, comments, posted), clock=lambda: T0 + dt.timedelta(minutes=40),
+                                    log=lambda s: None)
         return r, posted
 
     PR = {"number": 1311, "body": "Closes #1309\n\n" + L.DRIVER_MARK, "closingIssuesReferences": [{"number": 1309}],
@@ -267,15 +248,12 @@ class FixHandoffCheck(unittest.TestCase):
 
     def test_live_driver_with_stale_progress_is_not_flagged(self):   # mid-fix / CI wait / review-GPU wait: still running
         posted = []
-        with tempfile.TemporaryDirectory() as home:
-            old = L.HOME; L.HOME = home
-            try:
-                states = [("run", {"repo": "cmdemo1-dashboard", "issue": 1309, "pid": os.getpid(), "stage": "ci",
-                                   "progress_at": (T0 - dt.timedelta(minutes=60)).isoformat()})]
-                with mock.patch.object(L, "all_states", lambda: states):
-                    r = W.fix_handoff_check(gh=self._gh([self.PR], [c(FAIL, 5)], posted),
-                                            clock=lambda: T0 + dt.timedelta(minutes=40), log=lambda s: None)
-            finally: L.HOME = old
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):   # no real drivers on disk
+            states = [("run", {"repo": "cmdemo1-dashboard", "issue": 1309, "pid": os.getpid(), "stage": "ci",
+                               "progress_at": (T0 - dt.timedelta(minutes=60)).isoformat()})]
+            with mock.patch.object(L, "all_states", lambda: states):
+                r = W.fix_handoff_check(gh=self._gh([self.PR], [c(FAIL, 5)], posted),
+                                        clock=lambda: T0 + dt.timedelta(minutes=40), log=lambda s: None)
         self.assertEqual((r, posted), ("ok", []))
         self.assertTrue(W.driver_alive(states, "cmdemo1-dashboard", 1309))
         self.assertFalse(W.driver_alive([("run", dict(states[0][1], pid=2 ** 22))], "cmdemo1-dashboard", 1309))
@@ -291,10 +269,8 @@ class FixHandoffCheck(unittest.TestCase):
             if args[0] == "api" and "/issues/1309/" in args[2]:
                 return subprocess.CompletedProcess(args, 0, "gh: warning not json", "")
             return good(args)
-        with tempfile.TemporaryDirectory() as home:
-            old = L.HOME; L.HOME = home
-            try: r = W.fix_handoff_check(gh=gh, clock=lambda: T0 + dt.timedelta(minutes=40), log=logs.append)
-            finally: L.HOME = old
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):
+            r = W.fix_handoff_check(gh=gh, clock=lambda: T0 + dt.timedelta(minutes=40), log=logs.append)
         self.assertEqual(r, "stalled: cmdemo1-dashboard#1398")
         self.assertTrue(any("PR #1311 skipped" in l for l in logs))
 
@@ -308,24 +284,18 @@ class FixHandoffCheck(unittest.TestCase):
         def gh(args):
             if args[:2] == ["pr", "list"]: return subprocess.CompletedProcess(args, 1, "GraphQL: too many nodes", "")
             raise AssertionError(args)
-        with tempfile.TemporaryDirectory() as home:
-            old = L.HOME; L.HOME = home
-            try: r = W.fix_handoff_check(repos=("cmdemo1-dashboard",), gh=gh, clock=lambda: T0, log=lambda s: None)
-            finally: L.HOME = old
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):
+            r = W.fix_handoff_check(repos=("cmdemo1-dashboard",), gh=gh, clock=lambda: T0, log=lambda s: None)
         self.assertEqual(r, "ok; list failed: cmdemo1-dashboard")
 
 class SharedEntry(unittest.TestCase):
     def test_cli_run_entry_calls_run_checks_once_with_the_defaults(self):
         calls = []
-        old = W.run_checks
-        W.run_checks = lambda **kw: (calls.append(kw), [("gpu_health_check", "ok")])[1]
-        try:
+        with fake_modules({(W, "run_checks"): lambda **kw: (calls.append(kw), [("gpu_health_check", "ok")])[1]}):
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(W.main(["run"]), 0)
             self.assertEqual(calls, [{}])                   # 'run' calls run_checks once, with the defaults
             self.assertEqual(json.loads(out.getvalue()), [["gpu_health_check", "ok"]])
-        finally:
-            W.run_checks = old
 
     def test_cli_help_works(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -346,68 +316,55 @@ class ExitHook(unittest.TestCase):
             "criteria": [{"text": "A works", "evidence_cmd": "dotnet test --filter A"}],
             "tasks": [{"name": "t1", "prompt": "Write test A"}], "verify_cmd": "dotnet build", "pr_title": "A"}
 
-    def _setup(self, h, issue, end, failing=False):
-        old_home, old_rc = L.HOME, W.run_checks
-        L.HOME = h
+    @contextlib.contextmanager
+    def _env(self, h, issue, end, failing=False):
+        """A dry-run driver under the temp home h, ending at `end` ("done", "blocked" or "raise"), with the watchdog's
+        run_checks replaced by a stub that records its calls (and fails when `failing`); yields (driver, calls).
+        fake_modules puts L.HOME and watchdog.run_checks back when the block ends, so no test leaves the watchdog
+        patched for the next one and no test has to remember the restore order (#940)."""
         calls = []
-        d = L.Driver(self.PLAN["repo"], issue, dry_run=True)
-        with open(os.path.join(d.run_dir, "plan.json"), "w") as f:
-            json.dump(self.PLAN, f)
-        d.sh = lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "ok", "")
-        if end == "raise":
-            d.st_gpu = lambda: (_ for _ in ()).throw(RuntimeError("driver boom"))
-        else:
-            d.st_gpu = lambda: d.save(stage=end, **({"resume_stage": "ci"} if end == "blocked" else {}))
         def rc(**kw):
             calls.append(kw)
             if failing: raise RuntimeError("checks down")
             return [("gpu_health_check", "ok")]
-        W.run_checks = rc
-        return d, calls, (old_home, old_rc)
+        with fake_modules({(L, "HOME"): h, (W, "run_checks"): rc}):
+            d = L.Driver(self.PLAN["repo"], issue, dry_run=True)
+            with open(os.path.join(d.run_dir, "plan.json"), "w") as f:
+                json.dump(self.PLAN, f)
+            d.sh = lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "ok", "")
+            if end == "raise":
+                d.st_gpu = lambda: (_ for _ in ()).throw(RuntimeError("driver boom"))
+            else:
+                d.st_gpu = lambda: d.save(stage=end, **({"resume_stage": "ci"} if end == "blocked" else {}))
+            yield d, calls
 
     def test_run_checks_once_when_done(self):
-        with tempfile.TemporaryDirectory() as h:
-            d, calls, old = self._setup(h, 40, "done")
-            try:
-                d.run()
-            finally:
-                L.HOME, W.run_checks = old
+        with tempfile.TemporaryDirectory() as h, self._env(h, 40, "done") as (d, calls):
+            d.run()
         self.assertEqual(d.s["status"], "done")
         self.assertEqual(len(calls), 1)                   # the exit hook ran run_checks exactly once
         self.assertIs(calls[0]["log"].__self__, d)        # called with the driver's own log
 
     def test_run_checks_once_when_blocked_and_hold_returns_false(self):
-        with tempfile.TemporaryDirectory() as h:
-            d, calls, old = self._setup(h, 41, "blocked")
-            try:
-                d.run()
-            finally:
-                L.HOME, W.run_checks = old
+        with tempfile.TemporaryDirectory() as h, self._env(h, 41, "blocked") as (d, calls):
+            d.run()
         self.assertEqual(d.s["status"], "blocked")
         self.assertFalse(d.hold_blocked())               # the blocker holds: no resume, the run ends blocked
         self.assertEqual(len(calls), 1)
         self.assertIs(calls[0]["log"].__self__, d)
 
     def test_run_checks_once_when_driver_raises(self):
-        with tempfile.TemporaryDirectory() as h:
-            d, calls, old = self._setup(h, 42, "raise")
-            try:
-                with self.assertRaises(RuntimeError) as e:
-                    d.run()
-                self.assertEqual(str(e.exception), "driver boom")   # the original driver exception is re-raised
-            finally:
-                L.HOME, W.run_checks = old
+        with tempfile.TemporaryDirectory() as h, self._env(h, 42, "raise") as (d, calls):
+            with self.assertRaises(RuntimeError) as e:
+                d.run()
+            self.assertEqual(str(e.exception), "driver boom")   # the original driver exception is re-raised
         self.assertEqual((d.s["status"], d.s["error"]), ("error", "driver boom"))
         self.assertEqual(len(calls), 1)
         self.assertIs(calls[0]["log"].__self__, d)
 
     def test_failing_run_checks_is_logged_and_does_not_change_end_status(self):
-        with tempfile.TemporaryDirectory() as h:
-            d, calls, old = self._setup(h, 43, "done", failing=True)
-            try:
-                d.run()                                   # the hook failure never escapes Driver.run
-            finally:
-                L.HOME, W.run_checks = old
+        with tempfile.TemporaryDirectory() as h, self._env(h, 43, "done", failing=True) as (d, calls):
+            d.run()                                   # the hook failure never escapes Driver.run
             with open(os.path.join(d.run_dir, "driver.log")) as f:
                 log = f.read()
             self.assertIn("watchdog exit hook failed: checks down", log)
@@ -415,13 +372,9 @@ class ExitHook(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_import_failure_never_raises_out_of_the_done_path(self):
-        with tempfile.TemporaryDirectory() as h:
-            d, calls, old = self._setup(h, 45, "done")
-            try:
-                with mock.patch.dict(sys.modules, {"watchdog": None}):    # `import watchdog` raises
-                    d.run()                                               # the hook swallows it; the run ends done
-            finally:
-                L.HOME, W.run_checks = old
+        with tempfile.TemporaryDirectory() as h, self._env(h, 45, "done") as (d, calls):
+            with mock.patch.dict(sys.modules, {"watchdog": None}):    # `import watchdog` raises
+                d.run()                                               # the hook swallows it; the run ends done
             with open(os.path.join(d.run_dir, "driver.log")) as f:
                 log = f.read()
             self.assertIn("watchdog exit hook failed", log)
@@ -429,42 +382,30 @@ class ExitHook(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_import_failure_does_not_replace_the_driver_exception(self):
-        with tempfile.TemporaryDirectory() as h:
-            d, calls, old = self._setup(h, 46, "raise")
-            try:
-                with mock.patch.dict(sys.modules, {"watchdog": None}):
-                    with self.assertRaises(RuntimeError) as e:
-                        d.run()
-                self.assertEqual(str(e.exception), "driver boom")   # still the original driver exception
-            finally:
-                L.HOME, W.run_checks = old
+        with tempfile.TemporaryDirectory() as h, self._env(h, 46, "raise") as (d, calls):
+            with mock.patch.dict(sys.modules, {"watchdog": None}):
+                with self.assertRaises(RuntimeError) as e:
+                    d.run()
+            self.assertEqual(str(e.exception), "driver boom")   # still the original driver exception
         self.assertEqual(d.s["status"], "error")
         self.assertEqual(calls, [])
 
     def test_hook_never_raises_even_when_logging_fails(self):
-        with tempfile.TemporaryDirectory() as h:
-            d, calls, old = self._setup(h, 47, "done", failing=True)
+        with tempfile.TemporaryDirectory() as h, self._env(h, 47, "done", failing=True) as (d, calls):
             real = d.log
             def log(line):
                 if "watchdog exit hook" in line: raise IOError("driver.log is closed")
                 real(line)
             d.log = log
-            try:
-                d.run()                                   # the failed log line never escapes Driver.run
-            finally:
-                L.HOME, W.run_checks = old
+            d.run()                                   # the failed log line never escapes Driver.run
         self.assertEqual(d.s["status"], "done")
         self.assertEqual(len(calls), 1)
 
     def test_failing_run_checks_never_swallows_the_driver_exception(self):
-        with tempfile.TemporaryDirectory() as h:
-            d, calls, old = self._setup(h, 44, "raise", failing=True)
-            try:
-                with self.assertRaises(RuntimeError) as e:
-                    d.run()
-                self.assertEqual(str(e.exception), "driver boom")   # still the original driver exception
-            finally:
-                L.HOME, W.run_checks = old
+        with tempfile.TemporaryDirectory() as h, self._env(h, 44, "raise", failing=True) as (d, calls):
+            with self.assertRaises(RuntimeError) as e:
+                d.run()
+            self.assertEqual(str(e.exception), "driver boom")   # still the original driver exception
             with open(os.path.join(d.run_dir, "driver.log")) as f:
                 log = f.read()
             self.assertIn("driver error: driver boom", log)
