@@ -769,7 +769,7 @@ class Driver:
             if review or self.last_task.get("result") not in ("no-start", "stalled"): return r.returncode == 0
             if k == LIMITS["pi_relaunch"]: break
             up = G.available(self.gpu_health()) or list(G.PRIORITY)
-            task, g = f"{name}-relaunch-{k + 1}", ",".join(relaunch_gpus(self.s.get("size"), up))   # a free GPU of the item's size
+            task, g = f"{name}-relaunch-{k + 1}", G.gpu_arg(relaunch_gpus(self.s.get("size"), up))   # a free GPU of the item's size
             pf = os.path.join(self.run_dir, "logs", f"{task}.prompt.md")
             open(pf, "w").write(scrub(prompt) + RELAUNCH_NOTE.format(name=name) + suffix)
             self.log(f"Pi hand-off {name} {self.last_task.get('result')} (start {HANDOFF_START_S} s / stall {HANDOFF_STALL_S} s / "
@@ -1328,7 +1328,7 @@ class Driver:
                      "the repository's AGENTS.md / CLAUDE.md rules hold; the code is easy to read (names, small methods, no "
                      "duplication) and the refactoring research is substantive and its in-scope items are done; no secret, "
                      f"credential or production-setup change. Write one bullet per problem to {out} (or `- No findings.`). "
-                     "End your reply with PASS when there is no blocking problem, otherwise FAIL.", PI_TASK_TIMEOUT_S, gpu=",".join(rv))
+                     "End your reply with PASS when there is no blocking problem, otherwise FAIL.", PI_TASK_TIMEOUT_S, gpu=G.gpu_arg(rv))
         rv = self.last_task.get("gpu") or rv[0]; self.save(reviewer_gpu=rv)
         if self.sh(["git", "status", "--porcelain"], cwd=self.s["wt"], check=False).stdout.strip():
             self.log("reviewer changed files; discarding them"); self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"])
@@ -1477,18 +1477,24 @@ def draft_plan_prompt(repo, issue, title, body, out):
         "Write a first complete, valid plan.draft.json as soon as you know the files involved (after at most a few reads), "
         "then refine it in place; never leave the file unwritten.")
 
+def draft_result(draft, pi_pass, errors):
+    """What cmd_draft_plan reports on stdout (the draft path, whether the Pi pass ended PASS, and the plan-validation
+    errors): a Pi that never started and a plan that did not validate report the same way."""
+    print(json.dumps({"draft": draft, "pi_pass": pi_pass, "errors": errors}, indent=1))
+
 def cmd_draft_plan(a):
     d = Driver(a.repo, a.issue, top_session=a.top_session)
     iss = json.loads(d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "{title,body}").stdout)
     d.plan_worktree()
     out, prompt = draft_plan_prompt(a.repo, a.issue, iss["title"], iss["body"], os.path.join(d.run_dir, PLAN_DRAFT_FILE))
-    try: ok = d.pi("draft-plan", prompt, DRAFT_PLAN_TIMEOUT_S, gpu=G.LARGE_GPU)   # plan drafting runs before the gpu stage: no gpu recorded yet
-    except PiNotStarted as e: print(json.dumps({"draft": out, "pi_pass": False, "errors": [str(e)]}, indent=1)); sys.exit(1)
+    # plan drafting runs before the gpu stage: no gpu recorded yet, so ask for any free 262K GPU (#907) rather than queueing on pro5000
+    try: ok = d.pi("draft-plan", prompt, DRAFT_PLAN_TIMEOUT_S, gpu=G.gpu_arg(G.LARGE_GPUS))
+    except PiNotStarted as e: draft_result(out, False, [str(e)]); sys.exit(1)
     try:
         p = json.load(open(out)); errs = validate_plan(p)
     except Exception as e:
         p, errs = None, [f"no valid JSON plan: {e}"]
-    print(json.dumps({"draft": out, "pi_pass": ok, "errors": errs}, indent=1))
+    draft_result(out, ok, errs)
     print("Review plan.draft.json; copy it to plan.json (edit as needed), then run `item-loop start`.")
     sys.exit(0 if not errs else 1)
 

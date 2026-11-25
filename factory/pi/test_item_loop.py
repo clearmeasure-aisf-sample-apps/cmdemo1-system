@@ -2587,6 +2587,18 @@ class DraftPlanTests(unittest.TestCase):   # cmd_draft_plan with gh/plan_worktre
         self.assertEqual(calls[0][2], L.DRAFT_PLAN_TIMEOUT_S)
         self.assertGreaterEqual(L.DRAFT_PLAN_TIMEOUT_S, 2700)
 
+    def test_draft_plan_takes_any_free_262k_gpu(self):   # cmdemo1-system#907: a draft must not queue on pro5000 alone
+        calls, _ = self._run()
+        self.assertIn("pro5000", calls[0][3].split(",")); self.assertIn("pro6000", calls[0][3].split(","))
+        self.assertEqual(calls[0][3], ",".join(G.LARGE_GPUS), "draft-plan asks for the 262K pair, pro5000 first")
+        self.assertEqual(calls[0][3], L.G.gpu_arg(G.LARGE_GPUS), "the run-task --gpu argument form (reviews use it too)")
+
+    def test_draft_plan_gpu_list_is_what_run_task_parses(self):   # the comma list is run-task's --gpu contract, not a driver habit
+        loader = importlib.machinery.SourceFileLoader("run_task_draft_gpu", os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-task"))
+        rt = importlib.util.module_from_spec(importlib.util.spec_from_loader("run_task_draft_gpu", loader)); loader.exec_module(rt)
+        gpu = self._run()[0][0][3]   # calls[0] is (name, prompt, timeout, gpu)
+        self.assertEqual(rt.gpu_list(gpu), ["pro5000", "pro6000"])   # run-task takes the first of them with a free slot
+
     def test_draft_plan_prompt_asks_for_early_draft(self):
         calls, _ = self._run()
         prompt = calls[0][1]

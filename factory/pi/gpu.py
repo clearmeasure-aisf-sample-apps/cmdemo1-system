@@ -21,8 +21,8 @@ GPUS = {
     "ts3":     {"label": "RTX 5060 Ti",  "ctx": 65536,  "slots": 1, "rank": 3, "note": "64K context, slowest"},
 }
 MODEL = "auto"
-LARGE_GPU = "pro5000"                  # default GPU (run-task, plan drafting)
-LARGE_GPUS = ("pro5000", "pro6000")    # 262K context: the only GPUs a large item waits for while one is up
+LARGE_GPU = "pro5000"                  # default GPU (run-task's own --gpu default)
+LARGE_GPUS = ("pro5000", "pro6000")    # 262K context: the only GPUs a large item waits for while one is up (a draft-plan too)
 SMALL_GPUS = ("obs", "ts3")
 PRIORITY = ("pro5000", "pro6000", "obs", "ts3")   # new work goes to the first GPU with a free slot; ts3 (slowest) only when the rest are full
 # shortest client timeout for a Pi / model call (a long call hung up at less is a 499). Tests may lower the floor
@@ -112,6 +112,12 @@ def reviewer_gpus(author, up):
     one GPU or a list (every GPU that wrote code for the item, relaunches included): none of them may review."""
     authors = {author} if isinstance(author, str) else set(author or ())
     return [g for g in GPUS if g in up and g not in authors]
+
+def gpu_arg(gpus):
+    """One GPU name or a GPU list as run-task's `--gpu` argument (a comma list, first-named preferred): the launch then
+    takes the first free slot of ANY GPU listed while the gate holds the caps (reviews #t83u, draft-plan #907)."""
+    gs = [gpus] if isinstance(gpus, str) else list(gpus)
+    return ",".join(g for g in gs if g)
 
 def main():
     a = sys.argv[1:]
