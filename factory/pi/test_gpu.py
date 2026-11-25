@@ -84,4 +84,19 @@ class Gpus(unittest.TestCase):
         self.assertEqual(G.health_exit(G.health(env={}, opener=opener)), 3)
         self.assertEqual(G.health_exit({"pro5000": ("UNREACHABLE", ""), "obs": ("MISSING_SECRETS", ""), "ts3": ("REFUSED", "")}), 4)
 
+class GpuArg(unittest.TestCase):   # cmdemo1-system#907: one place renders run-task's --gpu argument
+    def test_a_gpu_list_becomes_a_comma_list_in_the_order_given(self):
+        self.assertEqual(G.gpu_arg(G.LARGE_GPUS), "pro5000,pro6000")
+        self.assertEqual(G.gpu_arg(["obs", "ts3"]), "obs,ts3")
+        self.assertEqual(G.gpu_arg(["pro5000", "pro6000", "obs", "ts3"]), "pro5000,pro6000,obs,ts3")
+
+    def test_one_gpu_name_stays_one_name(self):
+        for g in G.GPUS: self.assertEqual(G.gpu_arg(g), g)
+
+    def test_every_name_it_renders_is_a_known_gpu(self):
+        for arg in (G.gpu_arg(G.LARGE_GPUS), G.gpu_arg(G.PRIORITY), G.gpu_arg("ts3")):
+            self.assertTrue(arg, "a --gpu argument is never empty")
+            self.assertTrue(all(g in G.GPUS for g in arg.split(",")), arg)
+
+
 if __name__ == "__main__": unittest.main()
