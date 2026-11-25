@@ -3623,4 +3623,62 @@ def red_keys_of(h):
         return set()
 
 
+class TestHandoffBudgets(unittest.TestCase):
+    """The HandoffBudgets value object (cmdemo1-system#954): the nine hand-off durations and the gh-retry knobs as
+    one timedelta-based object whose invariants are asserted on construction, whose .describe() owns the no-start
+    message and whose .slot_wait() owns the first-attempt-vs-relaunch rule. The shared module instance must match
+    every existing named constant, so every value sent to run-task and every message string is unchanged."""
+
+    def test_shared_instance_matches_every_named_constant(self):
+        b = L.HANDOFF_BUDGETS
+        self.assertEqual(b.start_s, L.HANDOFF_START_S)
+        self.assertEqual(b.stall_s, L.HANDOFF_STALL_S)
+        self.assertEqual(b.slot_wait_s, L.HANDOFF_SLOT_WAIT_S)
+        self.assertEqual(b.any_slot_wait_s, L.ANY_SLOT_WAIT_S)
+        self.assertEqual(b.draft_plan_s, L.DRAFT_PLAN_TIMEOUT_S)
+        self.assertEqual(b.research_s, L.RESEARCH_TIMEOUT_S)
+        self.assertEqual(b.task_timeout_s, L.PI_TASK_TIMEOUT_S)
+        self.assertEqual(b.gpu_wait_s, L.GPU_WAIT_S)
+        self.assertEqual(b.gpu_wait_h, L.GPU_WAIT_H)
+
+    def test_slot_wait_rule(self):
+        b = L.HANDOFF_BUDGETS
+        self.assertEqual(b.slot_wait(False, 0), L.HANDOFF_SLOT_WAIT_S)   # first attempt: its own GPU slot
+        self.assertEqual(b.slot_wait(False, 1), L.ANY_SLOT_WAIT_S)      # a relaunch: any free GPU
+        self.assertEqual(b.slot_wait(True, 0), L.ANY_SLOT_WAIT_S)       # a review: any free GPU
+
+    def test_describe_produces_the_pi_not_started_text(self):
+        b = L.HANDOFF_BUDGETS
+        text = b.describe("t1", "no-start")
+        self.assertEqual(text,
+                         f"Pi hand-off `t1` did not start or stalled (no-start: no GPU slot, no model "
+                         f"output within {L.HANDOFF_START_S // 60} min of getting one, "
+                         f"or no activity for {L.HANDOFF_STALL_S // 60} min) "
+                         f"after {L.LIMITS['pi_relaunch']} relaunches on any free GPU.")
+
+    def test_stall_must_exceed_start(self):
+        with self.assertRaises(ValueError):
+            L.HandoffBudgets(start=1800, stall=900)   # stall budget not greater than start budget
+
+    def test_task_timeout_must_outlast_start(self):
+        with self.assertRaises(ValueError):
+            L.HandoffBudgets(start=1800, stall=3600, task_timeout=900)   # task timeout not greater than start
+
+    def test_any_slot_wait_must_exceed_start(self):
+        with self.assertRaises(ValueError):
+            L.HandoffBudgets(start=900, stall=1800, any_slot_wait=600)   # any-slot wait not greater than start
+
+    def test_negative_clock_rejected(self):
+        for kw in ({"start": -1}, {"stall": 0}, {"gpu_wait": 0}, {"gpu_wait_h": 0}, {"draft_plan": -5}):
+            with self.assertRaises(ValueError, msg=kw):
+                L.HandoffBudgets(**kw)
+
+    def test_default_construction_is_the_production_budget(self):
+        b = L.HandoffBudgets()   # the defaults are the module constants
+        self.assertEqual(b.start_s, L.HANDOFF_START_S)
+        self.assertGreater(b.stall_s, b.start_s)
+        self.assertGreater(b.task_timeout_s, b.start_s)
+        self.assertGreater(b.any_slot_wait_s, b.start_s)
+
+
 if __name__ == "__main__": unittest.main()
