@@ -1267,10 +1267,15 @@ class Driver:
         default = self.gh("repo", "view", self.full, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").stdout.strip()
         return clone, default
 
+    def worktree_path(self, kind="wt"):
+        """The work-tree path for this item under ~/factory-wt: <repo>-<issue> for kind `wt`, <repo>-<issue>-plan for `plan`."""
+        suffix = {"wt": "", "plan": "-plan"}[kind]
+        return os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}{suffix}")
+
     def setup_worktree(self):
         p = self.s["plan"]; clone, default = self._clone_ready()
-        wt = os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}")
-        if os.path.isdir(wt + "-plan"): self.sh(["git", "worktree", "remove", "--force", wt + "-plan"], cwd=clone, check=False)
+        wt = self.worktree_path("wt")
+        if os.path.isdir(self.worktree_path("plan")): self.sh(["git", "worktree", "remove", "--force", self.worktree_path("plan")], cwd=clone, check=False)
         if not os.path.isdir(wt):
             remote = self.sh(["git", "ls-remote", "--heads", "origin", p["branch"]], cwd=clone).stdout.strip()
             base = f"origin/{p['branch']}" if remote else f"origin/{default}"
@@ -1282,7 +1287,7 @@ class Driver:
     def plan_worktree(self):
         """Detached worktree at the default branch for Pi to read while drafting the plan (no branch is created)."""
         clone, default = self._clone_ready()
-        wt = os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}-plan")
+        wt = self.worktree_path("plan")
         if os.path.isdir(wt): self.sh(["git", "worktree", "remove", "--force", wt], cwd=clone, check=False)
         self.sh(["git", "worktree", "add", "-q", "--detach", wt, f"origin/{default}"], cwd=clone)
         self.save(wt=wt, default=default, clone=clone)
