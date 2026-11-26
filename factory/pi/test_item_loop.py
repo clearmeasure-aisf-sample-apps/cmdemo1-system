@@ -910,13 +910,32 @@ class Concurrency(unittest.TestCase):
               ("c", {"repo": "cmdemo1-workorders", "gpu": "ts3", "stage": "implement", "pid": 9}),     # dead driver
               ("d", {"repo": "cmdemo1-workorders", "gpu": "obs", "stage": "blocked", "resume_stage": "ci", "pid": 4}),
               ("e", {"repo": "cmdemo1-dashboard", "gpu": "ts3", "stage": "review", "pid": 5})]
-        self.assertEqual(L.busy_gpus(st, None, alive), {"ts3"})        # pro5000 has 2 slots, only 1 held
-        self.assertEqual(L.busy_gpus(st + [("f", {"gpu": "pro5000", "stage": "ci", "pid": 6})], None, alive), {"pro5000", "ts3"})
-        self.assertEqual(L.busy_gpus(st, "a", alive), {"ts3"})
+        self.assertEqual(L.busy_gpus(st, None, alive), set())           # review (e) no longer holds its author GPU (cmdemo1-system#877)
+        self.assertEqual(L.busy_gpus(st + [("f", {"gpu": "pro5000", "stage": "ci", "pid": 6})], None, alive), {"pro5000"})
+        self.assertEqual(L.busy_gpus(st, "a", alive), set())
         self.assertEqual(L.repo_wip(st, "cmdemo1-workorders", None, alive), 2)   # a (ci) + d (blocked in review)
         self.assertEqual(L.repo_wip(st, "cmdemo1-dashboard", None, alive), 1)
         self.assertEqual(L.WIP_LIMIT, 3)
         self.assertEqual((L.wip_limit("cmdemo1-dashboard"), L.wip_limit("cmdemo1-workorders"), L.wip_limit("cmdemo1-system")), (8, 3, 3))
+
+    def test_review_and_merge_items_do_not_hold_their_author_gpu(self):   # cmdemo1-system#877
+        alive = lambda pid: True
+        st = [("rev", {"gpu": "ts3", "stage": "review", "pid": 1}),
+              ("mrg", {"gpu": "obs", "stage": "merge", "pid": 2}),
+              ("imp", {"gpu": "pro5000", "stage": "implement", "pid": 3})]
+        self.assertEqual(L.busy_gpus(st, None, alive), set(),
+                         "review and merge items must not count toward their recorded (author) GPU")
+        # a GPU-holding stage item still holds its GPU
+        self.assertEqual(L.busy_gpus(st, None, alive), set(),
+                         "pro5000 has 2 slots, only 1 held by implement")
+        # fill pro5000's second slot: now busy
+        st2 = st + [("imp2", {"gpu": "pro5000", "stage": "ci", "pid": 4})]
+        self.assertEqual(L.busy_gpus(st2, None, alive), {"pro5000"},
+                         "two GPU-holding items on pro5000 (2 slots) make it busy")
+        # ts3 becomes busy only when a GPU-holding item is on it, not a review item
+        st3 = st + [("imp3", {"gpu": "ts3", "stage": "pickup", "pid": 5})]
+        self.assertEqual(L.busy_gpus(st3, None, alive), {"ts3"},
+                         "a GPU-holding item on ts3 (1 slot) makes it busy even though a review item is also recorded there")
 
     def test_intake_stops_while_red_except_fix_forward(self):
         self.assertTrue(L.intake_open({}, PLAN))

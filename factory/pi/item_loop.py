@@ -68,8 +68,11 @@ HANDS_OFF = {("cmdemo1-system", 654), ("cmdemo1-workorders", 1875), ("cmdemo1-wo
 WIP_LIMIT = 3             # per repository: In Progress + Review (default)
 WIP_LIMITS = {"cmdemo1-dashboard": 8}   # Jeffrey, 22 Nov 2026 7:31am CT: dashboard 8, workorders and system stay 3 (was 5 per 21 Nov 8:30am CT)
 def wip_limit(repo): return WIP_LIMITS.get(repo, WIP_LIMIT)
-# Stages in which an item holds its GPU (In Progress / Review). Waiting for a GPU, blocked, main, deploy and done do not.
+# Stages in which an item is In Progress or Review (WIP counting). Waiting for a GPU, blocked, main, deploy and done do not.
 ACTIVE_STAGES = ("pickup", "research", "implement", "local-verify", "pr", "ci", "review", "merge")
+# Stages in which an item holds its recorded (author) GPU slot. Review and merge do not: the independent review runs
+# on a different (non-author) GPU enforced by gpu_gate.py, and merge is gate-only (no Pi task on the author GPU).
+GPU_HOLDING_STAGES = ("pickup", "research", "implement", "local-verify", "pr", "ci")
 # Never changed by an enhancement PR: credentials, secrets and production setup.
 PROTECTED_RE = re.compile(r"(?i)(^|/)(\.github/workflows|environments/prod|infra|octopus)/|(^|/)\.env(\.|$)|secret|"
                           r"credential|\.(pem|pfx|key)$|appsettings\.prod|keyvault|(^|/)nuget\.config$")
@@ -641,10 +644,11 @@ def paused_resume_stage(state):
     return st.get("resume_stage") if st.get("stage") == "blocked" else st.get("stage")
 
 def busy_gpus(states, me=None, alive=lambda pid: False):
-    """GPUs whose slots are all held by other live items in an active stage (pro5000 has 2, pro6000, obs and ts3 have 1).
-    states: [(key, state dict)]."""
+    """GPUs whose slots are all held by other live items in a GPU-holding stage (pro5000 has 2, pro6000, obs and ts3
+    have 1). states: [(key, state dict)]. Review and merge items do not hold their recorded (author) GPU: the
+    independent review runs on a different GPU (gpu_gate.py enforces the real slot), and merge is gate-only."""
     held = Counter(s.get("gpu") for k, s in states
-                   if k != me and s.get("gpu") and s.get("stage") in ACTIVE_STAGES and alive(s.get("pid")))
+                   if k != me and s.get("gpu") and s.get("stage") in GPU_HOLDING_STAGES and alive(s.get("pid")))
     return {g for g, n in held.items() if n >= G.GPUS.get(g, {}).get("slots", 1)}
 
 def gpu_for_item(rec, size, up, busy):
