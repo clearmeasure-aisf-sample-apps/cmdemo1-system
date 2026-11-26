@@ -1345,23 +1345,40 @@ class Driver:
             self.heartbeat(BLOCKED_HEARTBEAT_MIN)
         return False
 
+    def _gpu_intake_check(self, plan):
+        """Intake-red check (Specification): None when intake is open, else the exact `why` string the wait loop logs."""
+        red = red_load()
+        if intake_open(red, plan): return None
+        return "intake stopped while red: " + "; ".join(f"{k}: {v['what']}" for k, v in red.items())
+
+    def _gpu_wip_check(self, states, me):
+        """WIP-full check (Specification): None when the repo has WIP room, else the exact `why` string."""
+        if repo_wip(states, self.repo, me, pid_alive) < wip_limit(self.repo): return None
+        return f"WIP is full for {self.repo} ({wip_limit(self.repo)})"
+
+    def _gpu_free_check(self, size, up, states, me):
+        """No-free-GPU check (Specification): (gpu, None) when a GPU of the right size is free, else (None, why).
+        `gpu_for_item` returns `(gpu, wait_why)`; we forward its `why` when it says wait."""
+        g, why = gpu_for_item(self.s.get("gpu"), size, up, busy_gpus(states, me, pid_alive))
+        return (g, None) if g else (None, why)
+
     def st_gpu(self):
         """Wait (no Grok turn, no comment; the item stays in Todo) until intake is open, the repo has WIP room on this
         box and a GPU of the right size is free; then take it. One active item per GPU slot (pro5000 has 2), so up to 5 items at once."""
         p = self.s["plan"]; size = G.classify_size(p); t_end = time.time() + self.budgets.gpu_wait_h * 3600; me = os.path.basename(self.run_dir)
         while time.time() < t_end:
-            red = red_load()
-            if not intake_open(red, p): why = "intake stopped while red: " + "; ".join(f"{k}: {v['what']}" for k, v in red.items())
-            else:
+            why = self._gpu_intake_check(p)
+            if why is None:
                 with open(os.path.join(_runs_dir(), "gpu.lock"), "w") as lk:
                     fcntl.flock(lk, fcntl.LOCK_EX); states = all_states()
                     up = G.available(self.gpu_health())
-                    if repo_wip(states, self.repo, me, pid_alive) >= wip_limit(self.repo): why = f"WIP is full for {self.repo} ({wip_limit(self.repo)})"
-                    else:
-                        g, why = gpu_for_item(self.s.get("gpu"), size, up, busy_gpus(states, me, pid_alive))
+                    why = self._gpu_wip_check(states, me)
+                    if why is None:
+                        g, free_why = self._gpu_free_check(size, up, states, me)
                         if g:
                             self.save(gpu=g, size=size, stage="pickup"); self.log(f"GPU {g} ({self.gpu_label(g)}) for a {size} item")
                             return
+                        why = free_why
             if self.dry:
                 g = self.s.get("gpu") or G.LARGE_GPU
                 self.log(f"DRY-RUN: {why}; taking {g}"); return self.save(gpu=g, size=size, stage="pickup")
