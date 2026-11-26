@@ -499,12 +499,20 @@ def research_section(text):
 
 def research_ok(text, files):
     """The `## Refactoring research` section is present and substantive: long enough, names at least one file the
-    item touches, and names what it found (or why there is nothing) in at least two bullet lines."""
+    item touches (by file name, full path, or stem on a word boundary), and names what it found (or why there is
+    nothing) in at least two bullet lines."""
     if not text or research_head(text) < 0: return False
     sec = research_section(text)
     bullets = [l for l in sec.splitlines() if l.strip().startswith(("-", "*", "|")) and len(l.strip()) > 10]
     names = {f.rsplit("/", 1)[-1] for f in files or []} | set(files or [])
-    return len(sec.strip()) >= RESEARCH_MIN_CHARS and len(bullets) >= 2 and (not names or any(n in sec for n in names))
+    # cmdemo1-system#913: accept the stem (file name without extension) on a word boundary, so Pi can name the
+    # type (`ChurchTimeZone`) instead of the file (`ChurchTimeZone.cs`); the file name and full path still match
+    # as before (substring, which is what the existing tests pin).
+    def _named(n):
+        if n in sec: return True
+        stem = n.rsplit(".", 1)[0] if "." in n else ""
+        return bool(stem) and bool(re.search(r"\b" + re.escape(stem) + r"\b", sec))
+    return len(sec.strip()) >= RESEARCH_MIN_CHARS and len(bullets) >= 2 and (not names or any(_named(n) for n in names))
 
 def normalize_research(text):
     """Research text as it enters the PR body: the `## Refactoring research` heading stays H2 and every other H2
@@ -1413,7 +1421,7 @@ class Driver:
             "(callers, callees, tests, sibling classes):\n" + "\n".join(f"- {f}" for f in p["files"]) + "\n\n"
             "Look for: duplication, long methods, primitive obsession, missing abstractions, and places where a known pattern "
             "(strategy, specification, builder / ObjectMother, query / command objects, value objects, etc.) would make the "
-            "code clearer and easier to maintain.\n\n"
+            "code clearer and easier to maintain. Give each bullet's file **path** in backticks (e.g. `src/A.cs`).\n\n"
             f"Write the findings as Markdown to {out}, starting with the line `{RESEARCH_HEAD}`, then one bullet per finding: "
             "file and member, the smell, the proposed refactoring or pattern, and the verdict `in scope` (small, safe, inside "
             "the files above: done in this PR) or `follow-up` (larger: filed as its own issue). When a file has nothing worth "
