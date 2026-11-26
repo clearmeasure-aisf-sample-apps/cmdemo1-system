@@ -614,9 +614,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         d.sh = sh; return d, calls
 
     def test_handoff_relaunched_on_any_free_gpu_then_passes(self):
-        old_gpu_health = L.gpu_health
-        L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
-        try:
+        with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, calls = self.driver(h, ["no-start", "stalled", "PASS"])
                 self.assertTrue(d.pi("review-fix-2", "fix it"))
@@ -632,8 +630,6 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
                 p0, p1 = (open(arg(c, "--prompt-file")).read() for c in calls[:2])
                 self.assertNotIn("partial edits", p0); self.assertIn("partial edits", p1); self.assertIn("fix it", p1)
                 self.assertTrue(p1.rstrip().endswith("the last line."))
-        finally:
-            L.gpu_health = old_gpu_health
 
     def test_large_item_relaunch_keeps_its_size_routing(self):   # review major 2, related minor
         self.assertEqual(L.relaunch_gpus("large", ["ts3", "obs", "pro5000"]), ["pro5000"])
@@ -643,15 +639,11 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         self.assertEqual(L.relaunch_gpus("large", ["ts3", "pro6000", "pro5000"]), ["pro5000", "pro6000"])   # either 262K GPU
         self.assertEqual(L.relaunch_gpus("large", ["ts3", "pro6000"]), ["pro6000"])
         self.assertEqual(L.relaunch_gpus("small", ["ts3", "obs", "pro6000", "pro5000"]), ["pro5000", "pro6000", "obs", "ts3"])
-        old_gpu_health = L.gpu_health
-        L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
-        try:
+        with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, calls = self.driver(h, ["stalled", "PASS"], size="large")
                 self.assertTrue(d.pi("t1", "do it"))
                 self.assertEqual(calls[1][calls[1].index("--gpu") + 1], "pro5000,pro6000")   # a 262K GPU only
-        finally:
-            L.gpu_health = old_gpu_health
 
     def test_review_excludes_every_authoring_gpu_including_relaunch_gpus(self):   # review major 2
         self.assertEqual(G.reviewer_gpus(["ts3", "obs"], list(G.GPUS)), ["pro5000", "pro6000"])
@@ -671,21 +663,15 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             self.assertEqual(d.author_gpus(), ["ts3", "obs"], "a review never counts as authoring")
 
     def test_no_slot_record_is_not_an_author_gpu(self):
-        old_gpu_health = L.gpu_health
-        L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
-        try:
+        with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, _ = self.driver(h, [("no-start", "pro5000,obs,ts3"), "PASS"])
                 self.assertTrue(d.pi("t1", "do it")); self.assertEqual(d.s.get("author_gpus"), ["pro5000"])
-        finally:
-            L.gpu_health = old_gpu_health
 
     def test_read_only_calls_and_no_start_are_not_author_gpus(self):   # re-review major A / minor D
         self.assertFalse(L.writes_code("draft-plan")); self.assertFalse(L.writes_code("refactoring-research-1"))
         self.assertFalse(L.writes_code("independent-review-2")); self.assertTrue(L.writes_code("review-fix-1"))
-        old_gpu_health = L.gpu_health
-        L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
-        try:
+        with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, _ = self.driver(h, [("PASS", "pro5000")])   # item on ts3; plan drafted on pro5000
                 self.assertTrue(d.pi("draft-plan", "plan it", gpu="pro5000"))
@@ -694,8 +680,6 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
                 self.assertIn("pro5000", G.reviewer_gpus(d.author_gpus(), list(G.GPUS)), "pro5000 stays a reviewer")
                 d3, _ = self.driver(h, [("no-start", "obs"), ("PASS", "ts3")])   # got a slot on obs but never replied
                 self.assertTrue(d3.pi("t1", "do it")); self.assertNotIn("obs", d3.author_gpus())
-        finally:
-            L.gpu_health = old_gpu_health
 
     def test_hold_mid_pass_stops_push_and_merge(self):   # re-review minor B
         with fake_home() as h:
@@ -734,9 +718,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             def __init__(self): self.t = 1e9
             def time(self): return self.t
             def sleep(self, s): self.t += s
-        old_time = L.time
-        L.time = T()
-        try:
+        with fake_modules({(L, "time"): T()}):
             with fake_home() as h:
                 d = make_driver(issue=1945); d.dry = False
                 d.s.update(pr=5, resume_stage="review", blocker="required checks still red after 3 Pi fix passes.")
@@ -748,21 +730,15 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
                 d.comment = d.wake_bot = lambda *a, **k: self.fail("a held item is never touched")
                 self.assertFalse(d.hold_blocked(), "a held driver never clears its Blocker or resumes")
                 self.assertEqual(len(checks), 1); self.assertEqual(d.s["status"], "held"); self.assertIn("blocker", d.s)
-        finally:
-            L.time = old_time
 
     def test_handoff_blocks_after_two_relaunches_and_reviews_are_not_relaunched(self):
-        old_gpu_health = L.gpu_health
-        L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
-        try:
+        with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, calls = self.driver(h, ["no-start"] * 3)
                 with self.assertRaises(L.PiNotStarted) as e: d.pi("t1", "do it")
                 self.assertEqual(len(calls), 3); self.assertFalse(L.hold_resumes(str(e.exception)))
                 d, calls = self.driver(h, ["no-start"])
                 self.assertFalse(d.pi("independent-review-1", "review", gpu="obs")); self.assertEqual(len(calls), 1)
-        finally:
-            L.gpu_health = old_gpu_health
 
     def test_hold_file_stops_start_run_and_watchdog(self):
         import watchdog as W
@@ -818,9 +794,7 @@ class TaskNameSlug(unittest.TestCase):   # cmdemo1-system#959: a plan task name 
             self.assertTrue(os.path.exists(os.path.join(d.run_dir, "logs", "t1.prompt.md")))
 
     def test_pi_relaunch_prompt_paths_are_slugged_too(self):
-        old_gpu_health = L.gpu_health
-        L.gpu_health = lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}
-        try:
+        with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, calls = self.driver_with_scripted_run(h, 961, ["no-start", "PASS"])
                 name = "test: whole factory/pi suite green"
@@ -832,8 +806,6 @@ class TaskNameSlug(unittest.TestCase):   # cmdemo1-system#959: a plan task name 
                     pf = arg(c, "--prompt-file")
                     self.assertTrue(os.path.exists(pf), pf)
                 self.assertIn("partial edits", open(arg(calls[1], "--prompt-file")).read())
-        finally:
-            L.gpu_health = old_gpu_health
 
 class DryRunDriver(unittest.TestCase):
     def test_writes_are_skipped_in_dry_run(self):
@@ -1985,12 +1957,9 @@ class VerifyEvidenceRunCmd(PidfileKill, unittest.TestCase):   # cmdemo1-system#8
             d.s.update(verify_runs=5, verify_s=12.5)            # the counters must keep counting from where they are
             logs = []; d.log = logs.append
             run = self.run_recorder([(7, stdout)])
-            old_time, L.time = L.time, self.StepTime(1e6, 1e6 + 1, 1e6 + 2)
-            try:
+            with fake_modules({(L, "time"): self.StepTime(1e6, 1e6 + 1, 1e6 + 2)}):
                 with patch_run(run):
                     rc, out = d.verify("x")
-            finally:
-                L.time = old_time
             # read everything back while the fake HOME still exists: it is a TemporaryDirectory, it goes on exit
             log_text = open(os.path.join(d.run_dir, "logs", "verify-x.log")).read()
             saved = json.load(open(d.state_p))
@@ -2674,13 +2643,9 @@ class GpuHealthCacheDi(unittest.TestCase):   # cmdemo1-system#868: the GPU healt
         with fake_home():
             self.assertIs(make_driver(issue=101).gpu_health, L.gpu_health)   # default: the shared module probe
         fake = lambda max_age=600: {g: ("HEALTHY", "") for g in G.GPUS}
-        old = L.gpu_health
-        L.gpu_health = fake
-        try:
+        with fake_modules({(L, "gpu_health"): fake}):
             with fake_home():
                 self.assertIs(make_driver(issue=102).gpu_health, fake)   # a patch before construction is honored
-        finally:
-            L.gpu_health = old
 
     def test_injected_cache_fakes_st_gpu_with_no_network(self):
         seen = []
