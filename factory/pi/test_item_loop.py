@@ -471,8 +471,8 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         rt = self.rt()
         with tempfile.TemporaryDirectory() as tmp:
             beats = []; t0 = time.monotonic()
-            rc, _ = rt.run_pi(["bash", "-c", "sleep 60"], cwd=tmp, timeout=30, sdir=tmp, start_s=1, beat=beats.append)
-            self.assertEqual(rc, rt.NO_START_RC); self.assertFalse(rt.run_pi.started)
+            run = rt.run_pi(["bash", "-c", "sleep 60"], cwd=tmp, timeout=30, sdir=tmp, start_s=1, beat=beats.append)
+            self.assertEqual(run.rc, rt.NO_START_RC); self.assertFalse(run.started)
             self.assertLess(time.monotonic() - t0, 15); self.assertTrue(beats and "pi_pid" in beats[0])
 
     def test_run_pi_stalled_after_model_output_is_stalled_not_no_start(self):
@@ -481,17 +481,17 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             f = os.path.join(tmp, "s.jsonl")
             # The run deadline is only a backstop for a starved watchdog thread (on a loaded host the stall kill can land
             # late, and a 30 s deadline then won first: rc 124 instead of 125). Same start_s / stall_s, same assertions.
-            rc, _ = rt.run_pi(["bash", "-c", f"echo '{HDR}' > {f}; echo '{ASSISTANT}' >> {f}; sleep 600"], cwd=tmp, timeout=120,
-                              sdir=tmp, start_s=1, stall_s=2)
-            self.assertEqual(rc, rt.NO_START_RC); self.assertTrue(rt.run_pi.started)
+            run = rt.run_pi(["bash", "-c", f"echo '{HDR}' > {f}; echo '{ASSISTANT}' >> {f}; sleep 600"], cwd=tmp, timeout=120,
+                            sdir=tmp, start_s=1, stall_s=2)
+            self.assertEqual(run.rc, rt.NO_START_RC); self.assertTrue(run.started)
 
     def test_user_prompt_record_alone_is_no_start(self):   # review minor 5: the prompt record is not model output
         rt = self.rt()
         with tempfile.TemporaryDirectory() as tmp:
             f = os.path.join(tmp, "s.jsonl")
-            rc, _ = rt.run_pi(["bash", "-c", f"echo '{HDR}' > {f}; echo '{USER}' >> {f}; sleep 60"], cwd=tmp, timeout=30,
-                              sdir=tmp, start_s=1)
-            self.assertEqual(rc, rt.NO_START_RC); self.assertFalse(rt.run_pi.started)
+            run = rt.run_pi(["bash", "-c", f"echo '{HDR}' > {f}; echo '{USER}' >> {f}; sleep 60"], cwd=tmp, timeout=30,
+                            sdir=tmp, start_s=1)
+            self.assertEqual(run.rc, rt.NO_START_RC); self.assertFalse(run.started)
 
     def test_reused_session_dir_with_older_larger_file_is_not_killed(self):   # review major 1
         rt = self.rt()
@@ -502,8 +502,8 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             script = (f"echo '{HDR}' > {new}; echo '{ASSISTANT}' >> {new}; "
                       f"for i in 1 2 3 4 5 6 7 8; do sleep 0.5; echo '{ASSISTANT}' >> {new}; done; echo PASS")
             t0 = time.monotonic()
-            rc, text = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5)
-            self.assertEqual(rc, 0, "a healthy run must not be judged against an older session file"); self.assertIn("PASS", text)
+            run = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5)
+            self.assertEqual(run.rc, 0, "a healthy run must not be judged against an older session file"); self.assertIn("PASS", run.text)
             self.assertGreater(time.monotonic() - t0, 1.5)
             self.assertEqual(rt.session_files(tmp, time.time() - 60), [new])
 
@@ -513,8 +513,8 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             f = os.path.join(tmp, "s.jsonl")
             script = f"echo '{HDR}' > {f}; for i in $(seq 12); do sleep 0.5; echo '{ASSISTANT}' >> {f}; done; echo PASS"
             t0 = time.monotonic()
-            rc, text = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5, stall_s=1.5)
-            self.assertEqual(rc, 0); self.assertIn("PASS", text)
+            run = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5, stall_s=1.5)
+            self.assertEqual(run.rc, 0); self.assertIn("PASS", run.text)
             self.assertGreater(time.monotonic() - t0, 3 * 1.5, "the run outlived start_s several times over")
 
     def test_cpu_work_after_start_is_activity_not_a_stall(self):   # review minor 4: a long build writes no record
@@ -523,16 +523,16 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             f = os.path.join(tmp, "s.jsonl")
             script = (f"echo '{HDR}' > {f}; echo '{ASSISTANT}' >> {f}; "
                       "end=$((SECONDS+5)); while [ $SECONDS -lt $end ]; do :; done; echo PASS")
-            rc, text = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5, stall_s=1.5)
-            self.assertEqual(rc, 0, "CPU work in Pi's group after model output keeps the run alive"); self.assertIn("PASS", text)
+            run = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5, stall_s=1.5)
+            self.assertEqual(run.rc, 0, "CPU work in Pi's group after model output keeps the run alive"); self.assertIn("PASS", run.text)
 
     def test_failing_heartbeat_never_turns_the_watch_off(self):   # review minor 7
         rt = self.rt()
         def beat(d): raise OSError("disk full")
         with tempfile.TemporaryDirectory() as tmp:
             t0 = time.monotonic()
-            rc, _ = rt.run_pi(["bash", "-c", "sleep 60"], cwd=tmp, timeout=30, sdir=tmp, start_s=1, beat=beat)
-            self.assertEqual(rc, rt.NO_START_RC); self.assertLess(time.monotonic() - t0, 15)
+            run = rt.run_pi(["bash", "-c", "sleep 60"], cwd=tmp, timeout=30, sdir=tmp, start_s=1, beat=beat)
+            self.assertEqual(run.rc, rt.NO_START_RC); self.assertLess(time.monotonic() - t0, 15)
 
     def test_pi_exiting_on_its_own_at_the_kill_keeps_its_rc(self):   # review minor 11
         rt = self.rt(); ev = rt.threading.Event()
@@ -586,8 +586,8 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
     def test_run_pi_with_progress_is_left_alone(self):
         rt = self.rt()
         with tempfile.TemporaryDirectory() as tmp:
-            rc, text = rt.run_pi(["bash", "-c", "echo done; exit 0"], cwd=tmp, timeout=10, sdir=tmp, start_s=5)
-            self.assertEqual(rc, 0); self.assertIn("done", text)
+            run = rt.run_pi(["bash", "-c", "echo done; exit 0"], cwd=tmp, timeout=10, sdir=tmp, start_s=5)
+            self.assertEqual(run.rc, 0); self.assertIn("done", run.text)
 
     def test_gate_gives_up_after_max_wait(self):
         import gpu_gate
@@ -1542,9 +1542,9 @@ class RunTaskTimeout(PidfileKill, unittest.TestCase):   # cmdemo1-system#817: --
 
     def test_run_pi_normal_exit_returns_rc_and_output(self):
         with tempfile.TemporaryDirectory() as tmp:
-            rc, text = self.rt.run_pi(["bash", "-c", "echo hello; exit 3"], cwd=tmp, timeout=10)
-            self.assertEqual(rc, 3)
-            self.assertIn("hello", text)
+            run = self.rt.run_pi(["bash", "-c", "echo hello; exit 3"], cwd=tmp, timeout=10)
+            self.assertEqual(run.rc, 3)
+            self.assertIn("hello", run.text)
 
     def _pi_on_path(self, tmp, body):
         """A fake `pi` executable first on PATH for this test (restored on cleanup)."""
@@ -1576,10 +1576,10 @@ class RunTaskTimeout(PidfileKill, unittest.TestCase):   # cmdemo1-system#817: --
         with tempfile.TemporaryDirectory() as tmp:
             fake, pidfile = self._fake_pi(tmp)
             t0 = time.monotonic()
-            rc, text = self.rt.run_pi([fake], cwd=tmp, timeout=2)
+            run = self.rt.run_pi([fake], cwd=tmp, timeout=2)
             elapsed = time.monotonic() - t0
-            self.assertEqual(rc, 124, "a timed-out Pi run must report 124")
-            self.assertIn("started", text)
+            self.assertEqual(run.rc, 124, "a timed-out Pi run must report 124")
+            self.assertIn("started", run.text)
             self.assertLess(elapsed, 12, f"--timeout 2 took {elapsed:.1f}s: it waited for the grandchildren to exit")
             self.assertTrue(self._pid_gone(pidfile), "the grandchild holding the stdout pipe must be killed too")
 
@@ -2196,9 +2196,9 @@ class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, p
         fd = gpu_gate.acquire("obs", wait=False); self.assertIsNotNone(fd)
         env = dict(self.env, FACTORY_GPU_SLOT_FD=f"obs:{fd}")
         code = "import gpu_gate,sys; print(gpu_gate.held_fd('obs'))"
-        rc, out = rt.run_pi([sys.executable, "-c", code], cwd=self.HERE, timeout=20, slot_fd=fd, env=env)
+        run = rt.run_pi([sys.executable, "-c", code], cwd=self.HERE, timeout=20, slot_fd=fd, env=env)
         os.close(fd)
-        self.assertEqual((rc, out.strip()), (0, str(fd)), "pi-gpu must see the slot run-task passed down")
+        self.assertEqual((run.rc, run.text.strip()), (0, str(fd)), "pi-gpu must see the slot run-task passed down")
 
 class SharedRunCmd(PidfileKill, unittest.TestCase):   # cmdemo1-system#839: run-task's Pi launch moves onto run_cmd too
     """run_pi() is the last Pi launch in factory/pi that still owns its own subprocess.Popen, so #817's process-group
@@ -2267,11 +2267,11 @@ class SharedRunCmd(PidfileKill, unittest.TestCase):   # cmdemo1-system#839: run-
         with tempfile.TemporaryDirectory() as tmp:
             fake, pidfile = self._fake_pi(tmp, pid_dir)
             t0 = time.monotonic()
-            rc, text = rt.run_pi([fake], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5, stall_s=1.5, beat=beat)
+            run = rt.run_pi([fake], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5, stall_s=1.5, beat=beat)
             elapsed = time.monotonic() - t0
-        self.assertEqual(rc, rt.NO_START_RC, "a Pi that stops being active after its first model output is still rc 125")
-        self.assertTrue(rt.run_pi.started, "model output arrived, so this is a stall and not a no-start")
-        self.assertIn("started", text)
+        self.assertEqual(run.rc, rt.NO_START_RC, "a Pi that stops being active after its first model output is still rc 125")
+        self.assertTrue(run.started, "model output arrived, so this is a stall and not a no-start")
+        self.assertIn("started", run.text)
         self.assertLess(elapsed, 12, f"stall_s=1.5 took {elapsed:.1f}s: the kill must not wait for the grandchildren")
         self.assertTrue(beats and all(b["alive"] for b in beats),
                         "the watchdog must be handed a live child: every beat's pi_pid is a running process")
@@ -2290,10 +2290,10 @@ class SharedRunCmd(PidfileKill, unittest.TestCase):   # cmdemo1-system#839: run-
         env = dict(self.env, FACTORY_GPU_SLOT_FD=f"obs:{fd}")
         code = ("import gpu_gate, os; print('ENVD=' + (os.environ.get('FACTORY_GPU_SLOT_FD') or 'missing')); "
                 "print('HELD=' + str(gpu_gate.held_fd('obs')))")
-        rc, out = rt.run_pi([sys.executable, "-c", code], cwd=self.HERE, timeout=20, slot_fd=fd, env=env)
-        self.assertEqual(rc, 0, out[-500:])
-        self.assertIn(f"ENVD=obs:{fd}", out, "the child still sees FACTORY_GPU_SLOT_FD: pi-gpu's gate reads the slot from it")
-        self.assertIn(f"HELD={fd}", out, "and the fd itself is open in the child, so the slot is held as long as Pi lives")
+        run = rt.run_pi([sys.executable, "-c", code], cwd=self.HERE, timeout=20, slot_fd=fd, env=env)
+        self.assertEqual(run.rc, 0, run.text[-500:])
+        self.assertIn(f"ENVD=obs:{fd}", run.text, "the child still sees FACTORY_GPU_SLOT_FD: pi-gpu's gate reads the slot from it")
+        self.assertIn(f"HELD={fd}", run.text, "and the fd itself is open in the child, so the slot is held as long as Pi lives")
 
 class Scrubbing(unittest.TestCase):
     def test_tunnel_hosts_and_every_gpu_secret_are_redacted(self):
