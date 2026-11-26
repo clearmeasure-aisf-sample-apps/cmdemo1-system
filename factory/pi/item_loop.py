@@ -1873,9 +1873,12 @@ class Driver:
         st = json.loads(self.gh("api", f"repos/{self.full}/compare/{sha}...{x['commit']}", "--jq", "{status:.status}",
                                 check=False).stdout or "{}").get("status")
         rk = f"{dep} {env['name']}"
-        health = dep_health(env, dep)
         red = env_red(env, dep)
-        healthy = dep == "system" or health == "healthy"
+        # A deployable with no containerApps health entry is treated as healthy once its deploy has passed
+        # (cmdemo1-system#847): env_red is already False when no entry is recorded (or dep is `system`), so the
+        # board-advancing health gate is exactly the inverse of the red flag. A deployable that HAS an entry
+        # reading unhealthy is red and still does not advance.
+        healthy = not red
         if red and st in ("ahead", "identical"):
             if rk not in red_load():
                 red_set(rk, f"{dep} {x.get('version')} unhealthy in {env['name']}")
