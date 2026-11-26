@@ -98,8 +98,9 @@
        app's slot holds seven lines under its badge: version, pin, traffic, failures, process, uptime and role, and
        an eighth, the marks of its detailed health check, for a deployable with healthDetailPath; then two more, as
        the slot of every node a deployment changes has: what is being deployed there and what just happened, in
-       words, from deployments.json). The script downloads the PlantUML release jar of the pinned version from GitHub,
-       verifies its SHA-256, renders every diagram in one Java process (layout engine smetana: no Graphviz; security
+       words, from deployments.json). The script downloads the PlantUML release jar of the pinned version from GitHub
+       (a download GitHub does not answer, or answers 408, 429 or 5xx, is tried again: four attempts, 10, 30 and 60
+       seconds apart; Invoke-Retried), verifies its SHA-256, renders every diagram in one Java process (layout engine smetana: no Graphviz; security
        profile SANDBOX) and checks that each SVG has every element the manifest names; a missing one fails the step.
        Java's output is logged as information; the download and the render are timed.
        The manifest also says where each box leads that topology.json has no link for (the frames, the regions, the
@@ -122,6 +123,11 @@
     3. The deployment, with the Static Web Apps CLI and the site's deployment token. The token is read from Azure
        when the step runs (the deploy identity may; the stack's deny settings keep everyone else from listing it),
        reaches the CLI through an environment variable, and is never stored, printed or passed as an argument.
+       npm fetches the CLI with its own retries (5, 10 to 60 seconds apart), and the CLI runs with --verbose silly, so
+       a failure says why; a deployment the CLI ends with a non-zero exit code is sent again, three attempts, 30 and
+       60 seconds apart (Get-RetryDelay), each attempt's output logged. A redeployment of the same folder is harmless:
+       the site serves the latest upload. A registry or upload blip (ECONNRESET, a 5xx, an exit code with no reason)
+       no longer fails the step on its own (cmdemo1-system #957; dashboard 1.0.1388 and 1.0.1390 in tdd, Nov 26).
     4. The proof: the site serves the topology this step wrote.
     With hosting "storagewebsite", 3 and 4 are Publish-StorageWebsite of scripts/deploy-storagewebsite.ps1, which
     octopus/projects.tf joins in before this script: the static website of the storage account the stack created.
@@ -1985,6 +1991,52 @@ function Find-PrivateRepository {
         })
 }
 
+function Get-HttpStatusOf {
+    # The HTTP status a failed web call was answered with, or 0 when it was not answered at all (a timeout, a reset).
+    param([Parameter(Mandatory)] [Management.Automation.ErrorRecord] $ErrorRecord)
+    $response = if ($ErrorRecord.Exception.PSObject.Properties['Response']) { $ErrorRecord.Exception.Response } else { $null }
+    if ($response) { return [int] $response.StatusCode }
+    return 0
+}
+
+function Test-TransientHttpStatus {
+    # Whether a web call that failed with this status may pass when sent again (principle 004): no answer, 408, 429,
+    # 500, 502, 503 or 504. A 404 or 403 will not, and is not retried.
+    param([Parameter(Mandatory)] [int] $Status)
+    return $Status -in 0, 408, 429, 500, 502, 503, 504
+}
+
+function Get-RetryDelay {
+    # The seconds to wait after failed attempt $Try (1-based): the entry of $DelaySeconds for it, the last entry for
+    # any attempt past the list.
+    param([Parameter(Mandatory)] [int] $Try, [Parameter(Mandatory)] [int[]] $DelaySeconds)
+    return $DelaySeconds[[Math]::Min([Math]::Max($Try, 1) - 1, $DelaySeconds.Count - 1)]
+}
+
+function Invoke-Retried {
+    # Runs $Action and returns what it returns; a failure $IsTransient accepts is tried again, up to $Attempts in all,
+    # Get-RetryDelay seconds apart, each retry one line of information (not a warning). Any other failure, and the last
+    # attempt's, is thrown as it came. The default classifier is Test-TransientHttpStatus of the failure's status.
+    param(
+        [Parameter(Mandatory)] [scriptblock] $Action,
+        [Parameter(Mandatory)] [string] $What,
+        [int] $Attempts = 4,
+        [int[]] $DelaySeconds = @(10, 30, 60),
+        [scriptblock] $IsTransient = { param($failure) Test-TransientHttpStatus -Status (Get-HttpStatusOf -ErrorRecord $failure) },
+        [scriptblock] $Sleep = { param($seconds) Start-Sleep -Seconds $seconds }
+    )
+    for ($try = 1; $true; $try++) {
+        try { return & $Action }
+        catch {
+            $failure = $_
+            if ($try -ge $Attempts -or -not (& $IsTransient $failure)) { throw }
+            $wait = Get-RetryDelay -Try $try -DelaySeconds $DelaySeconds
+            Write-Host "$What failed ($($failure.Exception.Message)), attempt $try of $Attempts; trying again in $wait seconds."
+            & $Sleep $wait
+        }
+    }
+}
+
 function Get-PlantUmlJar {
     # The PlantUML release jar of the pinned version, from the project's GitHub releases, into the folder; it fails when
     # its SHA-256 is not the pinned one. Returns the path and the seconds the download took.
@@ -1995,7 +2047,12 @@ function Get-PlantUmlJar {
     )
     $path = Join-Path $Folder "plantuml-$Version.jar"
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    Invoke-WebRequest -Uri "https://github.com/plantuml/plantuml/releases/download/v$Version/plantuml-$Version.jar" -OutFile $path -TimeoutSec 300
+    # GitHub's release download (a redirect to its object store) has answered 504 (dashboard 1.0.1388 in tdd, Nov 26):
+    # Invoke-Retried sends it again for no answer, 408, 429 and 5xx; -OutFile writes the file anew on every attempt.
+    $uri = "https://github.com/plantuml/plantuml/releases/download/v$Version/plantuml-$Version.jar"
+    Invoke-Retried -What "Downloading plantuml-$Version.jar from GitHub" -Action {
+        Invoke-WebRequest -Uri $uri -OutFile $path -TimeoutSec 300
+    }
     $seconds = $clock.Elapsed.TotalSeconds
     $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     if ($actual -ne $Sha256) {
@@ -2471,25 +2528,46 @@ $env:npm_config_update_notifier = 'false'
 $stage = Join-Path ([IO.Path]::GetTempPath()) "site-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -LiteralPath $folder -Destination (Join-Path $stage 'site') -Recurse
+# npm fetches the CLI and its dependencies from registry.npmjs.org, which has reset connections (ECONNRESET, exit code
+# 255: dashboard 1.0.839 in prod, #957): npm's own retries first, then the whole deployment again below.
+$env:npm_config_fetch_retries = '5'
+$env:npm_config_fetch_retry_mintimeout = '10000'
+$env:npm_config_fetch_retry_maxtimeout = '60000'
+# A failed deployment is sent again (the site serves the latest upload, so a second upload of the same folder is
+# harmless); each attempt's whole output is logged, at the CLI's most detailed level, because an exit code 1 with only
+# npm's deprecation notices said nothing of the cause (dashboard 1.0.1390 in tdd, Nov 26).
+$swaAttempts = 3
+$swaDelaySeconds = @(30, 60)
 Push-Location -LiteralPath $stage
 try {
-    $env:SWA_CLI_DEPLOYMENT_TOKEN = $token
-    $PSNativeCommandUseErrorActionPreference = $false
-    $output = @(npx --yes "@azure/static-web-apps-cli@$swaCliVersion" deploy ./site --env production 2>&1 | ForEach-Object { "$_" })
-    $code = $LASTEXITCODE
+    for ($try = 1; $true; $try++) {
+        try {
+            $env:SWA_CLI_DEPLOYMENT_TOKEN = $token
+            $PSNativeCommandUseErrorActionPreference = $false
+            $output = @(npx --yes "@azure/static-web-apps-cli@$swaCliVersion" deploy ./site --env production --verbose silly 2>&1 | ForEach-Object { "$_" })
+            $code = $LASTEXITCODE
+        }
+        finally {
+            $PSNativeCommandUseErrorActionPreference = $true
+            Remove-Item -LiteralPath Env:SWA_CLI_DEPLOYMENT_TOKEN -ErrorAction SilentlyContinue
+        }
+        # Colour codes out, and the token too, should a tool ever echo it.
+        $lines = @($output | ForEach-Object { ($_ -replace '\x1b\[[0-9;?]*[ -/]*[@-~]', '').Replace($token, '***').TrimEnd() } | Where-Object { $_ })
+        Write-Host "Static Web Apps CLI, attempt $try of ${swaAttempts}: exit code $code, $($lines.Count) line(s) of output"
+        $lines | ForEach-Object { Write-Host "  $_" }
+        if ($code -eq 0) { break }
+        if ($try -ge $swaAttempts) {
+            Fail-Step "The Static Web Apps CLI ended with exit code $code while deploying $name $version to ${staticSite}, on all $swaAttempts attempts; their output is above."
+        }
+        $wait = Get-RetryDelay -Try $try -DelaySeconds $swaDelaySeconds
+        Write-Host "The Static Web Apps CLI ended with exit code $code (attempt $try of $swaAttempts); deploying again in $wait seconds."
+        Start-Sleep -Seconds $wait
+    }
 }
 finally {
-    $PSNativeCommandUseErrorActionPreference = $true
-    Remove-Item -LiteralPath Env:SWA_CLI_DEPLOYMENT_TOKEN -ErrorAction SilentlyContinue
+    $token = $null
     Pop-Location
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-}
-# Colour codes out, and the token too, should a tool ever echo it.
-$lines = @($output | ForEach-Object { ($_ -replace '\x1b\[[0-9;?]*[ -/]*[@-~]', '').Replace($token, '***').TrimEnd() } | Where-Object { $_ })
-$token = $null
-$lines | ForEach-Object { Write-Host "  $_" }
-if ($code -ne 0) {
-    Fail-Step "The Static Web Apps CLI ended with exit code $code while deploying $name $version to ${staticSite}; its output is above."
 }
 
 # The proof that this release is what the site serves: the topology written above, by its time stamp. A deployment
