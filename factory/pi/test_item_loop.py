@@ -1347,13 +1347,19 @@ class ReviewFailOnPr(unittest.TestCase):   # cmdemo1-dashboard#1311: a review FA
 
     def test_research_only_fix_path_leaves_journal_activity(self):   # no commit on this path: check 2 must see activity
         import inspect
-        src = inspect.getsource(L.Driver.st_review)
+        # The research-redo path lives in the verdict-FAIL helper (cmdemo1-system#918): sync_pr_research() and the
+        # journal comment must stay adjacent, no commit on this path.
+        src = inspect.getsource(L.Driver._st_review_verdict_fail)
         i = src.index("self.sync_pr_research()")
         self.assertIn('self.comment("Research re-done after the review FAIL', src[i:i + 300])
 
     def test_st_review_fail_comments_use_the_mirror(self):   # both FAIL branches go through review_fail_comment
         import inspect
-        src = inspect.getsource(L.Driver.st_review)
+        # The two review_fail_comment calls now live in the two FAIL-outcome helpers (cmdemo1-system#918): the
+        # evidence-failed one and the verdict-fail one, one each.
+        src = (inspect.getsource(L.Driver.st_review)
+               + inspect.getsource(L.Driver._st_review_evidence_failed)
+               + inspect.getsource(L.Driver._st_review_verdict_fail))
         self.assertEqual(src.count("self.review_fail_comment("), 2)
         self.assertNotIn('self.comment("Review → In Progress', src)
         self.assertNotIn('self.comment(f"Review → In Progress', src)
@@ -3317,9 +3323,14 @@ class SharedFixPass(unittest.TestCase):   # cmdemo1-system#858: the bump-or-bloc
 
     def test_the_four_stages_use_the_helper_and_no_longer_bump_their_own_counter(self):
         import inspect
+        # st_review's two FAIL-outcome helpers own the review fix_pass calls (cmdemo1-system#918), so for st_review the
+        # guarded source is the dispatcher plus those two helpers; the other stages are their own method only.
+        review_helpers = ("_st_review_evidence_failed", "_st_review_verdict_fail")
         for name, key in (("st_ci", "ci_fix"), ("fix_quality", "quality_fix"), ("st_review", "review_fail"), ("st_merge", "merge_gate")):
             with self.subTest(stage=name):
                 src = inspect.getsource(getattr(L.Driver, name))
+                if name == "st_review":
+                    src += "".join(inspect.getsource(getattr(L.Driver, h)) for h in review_helpers)
                 self.assertIn("self.fix_pass(", src, f"Driver.{name} still writes the fix loop itself")
                 self.assertNotIn(f'bump("{key}")', src, f"Driver.{name} still bumps {key} outside the helper")
 
