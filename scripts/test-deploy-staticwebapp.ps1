@@ -260,5 +260,58 @@ Test-Case 'writer omits azureExcludeDeployables' ($source -match 'azureExcludeDe
 Test-Case 'writer fills page addresses from containers.json gaps' ($source -match 'ConvertTo-PageAddressMap') $true
 Test-Case 'writer skips retired deployables in topology' ($source -match "if \(\`$app\['retired'\] -eq \`$true\)") $true
 
+
+# Retries of the deployment's external calls (PlantUML from GitHub, the Static Web Apps CLI): dashboard 1.0.1388 and
+# 1.0.1390 failed in tdd on a 504 from GitHub and an exit code 1 of the CLI (Nov 26), 1.0.839 in prod on npm's ECONNRESET (#957).
+function New-HttpFailure([int] $Status) {
+    $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode] $Status)
+    $exception = [Microsoft.PowerShell.Commands.HttpResponseException]::new("Response status code does not indicate success: $Status", $response)
+    return [Management.Automation.ErrorRecord]::new($exception, 'WebCmdletWebResponseException', 'InvalidOperation', $null)
+}
+$noAnswer = [Management.Automation.ErrorRecord]::new([Net.Http.HttpRequestException]::new('Connection reset by peer'), 'x', 'ConnectionError', $null)
+Test-Case 'HTTP status of a 504' (Get-HttpStatusOf -ErrorRecord (New-HttpFailure 504)) 504
+Test-Case 'HTTP status of no answer is 0' (Get-HttpStatusOf -ErrorRecord $noAnswer) 0
+Test-Case 'transient statuses' @(0, 408, 429, 500, 502, 503, 504 | ForEach-Object { Test-TransientHttpStatus -Status $_ }) @($true, $true, $true, $true, $true, $true, $true)
+Test-Case 'not transient statuses' @(400, 401, 403, 404, 409, 422 | ForEach-Object { Test-TransientHttpStatus -Status $_ }) @($false, $false, $false, $false, $false, $false)
+Test-Case 'retry delay per attempt' @(1, 2, 3 | ForEach-Object { Get-RetryDelay -Try $_ -DelaySeconds @(10, 30, 60) }) @(10, 30, 60)
+Test-Case 'retry delay past the list is the last' (Get-RetryDelay -Try 9 -DelaySeconds @(30, 60)) 60
+Test-Case 'retry delay of attempt 0 is the first' (Get-RetryDelay -Try 0 -DelaySeconds @(30, 60)) 30
+
+$script:slept = [Collections.Generic.List[int]]::new()
+$script:calls = 0
+$sleep = { param($seconds) $script:slept.Add($seconds) }
+$result = Invoke-Retried -What 'test' -Sleep $sleep -Action {
+    $script:calls++
+    if ($script:calls -lt 3) { throw (New-HttpFailure 504) }
+    'jar'
+}
+Test-Case 'two 504s then success returns the result' $result 'jar'
+Test-Case 'two 504s then success: three calls' $script:calls 3
+Test-Case 'two 504s then success: waits 10 and 30' @($script:slept) @(10, 30)
+
+$script:slept.Clear(); $script:calls = 0
+$thrown = $null
+try { Invoke-Retried -What 'test' -Sleep $sleep -Action { $script:calls++; throw (New-HttpFailure 404) } } catch { $thrown = $_ }
+Test-Case 'a 404 is not retried' $script:calls 1
+Test-Case 'a 404 is thrown as it came' (Get-HttpStatusOf -ErrorRecord $thrown) 404
+Test-Case 'a 404 waits for nothing' $script:slept.Count 0
+
+$script:slept.Clear(); $script:calls = 0
+$thrown = $null
+try { Invoke-Retried -What 'test' -Sleep $sleep -Action { $script:calls++; throw $noAnswer.Exception } } catch { $thrown = $_ }
+Test-Case 'no answer every time: four attempts' $script:calls 4
+Test-Case 'no answer every time: the last failure is thrown' ($thrown.Exception.Message) 'Connection reset by peer'
+Test-Case 'no answer every time: waits 10, 30 and 60' @($script:slept) @(10, 30, 60)
+
+$script:slept.Clear(); $script:calls = 0
+$result = Invoke-Retried -What 'test' -Sleep $sleep -Action { $script:calls++; 'first' }
+Test-Case 'success at once: one call, no wait' @($result, $script:calls, $script:slept.Count) @('first', 1, 0)
+
+Test-Case 'PlantUML download goes through Invoke-Retried' ($source -match '(?s)function Get-PlantUmlJar.*?Invoke-Retried -What "Downloading plantuml') $true
+Test-Case 'npm fetches with retries' (($source -match "npm_config_fetch_retries = '5'") -and ($source -match 'npm_config_fetch_retry_mintimeout') -and ($source -match 'npm_config_fetch_retry_maxtimeout')) $true
+Test-Case 'SWA CLI runs verbose' ($source -match 'deploy \./site --env production --verbose silly 2>&1') $true
+Test-Case 'SWA CLI deployment is retried' (($source -match '\$swaAttempts = 3') -and ($source -match 'Get-RetryDelay -Try \$try -DelaySeconds \$swaDelaySeconds')) $true
+Test-Case 'SWA CLI output keeps the token redacted' ($source -match "\.Replace\(\`$token, '\*\*\*'\)") $true
+
 if ($failures -gt 0) { Write-Host "$failures FAILED"; exit 1 }
 Write-Host 'OK'
