@@ -104,32 +104,102 @@ def group_cpu_s(pgid):
         if len(f) > 14 and f[2] == str(pgid): tot += sum(int(x) for x in f[11:15])   # utime stime + reaped children's
     return tot / os.sysconf("SC_CLK_TCK")
 
-def watch_progress(p, kill, sdir, start_s, beat=None, poll_s=None, stall_s=None, since=None, cpu=group_cpu_s):
-    """Kill Pi's group when it has no model output within start_s or, once it has, neither a new session record nor
-    CPU work for stall_s (default 2 x start_s) (t85u). Returns an Event: set = killed; .started tells whether model
-    output ever arrived (no-start vs stalled). Only session files written since `since` (launch) count."""
-    ev = threading.Event(); ev.started = False; stall_s = stall_s or 2 * start_s
-    poll_s = poll_s or min(30.0, start_s / 4)
-    scan = SessionScan(sdir, time.time() if since is None else since)
+class WatchEvent(threading.Event):
+    """A threading.Event with a declared `started` field: True once model output has arrived. The watch loop sets
+    it; run_pi reads it to distinguish no-start (never) from stalled (yes). A real field, not a monkey-patched
+    attribute on a plain Event (cmdemo1-system#946)."""
+    def __init__(self):
+        super().__init__()
+        self.started = False
+
+class ActivitySignal:
+    """One source of activity in Pi's process group. The watch loop calls `tick(p, ev)` once per poll; a signal
+    returns the new last-activity timestamp (or None if it saw nothing new). A third signal is added by appending
+    to Watch.signals — the loop never changes (cmdemo1-system#946)."""
+    def tick(self, p, ev):
+        """Poll one activity source. Returns (new_lines, model_seen, last_activity) where new_lines is the
+        cumulative session-line count (0 if this signal has no line count), model_seen is True if model output
+        has ever been seen, and last_activity is a float timestamp or None if no activity was detected this tick."""
+        raise NotImplementedError
+
+class SessionActivity(ActivitySignal):
+    """Activity from new session records: a new record or model output in a session file written since launch."""
+    def __init__(self, scan):
+        self.scan = scan
+        self.seen = 0
+    def tick(self, p, ev):
+        n, model = self.scan.poll()
+        if model:
+            ev.started = True
+        if n > self.seen:
+            self.seen = n
+            return (n, True, time.time())
+        return (n, False, None)
+
+class CpuActivity(ActivitySignal):
+    """Activity from CPU work in Pi's process group: a long build or test writes no session record but burns CPU.
+    Only active once model output has arrived (ev.started)."""
+    def __init__(self, cpu=group_cpu_s, frac=CPU_ACTIVE_FRAC):
+        self.cpu = cpu
+        self.frac = frac
+        self._prev = None   # (cpu_seconds, timestamp) baseline pair
+    def tick(self, p, ev):
+        if not ev.started:
+            return (0, False, None)
+        c, t = self.cpu(p.pid), time.time()
+        if self._prev is not None and c - self._prev[0] >= self.frac * (t - self._prev[1]):
+            self._prev = (c, t)
+            return (0, False, t)
+        self._prev = (c, t)
+        return (0, False, None)
+
+class Watch:
+    """The hand-off watch configuration as one value object (cmdemo1-system#946): the session dir, the launch
+    timestamp, the start / stall / poll clocks, the beat callback, and the list of ActivitySignals. The builder
+    `Watch.for_run` computes poll_s = min(30.0, start_s / 4) and stall_s = stall_s or 2 * start_s, so every timing
+    threshold lives in exactly one place."""
+    def __init__(self, sdir, since, start_s, stall_s, poll_s, beat=None, signals=None):
+        self.sdir = sdir
+        self.since = since
+        self.start_s = start_s
+        self.stall_s = stall_s
+        self.poll_s = poll_s
+        self.beat = beat
+        self.signals = signals if signals is not None else []
+    @classmethod
+    def for_run(cls, sdir, since, start_s, beat=None, stall_s=None, poll_s=None, cpu=group_cpu_s):
+        """Build a Watch for one run: stall_s defaults to 2 x start_s, poll_s defaults to min(30.0, start_s / 4),
+        and the default signal list is [SessionActivity, CpuActivity]."""
+        stall = stall_s if stall_s is not None else 2 * start_s
+        poll = poll_s if poll_s is not None else min(30.0, start_s / 4)
+        scan = SessionScan(sdir, since)
+        signals = [SessionActivity(scan), CpuActivity(cpu)]
+        return cls(sdir, since, start_s, stall, poll, beat, signals)
+
+def watch_progress(p, kill, watch):
+    """Kill Pi's group when it has no model output within watch.start_s or, once it has, no activity from any
+    signal for watch.stall_s (t85u). Returns a WatchEvent: set = killed; .started tells whether model output ever
+    arrived (no-start vs stalled). Only session files written since watch.since (launch) count."""
+    ev = WatchEvent()
     def loop():
-        seen, last, c0 = 0, time.time(), None
+        last = time.time()
+        total_lines = 0
         while p.poll() is None:
             try:
-                n, model = scan.poll()
-                if model: ev.started = True
-                if n > seen: seen, last = n, time.time()
-                if ev.started:   # a long tool call (dotnet build / test) writes no record but burns CPU
-                    c, t = cpu(p.pid), time.time()
-                    if c0 is not None and c - c0[0] >= CPU_ACTIVE_FRAC * (t - c0[1]): last = t
-                    c0 = (c, t)
-                if beat:
-                    try: beat({"state": "running", "pi_pid": p.pid, "session_lines": n, "model_output": ev.started,
-                               "last_activity": dt.datetime.fromtimestamp(last, dt.timezone.utc).isoformat(timespec="seconds")})
+                for sig in watch.signals:
+                    n, model, act = sig.tick(p, ev)
+                    if n: total_lines = n
+                    if act is not None: last = act
+                if watch.beat:
+                    try:
+                        watch.beat({"state": "running", "pi_pid": p.pid, "session_lines": total_lines,
+                                    "model_output": ev.started,
+                                    "last_activity": dt.datetime.fromtimestamp(last, dt.timezone.utc).isoformat(timespec="seconds")})
                     except Exception: pass   # a failed heartbeat (disk full) never ends the watch
-                if time.time() - last > (stall_s if ev.started else start_s) and p.poll() is None:
+                if time.time() - last > (watch.stall_s if ev.started else watch.start_s) and p.poll() is None:
                     ev.set(); kill(signal.SIGTERM); time.sleep(5); kill(signal.SIGKILL); return
             except Exception: pass         # one bad poll never turns the watchdog off
-            time.sleep(poll_s)
+            time.sleep(watch.poll_s)
     threading.Thread(target=loop, daemon=True).start()
     return ev
 
@@ -149,14 +219,13 @@ class PiRun:
     def __repr__(self):
         return f"PiRun(rc={self.rc!r}, started={self.started!r}, timed_out={self.timed_out!r})"
 
-def run_pi(cmd, cwd, timeout, slot_fd=None, env=None, sdir=None, start_s=None, beat=None, stall_s=None):
+def run_pi(cmd, cwd, timeout, slot_fd=None, env=None, watch=None):
     """Run Pi through runner.run_cmd, the one runner with a deadline (#839): it puts Pi in its own process group
     and, on timeout, SIGTERMs then SIGKILLs that whole group (the #817 rule, now written once) and hands the output
     collected before the pipe had to be closed back on the exception. Returns a PiRun(rc, text, started, timed_out);
-    a timeout reports rc=TIMEOUT_RC, timed_out=True with the pre-kill output. With sdir and start_s, a Pi with no
-    model output within start_s, or no activity for stall_s after it, is killed the same way by the watch:
-    rc=NO_START_RC; rc=NO_START_RC with started=False means it never produced model output."""
-    since = time.time()
+    a timeout reports rc=TIMEOUT_RC, timed_out=True with the pre-kill output. With a watch (a Watch value object),
+    a Pi with no model output within watch.start_s, or no activity for watch.stall_s after it, is killed the same
+    way: rc=NO_START_RC; rc=NO_START_RC with started=False means it never produced model output."""
     def s(v): return (v.decode(errors="replace") if isinstance(v, bytes) else v) or ""
     ev = None
     child_spawned = False
@@ -165,7 +234,8 @@ def run_pi(cmd, cwd, timeout, slot_fd=None, env=None, sdir=None, start_s=None, b
         def kill(sig):
             try: os.killpg(p.pid, sig)
             except ProcessLookupError: pass
-        ev = watch_progress(p, kill, sdir, start_s, beat, stall_s=stall_s, since=since) if sdir and start_s else None
+        if watch is not None:
+            ev = watch_progress(p, kill, watch)
         child_spawned = True   # the child exists: "not started" from here on means only "no model output"
     try:
         r = run_cmd(cmd, cwd=cwd, timeout=timeout, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -242,10 +312,10 @@ def main():
     pi_gpu = os.environ.get("FACTORY_PI_GPU_BIN") or os.path.join(HERE, "pi-gpu")
     launched = time.time()
     try:
+        watch = Watch.for_run(sdir, launched, a.start_timeout, beat=lambda d: progress(**d),
+                              stall_s=a.stall_timeout or None) if a.start_timeout else None
         pi_run = run_pi([pi_gpu, a.gpu, "--session-dir", sdir, "--no-context-files", "--no-skills", "--no-mcp",
-                         "--approve", "-p", prompt], a.cwd, G.client_timeout(a.timeout), slot, env,
-                        sdir=sdir, start_s=a.start_timeout or None, beat=lambda d: progress(**d),
-                        stall_s=a.stall_timeout or None)
+                         "--approve", "-p", prompt], a.cwd, G.client_timeout(a.timeout), slot, env, watch=watch)
     finally:
         t1 = now(); gpu_gate.release(slot)
     rc, text = pi_run.rc, scrub(pi_run.text)
