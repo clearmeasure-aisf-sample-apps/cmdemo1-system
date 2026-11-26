@@ -285,8 +285,12 @@ def gh_retry_wait(attempt, waited):
     return wait if waited + wait <= GH_RETRY_MAX_WAIT_S else None
 
 def pr_number(text):
-    t = str(text or "").strip()
-    return int(t) if t.isdigit() else None
+    """The PR number from gh output: a plain number (gh pr list -q .[0].number) or a PR URL (gh pr create),
+    with or without a trailing slash. None when neither (the 'no open PR' message or unexpected output)."""
+    t = str(text or "").strip().rstrip("/")
+    if t.isdigit(): return int(t)
+    m = re.search(r"/pull/(\d+)", t)
+    return int(m.group(1)) if m else None
 
 def classify_failure(log_text):
     """'infra' when the failure never reached the code (network, registry, runner), else 'code'."""
@@ -1691,26 +1695,40 @@ class Driver:
         return pr_number(r.stdout)
 
     def create_pr(self, head):
-        """Open the PR (research section in the body), move the board to Review and say so on the issue."""
+        """Open the PR (research section in the body), move the board to Review and say so on the issue.
+        Raises RuntimeError when gh's output does not parse to a PR number: the driver must never save pr=None
+        and advance to st_ci (which would run `gh pr checks None`)."""
         p = self.s["plan"]
         body = self.log_file("pr-body.md", with_research(f"Closes #{self.issue}\n\n{p.get('pr_summary', '')}\n\nCode by Pi on the {self.gpu_label()}; "
                                      f"planned, verified and merged by the factory bot's Pi driver (run `{self.s['run_id']}`).\n\n{DRIVER_MARK}\n",
                                      self.research_text()))
         r = self.gh("pr", "create", "-R", self.full, "--head", p["branch"], "--base", self.s["default"],
                     "--title", p["pr_title"], "--body-file", body, write=True)
-        self.save(pr=int(r.stdout.strip().rstrip("/").split("/")[-1]))
+        n = pr_number(r.stdout)
+        if n is None:
+            raise RuntimeError(f"gh pr create output is not a PR number: {r.stdout!r}")
+        self.save(pr=n)
         self.move("Review")
-        self.comment(f"In Progress → Review\n\nPR #{self.s['pr']} (head `{head[:8]}`). Required checks: running "
+        self.comment(f"In Progress → Review\n\nPR #{n} (head `{head[:8]}`). Required checks: running "
                      f"(local verification green, {self.s.get('verify_runs', 0)} runs). Change: {p.get('pr_summary', p['pr_title'])}\n\n{self.usage()}")
+        return n
+
+    def ensure_pr(self, head):
+        """The PR-version of find-existing-or-create (the issue's ensure_issue pattern, for a different object: a
+        PR, not an issue -- different gh verb, PR-specific fields, no label, and the merge gate needs PR author ==
+        bot). Saved PR first, then the open PR for this branch, then create. Returns the PR number.
+        create_pr raises when its output does not parse, so this never returns None."""
+        if self.s.get("pr"): return self.s["pr"]
+        if (n := self.find_open_pr()) is not None:
+            self.save(pr=n); return n
+        return self.create_pr(head)
 
     def st_pr(self):
         p = self.s["plan"]
         if p.get("kind") == "enhancement":
             if (why := self.enhancement_blocker()): return self.blocker(why)
         head = self.commit_push(p["pr_title"])
-        if not self.s.get("pr"):
-            if (n := self.find_open_pr()) is not None: self.save(pr=n)
-        if not self.s.get("pr"): self.create_pr(head)
+        self.ensure_pr(head)
         self.save(stage="ci")
 
     def st_ci(self):

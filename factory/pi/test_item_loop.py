@@ -3198,6 +3198,121 @@ class EnsureIssueTests(unittest.TestCase):   # cmdemo1-system#831: the shared en
             self.assertEqual(len(calls), 2)   # the list ran, the create was attempted and failed
 
 
+class EnsurePrTests(unittest.TestCase):   # cmdemo1-system#922: the shared ensure_pr helper - mocked self.gh, no network
+    """ensure_pr is the PR-version of the find-existing-or-create pattern (the ensure_issue pattern, for a different
+    object): saved PR first, then the open PR for this branch, then create. It consolidates PR-number parsing and
+    creation in one place. Every test records each d.gh call and asserts the exact gh args. create_pr must RAISE when
+    gh's output does not parse to a number - it must never save pr=None and let st_ci run `gh pr checks None`."""
+
+    REPO = "cmdemo1-workorders"
+
+    def driver_and_gh(self, list_stdout="", create_stdout="", create_rc=0, saved_pr=None, issue=922):
+        """A dry-run driver with its plan/default/gpu/run_id set and self.gh mocked: `pr list` answers `list_stdout`,
+        `pr create` answers (create_rc, create_stdout). Returns (driver, call recorder)."""
+        d = make_driver(repo=self.REPO, issue=issue)
+        d.s["plan"] = PLAN
+        d.s["default"] = "main"
+        d.s["gpu"] = "obs"
+        d.s["run_id"] = "run922"
+        if saved_pr is not None: d.s["pr"] = saved_pr
+        d.usage = lambda final=False: "usage"
+        calls = []
+        def gh(*a, **k):
+            calls.append((list(a), dict(k)))
+            if a and a[0] == "pr" and len(a) > 1 and a[1] == "list":
+                return subprocess.CompletedProcess(("gh",) + a, 0, list_stdout, "")
+            if a and a[0] == "pr" and len(a) > 1 and a[1] == "create":
+                return subprocess.CompletedProcess(("gh",) + a, create_rc, create_stdout, "")
+            return subprocess.CompletedProcess(("gh",) + a, 0, "", "")
+        d.gh = gh
+        return d, calls
+
+    def test_saved_pr_shortcut_returns_without_gh_call(self):
+        with fake_home():
+            d, calls = self.driver_and_gh(saved_pr=77)
+            self.assertEqual(d.ensure_pr("abc123def"), 77)
+            self.assertEqual(calls, [])   # no gh call at all when the PR is already saved
+
+    def test_adopts_an_already_open_pr(self):
+        with fake_home():
+            d, calls = self.driver_and_gh(list_stdout="55\n")
+            self.assertEqual(d.ensure_pr("abc123def"), 55)
+            self.assertEqual(d.s["pr"], 55)
+            # exactly one gh call: the pr list; no create
+            self.assertEqual(len(calls), 1)
+            args, kw = calls[0]
+            self.assertEqual(args[0:2], ["pr", "list"])
+            self.assertEqual(args[args.index("--head") + 1], PLAN["branch"])
+            self.assertEqual(kw.get("check"), False)
+
+    def test_creates_new_pr_when_none_open(self):
+        with fake_home():
+            url = f"https://github.com/{L.ORG}/{self.REPO}/pull/42"
+            d, calls = self.driver_and_gh(list_stdout="", create_stdout=url + "\n")
+            self.assertEqual(d.ensure_pr("abc123def"), 42)
+            self.assertEqual(d.s["pr"], 42)
+            verbs = [(a[0], a[1]) for a, _ in calls if a]
+            # the first two gh calls are the find-then-create; move/comment add api/graphql + issue/comment after
+            self.assertEqual(verbs[0], ("pr", "list")); self.assertEqual(verbs[1], ("pr", "create"))
+            create_args = next(a for a, _ in calls if a and a[0:2] == ["pr", "create"])
+            self.assertEqual(create_args, ["pr", "create", "-R", f"{L.ORG}/{self.REPO}",
+                                           "--head", PLAN["branch"], "--base", "main", "--title", PLAN["pr_title"],
+                                           "--body-file", create_args[create_args.index("--body-file") + 1]])
+            self.assertEqual(next(k for a, k in calls if a and a[0:2] == ["pr", "create"]).get("write"), True)
+
+    def test_create_pr_parses_number_from_url_with_trailing_slash(self):
+        with fake_home():
+            url = f"https://github.com/{L.ORG}/{self.REPO}/pull/88/"
+            d, calls = self.driver_and_gh(create_stdout=url + "\n")
+            self.assertEqual(d.create_pr("abc123def"), 88)
+            self.assertEqual(d.s["pr"], 88)
+
+    def test_create_pr_parses_number_from_plain_url(self):
+        with fake_home():
+            url = f"https://github.com/{L.ORG}/{self.REPO}/pull/88"
+            d, calls = self.driver_and_gh(create_stdout=url + "\n")
+            self.assertEqual(d.create_pr("abc123def"), 88)
+
+    def test_create_pr_raises_on_unparseable_output(self):
+        """The regression the prior attempt introduced: unparseable create output must raise, not save pr=None."""
+        for bad in ("", "HTTP 422: Validation Failed", "not a number", "42abc"):
+            with fake_home():
+                d, calls = self.driver_and_gh(create_rc=0, create_stdout=bad + "\n")
+                with self.assertRaises(RuntimeError):
+                    d.create_pr("abc123def")
+                self.assertNotIn("pr", d.s)   # never saved a pr (certainly not None)
+
+    def test_create_pr_raises_on_http_error_output(self):
+        with fake_home():
+            d, calls = self.driver_and_gh(create_rc=1, create_stdout="HTTP 422: Validation Failed")
+            with self.assertRaises(RuntimeError):
+                d.create_pr("abc123def")
+            self.assertNotIn("pr", d.s)
+
+    def test_ensure_pr_propagates_unparseable_create(self):
+        with fake_home():
+            d, calls = self.driver_and_gh(list_stdout="", create_rc=0, create_stdout="garbage")
+            with self.assertRaises(RuntimeError):
+                d.ensure_pr("abc123def")
+            self.assertNotIn("pr", d.s)
+
+
+class EnsurePrNumberParse(unittest.TestCase):   # cmdemo1-system#922: pr_number now parses a PR URL as well as a plain number
+    def test_plain_number_and_whitespace(self):
+        self.assertEqual(L.pr_number("42"), 42)
+        self.assertEqual(L.pr_number(" 42 "), 42)
+
+    def test_url_without_trailing_slash(self):
+        self.assertEqual(L.pr_number("https://github.com/x/y/pull/123"), 123)
+
+    def test_url_with_trailing_slash(self):
+        self.assertEqual(L.pr_number("https://github.com/x/y/pull/123/"), 123)
+
+    def test_non_numeric_is_none(self):
+        for bad in ("", "not a number", "HTTP 404: Not Found", "42abc", None, "no open PR for that head"):
+            self.assertIsNone(L.pr_number(bad))
+
+
 class MoveBoardItem(unittest.TestCase):
     """Driver.move: board item lookup failures log and no-op; a found item is moved via item-edit."""
 
