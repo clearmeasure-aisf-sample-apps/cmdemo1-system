@@ -1343,7 +1343,7 @@ class StagedFilesGate(unittest.TestCase):
     remote, a main branch, and a worktree branched from an older main commit after main has advanced with a commit
     touching environments/prod/versions.json."""
 
-    def build_repo(self, tmp):
+    def build_merge_base_repo(self, tmp):
         env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
                    GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
         def git(*a, cwd):
@@ -1386,7 +1386,7 @@ class StagedFilesGate(unittest.TestCase):
 
     def test_staged_files_merge_base_protected_empty_for_factory_pi_change(self):
         with tempfile.TemporaryDirectory() as tmp:
-            sh, wt = self.build_repo(tmp)
+            sh, wt = self.build_merge_base_repo(tmp)
             self.stage(wt, "factory/pi/sample.txt", "two\n")
             staged = L.staged_files(sh, wt, "main")
             self.assertEqual(sorted(staged), ["factory/pi/sample.txt"])   # only what the worktree staged; not main's prod bump
@@ -1394,7 +1394,7 @@ class StagedFilesGate(unittest.TestCase):
 
     def test_staged_files_merge_base_protected_nonempty_for_prod_versions(self):
         with tempfile.TemporaryDirectory() as tmp:
-            sh, wt = self.build_repo(tmp)
+            sh, wt = self.build_merge_base_repo(tmp)
             self.stage(wt, "factory/pi/sample.txt", "two\n")
             self.stage(wt, "environments/prod/versions.json", '{"v": 3}\n')
             staged = L.staged_files(sh, wt, "main")
@@ -1546,6 +1546,21 @@ class RunTaskTimeout(PidfileKill, unittest.TestCase):   # cmdemo1-system#817: --
             self.assertLess(elapsed, 12, f"--timeout 2 took {elapsed:.1f}s: it waited for the grandchildren to exit")
             self.assertTrue(self._pid_gone(pidfile), "the grandchild holding the stdout pipe must be killed too")
 
+    def make_timed_out_run_dir(self, tmp, fake_pi):
+        """Build the scenario for a run-task that will time out: a fake run dir with run.json, a prompt file,
+        and a scrubbed env (no LOCAL_LLM_* secrets) with FACTORY_PI_GPU_BIN, FACTORY_PI_LOCK_DIR, TMPDIR,
+        and FACTORY_MIN_CLIENT_TIMEOUT_S=1 (so --timeout 2 doesn't become 300 s). Returns (run, cwd, lockdir,
+        prompt, env)."""
+        run, cwd, lockdir = (os.path.join(tmp, x) for x in ("run", "work", "locks"))
+        for d in (run, cwd, lockdir): os.makedirs(d)
+        json.dump({"top_session": "t", "start": "2026-01-01T00:00:00+00:00", "pi_version": "0-test"},
+                  open(os.path.join(run, "run.json"), "w"))   # so run-task never calls `pi --version`
+        prompt = os.path.join(tmp, "prompt.md"); open(prompt, "w").write("do the task\n")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LOCAL_LLM_")}   # no secrets to the child
+        env.update({"FACTORY_PI_GPU_BIN": fake_pi, "FACTORY_PI_LOCK_DIR": lockdir, "TMPDIR": tmp,
+                    "FACTORY_MIN_CLIENT_TIMEOUT_S": "1"})
+        return run, cwd, lockdir, prompt, env
+
     def test_run_task_timeout_releases_slot_and_leaves_no_grandchild(self):
         # Safety first: without the two overrides below, running run-task end to end would take the real
         # /tmp/factory-pi-<gpu>-slot-N.lock and exec the real pi-gpu. Fail here instead of doing either.
@@ -1555,15 +1570,7 @@ class RunTaskTimeout(PidfileKill, unittest.TestCase):   # cmdemo1-system#817: --
                                   ": tests must never take the real /tmp slot locks or exec the real pi-gpu")
         with tempfile.TemporaryDirectory() as tmp:
             fake, pidfile = self._fake_pi(tmp)
-            run, cwd, lockdir = (os.path.join(tmp, x) for x in ("run", "work", "locks"))
-            for d in (run, cwd, lockdir): os.makedirs(d)
-            json.dump({"top_session": "t", "start": "2026-01-01T00:00:00+00:00", "pi_version": "0-test"},
-                      open(os.path.join(run, "run.json"), "w"))   # so run-task never calls `pi --version`
-            prompt = os.path.join(tmp, "prompt.md"); open(prompt, "w").write("do the task\n")
-            env = {k: v for k, v in os.environ.items() if not k.startswith("LOCAL_LLM_")}   # no secrets to the child
-            # floor down MIN_CLIENT_TIMEOUT_S or `--timeout 2` would become 300 s and outlast this 15 s test
-            env.update({"FACTORY_PI_GPU_BIN": fake, "FACTORY_PI_LOCK_DIR": lockdir, "TMPDIR": tmp,
-                        "FACTORY_MIN_CLIENT_TIMEOUT_S": "1"})
+            run, cwd, lockdir, prompt, env = self.make_timed_out_run_dir(tmp, fake)
             try:
                 proc = subprocess.run([sys.executable, self.RUN_TASK, "--run-dir", run, "--cwd", cwd,
                                        "--task", "t817", "--prompt-file", prompt, "--gpu", "obs", "--timeout", "2"],
@@ -2411,15 +2418,20 @@ class ResumeAfterError(unittest.TestCase):   # resuming an error state: keeps th
             self.assertEqual(d.s["gpu"], "pro5000")  # obs is down, so the free healthy pick is pro5000
             self.assertEqual(d.s["stage"], "pickup")
 
+    def hold_all_gpus(self, h):
+        """Create fake live items in another repo that hold every available GPU: both pro5000 slots, obs and ts3.
+        Returns the runs directory path."""
+        runs = os.path.join(h, "factory-runs")
+        for i, (gpu, stage) in enumerate((("pro5000", "ci"), ("pro5000", "ci"), ("obs", "implement"), ("ts3", "review"))):
+            r = os.path.join(runs, f"cmdemo1-dashboard-{11 + i}"); os.makedirs(r)
+            json.dump({"repo": "cmdemo1-dashboard", "issue": 11 + i, "gpu": gpu, "stage": stage,
+                      "status": "running", "pid": os.getpid()}, open(os.path.join(r, "state.json"), "w"))
+        return runs
+
     def test_errone_gpu_item_waits_while_gpus_held_then_blocks(self):
         with patched_driver_env(time=Clock(),
                                 gpu_health=lambda max_age=600: {g: ("HEALTHY", "") for g in ("pro5000", "obs", "ts3")}) as h:
-            # Live items in another repo hold every available GPU: both pro5000 slots, obs and ts3.
-            runs = os.path.join(h, "factory-runs")
-            for i, (gpu, stage) in enumerate((("pro5000", "ci"), ("pro5000", "ci"), ("obs", "implement"), ("ts3", "review"))):
-                r = os.path.join(runs, f"cmdemo1-dashboard-{11 + i}"); os.makedirs(r)
-                json.dump({"repo": "cmdemo1-dashboard", "issue": 11 + i, "gpu": gpu, "stage": stage,
-                          "status": "running", "pid": os.getpid()}, open(os.path.join(r, "state.json"), "w"))
+            self.hold_all_gpus(h)
             d = L.Driver("cmdemo1-workorders", 28)   # dry_run=False
             d.s["plan"] = dict(PLAN, size="large")
             d.s["stage"] = "gpu"; d.s["status"] = "error"; d.s["error"] = "boom"; d.save()   # the gpu is already cleared
