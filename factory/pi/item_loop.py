@@ -453,18 +453,95 @@ def validate_plan(p):
 def protected_files(files):
     return [f for f in files if PROTECTED_RE.search(f)]
 
+def origin_ref(ref):
+    """The remote-tracking ref for a branch name (`origin/<ref>`): the one place that spelling is built
+    (cmdemo1-system#871) -- no stage or helper may hand-build an `origin/...` string."""
+    return f"origin/{ref}"
+
+def remote_refspec(branch):
+    """The fetch refspec that materializes `branch` as a remote-tracking ref: the one place the
+    `refs/remotes/origin/...` spelling is built (cmdemo1-system#871)."""
+    return f"{branch}:refs/remotes/origin/{branch}"
+
+class GitRepo:
+    """A git working tree as a value object (cmdemo1-system#871): one path plus the git calls the driver makes
+    inside it. Every call goes through the injected `sh` (Driver.sh: the logging, the dry-run skip and the gh
+    rate-limit backoff live there, never in a git argument list), always with `cwd` set to the bound path, so the
+    work-tree path and the `origin/...` refs (origin_ref) cannot drift between the stages that used to spell
+    `cwd=self.s["wt"]` and `f"origin/{...}"` on every call.
+
+    Driver builds one for the item's work tree in __init__ (`self.git`, through the Driver._sh seam so a test's
+    `d.sh = ...` replacement is honored at call time); the module-level merge_base / staged_files keep their
+    (sh, wt, default) signatures by building a throwaway GitRepo. The merge-base rule (merge-base of HEAD and
+    origin/<default>, falling back to origin/<default> when git cannot resolve it, so the protected-file gate is
+    never made more permissive than it was) lives in merge_base(), and nowhere else."""
+
+    def __init__(self, sh, path):
+        self.sh = sh
+        self.path = path
+
+    def _git(self, *a, **k):
+        k.setdefault("cwd", self.path)
+        return self.sh(["git", *a], **k)
+
+    def add_all(self):
+        return self._git("add", "-A")
+
+    def head(self):
+        return self._git("rev-parse", "HEAD").stdout.strip()
+
+    def merge_base(self, base):
+        """merge-base(HEAD, origin/<base>), or origin/<base> when git cannot resolve it (a branch behind main may
+        still show a false protected file, never a missed one: the gate never widens)."""
+        r = self._git("merge-base", "HEAD", origin_ref(base), check=False)
+        b = (r.stdout or "").strip()
+        return origin_ref(base) if r.returncode or not b else b
+
+    def changed_names(self, base):
+        """Paths staged in the index relative to merge_base(base): the branch's own staged changes, never commits
+        main made after the branch forked off."""
+        return self._git("diff", "--cached", "--name-only", self.merge_base(base), check=False).stdout.split()
+
+    def diff(self, base):
+        """The branch's diff against merge_base(base) (`<merge-base>...HEAD`): what the independent review reads."""
+        return self._git("diff", f"{self.merge_base(base)}...HEAD", check=False).stdout
+
+    def staged_changes(self):
+        """True when the index holds a change (git diff --cached --quiet exits non-zero)."""
+        return bool(self._git("diff", "--cached", "--quiet", check=False).returncode)
+
+    def staged_stat(self):
+        return self._git("diff", "--cached", "--stat").stdout
+
+    def commit(self, msg, author_args=BOT_GIT, allow_empty=False):
+        """One quiet commit as the bot (the BOT_GIT author args by default); allow_empty for the CI re-run commit."""
+        return self._git(*author_args, "commit", "-q", *(("--allow-empty",) if allow_empty else ()), "-m", msg)
+
+    def push(self, branch):
+        """Push HEAD to the branch on origin (a write: skipped in dry-run by sh)."""
+        return self._git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", write=True)
+
+    def reset_hard(self, check=True):
+        return self._git("reset", "-q", "--hard", check=check)
+
+    def clean(self, check=True):
+        return self._git("clean", "-fdq", check=check)
+
+    def checkout(self, pathspec, check=True):
+        return self._git("checkout", "--", pathspec, check=check)
+
+    def status_porcelain(self):
+        return self._git("status", "--porcelain", check=False).stdout.strip()
+
 def merge_base(sh, wt, default):
     """Merge base of HEAD and origin/<default>: the commit the branch forked from, which is what the PR diff shows.
-    When git cannot resolve it, falls back to the old origin/<default> comparison, so the gate is never made more
-    permissive than it was (a branch behind main may still show a false protected file, never a missed one)."""
-    r = sh(["git", "merge-base", "HEAD", f"origin/{default}"], cwd=wt, check=False)
-    base = (r.stdout or "").strip()
-    return f"origin/{default}" if r.returncode or not base else base
+    Thin wrapper over GitRepo.merge_base (the rule and the origin/<default> fallback live there)."""
+    return GitRepo(sh, wt).merge_base(default)
 
 def staged_files(sh, wt, default):
     """Paths staged in the worktree's index relative to merge_base(sh, wt, default): the branch's own staged
-    changes, never commits main made after the branch forked off."""
-    return sh(["git", "diff", "--cached", "--name-only", merge_base(sh, wt, default)], cwd=wt, check=False).stdout.split()
+    changes, never commits main made after the branch forked off. Thin wrapper over GitRepo.changed_names."""
+    return GitRepo(sh, wt).changed_names(default)
 
 def gate_state(checks, required):
     """Merge gate: required checks GREEN and the quality checks (Qodana zero new problems, Refactoring rationale)
@@ -977,6 +1054,10 @@ class Driver:
         self.s.setdefault("counts", fresh_counts())
         if top_session: self.s["top_session"] = top_session
         self.full = f"{ORG}/{repo}"; self.last_task = {}
+        # The item's work tree as a GitRepo value object (cmdemo1-system#871): the work-tree path is deterministic
+        # (worktree_path("wt"), exactly what setup_worktree records into self.s["wt"]), and the _sh seam resolves
+        # self.sh at call time, so a test's `d.sh = ...` replacement is honored although this is built once here.
+        self.git = GitRepo(self._sh, self.worktree_path("wt"))
 
     # state / log
     def save(self, **kw):
@@ -1001,6 +1082,11 @@ class Driver:
         p = os.path.join(self.run_dir, "logs", name)
         write_text(p, scrub(text))
         return p
+
+    def _sh(self, cmd, **k):
+        """The sh seam GitRepo calls through (cmdemo1-system#871): resolved through the instance at call time, so
+        the GitRepo built once in __init__ still honors a test's `d.sh = ...` replacement."""
+        return self.sh(cmd, **k)
 
     def sh(self, cmd, cwd=None, check=True, timeout=None, write=False):
         """write=True marks a GitHub- or remote-changing step: skipped (logged) in dry-run. Between the dry-run skip
@@ -1242,13 +1328,12 @@ class Driver:
 
     def commit_push(self, msg):
         self.check_held()
-        wt = self.s["wt"]
-        self.sh(["git", "add", "-A"], cwd=wt)
-        if self.sh(["git", "diff", "--cached", "--quiet"], cwd=wt, check=False).returncode:
-            self.sh(["git", *BOT_GIT, "commit", "-q", "-m", msg + f"\n\nCode by Pi ({self.gpu_label()}); planned by the factory bot; "
-                     f"Pi driver run {self.s['run_id']}."], cwd=wt)
-        self.sh(["git", "push", "-q", "origin", f"HEAD:refs/heads/{self.s['plan']['branch']}"], cwd=wt, write=True)
-        head = self.sh(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip(); self.save(head=head)
+        self.git.add_all()
+        if self.git.staged_changes():
+            self.git.commit(msg + f"\n\nCode by Pi ({self.gpu_label()}); planned by the factory bot; "
+                         f"Pi driver run {self.s['run_id']}.")
+        self.git.push(self.s["plan"]["branch"])
+        head = self.git.head(); self.save(head=head)
         if not self.dry and self.s.get("pr"): time.sleep(90)   # let the PR's checks move to the new head before reading them
         return head
 
@@ -1311,8 +1396,8 @@ class Driver:
         if os.path.isdir(self.worktree_path("plan")): self.sh(["git", "worktree", "remove", "--force", self.worktree_path("plan")], cwd=clone, check=False)
         if not os.path.isdir(wt):
             remote = self.sh(["git", "ls-remote", "--heads", "origin", p["branch"]], cwd=clone).stdout.strip()
-            base = f"origin/{p['branch']}" if remote else f"origin/{default}"
-            if remote: self.sh(["git", "fetch", "-q", "origin", f"{p['branch']}:refs/remotes/origin/{p['branch']}"], cwd=clone)
+            base = origin_ref(p["branch"]) if remote else origin_ref(default)
+            if remote: self.sh(["git", "fetch", "-q", "origin", remote_refspec(p["branch"])], cwd=clone)
             self.sh(["git", "worktree", "prune"], cwd=clone)
             self.sh(["git", "worktree", "add", "-q", "-B", p["branch"], wt, base], cwd=clone)
         self.save(wt=wt, default=default, clone=clone)
@@ -1322,7 +1407,7 @@ class Driver:
         clone, default = self._clone_ready()
         wt = self.worktree_path("plan")
         if os.path.isdir(wt): self.sh(["git", "worktree", "remove", "--force", wt], cwd=clone, check=False)
-        self.sh(["git", "worktree", "add", "-q", "--detach", wt, f"origin/{default}"], cwd=clone)
+        self.sh(["git", "worktree", "add", "-q", "--detach", wt, origin_ref(default)], cwd=clone)
         self.save(wt=wt, default=default, clone=clone)
 
     def run(self):
@@ -1470,7 +1555,7 @@ class Driver:
                 return self.blocker("the refactoring research is missing or not substantive after "
                                     f"{LIMITS['research']} Pi passes (`{RESEARCH_HEAD}` with findings per touched file).")
             self.pi(f"refactoring-research-{self.s['counts']['research']}", prompt, self.budgets.research_s)
-            self.sh(["git", "checkout", "--", "."], cwd=self.s["wt"], check=False); self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"], check=False)
+            self.git.checkout(".", check=False); self.git.clean(check=False)
             text = self.research_text()
         try:
             with open(fu) as f: extra = json.load(f)
@@ -1486,7 +1571,7 @@ class Driver:
                         "test green; never skip, delete or weaken a test. If this refactoring turns out larger than a small, "
                         "safe change inside the item's files, change nothing and end with FAIL.")
             if not self.local_green("refactor"):
-                self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"]); self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"])
+                self.git.reset_hard(); self.git.clean()
                 append_text(out, "\n- In-scope refactors were reverted: verification stayed red after the fix passes; "
                                    "they are left to a follow-up.\n")
                 self.log("in-scope refactors reverted (red)")
@@ -1536,9 +1621,9 @@ class Driver:
             return self.blocker(f"local verification `{self.s['plan']['verify_cmd']}` is still red after "
                                 f"{LIMITS['local_fix']} Pi fix passes.")
         if self.dry:
-            self.sh(["git", "add", "-A"], cwd=self.s["wt"])
+            self.git.add_all()
             self.log("DRY-RUN: local verification green; stopping before commit/push/PR.\n"
-                     + self.sh(["git", "diff", "--cached", "--stat"], cwd=self.s["wt"]).stdout)
+                     + self.git.staged_stat())
             return self.save(stage="dry-run-done")
         self.save(stage="pr")
 
@@ -1548,13 +1633,13 @@ class Driver:
 
     def merge_base(self):
         """Merge base of HEAD and origin/<default>, or origin/<default> when git cannot resolve it."""
-        return merge_base(self.sh, self.s["wt"], self.s["default"])
+        return self.git.merge_base(self.s["default"])
 
     def enhancement_blocker(self):
         """Blocker text when the enhancement's own staged changes touch credentials, secrets or production setup, else
         None. The index is compared with merge_base(), so commits main made after the branch forked off never block."""
-        self.sh(["git", "add", "-A"], cwd=self.s["wt"])
-        bad = protected_files(staged_files(self.sh, self.s["wt"], self.s["default"]))
+        self.git.add_all()
+        bad = protected_files(self.git.changed_names(self.s["default"]))
         return (f"the change touches credentials, secrets or production setup ({', '.join(bad)}); "
                 "an enhancement PR may not.") if bad else None
 
@@ -1610,7 +1695,7 @@ class Driver:
             for rid in runs:
                 r = self.gh("run", "rerun", rid, "-R", self.full, "--failed", write=True, check=False)
                 if r.returncode:   # refused: one empty commit instead (operating-instructions)
-                    self.sh(["git", *BOT_GIT, "commit", "-q", "--allow-empty", "-m", "Re-run CI after an infrastructure failure"], cwd=self.s["wt"])
+                    self.git.commit("Re-run CI after an infrastructure failure", allow_empty=True)
                     self.commit_push("Re-run CI"); break
             return
         if self.fix_pass("ci_fix", f"required checks still red after {LIMITS['ci_fix']} Pi fix passes.",
@@ -1777,7 +1862,7 @@ class Driver:
         if not rv and not self.dry:
             self.blocker(f"no second GPU is up for the independent review of code written on {', '.join(self.gpu_label(g) for g in self.author_gpus())}."); return None
         rv = rv or [self.gpu()]; self.save(reviewer_gpu=rv[0])
-        diff = self.sh(["git", "diff", f"{self.merge_base()}...HEAD"], cwd=self.s["wt"], check=False).stdout
+        diff = self.git.diff(self.s["default"])
         limit = 60000 if all(g in G.LARGE_GPUS for g in rv) else 24000   # any small GPU may take it: size the prompt for the smallest
         out = os.path.join(self.run_dir, "independent-review.md")
         if os.path.exists(out): os.remove(out)
@@ -1796,9 +1881,9 @@ class Driver:
                      f"credential or production-setup change. Write one bullet per problem to {out} (or `- No findings.`). "
                      "End your reply with PASS when there is no blocking problem, otherwise FAIL.", PI_TASK_TIMEOUT_S, gpu=G.gpu_arg(rv))
         rv = self.last_task.get("gpu") or rv[0]; self.save(reviewer_gpu=rv)
-        if self.sh(["git", "status", "--porcelain"], cwd=self.s["wt"], check=False).stdout.strip():
-            self.log("reviewer changed files; discarding them"); self.sh(["git", "reset", "-q", "--hard"], cwd=self.s["wt"])
-            self.sh(["git", "clean", "-fdq"], cwd=self.s["wt"])
+        if self.git.status_porcelain():
+            self.log("reviewer changed files; discarding them"); self.git.reset_hard()
+            self.git.clean()
         verdict = review_verdict(self.last_task.get("result"), scrub(read_text(out)) if os.path.exists(out) else None)
         self.log(f"independent review on {rv}: {verdict.label}")
         return verdict
