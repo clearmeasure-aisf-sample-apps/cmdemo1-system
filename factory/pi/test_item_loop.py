@@ -125,6 +125,29 @@ def pi_stub(result, calls=None):
         return result(calls) if callable(result) else result
     return pi
 
+def load_run_task(module_name):
+    """run-task has no .py suffix: load it as a fresh module under `module_name` (each test class uses its own name,
+    so two loaders never collide and a class can call it per test)."""
+    loader = importlib.machinery.SourceFileLoader(module_name, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-task"))
+    m = importlib.util.module_from_spec(importlib.util.spec_from_loader(module_name, loader))
+    loader.exec_module(m)
+    return m
+
+def fake_run_dir(tmp, fake_pi, prompt_text="do it\n", env_extra=None):
+    """The scaffolding every end-to-end run-task test shares: run/work/locks dirs, a pre-seeded run.json (so run-task
+    never probes `pi --version`), a prompt file, and a scrubbed env (no LOCAL_LLM_* secrets) with FACTORY_PI_GPU_BIN
+    pointing at `fake_pi`, plus FACTORY_PI_LOCK_DIR, TMPDIR and FACTORY_MIN_CLIENT_TIMEOUT_S=1 (so --timeout 2 stays 2 s).
+    Returns (run, cwd, lockdir, prompt, env)."""
+    run, cwd, lockdir = (os.path.join(tmp, x) for x in ("run", "work", "locks"))
+    for d in (run, cwd, lockdir): os.makedirs(d, exist_ok=True)
+    json.dump({"top_session": "t", "start": "2026-01-01T00:00:00+00:00", "pi_version": "0-test"},
+              open(os.path.join(run, "run.json"), "w"))   # so run-task never calls `pi --version`
+    prompt = os.path.join(tmp, "prompt.md"); open(prompt, "w").write(prompt_text)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LOCAL_LLM_")}   # no secrets to the child
+    env.update({"FACTORY_PI_GPU_BIN": fake_pi, "FACTORY_PI_LOCK_DIR": lockdir, "TMPDIR": tmp,
+                "FACTORY_MIN_CLIENT_TIMEOUT_S": "1"}, **(env_extra or {}))
+    return run, cwd, lockdir, prompt, env
+
 class PromptMentions:   # mixin for prompt tests: every phrase the prompt must name, on one line, needle named on failure
     def assert_mentions(self, text, *needles):
         for n in needles: self.assertIn(n, text, n)
@@ -464,8 +487,7 @@ class ReviewInfraRetry(unittest.TestCase):   # t83u: no / empty findings or no v
 
 class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has not really started in 15 min is relaunched
     def rt(self):
-        loader = importlib.machinery.SourceFileLoader("run_task_t85u", os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-task"))
-        m = importlib.util.module_from_spec(importlib.util.spec_from_loader("run_task_t85u", loader)); loader.exec_module(m); return m
+        return load_run_task("run_task_t85u")
 
     def test_run_pi_kills_a_pi_with_no_session_record(self):
         rt = self.rt()
@@ -542,13 +564,8 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         self.assertFalse(rt.killed_by_watch(ev, 0)); self.assertFalse(rt.killed_by_watch(ev, 1))
 
     def run_task_main(self, tmp, args, pi_script=None, env_extra=None):
-        run, cwd, lockdir = (os.path.join(tmp, x) for x in ("run", "work", "locks"))
-        for d in (run, cwd, lockdir): os.makedirs(d, exist_ok=True)
-        json.dump({"top_session": "t", "start": "2026-01-01T00:00:00+00:00", "pi_version": "0-test"}, open(os.path.join(run, "run.json"), "w"))
-        prompt = os.path.join(tmp, "prompt.md"); open(prompt, "w").write("do it\n")
         fake = os.path.join(tmp, "fake-pi"); open(fake, "w").write("#!/usr/bin/env bash\n" + (pi_script or "echo PASS\n")); os.chmod(fake, 0o755)
-        env = {k: v for k, v in os.environ.items() if not k.startswith("LOCAL_LLM_")}
-        env.update({"FACTORY_PI_GPU_BIN": fake, "FACTORY_PI_LOCK_DIR": lockdir, "TMPDIR": tmp, "FACTORY_MIN_CLIENT_TIMEOUT_S": "1"}, **(env_extra or {}))
+        run, cwd, lockdir, prompt, env = fake_run_dir(tmp, fake, env_extra=env_extra)
         p = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-task"), "--run-dir", run,
                             "--cwd", cwd, "--prompt-file", prompt, *args], env=env, capture_output=True, text=True, timeout=30)
         return p, run, lockdir
@@ -1520,10 +1537,7 @@ class RunTaskTimeout(PidfileKill, unittest.TestCase):   # cmdemo1-system#817: --
 
     @classmethod
     def setUpClass(cls):
-        loader = importlib.machinery.SourceFileLoader("run_task", cls.RUN_TASK)
-        spec = importlib.util.spec_from_loader("run_task", loader)
-        cls.rt = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.rt)
+        cls.rt = load_run_task("run_task")
 
     def _fake_pi(self, tmp):
         """Stand-in for pi-gpu (takes and ignores any args): backgrounds a grandchild, records its pid, prints
@@ -1584,19 +1598,9 @@ class RunTaskTimeout(PidfileKill, unittest.TestCase):   # cmdemo1-system#817: --
             self.assertTrue(self._pid_gone(pidfile), "the grandchild holding the stdout pipe must be killed too")
 
     def make_timed_out_run_dir(self, tmp, fake_pi):
-        """Build the scenario for a run-task that will time out: a fake run dir with run.json, a prompt file,
-        and a scrubbed env (no LOCAL_LLM_* secrets) with FACTORY_PI_GPU_BIN, FACTORY_PI_LOCK_DIR, TMPDIR,
-        and FACTORY_MIN_CLIENT_TIMEOUT_S=1 (so --timeout 2 doesn't become 300 s). Returns (run, cwd, lockdir,
-        prompt, env)."""
-        run, cwd, lockdir = (os.path.join(tmp, x) for x in ("run", "work", "locks"))
-        for d in (run, cwd, lockdir): os.makedirs(d)
-        json.dump({"top_session": "t", "start": "2026-01-01T00:00:00+00:00", "pi_version": "0-test"},
-                  open(os.path.join(run, "run.json"), "w"))   # so run-task never calls `pi --version`
-        prompt = os.path.join(tmp, "prompt.md"); open(prompt, "w").write("do the task\n")
-        env = {k: v for k, v in os.environ.items() if not k.startswith("LOCAL_LLM_")}   # no secrets to the child
-        env.update({"FACTORY_PI_GPU_BIN": fake_pi, "FACTORY_PI_LOCK_DIR": lockdir, "TMPDIR": tmp,
-                    "FACTORY_MIN_CLIENT_TIMEOUT_S": "1"})
-        return run, cwd, lockdir, prompt, env
+        """Build the scenario for a run-task that will time out: the shared fake run dir with run.json, a prompt file
+        ("do the task"), and the scrubbed env. Returns (run, cwd, lockdir, prompt, env)."""
+        return fake_run_dir(tmp, fake_pi, prompt_text="do the task\n")
 
     def test_run_task_timeout_releases_slot_and_leaves_no_grandchild(self):
         # Safety first: without the two overrides below, running run-task end to end would take the real
@@ -1634,6 +1638,73 @@ class RunTaskTimeout(PidfileKill, unittest.TestCase):   # cmdemo1-system#817: --
         self.assertEqual(rt.result_of(0, True, "done, PASS"), "PASS")
         self.assertEqual(rt.result_of(1, True, "done, FAIL"), "FAIL")
         self.assertEqual(rt.result_of(3, True, "crashed"), "exit 3")
+
+class RunTaskRecords(unittest.TestCase):   # cmdemo1-system#933: main()'s extracted steps are pure and unit-tested directly
+    """The run.json bootstrap, the two tasks.jsonl record builders and the exit-code rule, exercised without
+    launching run-task: no subprocess, no slot, no Pi (pi_version is mocked where it would probe the real one)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rt = load_run_task("run_task_records")
+
+    def test_ensure_run_json_writes_once_and_makes_logs(self):
+        with tempfile.TemporaryDirectory() as run:
+            with mock.patch.object(self.rt, "pi_version", return_value="0-test"):
+                self.rt.ensure_run_json(run, "top-1")
+            meta = json.load(open(os.path.join(run, "run.json")))
+            self.assertEqual(meta["top_session"], "top-1"); self.assertEqual(meta["pi_version"], "0-test")
+            self.assertIn("start", meta)
+            self.assertTrue(os.path.isdir(os.path.join(run, "logs")))
+            with mock.patch.object(self.rt, "pi_version", return_value="other") as pv:
+                self.rt.ensure_run_json(run, "top-2")   # a second launch must not rewrite the first run.json
+            pv.assert_not_called()
+            self.assertEqual(json.load(open(os.path.join(run, "run.json")))["top_session"], "top-1")
+
+    def test_ensure_run_json_falls_back_to_the_env_top_session(self):
+        with tempfile.TemporaryDirectory() as run:
+            with mock.patch.object(self.rt, "pi_version", return_value=""), \
+                 mock.patch.dict(os.environ, {"FACTORY_TOP_SESSION": "env-top"}):
+                self.rt.ensure_run_json(run, None)
+            self.assertEqual(json.load(open(os.path.join(run, "run.json")))["top_session"], "env-top")
+
+    def test_no_start_record_fields_and_key_order(self):
+        start = L.now()
+        rec = self.rt.no_start_record("t1", "obs,ts3", start, 60)
+        self.assertEqual(list(rec), ["task", "gpu", "start", "end", "rc", "result", "why"])
+        self.assertEqual((rec["task"], rec["gpu"], rec["rc"], rec["result"], rec["start"]),
+                         ("t1", "obs,ts3", self.rt.NO_START_RC, "no-start", start.isoformat(timespec="seconds")))
+        self.assertEqual(rec["why"], "no free slot on obs,ts3 within 60 s")
+        self.assertLessEqual((L.now() - L.dt.datetime.fromisoformat(rec["end"])).total_seconds(), 10)
+
+    def test_finish_record_carries_usage_and_wall_time(self):
+        t0 = L.now(); t1 = t0 + L.dt.timedelta(seconds=12.345)
+        u = {"input": 10, "output": 20, "cacheRead": 30, "turns": 3}
+        rec = self.rt.finish_record("t1", "obs", ["/x/s.jsonl"], u, "s1", t0, t1, 0, "PASS")
+        self.assertEqual(rec, {"task": "t1", "gpu": "obs", "session_id": "s1", "session_file": "/x/s.jsonl",
+                               "start": t0.isoformat(timespec="seconds"), "end": t1.isoformat(timespec="seconds"),
+                               "wall_s": 12.3, "rc": 0, "result": "PASS",
+                               "input": 10, "output": 20, "cacheRead": 30, "turns": 3})
+        # no session file of this launch: no id, no file, and the usage zeros are still spread in
+        rec = self.rt.finish_record("t2", "obs", [], {"input": 0, "output": 0, "cacheRead": 0, "turns": 0}, None, t0, t1, 7, "exit 7")
+        self.assertIsNone(rec["session_id"]); self.assertIsNone(rec["session_file"]); self.assertEqual(rec["rc"], 7)
+        self.assertEqual(list(rec), ["task", "gpu", "session_id", "session_file", "start", "end", "wall_s",
+                                     "rc", "result", "input", "output", "cacheRead", "turns"])
+
+    def test_append_record_appends_one_jsonl_line(self):
+        with tempfile.TemporaryDirectory() as run:
+            self.rt.append_record(run, {"task": "a", "rc": 0, "result": "PASS"})
+            self.rt.append_record(run, {"task": "b", "rc": 125, "result": "no-start"})
+            lines = [json.loads(l) for l in open(os.path.join(run, "tasks.jsonl"))]
+            self.assertEqual([l["task"] for l in lines], ["a", "b"])   # both records, in order
+
+    def test_exit_code_of_covers_each_branch(self):
+        rt = self.rt
+        self.assertEqual(rt.exit_code_of("PASS", 0), 0)
+        self.assertEqual(rt.exit_code_of("no-start", rt.NO_START_RC), rt.NO_START_RC)
+        self.assertEqual(rt.exit_code_of("stalled", rt.NO_START_RC), rt.NO_START_RC)
+        self.assertEqual(rt.exit_code_of("timeout", rt.TIMEOUT_RC), 1)
+        self.assertEqual(rt.exit_code_of("FAIL", 1), 1)
+        self.assertEqual(rt.exit_code_of("exit 3", 3), 1)
 
 class SharedTaskTimeout(unittest.TestCase):   # one Pi task's wall-clock budget is one shared constant, not three literals
     """1800 used to be spelled out in three places: Driver.pi's own default, the review call, and run-task's
