@@ -90,17 +90,19 @@ def scripted_sh(replies):
     """sh replacement for git/gh steps: a reply key is a command word or a run of consecutive words ('merge-base',
     'diff --cached', 'rev-parse', 'create') matched against the argv only, never against a commit message or a
     branch name. The first matching key answers; its value is the stdout, or a (returncode, stdout) pair when the
-    command must fail. Every command is recorded in the callable's .calls list."""
+    command must fail. Every command is recorded in the callable's .calls list. A `Command` value object is
+    unwrapped to its argv for matching and recording (cmdemo1-system#947)."""
     calls = []
     def sh(cmd, **k):
-        calls.append(list(cmd))
-        argv = cmd.split() if isinstance(cmd, str) else [str(x) for x in cmd]
+        argv = cmd.argv if isinstance(cmd, L.Command) else cmd
+        calls.append(list(argv))
+        words_argv = argv.split() if isinstance(argv, str) else [str(x) for x in argv]
         for key, reply in replies.items():
             words = key.split()
-            if any(argv[i:i + len(words)] == words for i in range(len(argv) - len(words) + 1)):
+            if any(words_argv[i:i + len(words)] == words for i in range(len(words_argv) - len(words) + 1)):
                 rc, stdout = reply if isinstance(reply, tuple) else (0, reply)
-                return L.subprocess.CompletedProcess(cmd, rc, stdout, "")
-        return L.subprocess.CompletedProcess(cmd, 0, "", "")
+                return L.subprocess.CompletedProcess(argv, rc, stdout, "")
+        return L.subprocess.CompletedProcess(argv, 0, "", "")
     sh.calls = calls
     return sh
 
@@ -1930,13 +1932,37 @@ class DriverShGroupKill(PidfileKill, unittest.TestCase):   # cmdemo1-system#839:
             d = make_driver(repo="cmdemo1-system", issue=839, dry_run=False)
             logs = []; d.log = logs.append
             with patch_run(run):
-                r = d.sh(["gh", "pr", "list"], check=False)   # App attempt refused -> the same call on the user login
-                d.sh(["git", "status"], check=False)          # never a gh command: never a token
+                r = d.gh("pr", "list", check=False)   # App attempt refused -> the same call on the user login
+                d.sh(["git", "status"], check=False)  # never a gh command: never a token
         self.assertEqual([list(c) for c, _ in run.calls], [["gh", "pr", "list"], ["gh", "pr", "list"], ["git", "status"]],
                          "the refused attempt is re-run with the same argv")
         self.assertEqual([((k.get("env") or {}).get("GH_TOKEN")) for _, k in run.calls], [self.APP_TOKEN, None, None])
         self.assertEqual((r.returncode, r.stdout), (0, "[]"))
         self.assertTrue(any("user login" in m for m in logs))
+
+    def test_bare_gh_list_gets_no_app_token_and_no_retry(self):
+        """cmdemo1-system#947: a bare ["gh", ...] list passed to sh() is a non-gh command -- no App token, no
+        rate-limit retry. Only gh() builds a Command with is_gh=True, and only that gets the App quota and the
+        backoff. This test goes through the REAL Driver.sh via patch_run, so the real sh code path runs."""
+        os.environ["GH_APP_TOKEN_CMD"] = f"printf {self.APP_TOKEN}"
+        # a rate-limited reply: if sh() treated this as a gh command, it would retry
+        rl = (1, "GraphQL: API rate limit exceeded for user ID 1.")
+        run = self.run_recorder([rl])
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=839, dry_run=False)
+            waits = []; d.wait_alive = lambda s, why: waits.append((s, why))
+            with patch_run(run):
+                r = d.sh(["gh", "pr", "list"], check=False)   # bare list: not a Command, so non-gh
+        # exactly one run: no retry (a gh command would have retried the rate-limited reply)
+        self.assertEqual(len(run.calls), 1,
+                         "a bare gh list must not be retried: sh() does not sniff argv for gh")
+        # no App token: the env must not carry GH_TOKEN
+        self.assertEqual([(k.get("env") or {}).get("GH_TOKEN") for _, k in run.calls], [None],
+                         "a bare gh list must not get the App token: only gh() decides app_ok")
+        # no wait_alive calls: the retry loop never ran
+        self.assertEqual(waits, [])
+        # the rate-limited reply is returned as-is (no retry)
+        self.assertEqual((r.returncode, r.stdout), rl)
 
     # (3) the surface: whatever the runner answers is what the caller always got
     def test_the_runners_result_flows_straight_back_to_the_caller(self):
@@ -2959,7 +2985,7 @@ class DraftPlanTests(unittest.TestCase):   # cmd_draft_plan with gh/plan_worktre
 class GhChokepoint(unittest.TestCase):   # cmdemo1-system#828: every gh call is one sh chokepoint with explicit check, timeout and write
     def gh_recorder(self):
         calls = []
-        sh = lambda cmd, **k: (calls.append((cmd, k)), subprocess.CompletedProcess(cmd, 0, "", ""))[1]
+        sh = lambda cmd, **k: (calls.append((cmd, k)), subprocess.CompletedProcess(getattr(cmd, "argv", cmd), 0, "", ""))[1]
         return sh, calls
 
     def test_gh_passes_timeout_and_check_to_sh(self):
@@ -2968,8 +2994,10 @@ class GhChokepoint(unittest.TestCase):   # cmdemo1-system#828: every gh call is 
             sh, calls = self.gh_recorder(); d.sh = sh
             d.gh("run", "watch", "1", check=False, timeout=21600)
             cmd, k = calls[0]
-            self.assertEqual(list(cmd), ["gh", "run", "watch", "1"])
-            self.assertEqual((k.get("check"), k.get("timeout"), k.get("write")), (False, 21600, False))
+            self.assertIsInstance(cmd, L.Command)
+            self.assertEqual(list(cmd.argv), ["gh", "run", "watch", "1"])
+            self.assertEqual((k.get("check"), k.get("timeout")), (False, 21600))
+            self.assertFalse(cmd.write)
 
     def test_gh_defaults_unchanged(self):
         with fake_home() as h:
@@ -2977,8 +3005,43 @@ class GhChokepoint(unittest.TestCase):   # cmdemo1-system#828: every gh call is 
             sh, calls = self.gh_recorder(); d.sh = sh
             d.gh("pr", "list")
             cmd, k = calls[0]
-            self.assertEqual(list(cmd), ["gh", "pr", "list"])
-            self.assertEqual((k.get("check"), k.get("timeout"), k.get("write")), (True, None, False))
+            self.assertIsInstance(cmd, L.Command)
+            self.assertEqual(list(cmd.argv), ["gh", "pr", "list"])
+            self.assertEqual((k.get("check"), k.get("timeout")), (True, None))
+            self.assertFalse(cmd.write)
+
+    def test_gh_decides_the_policy(self):
+        """cmdemo1-system#947: gh() builds the Command and decides is_gh, app_ok and write -- sh() never sniffs."""
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=828)
+            sh, calls = self.gh_recorder(); d.sh = sh
+            # a plain gh read: is_gh=True, app_ok=True, write=False
+            d.gh("pr", "list")
+            cmd = calls[0][0]
+            self.assertTrue(cmd.is_gh); self.assertTrue(cmd.app_ok); self.assertFalse(cmd.write)
+            # pr create / issue create stay on the user login: app_ok=False
+            d.gh("pr", "create", "--title", "t")
+            cmd = calls[1][0]
+            self.assertTrue(cmd.is_gh); self.assertFalse(cmd.app_ok); self.assertFalse(cmd.write)
+            d.gh("issue", "create", "--title", "t")
+            cmd = calls[2][0]
+            self.assertTrue(cmd.is_gh); self.assertFalse(cmd.app_ok); self.assertFalse(cmd.write)
+            # a write: write=True
+            d.gh("pr", "comment", "1", "--body", "hi", write=True)
+            cmd = calls[3][0]
+            self.assertTrue(cmd.is_gh); self.assertTrue(cmd.app_ok); self.assertTrue(cmd.write)
+
+    def test_sh_rejects_conflicting_write_kwarg_on_command(self):
+        """A Command owns its write flag: a conflicting write= kwarg raises ValueError."""
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=828, dry_run=False)
+            c = L.Command(["gh", "pr", "list"], is_gh=True, app_ok=True, write=False)
+            with self.assertRaises(ValueError):
+                d.sh(c, write=True)
+            # matching kwarg is fine
+            c2 = L.Command(["git", "status"], write=True)
+            r = d.sh(c2, write=True, check=False)
+            self.assertIsInstance(r, subprocess.CompletedProcess)
 
     def test_no_direct_sh_gh_call_sites(self):
         src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "item_loop.py")).read()

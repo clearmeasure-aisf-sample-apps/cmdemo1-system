@@ -23,10 +23,26 @@ from collections import Counter
 from enum import StrEnum
 from typing import NamedTuple
 import argparse, datetime as dt, fcntl, json, os, re, shlex, subprocess, sys, time, urllib.request, uuid
+
+
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
 from scrub import SECRET_RE, scrub, add_secret_source   # the one scrub rule set lives in scrub.py (#838), re-exported here so watchdog, run-task and the tests keep importing it from item_loop
 from runner import run_cmd   # the one runner with a deadline lives in runner.py (#839), re-exported here for the same reason: run-task uses it without importing this driver
+
+
+class Command(NamedTuple):
+    """A command the driver will run, with the policy that sh() used to sniff out of argv (cmdemo1-system#947):
+    `argv` is the command (a list of words or a shell string), `is_gh` says it is a `gh` call (the App-token
+    first-try and the rate-limit retry apply), `app_ok` says the App token may be used for it (False for
+    `pr create` / `issue create`, which stay on the user login), and `write` marks a GitHub- or remote-changing
+    step (skipped, logged, in dry-run). Built by `Driver.gh()`; a bare list or string passed to `Driver.sh()`
+    is a non-gh command with no App token and no rate-limit retry, and its `write` flag comes from the `write=`
+    keyword."""
+    argv: object
+    is_gh: bool = False
+    app_ok: bool = False
+    write: bool = False
 
 # String enums for check states and failure types (values are string literals for JSON compatibility).
 class CheckState(StrEnum):
@@ -241,7 +257,6 @@ def iso(t=None): return (t or now()).isoformat(timespec="seconds")
 # ---- GitHub App token for gh (own API quota). Opt-in: set GH_APP_TOKEN_CMD to a command that prints an installation token.
 GH_APP_TOKEN_TTL_S = 50 * 60   # installation tokens last 1h; refresh before that
 _APP_DENIED_RE = re.compile(r"HTTP 40[13]\b|Resource not accessible|Forbidden|Bad credentials|API rate limit|Repository rule violations|not authorized to push|protected branch", re.I)   # clear authorization refusals only
-GH_APP_USER_ONLY = {("pr", "create"), ("issue", "create")}   # authored objects stay the bot user's: the merge gate requires PR author == BOT
 GH_APP_MINT_RETRY_S = 5 * 60   # a failed mint is not retried on every gh call
 _app_tok = {"v": None, "at": 0.0}
 # The token itself stays here (scrub.py never imports item_loop, so there is no cycle): it registers as a caller-owned
@@ -1129,21 +1144,39 @@ class Driver:
         the GitRepo built once in __init__ still honors a test's `d.sh = ...` replacement."""
         return self.sh(cmd, **k)
 
-    def sh(self, cmd, cwd=None, check=True, timeout=None, write=False):
-        """write=True marks a GitHub- or remote-changing step: skipped (logged) in dry-run. Between the dry-run skip
-        and check/write, sh does exactly two things: one subprocess of the command (_run_logged, a gh call first on
-        the App token) and the gh rate-limit backoff on a rate-limited reply (_retry_rate_limit)."""
-        shown = cmd if isinstance(cmd, str) else " ".join(shlex.quote(c) for c in cmd)
+    _WRITE_SENTINEL = object()   # distinguishes "write= not passed" from "write=False passed"
+
+    def sh(self, cmd, cwd=None, check=True, timeout=None, write=_WRITE_SENTINEL):
+        """Run `cmd` and return its CompletedProcess. `cmd` is a `Command` value object (built by `Driver.gh()`,
+        which decides `is_gh`, `app_ok` and `write`), or a bare list / shell string (a non-gh command: no App
+        token, no rate-limit retry; its `write` flag comes from the `write=` keyword, defaulting to False).
+        A `Command` fully owns its `write` flag: passing a conflicting `write=` keyword raises ValueError.
+        Between the dry-run skip and check, sh does exactly two things: one subprocess of the command
+        (_run_logged, a gh call first on the App token) and the gh rate-limit backoff on a rate-limited reply
+        (_retry_rate_limit)."""
+        if isinstance(cmd, Command):
+            argv, is_gh, use_app = cmd.argv, cmd.is_gh, cmd.app_ok
+            if write is not self._WRITE_SENTINEL and write != cmd.write:
+                raise ValueError(f"sh(): write={write!r} kwarg conflicts with Command.write={cmd.write!r}; "
+                                 "a Command owns its write flag -- drop the kwarg or build the Command with the right value")
+            write = cmd.write
+        else:
+            argv, is_gh, use_app = cmd, False, False
+            if write is self._WRITE_SENTINEL: write = False
         if write and self.dry:
-            self.log(f"DRY-RUN skip: {shown[:300]}"); return subprocess.CompletedProcess(cmd, 0, "", "")
-        is_gh = (isinstance(cmd, list) and cmd and cmd[0] == "gh") or (isinstance(cmd, str) and cmd.startswith("gh "))
-        use_app = is_gh and not (isinstance(cmd, list) and tuple(cmd[1:3]) in GH_APP_USER_ONLY)
-        r = self._run_logged(cmd, use_app=use_app, cwd=cwd, timeout=timeout)
-        r = self._retry_rate_limit(r, cmd, is_gh=is_gh, use_app=use_app, cwd=cwd, timeout=timeout)
+            self.log(f"DRY-RUN skip: {self._shown(argv)[:300]}"); return subprocess.CompletedProcess(argv, 0, "", "")
+        shown = self._shown(argv)
+        r = self._run_logged(argv, use_app=use_app, cwd=cwd, timeout=timeout)
+        r = self._retry_rate_limit(r, argv, is_gh=is_gh, use_app=use_app, cwd=cwd, timeout=timeout)
         if is_gh and "gh_wait" in self.s: self.s.pop("gh_wait"); self.save()
         if check and r.returncode:
             raise RuntimeError(f"failed ({r.returncode}): {shown[:300]}\n{scrub(r.stdout)[-2000:]}")
         return r
+
+    @staticmethod
+    def _shown(argv):
+        """The one-line display form of `argv` for logs and error text: a str stays a str, a list is shlex-quoted."""
+        return argv if isinstance(argv, str) else " ".join(shlex.quote(c) for c in argv)
     def _run_logged(self, cmd, use_app=False, cwd=None, timeout=None):
         """One subprocess of cmd through the shared runner (run_cmd owns the deadline and the process-group kill).
         A gh call goes out first on the App installation token when `use_app` (its own API quota); any refusal
@@ -1174,7 +1207,17 @@ class Driver:
             waited += wait; attempt += 1
             r = self._run_logged(cmd, use_app=use_app, cwd=cwd, timeout=timeout)
         return r
-    def gh(self, *a, write=False, check=True, timeout=None): return self.sh(list(("gh", *a)), check=check, timeout=timeout, write=write)
+    # Authored objects stay the bot user's: the merge gate requires PR author == BOT (cmdemo1-system#947: the
+    # exclusion lives here, next to gh(), not at module level -- gh() already knows what it is building).
+    GH_APP_USER_ONLY = {("pr", "create"), ("issue", "create")}
+
+    def gh(self, *a, write=False, check=True, timeout=None):
+        """Build a `Command` for a `gh` call and run it through sh(). `app_ok` is False for the subcommands in
+        GH_APP_USER_ONLY (pr create / issue create stay on the user login); every other gh call tries the App
+        token first."""
+        argv = ["gh", *a]
+        app_ok = not (len(argv) >= 3 and tuple(argv[1:3]) in self.GH_APP_USER_ONLY)
+        return self.sh(Command(argv, is_gh=True, app_ok=app_ok, write=write), check=check, timeout=timeout)
     def wait_alive(self, seconds, why):
         """Sleep in GH_RETRY_TICK_S steps, re-saving state.json each step (pid, `updated`, `gh_wait`) so a driver waiting
         out a rate limit stays visibly alive. No comment here: that would itself be a rate-limited gh call."""
