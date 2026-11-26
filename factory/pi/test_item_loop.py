@@ -1143,6 +1143,24 @@ class RefactoringResearch(PromptMentions, unittest.TestCase):
         self.assertFalse(L.research_ok("## Refactoring research\n\n- none", ["src/A.cs"]))
         self.assertFalse(L.research_ok(self.GOOD.replace("src/A.cs", "src/B.cs"), ["src/A.cs"]))   # names no touched file
 
+    def test_research_ok_accepts_stem_only(self):   # cmdemo1-system#913: stem on a word boundary passes
+        # names only the stem `ChurchTimeZone`, never the file `ChurchTimeZone.cs`
+        stem_only = ("## Refactoring research\n\n- `ChurchTimeZone` `CompletionWindow`: 80-line method with duplicated "
+                     "validation; extract a specification object (in scope).\n- `ChurchTimeZone` `status` strings: "
+                     "primitive obsession; a value object would make the rules explicit (follow-up: filed).\n- Tests "
+                     "build data by hand; an ObjectMother would keep them short.\n\nIn scope: extract the "
+                     "specification. Follow-up: status value object.")
+        self.assertTrue(L.research_ok(stem_only, ["src/ChurchTimeZone.cs"]))
+
+    def test_research_ok_still_fails_when_no_touched_file_named(self):   # cmdemo1-system#913: no touched file → still fails
+        # names `OtherType` which is NOT the stem of `ChurchTimeZone.cs`
+        no_match = ("## Refactoring research\n\n- `OtherType` `CompletionWindow`: 80-line method with duplicated "
+                    "validation; extract a specification object (in scope).\n- `OtherType` `status` strings: "
+                    "primitive obsession; a value object would make the rules explicit (follow-up: filed).\n- Tests "
+                    "build data by hand; an ObjectMother would keep them short.\n\nIn scope: extract the "
+                    "specification. Follow-up: status value object.")
+        self.assertFalse(L.research_ok(no_match, ["src/ChurchTimeZone.cs"]))
+
     def test_pr_body_gets_exactly_one_section(self):
         b = L.with_research("Closes #1\n\n<!-- m -->\n", self.GOOD)
         self.assertEqual(b.count("## Refactoring research"), 1); self.assertTrue(b.startswith("Closes #1"))
