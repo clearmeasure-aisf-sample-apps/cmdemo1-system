@@ -809,6 +809,31 @@ def review_verdict(result, findings):
         return ReviewVerdict(None, f"the review ended with no PASS/FAIL verdict (run result: {result})")
     return ReviewVerdict(result == "PASS", findings)
 
+class PiRun(NamedTuple):
+    """One Pi run-task result as a value object (cmdemo1-system#894): the `result` string (PASS / FAIL / timeout /
+    no-start / stalled / exit N), the `gpu` that ran it (None when run-task printed no JSON line) and the `rc`
+    (run-task exit code: 0 PASS, 125 no-start / stalled, 124 timeout, 1 otherwise), answering the questions the
+    callers actually ask -- `ok` / `timed_out` / `not_started` -- instead of flattening them into one bool
+    (`r.returncode == 0`) and reading the side channel (`Driver.last_task`) out of order.
+
+    `not_started` covers both `no-start` and `stalled`: the driver treats them the same for relaunch purposes
+    (a hand-off that did not produce enough model output is relaunched on any free GPU). A `stalled` run *did*
+    produce model output (and may have edited the worktree), so the author-GPU check excludes only `no-start`,
+    not `stalled` -- callers that need that finer distinction read `result` directly."""
+
+    result: str
+    gpu: str | None
+    rc: int
+
+    @property
+    def ok(self): return self.result == "PASS"
+
+    @property
+    def timed_out(self): return self.result == "timeout"
+
+    @property
+    def not_started(self): return self.result in ("no-start", "stalled")
+
 def intake_open(red, plan):
     """While anything is red only fix-forward items start."""
     return not red or bool(plan.get("fix_forward"))
@@ -1230,20 +1255,23 @@ class Driver:
     def pi(self, name, prompt, timeout=PI_TASK_TIMEOUT_S, gpu=None):
         """Run one Pi task through run-task, driving a PiHandoff (the task name, prompt file, GPU list, attempt and
         slot wait of each try): a no-start / stalled hand-off is relaunched on any free GPU of the item's size, up to
-        LIMITS['pi_relaunch'] times. A review is never relaunched (its no-start is an infrastructure retry, and False
-        says so). True when the run-task that counts returned 0; PiNotStarted when a non-review hand-off still did
-        not start after the last relaunch."""
+        LIMITS['pi_relaunch'] times. A review is never relaunched (its no-start is an infrastructure retry, and
+        PiRun.ok False says so). Returns the PiRun (result / gpu / rc) of the attempt that counts; PiNotStarted when
+        a non-review hand-off still did not start after the last relaunch."""
         h = PiHandoff(self, name, prompt, timeout, gpu)
+        run = None
         for k in range(LIMITS["pi_relaunch"] + 1):
             r = self.sh(h.run_task_args(), check=False)
             self.log(f"pi {h.task}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
-            self.last_task = self._last_task_record(r)
-            if writes_code(h.name) and self.last_task.get("result") != "no-start":   # no model output = no edits
-                self.note_author_gpu(self.last_task.get("gpu"))
-            if h.review or self.last_task.get("result") not in ("no-start", "stalled"): return r.returncode == 0
+            rec = self._last_task_record(r)
+            self.last_task = rec   # kept for one release (cmdemo1-system#894); no caller reads it now
+            run = PiRun(result=rec.get("result", ""), gpu=rec.get("gpu"), rc=r.returncode)
+            if writes_code(h.name) and run.result != "no-start":   # no model output = no edits
+                self.note_author_gpu(run.gpu)
+            if h.review or not run.not_started: return run
             if k == LIMITS["pi_relaunch"]: break
-            self.log(h.advance(k + 1, self.last_task.get("result")))
-        raise PiNotStarted(h.not_started(self.last_task.get("result")))
+            self.log(h.advance(k + 1, run.result))
+        raise PiNotStarted(h.not_started(run.result))
 
     def _last_task_record(self, r):
         """The run-task record of one attempt: the last JSON object line of run-task's stdout (its result / gpu /
@@ -1269,7 +1297,7 @@ class Driver:
         for k in range(LIMITS["local_fix"] + 1):
             name = t["name"] if not k else f"{t['name']}-retry-{k}"
             if k: prompt = t["prompt"] + "\nNote: a previous attempt at this task failed; fix what it left broken."
-            if self.pi(name, prompt, t.get("timeout", PI_TASK_TIMEOUT_S)): return True
+            if self.pi(name, prompt, t.get("timeout", PI_TASK_TIMEOUT_S)).ok: return True
         self.blocker(f"Pi task `{t['name']}` still failed after {LIMITS['local_fix'] + 1} attempts (last attempt `{name}`).")
         return False
 
@@ -1871,7 +1899,7 @@ class Driver:
         if len(sec) > 24000:   # the reviewer must read every verdict: whole section, or a line-boundary cut that says so
             sec = sec[:24000].rsplit("\n", 1)[0].rstrip() + "\n(the section is longer than this prompt copy; the full text is in the PR body)"
         k = self.s["counts"].get("review_infra", 0)
-        self.pi(f"independent-review-{self.s['counts'].get('review_fail', 0) + 1}" + (f"-retry-{k}" if k else ""),
+        run = self.pi(f"independent-review-{self.s['counts'].get('review_fail', 0) + 1}" + (f"-retry-{k}" if k else ""),
                      f"Independent code review of {self.repo}#{self.issue} ({p['pr_title']}). You did not write this code. Change NO "
                      "files.\n\nAcceptance criteria:\n" + crit + "\n\nThe PR's refactoring research:\n" + sec +
                      f"\n\nDiff against {self.s['default']} (read any file in this tree for context):\n```diff\n{scrub(diff)[:limit]}\n```\n\n"
@@ -1880,11 +1908,11 @@ class Driver:
                      "duplication) and the refactoring research is substantive and its in-scope items are done; no secret, "
                      f"credential or production-setup change. Write one bullet per problem to {out} (or `- No findings.`). "
                      "End your reply with PASS when there is no blocking problem, otherwise FAIL.", PI_TASK_TIMEOUT_S, gpu=G.gpu_arg(rv))
-        rv = self.last_task.get("gpu") or rv[0]; self.save(reviewer_gpu=rv)
+        rv = run.gpu or rv[0]; self.save(reviewer_gpu=rv)
         if self.git.status_porcelain():
             self.log("reviewer changed files; discarding them"); self.git.reset_hard()
             self.git.clean()
-        verdict = review_verdict(self.last_task.get("result"), scrub(read_text(out)) if os.path.exists(out) else None)
+        verdict = review_verdict(run.result, scrub(read_text(out)) if os.path.exists(out) else None)
         self.log(f"independent review on {rv}: {verdict.label}")
         return verdict
 
@@ -2053,14 +2081,14 @@ def cmd_draft_plan(a):
     d.plan_worktree()
     out, prompt = draft_plan_prompt(a.repo, a.issue, iss["title"], iss["body"], os.path.join(d.run_dir, PLAN_DRAFT_FILE))
     # plan drafting runs before the gpu stage: no gpu recorded yet, so ask for any free 262K GPU (#907) rather than queueing on pro5000
-    try: ok = d.pi("draft-plan", prompt, d.budgets.draft_plan_s, gpu=G.gpu_arg(G.LARGE_GPUS))
+    try: run = d.pi("draft-plan", prompt, d.budgets.draft_plan_s, gpu=G.gpu_arg(G.LARGE_GPUS))
     except PiNotStarted as e: draft_result(out, False, [str(e)]); sys.exit(1)
     try:
         with open(out) as f: p = json.load(f)
         errs = validate_plan(p)
     except Exception as e:
         p, errs = None, [f"no valid JSON plan: {e}"]
-    draft_result(out, ok, errs)
+    draft_result(out, run.ok, errs)
     print("Review plan.draft.json; copy it to plan.json (edit as needed), then run `item-loop start`.")
     sys.exit(0 if not errs else 1)
 

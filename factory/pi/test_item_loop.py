@@ -118,12 +118,35 @@ def patch_run(fake):
         L.subprocess.run, L.run_cmd = old_run, old_run_cmd
 def pi_stub(result, calls=None):
     """Driver.pi replacement: returns a callable with the Driver.pi signature (name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None)
-    that appends each call's name to calls (when given) and returns result: a bool, or a callable taking the
-    calls list and returning a bool."""
+    that appends each call's name to calls (when given) and returns a PiRun whose .ok is result: a bool, or a callable
+    taking the calls list and returning a bool."""
     def pi(name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None):
         if calls is not None: calls.append(name)
-        return result(calls) if callable(result) else result
+        ok = result(calls) if callable(result) else result
+        return L.PiRun(result="PASS" if ok else "FAIL", gpu=None, rc=0 if ok else 1)
     return pi
+
+class PiRunValue(unittest.TestCase):   # cmdemo1-system#894: PiRun distinguishes timeout from FAIL
+    def test_timeout_is_distinguishable_from_fail(self):
+        t = L.PiRun(result="timeout", gpu="pro5000", rc=124)
+        f = L.PiRun(result="FAIL", gpu="pro5000", rc=1)
+        self.assertFalse(t.ok); self.assertTrue(t.timed_out); self.assertFalse(t.not_started)
+        self.assertFalse(f.ok); self.assertFalse(f.timed_out); self.assertFalse(f.not_started)
+        self.assertNotEqual(t, f)
+
+    def test_pass_is_ok_and_not_timed_out(self):
+        p = L.PiRun(result="PASS", gpu="ts3", rc=0)
+        self.assertTrue(p.ok); self.assertFalse(p.timed_out); self.assertFalse(p.not_started)
+
+    def test_no_start_and_stalled_are_not_started(self):
+        ns = L.PiRun(result="no-start", gpu="obs", rc=125)
+        st = L.PiRun(result="stalled", gpu="obs", rc=125)
+        self.assertTrue(ns.not_started); self.assertFalse(ns.ok)
+        self.assertTrue(st.not_started); self.assertFalse(st.ok)
+
+    def test_exit_n_is_not_ok_not_timed_out_not_not_started(self):
+        e = L.PiRun(result="exit 3", gpu="obs", rc=3)
+        self.assertFalse(e.ok); self.assertFalse(e.timed_out); self.assertFalse(e.not_started)
 
 class PromptMentions:   # mixin for prompt tests: every phrase the prompt must name, on one line, needle named on failure
     def assert_mentions(self, text, *needles):
@@ -617,7 +640,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, calls = self.driver(h, ["no-start", "stalled", "PASS"])
-                self.assertTrue(d.pi("review-fix-2", "fix it"))
+                self.assertTrue(d.pi("review-fix-2", "fix it").ok)
                 arg = lambda c, f: c[c.index(f) + 1]
                 self.assertEqual([arg(c, "--gpu") for c in calls], ["ts3", "pro5000,pro6000,obs,ts3", "pro5000,pro6000,obs,ts3"])
                 self.assertEqual([arg(c, "--task") for c in calls], ["review-fix-2", "review-fix-2-relaunch-1", "review-fix-2-relaunch-2"])
@@ -642,7 +665,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, calls = self.driver(h, ["stalled", "PASS"], size="large")
-                self.assertTrue(d.pi("t1", "do it"))
+                self.assertTrue(d.pi("t1", "do it").ok)
                 self.assertEqual(calls[1][calls[1].index("--gpu") + 1], "pro5000,pro6000")   # a 262K GPU only
 
     def test_review_excludes_every_authoring_gpu_including_relaunch_gpus(self):   # review major 2
@@ -650,7 +673,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         self.assertEqual(G.reviewer_gpus("ts3", list(G.GPUS)), ["pro5000", "pro6000", "obs"])
         with patched_driver_env(gpu_health=lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}, research_ok=lambda *a: True) as h:
             d, calls = self.driver(h, ["stalled", ("PASS", "obs")])   # item on ts3; the relaunch wrote the code on obs
-            self.assertTrue(d.pi("t1", "do it"))
+            self.assertTrue(d.pi("t1", "do it").ok)
             self.assertEqual(d.author_gpus(), ["ts3", "obs"])
             d.s.update(plan=dict(PLAN), pr=7, default="main"); d.merge_base = lambda: "abc"; review = []
             rec = json.dumps({"task": "independent-review-1", "gpu": "pro5000", "result": "PASS"})
@@ -666,7 +689,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, _ = self.driver(h, [("no-start", "pro5000,obs,ts3"), "PASS"])
-                self.assertTrue(d.pi("t1", "do it")); self.assertEqual(d.s.get("author_gpus"), ["pro5000"])
+                self.assertTrue(d.pi("t1", "do it").ok); self.assertEqual(d.s.get("author_gpus"), ["pro5000"])
 
     def test_read_only_calls_and_no_start_are_not_author_gpus(self):   # re-review major A / minor D
         self.assertFalse(L.writes_code("draft-plan")); self.assertFalse(L.writes_code("refactoring-research-1"))
@@ -674,12 +697,12 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         with fake_modules({(L, "gpu_health"): lambda *a: {g: ("HEALTHY", "") for g in G.GPUS}}):
             with fake_home() as h:
                 d, _ = self.driver(h, [("PASS", "pro5000")])   # item on ts3; plan drafted on pro5000
-                self.assertTrue(d.pi("draft-plan", "plan it", gpu="pro5000"))
+                self.assertTrue(d.pi("draft-plan", "plan it", gpu="pro5000").ok)
                 d2, _ = self.driver(h, [("PASS", "pro5000")]); d2.pi("refactoring-research-1", "research")
                 self.assertNotIn("pro5000", d.author_gpus()); self.assertNotIn("pro5000", d2.author_gpus())
                 self.assertIn("pro5000", G.reviewer_gpus(d.author_gpus(), list(G.GPUS)), "pro5000 stays a reviewer")
                 d3, _ = self.driver(h, [("no-start", "obs"), ("PASS", "ts3")])   # got a slot on obs but never replied
-                self.assertTrue(d3.pi("t1", "do it")); self.assertNotIn("obs", d3.author_gpus())
+                self.assertTrue(d3.pi("t1", "do it").ok); self.assertNotIn("obs", d3.author_gpus())
 
     def test_hold_mid_pass_stops_push_and_merge(self):   # re-review minor B
         with fake_home() as h:
@@ -738,7 +761,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
                 with self.assertRaises(L.PiNotStarted) as e: d.pi("t1", "do it")
                 self.assertEqual(len(calls), 3); self.assertFalse(L.hold_resumes(str(e.exception)))
                 d, calls = self.driver(h, ["no-start"])
-                self.assertFalse(d.pi("independent-review-1", "review", gpu="obs")); self.assertEqual(len(calls), 1)
+                self.assertFalse(d.pi("independent-review-1", "review", gpu="obs").ok); self.assertEqual(len(calls), 1)
 
     def test_hold_file_stops_start_run_and_watchdog(self):
         import watchdog as W
@@ -776,7 +799,7 @@ class TaskNameSlug(unittest.TestCase):   # cmdemo1-system#959: a plan task name 
         with fake_home() as h:
             d, calls = self.driver_with_scripted_run(h, 959, ["PASS"])
             name = "test: whole factory/pi suite green and no orphans left"
-            self.assertTrue(d.pi(name, "do it"))   # used to raise FileNotFoundError (raw '/' in the prompt path)
+            self.assertTrue(d.pi(name, "do it").ok)   # used to raise FileNotFoundError (raw '/' in the prompt path)
             arg = lambda c, f: c[c.index(f) + 1]
             pf = arg(calls[0], "--prompt-file")
             self.assertEqual(pf, os.path.join(d.run_dir, "logs", "test--whole-factory-pi-suite-green-and-no-orphans-left.prompt.md"))
@@ -787,7 +810,7 @@ class TaskNameSlug(unittest.TestCase):   # cmdemo1-system#959: a plan task name 
     def test_pi_safe_name_keeps_its_existing_log_names(self):
         with fake_home() as h:
             d, calls = self.driver_with_scripted_run(h, 960, ["PASS"])
-            self.assertTrue(d.pi("t1", "do it"))
+            self.assertTrue(d.pi("t1", "do it").ok)
             arg = lambda c, f: c[c.index(f) + 1]
             self.assertEqual(arg(calls[0], "--task"), "t1")
             self.assertEqual(arg(calls[0], "--prompt-file"), os.path.join(d.run_dir, "logs", "t1.prompt.md"))
@@ -798,7 +821,7 @@ class TaskNameSlug(unittest.TestCase):   # cmdemo1-system#959: a plan task name 
             with fake_home() as h:
                 d, calls = self.driver_with_scripted_run(h, 961, ["no-start", "PASS"])
                 name = "test: whole factory/pi suite green"
-                self.assertTrue(d.pi(name, "do it"))
+                self.assertTrue(d.pi(name, "do it").ok)
                 arg = lambda c, f: c[c.index(f) + 1]
                 self.assertEqual([arg(c, "--task") for c in calls],
                                  ["test--whole-factory-pi-suite-green", "test--whole-factory-pi-suite-green-relaunch-1"])
@@ -1669,7 +1692,8 @@ class SharedTaskTimeout(unittest.TestCase):   # one Pi task's wall-clock budget 
             d = make_driver(issue=1)
             seen = []
             def rec(*a, **kw):   # record whatever timeout pi was handed (positional or keyword), then pass the task
-                seen.append(a[2] if len(a) > 2 else kw.get("timeout")); return True
+                seen.append(a[2] if len(a) > 2 else kw.get("timeout"))
+                return L.PiRun(result="PASS", gpu=None, rc=0)
             d.pi = rec
             self.assertTrue(d.task_passes({"name": "t1", "prompt": "p", "timeout": 1234}))
             self.assertEqual(seen, [1234], "a plan task's own timeout must reach Driver.pi untouched")
@@ -2888,7 +2912,7 @@ class DraftPlanTests(unittest.TestCase):   # cmd_draft_plan with gh/plan_worktre
             def pi(self, name, prompt, timeout, gpu=None):
                 calls.append((name, prompt, timeout, gpu))
                 if write_plan: json.dump(plan, open(out_of(prompt), "w"))
-                return False
+                return L.PiRun(result="FAIL", gpu=None, rc=1)
 
             code = None
             with mock.patch.object(L.Driver, "gh", gh), mock.patch.object(L.Driver, "plan_worktree", mock.Mock()), \
@@ -3253,7 +3277,7 @@ class SharedFixPass(unittest.TestCase):   # cmdemo1-system#858: the bump-or-bloc
         d.blocker = lambda what, who="Jeffrey": (ev.append(("blocker", what)), d.save(stage="blocked", blocker=what))[-1]
         d.commit_push = lambda msg: ev.append(("commit", msg)) or "sha"
         d.local_green = lambda label: ev.append(("local_green", label)) or True
-        d.pi = lambda name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None: (ev.append(("pi", name, prompt)), True)[-1]
+        d.pi = lambda name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None: (ev.append(("pi", name, prompt)), L.PiRun(result="PASS", gpu=None, rc=0))[-1]
         return d
 
     def test_one_pass_moves_comments_fixes_verifies_and_pushes_in_that_order(self):
