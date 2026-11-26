@@ -467,11 +467,15 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         loader = importlib.machinery.SourceFileLoader("run_task_t85u", os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-task"))
         m = importlib.util.module_from_spec(importlib.util.spec_from_loader("run_task_t85u", loader)); loader.exec_module(m); return m
 
+    def watch(self, rt, sdir, start_s, beat=None, stall_s=None):
+        """Build a Watch for a test run (ObjectMother): the same builder production uses, with since=now."""
+        return rt.Watch.for_run(sdir, time.time(), start_s, beat=beat, stall_s=stall_s)
+
     def test_run_pi_kills_a_pi_with_no_session_record(self):
         rt = self.rt()
         with tempfile.TemporaryDirectory() as tmp:
             beats = []; t0 = time.monotonic()
-            run = rt.run_pi(["bash", "-c", "sleep 60"], cwd=tmp, timeout=30, sdir=tmp, start_s=1, beat=beats.append)
+            run = rt.run_pi(["bash", "-c", "sleep 60"], cwd=tmp, timeout=30, watch=self.watch(rt, tmp, 1, beat=beats.append))
             self.assertEqual(run.rc, rt.NO_START_RC); self.assertFalse(run.started)
             self.assertLess(time.monotonic() - t0, 15); self.assertTrue(beats and "pi_pid" in beats[0])
 
@@ -482,7 +486,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             # The run deadline is only a backstop for a starved watchdog thread (on a loaded host the stall kill can land
             # late, and a 30 s deadline then won first: rc 124 instead of 125). Same start_s / stall_s, same assertions.
             run = rt.run_pi(["bash", "-c", f"echo '{HDR}' > {f}; echo '{ASSISTANT}' >> {f}; sleep 600"], cwd=tmp, timeout=120,
-                            sdir=tmp, start_s=1, stall_s=2)
+                            watch=self.watch(rt, tmp, 1, stall_s=2))
             self.assertEqual(run.rc, rt.NO_START_RC); self.assertTrue(run.started)
 
     def test_user_prompt_record_alone_is_no_start(self):   # review minor 5: the prompt record is not model output
@@ -490,7 +494,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         with tempfile.TemporaryDirectory() as tmp:
             f = os.path.join(tmp, "s.jsonl")
             run = rt.run_pi(["bash", "-c", f"echo '{HDR}' > {f}; echo '{USER}' >> {f}; sleep 60"], cwd=tmp, timeout=30,
-                            sdir=tmp, start_s=1)
+                            watch=self.watch(rt, tmp, 1))
             self.assertEqual(run.rc, rt.NO_START_RC); self.assertFalse(run.started)
 
     def test_reused_session_dir_with_older_larger_file_is_not_killed(self):   # review major 1
@@ -502,7 +506,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             script = (f"echo '{HDR}' > {new}; echo '{ASSISTANT}' >> {new}; "
                       f"for i in 1 2 3 4 5 6 7 8; do sleep 0.5; echo '{ASSISTANT}' >> {new}; done; echo PASS")
             t0 = time.monotonic()
-            run = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5)
+            run = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, watch=self.watch(rt, tmp, 1.5))
             self.assertEqual(run.rc, 0, "a healthy run must not be judged against an older session file"); self.assertIn("PASS", run.text)
             self.assertGreater(time.monotonic() - t0, 1.5)
             self.assertEqual(rt.session_files(tmp, time.time() - 60), [new])
@@ -513,7 +517,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             f = os.path.join(tmp, "s.jsonl")
             script = f"echo '{HDR}' > {f}; for i in $(seq 12); do sleep 0.5; echo '{ASSISTANT}' >> {f}; done; echo PASS"
             t0 = time.monotonic()
-            run = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5, stall_s=1.5)
+            run = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, watch=self.watch(rt, tmp, 1.5, stall_s=1.5))
             self.assertEqual(run.rc, 0); self.assertIn("PASS", run.text)
             self.assertGreater(time.monotonic() - t0, 3 * 1.5, "the run outlived start_s several times over")
 
@@ -523,7 +527,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
             f = os.path.join(tmp, "s.jsonl")
             script = (f"echo '{HDR}' > {f}; echo '{ASSISTANT}' >> {f}; "
                       "end=$((SECONDS+5)); while [ $SECONDS -lt $end ]; do :; done; echo PASS")
-            run = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5, stall_s=1.5)
+            run = rt.run_pi(["bash", "-c", script], cwd=tmp, timeout=30, watch=self.watch(rt, tmp, 1.5, stall_s=1.5))
             self.assertEqual(run.rc, 0, "CPU work in Pi's group after model output keeps the run alive"); self.assertIn("PASS", run.text)
 
     def test_failing_heartbeat_never_turns_the_watch_off(self):   # review minor 7
@@ -531,11 +535,11 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
         def beat(d): raise OSError("disk full")
         with tempfile.TemporaryDirectory() as tmp:
             t0 = time.monotonic()
-            run = rt.run_pi(["bash", "-c", "sleep 60"], cwd=tmp, timeout=30, sdir=tmp, start_s=1, beat=beat)
+            run = rt.run_pi(["bash", "-c", "sleep 60"], cwd=tmp, timeout=30, watch=self.watch(rt, tmp, 1, beat=beat))
             self.assertEqual(run.rc, rt.NO_START_RC); self.assertLess(time.monotonic() - t0, 15)
 
     def test_pi_exiting_on_its_own_at_the_kill_keeps_its_rc(self):   # review minor 11
-        rt = self.rt(); ev = rt.threading.Event()
+        rt = self.rt(); ev = rt.WatchEvent()
         self.assertFalse(rt.killed_by_watch(ev, -15))                 # no kill
         ev.set()
         self.assertTrue(rt.killed_by_watch(ev, -signal.SIGTERM)); self.assertTrue(rt.killed_by_watch(ev, 143))
@@ -586,7 +590,7 @@ class HandoffStartWatchdog(unittest.TestCase):   # t85u: a Pi hand-off that has 
     def test_run_pi_with_progress_is_left_alone(self):
         rt = self.rt()
         with tempfile.TemporaryDirectory() as tmp:
-            run = rt.run_pi(["bash", "-c", "echo done; exit 0"], cwd=tmp, timeout=10, sdir=tmp, start_s=5)
+            run = rt.run_pi(["bash", "-c", "echo done; exit 0"], cwd=tmp, timeout=10, watch=self.watch(rt, tmp, 5))
             self.assertEqual(run.rc, 0); self.assertIn("done", run.text)
 
     def test_gate_gives_up_after_max_wait(self):
@@ -2267,7 +2271,7 @@ class SharedRunCmd(PidfileKill, unittest.TestCase):   # cmdemo1-system#839: run-
         with tempfile.TemporaryDirectory() as tmp:
             fake, pidfile = self._fake_pi(tmp, pid_dir)
             t0 = time.monotonic()
-            run = rt.run_pi([fake], cwd=tmp, timeout=30, sdir=tmp, start_s=1.5, stall_s=1.5, beat=beat)
+            run = rt.run_pi([fake], cwd=tmp, timeout=30, watch=rt.Watch.for_run(tmp, time.time(), 1.5, beat=beat, stall_s=1.5))
             elapsed = time.monotonic() - t0
         self.assertEqual(run.rc, rt.NO_START_RC, "a Pi that stops being active after its first model output is still rc 125")
         self.assertTrue(run.started, "model output arrived, so this is a stall and not a no-start")
