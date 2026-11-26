@@ -3801,4 +3801,17 @@ class TestHandoffBudgets(unittest.TestCase):
         self.assertGreater(b.any_slot_wait_s, b.start_s)
 
 
+class TestTimeouts(unittest.TestCase):   # cmdemo1-system#966: the TIMEOUTS table names every command timeout in one place
+    def test_table_values(self):
+        self.assertEqual(L.TIMEOUTS["verify"], 3600)
+        self.assertEqual(L.TIMEOUTS["evidence"], 3600)
+        self.assertEqual(L.TIMEOUTS["git"], 600)
+        self.assertEqual(L.TIMEOUTS["gh_watch"], 6 * 3600)
+        self.assertEqual(L.TIMEOUTS["wait_ci"], 600)
+        self.assertEqual(L.TIMEOUTS["api"], G.MIN_CLIENT_TIMEOUT_S)
+
+    def test_keys_are_exactly_the_six_command_kinds(self):
+        self.assertEqual(set(L.TIMEOUTS), {"verify", "evidence", "git", "gh_watch", "wait_ci", "api"})
+
+
 if __name__ == "__main__": unittest.main()

@@ -89,6 +89,18 @@ ANY_SLOT_WAIT_S = 2 * 3600  # a relaunch (any free GPU) or a review waits up to 
 DRAFT_PLAN_TIMEOUT_S = 2700  # the draft-plan Pi pass: cold prompt reads on pro5000 made every 1500 s draft-plan time out (cmdemo1-system#884)
 RESEARCH_TIMEOUT_S = 1500    # the mandatory refactoring-research Pi pass
 PI_TASK_TIMEOUT_S = G.PI_TASK_TIMEOUT_S   # the default timeout for one plan task run through task_passes
+# The driver's command timeouts, named in one place (cmdemo1-system#966): seconds per command kind, so the inline
+# literals (evidence, gh run watch, wait_ci) read from here instead of re-typing the number at each call site.
+# `verify`, `git` and `api` name the intended budgets for command kinds that currently inherit run_cmd's deadline
+# (no explicit timeout at the call site) -- naming them here is what a future behaviour change edits.
+TIMEOUTS = {
+    "verify": 3600,            # one verify_cmd pass (Driver.verify)
+    "evidence": 3600,          # one evidence_cmd pass (Driver.evidence_results / st_review)
+    "git": 600,                # one git operation (clone, fetch, push -- Driver.sh / Driver.git)
+    "gh_watch": 6 * 3600,      # gh run watch of one default-branch push run (st_main)
+    "wait_ci": 600,            # one gh pr checks --watch slice (Driver.wait_ci)
+    "api": G.MIN_CLIENT_TIMEOUT_S,   # one gh api call (floor: live via FACTORY_MIN_CLIENT_TIMEOUT_S)
+}
 # Not required to merge, but a red one still stalls the PR: route to Pi instead of waiting on it (no-idle-stall).
 QUALITY_CHECKS = ("qodana", "refactoring rationale")
 HEARTBEAT_MIN = 30        # no progress for this long -> one short status comment
@@ -1385,7 +1397,7 @@ class Driver:
             if cs:
                 try:
                     self.gh("pr", "checks", str(self.s["pr"]), "-R", self.full, "--watch", "--interval", "60",
-                            *(["--required"] if self.repo in REQUIRED else []), check=False, timeout=600)
+                            *(["--required"] if self.repo in REQUIRED else []), check=False, timeout=TIMEOUTS["wait_ci"])
                 except subprocess.TimeoutExpired: pass   # short slices so the heartbeat below runs
             self.heartbeat(); time.sleep(60)
         return CheckState.PENDING, []
@@ -1828,7 +1840,7 @@ class Driver:
         ev, failed = [], []
         for i, c in enumerate(self.s["plan"]["criteria"], 1):
             r = run_cmd(["bash", "-o", "pipefail", "-c", c["evidence_cmd"]], cwd=self.s["wt"], text=True,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=3600)
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=TIMEOUTS["evidence"])
             out = scrub(r.stdout); write_text(os.path.join(self.run_dir, "logs", f"evidence-{i}.log"), out)
             last = ([l for l in out.splitlines() if l.strip()][-1:] or [""])[0][:200]
             (ev if r.returncode == 0 else failed).append((c, last, r.returncode))
@@ -1946,7 +1958,7 @@ class Driver:
             if runs: break
             time.sleep(30)
         for run in runs:
-            self.gh("run", "watch", str(run["id"]), "-R", self.full, "--interval", "60", check=False, timeout=6 * 3600)
+            self.gh("run", "watch", str(run["id"]), "-R", self.full, "--interval", "60", check=False, timeout=TIMEOUTS["gh_watch"])
         r = self.gh("api", f"repos/{self.full}/actions/runs?head_sha={sha}&event=push&per_page=50", "--jq",
                     "[.workflow_runs[]|{name,conclusion}]", check=False)
         red = [x["name"] for x in json.loads(r.stdout or "[]") if x["conclusion"] not in ("success", "skipped", "neutral")]
