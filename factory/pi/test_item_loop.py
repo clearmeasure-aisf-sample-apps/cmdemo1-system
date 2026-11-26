@@ -3648,6 +3648,73 @@ def red_keys_of(h):
         return set()
 
 
+class DeployNoHealthEntry(unittest.TestCase):
+    """cmdemo1-system#847: a deployable that has NO containerApps health entry still advances the board once its
+    deploy has passed (the auto-promote reason says 'deployment and health ok'), instead of sitting in the driver's
+    deploy stage for its full 48-hour window. delivery.json for tdd/uat/prod lists only `ui` under containerApps, so
+    for dep == 'dashboard' dep_health is None and env_red is False -- the board must move Merged -> TDD -> UAT -> Done.
+    A deployable that HAS an entry reading unhealthy still does not advance."""
+
+    def _driver(self, h, repo="cmdemo1-dashboard", issue=847):
+        d = make_driver(repo=repo, issue=issue, dry_run=False)
+        d.s.update(merge_sha="m" * 40, column="Merged")
+        return d
+
+    def _delivery(self, envs):
+        return {"environments": envs}
+
+    def test_deploy_env_check_no_health_entry_is_in_env_when_identical(self):
+        with fake_home() as h:
+            d = self._driver(h)
+            d.gh = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, '{"status": "identical"}', "")
+            # deployable present, but NO health key at all -> dep_health is None -> not red -> healthy
+            env = {"name": "tdd", "deployables": [{"name": "dashboard", "version": "v533", "commit": "c" * 8}]}
+            in_env, (version, commit) = d.deploy_env_check(env, "dashboard", "m" * 40)
+            self.assertTrue(in_env, "no health entry + identical deploy -> in_env True (#847)")
+            self.assertEqual((version, commit), ("v533", "c" * 8))
+
+    def test_deploy_env_check_unhealthy_entry_still_not_in_env(self):
+        with fake_home() as h:
+            d = self._driver(h)
+            d.gh = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, '{"status": "identical"}', "")
+            d.fix_forward_issue = lambda *a, **k: None
+            d.comment = lambda body, **k: None
+            env = {"name": "tdd",
+                   "deployables": [{"name": "dashboard", "version": "v533", "commit": "c" * 8}],
+                   "health": {"containerApps": [{"name": "dashboard", "last": {"result": "unhealthy"}}]}}
+            in_env, _ = d.deploy_env_check(env, "dashboard", "m" * 40)
+            self.assertFalse(in_env, "a health entry reading unhealthy still does not advance")
+            self.assertIn("dashboard tdd", red_keys_of(h), "the red flag is set for the unhealthy dep+env")
+
+    def test_st_deploy_moves_dashboard_merged_through_tdd_uat_to_done_with_no_health_entry(self):
+        """The acceptance fixture: delivery.json with dashboard deployables in tdd/uat/prod and no containerApps
+        health entry for dashboard. The item moves Merged -> TDD -> UAT -> Done and the stage ends done."""
+        with fake_home() as h:
+            d = self._driver(h)
+            d.gh = lambda *a, **k: L.subprocess.CompletedProcess(a, 0, '{"status": "identical"}', "")
+            envs = [{"name": n, "deployables": [{"name": "dashboard", "version": "v1.0.428",
+                                                 "commit": "d" * 8}]}
+                    for n in ("tdd", "uat", "prod")]
+            delivery = self._delivery(envs)
+            moves_seen = []
+            comments = []
+            saved = []
+            d.move = lambda col: moves_seen.append(col) or d.s.update(column=col)
+            d.comment = lambda body, **k: comments.append(body)
+            d.heartbeat = lambda: None
+            d.save = lambda **k: saved.append(k) or {"stage": k.get("stage")}
+            class _Resp:
+                def read(self): return json.dumps(delivery).encode()
+            with fake_modules({(L.urllib.request, "urlopen"): lambda *a, **k: _Resp(),
+                               (L.time, "sleep"): lambda s: None,
+                               (L.time, "time"): lambda: 1e9}):   # fixed clock: the loop runs once, then Done
+                d.st_deploy(max_h=48)
+            self.assertEqual(moves_seen, ["Done"], "one move lands the item straight in Done")
+            self.assertTrue(any("Merged → TDD → UAT → Done" in c for c in comments),
+                            "the board path shows Merged -> TDD -> UAT -> Done")
+            self.assertTrue(any(k.get("stage") == "done" for k in saved), "the stage ends done")
+
+
 class TestHandoffBudgets(unittest.TestCase):
     """The HandoffBudgets value object (cmdemo1-system#954): the nine hand-off durations and the gh-retry knobs as
     one timedelta-based object whose invariants are asserted on construction, whose .describe() owns the no-start
