@@ -274,6 +274,38 @@ def exit_code_of(result, rc):
     """run-task's exit code: 0 PASS, NO_START_RC no-start / stalled, 1 otherwise."""
     return 0 if result == "PASS" else NO_START_RC if rc == NO_START_RC else 1
 
+def _ensure_run_json(run_dir, top_session):
+    """Create the run dir and its logs dir; write run.json (top session, start time, pi version) if missing.
+    Returns the run dir as an absolute path."""
+    run = os.path.abspath(run_dir)
+    os.makedirs(os.path.join(run, "logs"), exist_ok=True)
+    meta = os.path.join(run, "run.json")
+    if not os.path.exists(meta):
+        json.dump({"top_session": top_session or os.environ.get("FACTORY_TOP_SESSION") or "unnamed",
+                   "start": now().isoformat(timespec="seconds"),
+                   "pi_version": pi_version()},
+                  open(meta, "w"), indent=1)
+    return run
+
+def _no_start_record(run, task, gpu_now, t0, slot_wait):
+    """Build and append the no-slot record to tasks.jsonl; return the record dict."""
+    rec = {"task": task, "gpu": gpu_now, "start": t0.isoformat(timespec="seconds"),
+           "end": now().isoformat(timespec="seconds"),
+           "rc": NO_START_RC, "result": "no-start",
+           "why": f"no free slot on {gpu_now} within {slot_wait} s"}
+    with open(os.path.join(run, "tasks.jsonl"), "a") as f:
+        f.write(json.dumps(rec) + "\n")
+    return rec
+
+def _finish_record(run, task, gpu, sid, session_file, t0, t1, rc, result, usage):
+    """Build and append the finished-task record to tasks.jsonl; return the record dict."""
+    rec = {"task": task, "gpu": gpu, "session_id": sid, "session_file": session_file,
+           "start": t0.isoformat(timespec="seconds"), "end": t1.isoformat(timespec="seconds"),
+           "wall_s": round((t1 - t0).total_seconds(), 1), "rc": rc, "result": result, **usage}
+    with open(os.path.join(run, "tasks.jsonl"), "a") as f:
+        f.write(json.dumps(rec) + "\n")
+    return rec
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--run-dir", required=True); p.add_argument("--cwd", required=True)
@@ -283,13 +315,7 @@ def main():
     p.add_argument("--start-timeout", type=int, default=0); p.add_argument("--stall-timeout", type=int, default=0)
     p.add_argument("--slot-wait", type=int, default=0)
     a = p.parse_args()
-    run = os.path.abspath(a.run_dir); os.makedirs(os.path.join(run, "logs"), exist_ok=True)
-    meta = os.path.join(run, "run.json")
-    if not os.path.exists(meta):
-        json.dump({"top_session": a.top_session or os.environ.get("FACTORY_TOP_SESSION") or "unnamed",
-                   "start": now().isoformat(timespec="seconds"),
-                   "pi_version": pi_version()},
-                  open(meta, "w"), indent=1)
+    run = _ensure_run_json(a.run_dir, a.top_session)
     task = re.sub(r"[^A-Za-z0-9._-]", "-", a.task)
     sdir = os.path.join(run, "pi-sessions", task); os.makedirs(sdir, exist_ok=True)
     prompt = open(a.prompt_file).read()
@@ -302,9 +328,7 @@ def main():
     progress(state="waiting-for-slot")
     a.gpu, slot = gpu_gate.acquire_any(gs, max_wait=a.slot_wait or None)
     if slot is None:   # no slot within --slot-wait: never started, the driver relaunches on any free GPU
-        rec = {"task": task, "gpu": gpu_now, "start": t0.isoformat(timespec="seconds"), "end": now().isoformat(timespec="seconds"),
-               "rc": NO_START_RC, "result": "no-start", "why": f"no free slot on {gpu_now} within {a.slot_wait} s"}
-        with open(os.path.join(run, "tasks.jsonl"), "a") as f: f.write(json.dumps(rec) + "\n")
+        rec = _no_start_record(run, task, gpu_now, t0, a.slot_wait)
         progress(state="no-slot", result="no-start", rc=NO_START_RC, end=rec["end"])
         print(json.dumps(rec)); sys.exit(NO_START_RC)
     t0, gpu_now = now(), a.gpu
@@ -324,10 +348,7 @@ def main():
     sid, u = session_usage(files[-1]) if files else (None, {"input": 0, "output": 0, "cacheRead": 0, "turns": 0})
     last = ([l for l in text.strip().splitlines() if l.strip()][-1:] or [""])[0]
     result = result_of(rc, pi_run.started, last)
-    rec = {"task": task, "gpu": a.gpu, "session_id": sid, "session_file": files[-1] if files else None,
-           "start": t0.isoformat(timespec="seconds"), "end": t1.isoformat(timespec="seconds"),
-           "wall_s": round((t1 - t0).total_seconds(), 1), "rc": rc, "result": result, **u}
-    with open(os.path.join(run, "tasks.jsonl"), "a") as f: f.write(json.dumps(rec) + "\n")
+    rec = _finish_record(run, task, a.gpu, sid, files[-1] if files else None, t0, t1, rc, result, u)
     progress(state="finished", result=result, rc=rc, end=rec["end"])
     print(json.dumps(rec)); print("--- pi tail ---"); print(text[-1500:])
     sys.exit(exit_code_of(result, rc))
