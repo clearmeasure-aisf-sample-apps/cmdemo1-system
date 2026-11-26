@@ -1118,14 +1118,20 @@ class Driver:
         for k in range(LIMITS["pi_relaunch"] + 1):
             r = self.sh(h.run_task_args(), check=False)
             self.log(f"pi {h.task}: " + (r.stdout.splitlines() or ["?"])[0][:300]); self.progress()
-            self.last_task = next((rec for rec in map(_json_or_none, (r.stdout or "").splitlines()) if isinstance(rec, dict)),
-                                  {"result": f"exit {r.returncode}"})
+            self.last_task = self._last_task_record(r)
             if writes_code(h.name) and self.last_task.get("result") != "no-start":   # no model output = no edits
                 self.note_author_gpu(self.last_task.get("gpu"))
             if h.review or self.last_task.get("result") not in ("no-start", "stalled"): return r.returncode == 0
             if k == LIMITS["pi_relaunch"]: break
             self.log(h.advance(k + 1, self.last_task.get("result")))
         raise PiNotStarted(h.not_started(self.last_task.get("result")))
+
+    def _last_task_record(self, r):
+        """The run-task record of one attempt: the last JSON object line of run-task's stdout (its result / gpu /
+        exit fields), or a synthetic `exit <code>` record when no line parsed -- the record pi() and the independent
+        review both branch on (cmdemo1-system#918: pulled out of pi()'s loop so the loop reads as one step)."""
+        return next((rec for rec in map(_json_or_none, (r.stdout or "").splitlines()) if isinstance(rec, dict)),
+                    {"result": f"exit {r.returncode}"})
 
     def note_author_gpu(self, g):
         """Record a GPU that ran an authoring Pi call (any non-review call, a relaunch on another GPU included): the
@@ -1604,42 +1610,63 @@ class Driver:
         os.remove(plan)
 
     def st_review(self):
+        """The review stage, one decision per branch (cmdemo1-system#918): the evidence pass first, then the
+        independent-review verdict. Each FAIL outcome (evidence failed / independent review FAIL) hands off to its own
+        private helper (_st_review_evidence_failed / _st_review_verdict_fail); the PASS outcome saves the stage as
+        merge. review_until_verdict owns the retry-an-INFRA-verdict policy, so the stage asks the verdict one kind of
+        question and branches on verdict.is_fail."""
         p = self.s["plan"]; ev, failed = self.evidence_results()
         if failed:
-            evidence = "\n".join(f"- {c['text']}: evidence `{c['evidence_cmd']}` exit {rc}: {last}" for c, last, rc in failed)
-            criteria = "\n".join(f"- {c['text']}: `{c['evidence_cmd']}` -> {last}" for c, last, _ in failed)
-            if self.fix_pass("review_fail", "Review FAIL twice: " + "; ".join(f"{c['text']} (exit {rc})" for c, _, rc in failed),
-                             progress="In Progress",
-                             comment=lambda n: self.review_fail_comment(f"Review → In Progress\n\nReview: FAIL.\n\n{evidence}"
-                                                                        "\n\nSending the failed criteria to Pi."),
-                             fix=FixRound("review-fix", "These acceptance criteria fail their evidence commands:\n" + criteria +
-                                          "\nFix the code so each passes.", "review",
-                                          local_red="local verification red after a review fix.",
-                                          commit="Fix review findings")) is None: return
-            self.move("Review")
-            return self.save(stage="ci")
+            self._st_review_evidence_failed(failed)
+            return
         self.save(evidence=[[c["text"], c["evidence_cmd"], last] for c, last, _ in ev])
         verdict = self.review_until_verdict()
         if verdict is None: return   # no verdict at all: review_until_verdict / independent_review already blocked the item
-        findings = verdict.findings
         self.s["counts"]["review_infra"] = 0; self.save()   # any real verdict, PASS or FAIL: the infra retries start over
         if verdict.is_fail:
-            n = self.fix_pass("review_fail", "independent review FAIL twice: " + findings[:600], progress="In Progress",
-                              comment=lambda n: self.review_fail_comment(f"Review → In Progress\n\nReview: FAIL (independent review on the {self.gpu_label(self.s.get('reviewer_gpu'))}).\n\n"
-                                                                         f"{findings[:3000]}\n\nSending the findings to Pi."))
-            if n is None: return
-            if not self.s.get("research_in_body"):   # the section is the driver's to write: redo the research, fix the body
-                if not self.ensure_research_in_body(p): return
-                self.sync_pr_research()
-                self.comment("Research re-done after the review FAIL; the PR body's `## Refactoring research` section is updated.")   # journal activity: no commit on this path
-            else:   # Pi fixes the code: the same fix round, on the pass the bump above already counted
-                if not self.pi_round(f"review-fix-{n}", "An independent review of this branch failed. Findings:\n" + findings[:6000] +
-                                     "\nFix each finding with the smallest change. Never skip, delete or weaken a test or gate.",
-                                     f"review{n}", "local verification red after an independent-review fix.",
-                                     "Fix independent review findings"): return
-            self.move("Review")
-            return self.save(stage="ci")
+            self._st_review_verdict_fail(verdict)
+            return
         self.save(stage="merge")
+
+    def _st_review_evidence_failed(self, failed):
+        """The evidence-failed outcome of the review stage (cmdemo1-system#918): the criteria whose evidence_cmd went
+        red, sent to Pi as a `review-fix` fix pass, then the board moves back to Review and the stage re-enters ci.
+        Leaves the stage (returns) when fix_pass exhausted its review_fail budget."""
+        evidence = "\n".join(f"- {c['text']}: evidence `{c['evidence_cmd']}` exit {rc}: {last}" for c, last, rc in failed)
+        criteria = "\n".join(f"- {c['text']}: `{c['evidence_cmd']}` -> {last}" for c, last, _ in failed)
+        if self.fix_pass("review_fail", "Review FAIL twice: " + "; ".join(f"{c['text']} (exit {rc})" for c, _, rc in failed),
+                         progress="In Progress",
+                         comment=lambda n: self.review_fail_comment(f"Review → In Progress\n\nReview: FAIL.\n\n{evidence}"
+                                                                    "\n\nSending the failed criteria to Pi."),
+                         fix=FixRound("review-fix", "These acceptance criteria fail their evidence commands:\n" + criteria +
+                                      "\nFix the code so each passes.", "review",
+                                      local_red="local verification red after a review fix.",
+                                      commit="Fix review findings")) is None: return
+        self.move("Review")
+        self.save(stage="ci")
+
+    def _st_review_verdict_fail(self, verdict):
+        """The independent-review-FAIL outcome of the review stage (cmdemo1-system#918): the findings sent to Pi, or --
+        when the PR body has no substantive research section -- the research redone and the body synced (a journal
+        comment, no commit); otherwise the code-fix pi_round on the pass fix_pass already counted. Then the board moves
+        back to Review and the stage re-enters ci. Leaves the stage (returns) when fix_pass / ensure_research_in_body /
+        pi_round leave it."""
+        p = self.s["plan"]; findings = verdict.findings
+        n = self.fix_pass("review_fail", "independent review FAIL twice: " + findings[:600], progress="In Progress",
+                          comment=lambda n: self.review_fail_comment(f"Review → In Progress\n\nReview: FAIL (independent review on the {self.gpu_label(self.s.get('reviewer_gpu'))}).\n\n"
+                                                                     f"{findings[:3000]}\n\nSending the findings to Pi."))
+        if n is None: return
+        if not self.s.get("research_in_body"):   # the section is the driver's to write: redo the research, fix the body
+            if not self.ensure_research_in_body(p): return
+            self.sync_pr_research()
+            self.comment("Research re-done after the review FAIL; the PR body's `## Refactoring research` section is updated.")   # journal activity: no commit on this path
+        else:   # Pi fixes the code: the same fix round, on the pass the bump above already counted
+            if not self.pi_round(f"review-fix-{n}", "An independent review of this branch failed. Findings:\n" + findings[:6000] +
+                                 "\nFix each finding with the smallest change. Never skip, delete or weaken a test or gate.",
+                                 f"review{n}", "local verification red after an independent-review fix.",
+                                 "Fix independent review findings"): return
+        self.move("Review")
+        self.save(stage="ci")
 
     def evidence_results(self):
         """The per-criterion evidence pass of the review stage (cmdemo1-system#859): run each criterion's evidence_cmd
