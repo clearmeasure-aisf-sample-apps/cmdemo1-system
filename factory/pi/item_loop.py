@@ -476,6 +476,16 @@ def _task_timeouts():
     return (lambda p: not bad(p)), lambda p: "; ".join(
         f"tasks[{i}] timeout must be a positive int at or above {G.MIN_CLIENT_TIMEOUT_S}" for i in bad(p))
 
+def _plan_verify_timeout():
+    """Spec for a plan's optional `verify_timeout` (the opt-in per-item verify deadline, cmdemo1-system#967):
+    the plan omits it, or gives a positive int (not a bool) at or above MIN_CLIENT_TIMEOUT_S -- the same shape
+    a plan task's `timeout` must have (_task_timeouts), but a scalar plan key with a fixed message."""
+    def bad(p):
+        if "verify_timeout" not in p: return False
+        v = p["verify_timeout"]
+        return not (isinstance(v, int) and not isinstance(v, bool) and v >= G.MIN_CLIENT_TIMEOUT_S)
+    return (lambda p: not bad(p)), lambda p: f"verify_timeout must be a positive int at or above {G.MIN_CLIENT_TIMEOUT_S}"
+
 def _no_secret_values(p):
     blob = json.dumps(p)
     return scrub(blob) == blob
@@ -490,6 +500,7 @@ PLAN_CHECKS = [
     _entry_fields("criteria", "text", "evidence_cmd"),
     _entry_fields("tasks", "name", "prompt"),
     _task_timeouts(),
+    _plan_verify_timeout(),
     (lambda p: (p.get("repo"), p.get("issue")) not in NEVER_MERGE, "this item's PR is never merged"),
     (lambda p: (p.get("repo"), p.get("issue")) not in HANDS_OFF, "this item is hands-off (Jeffrey); do not work it"),
     (lambda p: p.get("size") in (None, "large", "small"), "size must be large or small"),
@@ -1383,14 +1394,28 @@ class Driver:
         return False
 
     def verify(self, name):
+        """One verify_cmd pass through the one runner (run_cmd owns the deadline and the process-group kill).
+        A plan may opt into a per-item `verify_timeout` (validated by _plan_verify_timeout); without the key the
+        call passes timeout=None, so a hung verify inherits run_cmd's own deadline as before. On a
+        subprocess.TimeoutExpired the driver does not raise: it returns rc 124 with the output collected so far
+        (a `verify timed out after <n>s` line appended), so local_green routes it through the same local_fix
+        Pi rounds as any other red verify. The bookkeeping below -- the verify log, the verify_runs / verify_s
+        counters, save, the log line -- runs once for both the normal result and the timed-out one."""
         log = os.path.join(self.run_dir, "logs", f"verify-{name}.log"); t0 = time.time()
-        r = run_cmd(["bash", "-o", "pipefail", "-c", self.s["plan"]["verify_cmd"]], cwd=self.s["wt"], text=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        write_text(log, scrub(r.stdout))
+        try:
+            r = run_cmd(["bash", "-o", "pipefail", "-c", self.s["plan"]["verify_cmd"]], cwd=self.s["wt"], text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        timeout=self.s["plan"].get("verify_timeout"))
+            rc, out = r.returncode, r.stdout
+        except subprocess.TimeoutExpired as e:
+            out = e.stdout if isinstance(e.stdout, str) else (e.stdout or b"").decode("utf-8", "replace")
+            rc = 124
+            out += f"\nverify timed out after {self.s['plan'].get('verify_timeout')}s"
+        write_text(log, scrub(out))
         self.s["verify_runs"] = self.s.get("verify_runs", 0) + 1
         self.s["verify_s"] = self.s.get("verify_s", 0) + time.time() - t0; self.save()
-        self.log(f"verify {name}: exit {r.returncode} in {time.time() - t0:.0f}s")
-        return r.returncode, r.stdout
+        self.log(f"verify {name}: exit {rc} in {time.time() - t0:.0f}s")
+        return rc, out
 
     def bump(self, key):
         self.s["counts"][key] = self.s["counts"].get(key, 0) + 1; self.save()

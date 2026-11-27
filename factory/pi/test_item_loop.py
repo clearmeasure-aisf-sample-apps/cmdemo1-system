@@ -269,6 +269,23 @@ class PlanSpec(unittest.TestCase):   # validate_plan as a specification list: PL
                                             {"name": "t2", "prompt": "p", "timeout": "90 seconds"}]),
                           f"tasks[1] {msg}")
 
+    def test_validate_plan_accepts_a_valid_verify_timeout_and_rejects_bad_ones(self):
+        """cmdemo1-system#967: the plan's optional verify_timeout is validated as a positive int (not a bool)
+        at or above MIN_CLIENT_TIMEOUT_S. Absent or a valid int passes silently; a bool, a non-int string, a
+        zero, or a value below the floor all produce the fixed message."""
+        # absent -> no verify_timeout message
+        self.assertEqual(L.validate_plan(PLAN), [], "a plan without verify_timeout must not trip the check")
+        # valid int at the floor -> no verify_timeout message
+        self.assertEqual(L.validate_plan(dict(PLAN, verify_timeout=G.MIN_CLIENT_TIMEOUT_S)), [],
+                         "a plan with verify_timeout == MIN_CLIENT_TIMEOUT_S must not trip the check")
+        # a value well above the floor is also valid
+        self.assertEqual(L.validate_plan(dict(PLAN, verify_timeout=7200)), [],
+                         "a plan with verify_timeout well above the floor must not trip the check")
+        msg = f"verify_timeout must be a positive int at or above {G.MIN_CLIENT_TIMEOUT_S}"
+        for bad in (True, "600", 0, G.MIN_CLIENT_TIMEOUT_S - 1):
+            errs = L.validate_plan(dict(PLAN, verify_timeout=bad))
+            self.assertIn(msg, errs, f"verify_timeout={bad!r} must trip the check with: {msg}")
+
     def test_branch_prefix(self):
         self.assert_check(dict(PLAN, branch="feature/x"), "branch must start with cm-ai-ops-bot/")
 
@@ -2147,6 +2164,54 @@ class VerifyEvidenceRunCmd(PidfileKill, unittest.TestCase):   # cmdemo1-system#8
                 src = inspect.getsource(getattr(L.Driver, name))
                 self.assertIsNone(re.search(r"\bsubprocess\.run\s*\(", src),
                                   f"Driver.{name} still runs its own subprocess.run: every deadline must go through run_cmd")
+
+    # (5) cmdemo1-system#967: an opt-in per-plan verify_timeout -- the driver passes it to run_cmd, and a
+    #     subprocess.TimeoutExpired becomes rc 124 with the collected output, not a raise.
+    def test_verify_timeout_returns_rc_124_with_collected_output(self):
+        """A plan with verify_timeout=300 hands timeout=300 to the runner; when the runner raises
+        TimeoutExpired the driver returns (124, collected-output) -- it does not raise -- and the verify
+        log carries the partial output plus the timeout line."""
+        with fake_home() as h:
+            d = self.driver(h)
+            d.s["plan"]["verify_timeout"] = 300
+            logs = []; d.log = logs.append
+            captured = {}
+            def fake_run(cmd, **k):
+                captured["cmd"] = cmd
+                captured.update(k)
+                raise subprocess.TimeoutExpired(cmd, 300, output="partial")
+            with fake_modules({(L, "run_cmd"): fake_run}):
+                rc, out = d.verify("x")
+            log_text = open(os.path.join(d.run_dir, "logs", "verify-x.log")).read()
+            self.assertEqual(captured["timeout"], 300, "verify must hand the plan's verify_timeout to run_cmd")
+            self.assertEqual(rc, 124, "a timed-out verify returns rc 124, not an exception")
+            self.assertIn("partial", out, "the output collected before the kill must come back")
+            self.assertIn("partial", log_text, "the verify log must carry the partial output")
+
+    def test_local_green_routes_a_timed_out_verify_through_local_fix(self):
+        """When verify times out every run, local_green must not raise -- it must return False and call Pi
+        LIMITS['local_fix'] times with the fix names (x-fix-1, x-fix-2, ...) carrying the partial output in the
+        prompt. This is the end-to-end proof the issue title asks for: a timed-out verify goes through the
+        same local_fix Pi rounds as any other red verify."""
+        with fake_home() as h:
+            d = self.driver(h)
+            d.s["plan"]["verify_timeout"] = 300
+            d.log = lambda *a: None
+            pi_calls = []
+            def fake_pi(name, prompt, timeout=L.PI_TASK_TIMEOUT_S, gpu=None):
+                pi_calls.append((name, prompt))
+                return L.PiRun(result="FAIL", gpu=None, rc=1)
+            d.pi = fake_pi
+            d.verify = lambda name: (124, "partial")
+            ok = d.local_green("x")
+            self.assertFalse(ok, "a verify that times out every run is never green")
+            self.assertEqual(len(pi_calls), L.LIMITS["local_fix"],
+                             f"local_green must run LIMITS['local_fix']={L.LIMITS['local_fix']} Pi fix rounds, got {len(pi_calls)}")
+            names = [c[0] for c in pi_calls]
+            self.assertEqual(names, ["x-fix-1", "x-fix-2", "x-fix-3"],
+                             "the fix rounds must be named x-fix-1, x-fix-2, x-fix-3")
+            for name, prompt in pi_calls:
+                self.assertIn("partial", prompt, f"the {name} prompt must carry the timed-out verify's output")
 
 class GpuGate(unittest.TestCase):   # cmdemo1-system#861: hard caps pro5000 2, pro6000 1, obs 1, ts3 1 for every Pi launch
     """On Nov 21 a Pi session ran `rm -f /tmp/factory-pi-*-slot-*.lock`; new run-tasks then took "free" slots on new
