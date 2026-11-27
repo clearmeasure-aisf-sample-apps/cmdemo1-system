@@ -1,5 +1,6 @@
 """Unit tests of the Pi item driver's decision rules (no network, no Pi). Run: python3 -m unittest factory/pi/test_item_loop.py"""
 import argparse, fcntl, importlib.machinery, importlib.util, inspect, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, unittest
+import io   # added for io.StringIO in DraftPlanTests._run_with_plan (additive import for #895)
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import item_loop as L
@@ -301,6 +302,19 @@ class PlanSpec(unittest.TestCase):   # validate_plan as a specification list: PL
     def test_task_prompts_may_not_commit_push_or_call_gh(self):
         self.assert_check(dict(PLAN, tasks=[{"name": "t1", "prompt": "then git push origin"}]),
                           "Pi task prompts must not ask Pi to commit, push or call gh")
+
+    def test_missing_keys_names_absent_and_empty_required_keys(self):
+        self.assertEqual(L.missing_keys(PLAN), [])
+        self.assertEqual(L.missing_keys({k: v for k, v in PLAN.items() if k not in ("criteria", "verify_cmd")}),
+                         ["criteria", "verify_cmd"])
+        self.assertEqual(L.missing_keys(dict(PLAN, files=[])), ["files"])
+        self.assertEqual(L.missing_keys([]), [])
+
+    def test_missing_keys_agrees_with_required_messages(self):
+        for k in L.PLAN_REQUIRED_KEYS:
+            p = {x: v for x, v in PLAN.items() if x != k}
+            self.assertEqual(L.missing_keys(p), [k], k)
+            self.assertIn(f"missing {k}", L.validate_plan(p), k)
 
 class NoIdleStall(unittest.TestCase):
     def test_quality_failures_route_qodana_and_refactoring_rationale(self):
@@ -2981,6 +2995,56 @@ class DraftPlanTests(unittest.TestCase):   # cmd_draft_plan with gh/plan_worktre
         calls, code = self._run(write_plan=True)
         self.assertEqual(calls[0][0], "draft-plan")
         self.assertEqual(code, 0)   # a valid draft on disk exits 0 even though the pi pass returned False
+
+    def _run_with_plan(self, plan):
+        """Run cmd_draft_plan with the patched pi writing `plan` (a dict or None) to the quoted out path.
+        Returns (calls, exit_code, stdout_json) -- stdout_json is the parsed JSON object printed by
+        draft_result, the first JSON object at the start of the captured stdout."""
+        calls = []
+        out = io.StringIO()
+        with fake_home():
+            gh = mock.Mock(return_value=mock.Mock(stdout='{"title": "t", "body": "b"}'))
+            plan, out_of = plan, self._out_of
+
+            def pi(self, name, prompt, timeout, gpu=None):
+                calls.append((name, prompt, timeout, gpu))
+                if plan is not None: json.dump(plan, open(out_of(prompt), "w"))
+                return L.PiRun(result="FAIL", gpu=None, rc=1)
+
+            code = None
+            with mock.patch.object(L.Driver, "gh", gh), mock.patch.object(L.Driver, "plan_worktree", mock.Mock()), \
+                    mock.patch.object(L.Driver, "pi", pi), contextlib.redirect_stdout(out):
+                try:
+                    L.cmd_draft_plan(argparse.Namespace(repo="cmdemo1-system", issue=884, top_session=None))
+                except SystemExit as e:
+                    code = e.code
+        text = out.getvalue()
+        # the JSON object starts at the first '{' and ends before the trailing newline+review line
+        start = text.index("{")
+        # find the matching close brace by counting
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{": depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0: break
+        obj = json.loads(text[start:i+1])
+        return calls, code, obj
+
+    def test_draft_plan_reports_missing_keys_for_partial_draft(self):
+        """A partial draft (PLAN minus criteria and verify_cmd) prints missing == [criteria, verify_cmd],
+        errors includes 'missing criteria', and the exit code is 1."""
+        partial = {k: v for k, v in self.PLAN.items() if k not in ("criteria", "verify_cmd")}
+        calls, code, obj = self._run_with_plan(partial)
+        self.assertEqual(obj["missing"], ["criteria", "verify_cmd"])
+        self.assertIn("missing criteria", obj["errors"])
+        self.assertEqual(code, 1)
+
+    def test_draft_plan_complete_draft_reports_empty_missing(self):
+        """A complete (valid) draft prints 'missing': []."""
+        calls, code, obj = self._run_with_plan(self.PLAN)
+        self.assertEqual(obj["missing"], [])
+        self.assertEqual(code, 0)
 
 class GhChokepoint(unittest.TestCase):   # cmdemo1-system#828: every gh call is one sh chokepoint with explicit check, timeout and write
     def gh_recorder(self):

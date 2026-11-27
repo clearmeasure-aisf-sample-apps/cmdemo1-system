@@ -444,9 +444,20 @@ def heartbeat_due(progress_at, last_heartbeat, at, minutes=HEARTBEAT_MIN):
 # checks ran. A predicate is true when the plan satisfies its spec; the message is the error text, a string or a
 # callable taking the plan when the text is computed (the enhancement's protected-file list, the bad criteria / task
 # entries). validate_plan returns the messages of the specs the plan fails, in list order.
+# The plan keys every plan must carry, in the order their missing-messages appear in PLAN_CHECKS and in the
+# draft-plan report's `missing` list.
+PLAN_REQUIRED_KEYS = ("repo", "issue", "branch", "files", "criteria", "tasks", "verify_cmd", "pr_title")
+
 def _required(k):
     """Spec for one required plan key: present, and not None / "" / []."""
     return (lambda p: k in p and p[k] not in (None, "", [])), f"missing {k}"
+
+def missing_keys(p):
+    """The required plan keys `p` is missing, in PLAN_REQUIRED_KEYS order: absent, or empty (None / "" / []) --
+    the same emptiness test the _required specs use. [] when p is not a dict; validate_plan still handles a
+    non-dict the way it always has (every non-required spec is also evaluated against it)."""
+    if not isinstance(p, dict): return []
+    return [k for k in PLAN_REQUIRED_KEYS if k not in p or p[k] in (None, "", [])]
 
 def _entry_fields(field, *keys):
     """Spec for one plan list (criteria, tasks): every entry carries all of `keys`. The message is today's per-entry
@@ -474,7 +485,7 @@ def _prompts_do_not_touch_github(p):
     return not re.search(r"git\s+(push|commit)|gh\s+(pr|issue|api)", " ".join(t.get("prompt", "") for t in p.get("tasks") or []))
 
 PLAN_CHECKS = [
-    *[_required(k) for k in ("repo", "issue", "branch", "files", "criteria", "tasks", "verify_cmd", "pr_title")],
+    *[_required(k) for k in PLAN_REQUIRED_KEYS],
     (lambda p: str(p.get("branch", "")).startswith(f"{BOT}/"), f"branch must start with {BOT}/"),
     _entry_fields("criteria", "text", "evidence_cmd"),
     _entry_fields("tasks", "name", "prompt"),
@@ -2154,10 +2165,12 @@ def draft_plan_prompt(repo, issue, title, body, out):
         "Write a first complete, valid plan.draft.json as soon as you know the files involved (after at most a few reads), "
         "then refine it in place; never leave the file unwritten.")
 
-def draft_result(draft, pi_pass, errors):
-    """What cmd_draft_plan reports on stdout (the draft path, whether the Pi pass ended PASS, and the plan-validation
-    errors): a Pi that never started and a plan that did not validate report the same way."""
-    print(json.dumps({"draft": draft, "pi_pass": pi_pass, "errors": errors}, indent=1))
+def draft_result(draft, pi_pass, errors, missing=None):
+    """What cmd_draft_plan reports on stdout (the draft path, whether the Pi pass ended PASS, the plan-validation
+    errors, and `missing` -- the required plan keys absent from a partial draft, from missing_keys; [] when the
+    draft is complete or there is no dict to check): a Pi that never started and a plan that did not validate
+    report the same way."""
+    print(json.dumps({"draft": draft, "pi_pass": pi_pass, "errors": errors, "missing": missing or []}, indent=1))
 
 def cmd_draft_plan(a):
     d = Driver(a.repo, a.issue, top_session=a.top_session)
@@ -2166,13 +2179,15 @@ def cmd_draft_plan(a):
     out, prompt = draft_plan_prompt(a.repo, a.issue, iss["title"], iss["body"], os.path.join(d.run_dir, PLAN_DRAFT_FILE))
     # plan drafting runs before the gpu stage: no gpu recorded yet, so ask for any free 262K GPU (#907) rather than queueing on pro5000
     try: run = d.pi("draft-plan", prompt, d.budgets.draft_plan_s, gpu=G.gpu_arg(G.LARGE_GPUS))
-    except PiNotStarted as e: draft_result(out, False, [str(e)]); sys.exit(1)
+    except PiNotStarted as e: draft_result(out, False, [str(e)], missing=[]); sys.exit(1)
+    miss = []
     try:
         with open(out) as f: p = json.load(f)
         errs = validate_plan(p)
+        miss = missing_keys(p)
     except Exception as e:
-        p, errs = None, [f"no valid JSON plan: {e}"]
-    draft_result(out, run.ok, errs)
+        p, errs, miss = None, [f"no valid JSON plan: {e}"], []
+    draft_result(out, run.ok, errs, missing=miss)
     print("Review plan.draft.json; copy it to plan.json (edit as needed), then run `item-loop start`.")
     sys.exit(0 if not errs else 1)
 
