@@ -9,6 +9,7 @@ import contextlib
 import item_loop_test_fakes as fakes   # #1021: shared fakes (PLAN, fake_home, ...) in item_loop_test_fakes.py
 from item_loop_test_fakes import PLAN, fake_home, fake_modules, make_driver, scripted_sh, patch_run, HDR, USER, ASSISTANT
 from test_item_loop_process_group import RunTaskTimeout, SharedTaskTimeout, RunCmdGroupKill, DriverShGroupKill, VerifyEvidenceRunCmd, GpuGate, SharedRunCmd   # #1021: the process-group kill family moved out; re-exported so the CI command that names this file still runs them
+from test_scrub import ScrubEnvValues, Scrubbing, SharedScrubModule, ScrubRuleGaps   # #1022: the scrub rule tests moved out; re-exported the same way
 
 @contextlib.contextmanager
 def patched_driver_env(run=None, sleep=None, gpu_health=None, time=None, gpu_for_item=None, research_ok=None):
@@ -99,12 +100,6 @@ class Rules(unittest.TestCase):
         text = "\n".join(["noise"] * 500 + [f"token {tok}", "src/A.cs(1,1): error CS0103: x", "done"])
         out = L.trim_log(text)
         self.assertNotIn(tok, out); self.assertIn("error CS0103", out); self.assertLessEqual(len(out), 12000)
-
-    def test_scrub_env_values(self):
-        os.environ["LOCAL_LLM_PRO5000_URL"] = "https://example-tunnel.invalid/v1"
-        try: self.assertNotIn("example-tunnel", L.scrub("base https://example-tunnel.invalid/v1/models"))
-        finally: del os.environ["LOCAL_LLM_PRO5000_URL"]
-        self.assertEqual(L.scrub("x https://a-b.trycloudflare.com/v1 y"), "x [redacted] y")
 
     def test_checks_state(self):
         req = ["Build result", "secret-scan"]
@@ -1464,73 +1459,6 @@ class StagedFilesGate(unittest.TestCase):
             # an unresolvable merge base falls back to origin/<default>: the gate never widens
             self.assertEqual(self.st_pr_driver(h, 33, (128, "")).merge_base(), "origin/main")
             self.assertEqual(self.st_pr_driver(h, 34, (0, "   \n")).merge_base(), "origin/main")
-
-class Scrubbing(unittest.TestCase):
-    def test_tunnel_hosts_and_every_gpu_secret_are_redacted(self):
-        for host in ("pro5000", "pro6000", "5070ti", "5060ti"):
-            out = L.scrub(f"GET https://{host}.clearmeasure.ai/v1/models -> 200; host {host}.clearmeasure.ai")
-            self.assertNotIn(f"{host}.clearmeasure.ai", out); self.assertIn("[redacted]", out)
-        fake = lambda c: "fake" + c * 12   # built at run time so the secret scan sees no literal
-        env = {"LOCAL_LLM_OBS_TOKEN": fake("o"), "LOCAL_LLM_TS3_TOKEN": fake("t"), "LOCAL_LLM_TS3_URL": "https://other.example.invalid/v1"}
-        old = {k: os.environ.get(k) for k in env}; os.environ.update(env)
-        try:
-            out = L.scrub(f"a {fake('o')} b {fake('t')} c https://other.example.invalid/v1/models")
-            for v in env.values(): self.assertNotIn(v, out)
-        finally:
-            for k, v in old.items():
-                if v is None: os.environ.pop(k, None)
-                else: os.environ[k] = v
-        self.assertEqual(L.scrub("Authorization: Bearer abcdef123"), "Authorization: [redacted]")
-        self.assertEqual(L.scrub("see https://github.com/x/y/pull/1"), "see https://github.com/x/y/pull/1")
-
-    def test_run_task_uses_the_shared_scrub(self):   # 838: run-task imports the shared module; item_loop only re-exports it
-        p = os.path.dirname(os.path.abspath(__file__))
-        rt = open(os.path.join(p, "run-task")).read()
-        self.assertIn("from scrub import scrub", rt); self.assertNotIn("item_loop", rt); self.assertIn('"--gpu"', rt)
-        il = open(os.path.join(p, "item_loop.py")).read()
-        self.assertIn("from scrub import", il)                                # the compatibility re-export keeps every call site working
-        self.assertNotIn("SECRET_RE = re.compile", il); self.assertNotIn("def scrub(", il)   # the rule set itself lives in scrub.py only
-
-class SharedScrubModule(unittest.TestCase):   # 838: one scrub rule set in factory/pi/scrub.py; item_loop re-exports it, run-task imports it.
-    # 'scrub' is imported INSIDE each test (never at the top) so the rest of the suite stays runnable while factory/pi/scrub.py is absent.
-    def rt(self):
-        loader = importlib.machinery.SourceFileLoader("run_task_838", os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-task"))
-        m = importlib.util.module_from_spec(importlib.util.spec_from_loader("run_task_838", loader)); loader.exec_module(m); return m
-
-    def test_item_loop_reexports_the_same_regex_and_function(self):
-        scrub = importlib.import_module("scrub")
-        self.assertIs(scrub.SECRET_RE, L.SECRET_RE, "item_loop must re-export the shared pattern, not a copy of it")
-        self.assertIs(scrub.scrub, L.scrub, "item_loop must re-export the shared function itself, so every existing call site keeps working")
-
-    def test_run_task_binds_that_same_scrub_function(self):
-        scrub = importlib.import_module("scrub")
-        self.assertIs(self.rt().scrub, scrub.scrub, "run-task must go through the shared scrub, not its own copy")
-
-    def test_add_secret_source_redacts_a_caller_owned_value(self):
-        scrub = importlib.import_module("scrub")
-        long_v, short_v = "own" + "Z" * 30, "own" + "Y" * 3   # built at run time so the secret scan sees no literal
-        sources = list(scrub.SECRET_SOURCES)                   # the module's source list: save it, restore it in the finally,
-                                                               # so no other test sees this registration
-        try:
-            scrub.add_secret_source(lambda: long_v)
-            out = scrub.scrub(f"a {long_v} b")
-            self.assertNotIn(long_v, out); self.assertIn("[redacted]", out)
-            scrub.add_secret_source(lambda: short_v)
-            self.assertIn(short_v, scrub.scrub(f"a {short_v} b"), "a value of 6 characters or fewer is not a secret")
-            scrub.add_secret_source(lambda: None)
-            self.assertEqual(scrub.scrub("a plain line"), "a plain line", "a source with nothing to hide changes nothing")
-        finally:
-            scrub.SECRET_SOURCES[:] = sources
-
-    def test_item_loop_registers_its_cached_app_token(self):
-        scrub = importlib.import_module("scrub")               # item_loop's scrub IS scrub.scrub: the App token is registered there
-        tok = "app" + "Q" * 30                                 # built at run time so the secret scan sees no literal
-        try:
-            L._app_tok.update(v=tok, at=1.0)
-            self.assertNotIn(tok, L.scrub(f"x {tok} y"), "the cached App token value must disappear from scrubbed output")
-            self.assertNotIn(tok, scrub.scrub(f"x {tok} y"), "and through the shared module's own entry point too")
-        finally:
-            L._app_tok.update(v=None, at=0.0)
 
 class UsageReport(unittest.TestCase):
     def test_report_lists_grok_sessions_driver_and_pi(self):
