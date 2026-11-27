@@ -3992,4 +3992,23 @@ class TestTimeouts(unittest.TestCase):   # cmdemo1-system#966: the TIMEOUTS tabl
         self.assertEqual(set(L.TIMEOUTS), {"verify", "evidence", "git", "gh_watch", "wait_ci", "api"})
 
 
+class GpuForItemExcluded(unittest.TestCase):   # cmdemo1-system#926: reserved GPUs (gpu-exclude) in gpu_for_item
+    def test_excluded_recorded_gpu_is_repicked(self):
+        """A small item whose recorded GPU pro6000 is excluded gets a new GPU (pro5000), not a wait."""
+        self.assertEqual(L.gpu_for_item("pro6000", "small", ["pro5000", "pro6000", "obs"], set(), excluded={"pro6000"}),
+                         ("pro5000", None))
+
+    def test_excluded_recorded_gpu_large_no_free_gpu_waits_with_reserved_name(self):
+        """A large item whose recorded GPU pro6000 is excluded, with pro5000 busy, waits and the why names pro6000."""
+        gpu, why = L.gpu_for_item("pro6000", "large", ["pro5000", "pro6000", "obs"], {"pro5000"}, excluded={"pro6000"})
+        self.assertIsNone(gpu)
+        self.assertIn("pro6000", why)
+
+    def test_non_excluded_recorded_gpu_down_still_waits(self):
+        """A recorded GPU that is down (not excluded) still waits for it."""
+        gpu, why = L.gpu_for_item("obs", "small", ["pro5000", "pro6000"], set(), excluded=set())
+        self.assertIsNone(gpu)
+        self.assertIn("waiting for the recorded GPU obs", why)
+
+
 if __name__ == "__main__": unittest.main()

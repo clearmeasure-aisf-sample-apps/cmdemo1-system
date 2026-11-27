@@ -772,11 +772,18 @@ def busy_gpus(states, me=None, alive=lambda pid: False):
                    if k != me and s.get("gpu") and s.get("stage") in GPU_HOLDING_STAGES and alive(s.get("pid")))
     return {g for g, n in held.items() if n >= G.GPUS.get(g, {}).get("slots", 1)}
 
-def gpu_for_item(rec, size, up, busy):
-    """(gpu, wait_why) for the gpu stage. A resumed item keeps the GPU recorded in state: take it when it is up,
-    otherwise wait for that GPU (never re-pick, never fall back to the pro5000 default). A new item picks a free
-    GPU of the right size; gpu=None means wait, and wait_why says for what."""
+def gpu_for_item(rec, size, up, busy, excluded=None):
+    """(gpu, wait_why) for the gpu stage. Excluded (reserved) GPUs are removed from `up` before anything else;
+    `excluded` defaults to G.excluded_gpus(). A resumed item keeps the GPU recorded in state: take it when it is up
+    (and not excluded), otherwise, if the recorded GPU is excluded, pick a new GPU with G.pick_gpu; else wait for
+    that GPU (never re-pick, never fall back to the pro5000 default). A new item picks a free GPU of the right
+    size; gpu=None means wait, and wait_why says for what (naming the reserved GPU when the wait is for one)."""
+    ex = G.excluded_gpus() if excluded is None else excluded
+    up = [g for g in up if g not in ex]
     if rec:
+        if rec in ex:
+            g = G.pick_gpu(size, up, busy)
+            return g, None if g else f"no free GPU for a {size} item (recorded GPU {rec} is reserved; up: {', '.join(up) or 'none'})"
         if rec in up: return rec, None
         return None, f"waiting for the recorded GPU {rec} (up: {', '.join(up) or 'none'})"
     g = G.pick_gpu(size, up, busy)

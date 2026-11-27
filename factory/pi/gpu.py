@@ -25,6 +25,7 @@ LARGE_GPU = "pro5000"                  # default GPU (run-task's own --gpu defau
 LARGE_GPUS = ("pro5000", "pro6000")    # 262K context: the only GPUs a large item waits for while one is up (a draft-plan too)
 SMALL_GPUS = ("obs", "ts3")
 PRIORITY = ("pro5000", "pro6000", "obs", "ts3")   # new work goes to the first GPU with a free slot; ts3 (slowest) only when the rest are full
+GPU_EXCLUDE_FILE = os.path.expanduser("~/.config/factory/gpu-exclude")
 # shortest client timeout for a Pi / model call (a long call hung up at less is a 499). Tests may lower the floor
 # with FACTORY_MIN_CLIENT_TIMEOUT_S; production leaves it unset, so the floor stays 300.
 MIN_CLIENT_TIMEOUT_S = int(os.environ.get("FACTORY_MIN_CLIENT_TIMEOUT_S", "300"))
@@ -103,15 +104,42 @@ def pick_gpu(size, up, busy):
         return next((g for g in free if g in LARGE_GPUS), None)
     return free[0] if free else None
 
+def excluded_gpus(env=None, path=None):
+    """Set of GPU names that are reserved (excluded from factory Pi work). The env var FACTORY_GPU_EXCLUDE wins
+    (even when empty: a comma/whitespace-separated list, empty means nothing excluded); otherwise the file at
+    `path` (default GPU_EXCLUDE_FILE) is read: names separated by whitespace, commas or newlines; `#` starts a
+    comment. A missing or unreadable file means nothing is excluded. Names that are not keys of GPUS are ignored."""
+    env = os.environ if env is None else env
+    if "FACTORY_GPU_EXCLUDE" in env:
+        raw = env["FACTORY_GPU_EXCLUDE"]
+        out = set()
+        for tok in raw.replace(",", " ").split():
+            tok = tok.strip()
+            if tok and not tok.startswith("#"): out.add(tok)
+    else:
+        p = path if path is not None else GPU_EXCLUDE_FILE
+        try:
+            with open(p) as f: raw = f.read()
+        except OSError: return set()
+        out = set()
+        for line in raw.splitlines():
+            line = line.split("#")[0]
+            for tok in line.replace(",", " ").split():
+                tok = tok.strip()
+                if tok: out.add(tok)
+    return {n for n in out if n in GPUS}
+
 def reviewer_gpu(author, up):
     """A different healthy GPU for the independent diff review (strongest first), or None."""
     return next((g for g in GPUS if g in up and g != author), None)
 
-def reviewer_gpus(author, up):
-    """Every healthy GPU but the author's, strongest first: the review takes whichever has a free slot first. author is
-    one GPU or a list (every GPU that wrote code for the item, relaunches included): none of them may review."""
+def reviewer_gpus(author, up, excluded=None):
+    """Every healthy GPU but the author's and but every excluded (reserved) GPU, strongest first: the review takes
+    whichever has a free slot first. author is one GPU or a list (every GPU that wrote code for the item, relaunches
+    included): none of them may review. `excluded` defaults to excluded_gpus()."""
     authors = {author} if isinstance(author, str) else set(author or ())
-    return [g for g in GPUS if g in up and g not in authors]
+    ex = excluded_gpus() if excluded is None else excluded
+    return [g for g in GPUS if g in up and g not in authors and g not in ex]
 
 def gpu_arg(gpus):
     """One GPU name or a GPU list as run-task's `--gpu` argument (a comma list, first-named preferred): the launch then

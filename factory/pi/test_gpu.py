@@ -173,4 +173,30 @@ class GpuArg(unittest.TestCase):   # cmdemo1-system#907: one place renders run-t
             self.assertTrue(all(g in G.GPUS for g in arg.split(",")), arg)
 
 
+class ExcludedGpus(unittest.TestCase):   # cmdemo1-system#926: reserved GPUs (gpu-exclude) are never picked
+    def test_excluded_gpus_reads_temp_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "gpu-exclude")
+            with open(p, "w") as f:
+                f.write("# reserved for the box lane\npro6000, pro5000\nobs  # inline comment\nbogus\n# another\n")
+            self.assertEqual(G.excluded_gpus(env={}, path=p), {"pro6000", "pro5000", "obs"})
+
+    def test_env_var_overrides_file_and_empty_env_var_means_nothing_excluded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "gpu-exclude")
+            with open(p, "w") as f: f.write("pro6000\n")
+            # env var set: wins over the file
+            self.assertEqual(G.excluded_gpus(env={"FACTORY_GPU_EXCLUDE": "obs"}, path=p), {"obs"})
+            # empty env var: wins over the file, means nothing excluded
+            self.assertEqual(G.excluded_gpus(env={"FACTORY_GPU_EXCLUDE": ""}, path=p), set())
+
+    def test_missing_file_gives_empty_set(self):
+        self.assertEqual(G.excluded_gpus(env={}, path="/nonexistent/gpu-exclude"), set())
+
+    def test_reviewer_gpus_drops_excluded(self):
+        self.assertEqual(G.reviewer_gpus("pro5000", ["pro5000", "pro6000", "obs"], excluded={"pro6000"}), ["obs"])
+
+
 if __name__ == "__main__": unittest.main()
