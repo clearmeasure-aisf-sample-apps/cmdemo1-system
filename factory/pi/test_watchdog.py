@@ -119,7 +119,11 @@ class Comments(unittest.TestCase):
         self.assertEqual(W._last_comment, {})
         self.assertTrue(any("watchdog comment on cmdemo1-workorders#7 failed: gh: no such issue" in s for s in logs))
 
-def no_prs(args):   # gh stub for run_checks: no open PRs anywhere, so check 2 is a no-op
+HEAD_SHA = "a" * 40
+
+def no_prs(args):   # gh stub for run_checks: no open PRs anywhere (check 2 is a no-op) and no runs on main's head (check 4: unknown)
+    if args[:1] == ["api"] and args[1].endswith("/commits/main"):
+        return subprocess.CompletedProcess(args, 0, HEAD_SHA + "\n", "")
     return subprocess.CompletedProcess(args, 0, "[]", "")
 
 class GpuHealthCheck(unittest.TestCase):
@@ -135,7 +139,7 @@ class GpuHealthCheck(unittest.TestCase):
         h["ts3"] = ("UNREACHABLE", "no answer (unknown host or timeout)")
         logs = []
         r = self._run(lambda: dict(h), logs.append)
-        self.assertEqual(r, [("gpu_health_check", "down: ts3"), ("fix_handoff_check", "ok")])   # the down GPU is in the result; the healthy ones carry on
+        self.assertEqual(r, [("gpu_health_check", "down: ts3"), ("fix_handoff_check", "ok"), ("red_main_check", "ok")])   # the down GPU is in the result; the healthy ones carry on
         self.assertTrue(any("watchdog GPU ts3 (RTX 5060 Ti): UNREACHABLE - no answer (unknown host or timeout)" in s
                             for s in logs))
         up = G.available(h)
@@ -151,7 +155,7 @@ class GpuHealthCheck(unittest.TestCase):
         with fake_modules({(W, "post_comment"): no_comment}):
             r = self._run(lambda: {g: ("HEALTHY", "serves a loaded model (Pi asks for `auto`)") for g in G.GPUS},
                           lambda s: None)
-        self.assertEqual(r, [("gpu_health_check", "ok"), ("fix_handoff_check", "ok")])
+        self.assertEqual(r, [("gpu_health_check", "ok"), ("fix_handoff_check", "ok"), ("red_main_check", "ok")])
 
     def test_check_failure_is_caught_logged_and_in_the_result(self):
         logs = []
@@ -185,7 +189,7 @@ class GpuHealthDefault(unittest.TestCase):
                     L.HOME = old_home
         finally:
             L._HEALTH.now, L._HEALTH.health, L._HEALTH.at, L._HEALTH.h = old
-        self.assertEqual(r, [("gpu_health_check", "ok"), ("fix_handoff_check", "ok")])
+        self.assertEqual(r, [("gpu_health_check", "ok"), ("fix_handoff_check", "ok"), ("red_main_check", "ok")])
 
     def test_run_checks_uses_an_injected_health_cache(self):
         calls = []
@@ -199,7 +203,7 @@ class GpuHealthDefault(unittest.TestCase):
                 r = W.run_checks(health=cache, gh=no_prs, log=lambda s: None)
             finally:
                 L.HOME = old_home
-        self.assertEqual(r, [("gpu_health_check", "no healthy GPU"), ("fix_handoff_check", "ok")])
+        self.assertEqual(r, [("gpu_health_check", "no healthy GPU"), ("fix_handoff_check", "ok"), ("red_main_check", "ok")])
         self.assertEqual(calls, [1], "the injected cache probed exactly once")
 
 FAIL = "Review → In Progress\n\nReview: FAIL (independent review on the RTX 5070 Ti).\n\n- a finding\n\nSending the findings to Pi."
@@ -341,7 +345,7 @@ class SharedEntry(unittest.TestCase):
         self.assertIn("usage:", out.getvalue())
 
     def test_registry_lists_checks_1_and_2(self):
-        self.assertEqual([c.__name__ for c in W.CHECKS], ["gpu_health_check", "fix_handoff_check"])
+        self.assertEqual([c.__name__ for c in W.CHECKS], ["gpu_health_check", "fix_handoff_check", "red_main_check"])
 
 class ExitHook(unittest.TestCase):
     """The driver's exit hook (item_loop.watchdog_exit): run_checks runs exactly once when a driver run
@@ -680,15 +684,16 @@ class OwnGreenPrsEntry(unittest.TestCase):
         def fake(**kw): seen.append("own"); return "ok"
         with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home, (W, "own_green_prs_check"): fake}):
             r = W.run_checks(gh=no_prs, own_prs=True, log=lambda s: None)
-        self.assertEqual([n for n, _ in r], ["gpu_health_check", "fix_handoff_check", "fake"])
+        self.assertEqual([n for n, _ in r], ["gpu_health_check", "fix_handoff_check", "red_main_check", "fake"])
         self.assertEqual(seen, ["own"])
-        self.assertEqual(r[2], ("fake", "ok"))
+        self.assertEqual(r[2], ("red_main_check", "ok"))
+        self.assertEqual(r[3], ("fake", "ok"))
 
     def test_default_run_checks_keeps_the_registered_checks_only(self):
         def no_check3(**kw): raise AssertionError("check 3 must not run without own_prs=True")
         with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home, (W, "own_green_prs_check"): no_check3}):
             r = W.run_checks(gh=no_prs, log=lambda s: None)
-        self.assertEqual([n for n, _ in r], ["gpu_health_check", "fix_handoff_check"])
+        self.assertEqual([n for n, _ in r], ["gpu_health_check", "fix_handoff_check", "red_main_check"])
 
     def test_cli_run_own_prs_passes_the_flag(self):
         calls = []
@@ -825,3 +830,126 @@ class IdleDecisionRule(unittest.TestCase):
         alive = lambda pid: False
         # newest is last_comment_at (10 min ago) < 90 min → leave
         self.assertEqual(W.idle_decision(st, at, up, busy, alive=alive), ("leave", None))
+
+SYS = "cmdemo1-system"
+SYS_KEY = "cmdemo1-system main"
+SYS_TITLE = "Fix forward: cmdemo1-system main is red"
+all_healthy = lambda: {g: ("HEALTHY", "serves a loaded model (Pi asks for `auto`)") for g in G.GPUS}
+
+def run(rid, name, conclusion, status="completed"):
+    return {"id": rid, "name": name, "status": status, "conclusion": conclusion}
+
+class FakeGh:
+    """gh stub for check 4: main's head sha, that sha's push runs, the open fix-forward titles (or a failed lookup),
+    and a recorded `issue create` (whose body file is read before the check deletes it). No open PRs anywhere."""
+
+    def __init__(self, runs, titles=(), titles_rc=0, create=None):
+        self.runs, self.titles, self.titles_rc, self.create = runs, list(titles), titles_rc, create
+        self.creates, self.bodies, self.calls = [], [], []
+
+    def __call__(self, args):
+        self.calls.append(args)
+        ok = lambda out: subprocess.CompletedProcess(args, 0, out, "")
+        if args[:1] == ["api"] and args[1].endswith("/commits/main"): return ok(HEAD_SHA + "\n")
+        if args[:1] == ["api"] and "/actions/runs?" in args[1]:
+            assert f"head_sha={HEAD_SHA}&event=push&per_page=50" in args[1], args[1]
+            return ok(json.dumps(self.runs))
+        if args[:1] == ["api"] and "/issues?state=open&labels=fix-forward" in args[1]:
+            return subprocess.CompletedProcess(args, self.titles_rc, json.dumps(self.titles) if self.titles_rc == 0 else "HTTP 502", "")
+        if args[:2] == ["issue", "create"]:
+            if self.create: raise self.create
+            with open(args[args.index("--body-file") + 1]) as f: self.bodies.append(f.read())
+            self.creates.append(args); self.titles.append(args[args.index("--title") + 1])
+            return ok(f"https://github.com/{L.ORG}/{SYS}/issues/9001\n")
+        if args[:1] == ["issue"] and "comment" in args: raise AssertionError("check 4 posts no comments")
+        return ok("[]")
+
+class RedMainCheck(unittest.TestCase):
+    """Check 4 (red_main_check): a red default-branch head (newest run per workflow on the head sha) sets
+    `<repo> main` in red.json and files one fix-forward issue; a green head clears it; unknown changes nothing."""
+
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory(); self.addCleanup(self.home.cleanup)
+        self.swap = fake_modules({(L, "HOME"): self.home.name}); self.swap.__enter__()
+        self.addCleanup(self.swap.__exit__, None, None, None)
+        self.logs = []
+
+    def check(self, gh, repos=(SYS,)):
+        return W.red_main_check(repos=repos, gh=gh, health=all_healthy, log=self.logs.append)
+
+    def test_red_head_sets_the_flag_and_files_one_issue_once(self):
+        gh = FakeGh([run(1, "Build", "success"), run(2, "Integration", "failure")])
+        sets = []
+        real_set = L.red_set
+        with fake_modules({(L, "red_set"): lambda k, w: (sets.append(k), real_set(k, w))[1]}):
+            self.assertEqual(self.check(gh), "acted: cmdemo1-system flagged, cmdemo1-system filed")
+            self.assertEqual(self.check(gh), "ok")   # second run: the flag and the open issue already exist
+        self.assertEqual(sets, [SYS_KEY])
+        self.assertIn(SYS_KEY, L.red_load())
+        self.assertEqual(len(gh.creates), 1)
+        a = gh.creates[0]
+        self.assertEqual(a[a.index("--title") + 1], SYS_TITLE)
+        self.assertEqual(a[a.index("--label") + 1], "fix-forward")
+        self.assertEqual(a[a.index("--assignee") + 1], L.BOT)
+        self.assertIn("Integration red at `aaaaaaaa`", gh.bodies[0])
+
+    def test_issue_already_open_sets_the_flag_without_a_create(self):
+        gh = FakeGh([run(5, "Build", "failure")], titles=[SYS_TITLE.lower()])
+        self.assertEqual(self.check(gh), "acted: cmdemo1-system flagged")
+        self.assertEqual(gh.creates, [])
+        self.assertIn(SYS_KEY, L.red_load())
+
+    def test_failed_then_green_on_the_head_sha_is_green_and_clears_the_flag(self):
+        L.red_set(SYS_KEY, "Build red at `bbbbbbbb`")
+        gh = FakeGh([run(7, "Build", "failure"), run(9, "Build", "success"), run(8, "Lint", "skipped")])
+        self.assertEqual(self.check(gh), "acted: cmdemo1-system cleared")
+        self.assertNotIn(SYS_KEY, L.red_load())
+        self.assertEqual(gh.creates, [])
+
+    def test_no_runs_or_in_progress_or_cancelled_leaves_the_flag(self):
+        L.red_set(SYS_KEY, "Build red at `bbbbbbbb`")
+        for runs in ([], [run(3, "Build", None, status="in_progress")], [run(4, "Build", "cancelled")],
+                     [run(4, "Build", "success"), run(6, "Deploy", "timed_out")], [run(2, "Build", "action_required")]):
+            gh = FakeGh(runs)
+            self.assertEqual(self.check(gh), "ok", runs)
+            self.assertIn(SYS_KEY, L.red_load())
+            self.assertEqual(gh.creates, [])
+
+    def test_failed_issue_lookup_creates_nothing_but_sets_the_flag(self):
+        gh = FakeGh([run(1, "Build", "failure")], titles_rc=1)
+        self.assertEqual(self.check(gh), "acted: cmdemo1-system flagged")
+        self.assertEqual(gh.creates, [])
+        self.assertIn(SYS_KEY, L.red_load())
+        self.assertTrue(any("open fix-forward lookup failed" in s for s in self.logs))
+
+    def test_issue_create_or_red_set_raising_is_logged_scrubbed_and_never_raised(self):
+        secret = "https://fake-pro5000.trycloudflare.com/v1"
+        gh = FakeGh([run(1, "Build", "failure")], create=RuntimeError("create broke at " + secret))
+        self.assertEqual(self.check(gh), "acted: cmdemo1-system flagged")
+        def boom(k, w): raise OSError("disk full near " + secret)
+        L.red_clear(SYS_KEY)
+        with fake_modules({(L, "red_set"): boom}):
+            self.assertEqual(self.check(FakeGh([run(1, "Build", "failure")])), "ok")
+        self.assertTrue(any("create broke" in s for s in self.logs))
+        self.assertTrue(any("disk full" in s for s in self.logs))
+        self.assertNotIn("trycloudflare", "".join(self.logs))
+
+    def test_deploy_flags_are_never_cleared(self):
+        L.red_set("dashboard tdd", "dashboard 1.0 unhealthy in tdd")
+        L.red_set(SYS_KEY, "Build red at `bbbbbbbb`")
+        self.assertEqual(self.check(FakeGh([run(1, "Build", "success")])), "acted: cmdemo1-system cleared")
+        self.assertEqual(list(L.red_load()), ["dashboard tdd"])
+
+    def test_red_state_keeps_only_the_newest_run_per_workflow(self):
+        self.assertEqual(W.main_state([run(9, "Build", "failure"), run(3, "Build", "success")]), ("red", ["Build"]))
+        self.assertEqual(W.main_state([run(3, "Build", "failure"), run(9, "Build", "success")]), ("green", []))
+        self.assertEqual(W.main_state([]), ("unknown", []))
+
+    def test_run_checks_with_own_prs_runs_red_main_check(self):
+        """Behavioural wiring: the driver-exit hook's call, run_checks(own_prs=True), runs check 4."""
+        gh = FakeGh([run(1, "Build", "failure")])
+        r = W.run_checks(repos=(SYS,), gh=gh, health=all_healthy, log=self.logs.append, own_prs=True)
+        self.assertIn(("red_main_check", "acted: cmdemo1-system flagged, cmdemo1-system filed"), r)
+        self.assertEqual([n for n, _ in r][-1], "own_green_prs_check")
+        self.assertIn(SYS_KEY, L.red_load())
+        self.assertEqual(len(gh.creates), 1)

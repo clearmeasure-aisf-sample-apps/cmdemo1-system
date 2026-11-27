@@ -23,13 +23,20 @@ healthy GPU other than the author's, and is squash-merged with --match-head-comm
 unaddressed `Review: FAIL` or `Blocker:` (no commit and no Review: PASS after it) holds it too; an item with a
 live driver is left to the driver.
 
+Check 4 (red_main_check): for each repo, the default-branch head sha's push runs (newest run per workflow) decide
+red (some run failed), green (every run completed success/skipped/neutral) or unknown (no runs, in progress,
+cancelled, timed out, action required, a failed lookup: nothing changes). Red sets the `<repo> main` intake flag in
+item_loop's red.json and files one `Fix forward: <repo> main is red` issue (label fix-forward, assigned to the bot)
+unless one is open or the open-issue lookup failed; green clears that flag. Deploy keys (`<dep> <env>`) are never
+touched, no comment is posted, and the check never raises.
+
 Check 1: GPU health for pro5000, pro6000 (RTX PRO 6000), obs (RTX 5070 Ti) and ts3 (RTX 5060 Ti) via the gpu.py models list
 (read-only: one GET /models per GPU; it never starts, stops or warms a model server). A down GPU is
 reported in the log and in run_checks' result, and GPU selection routes to the healthy GPUs.
 
 item_loop imports watchdog only lazily (inside watchdog_exit), so importing item_loop here cannot be circular.
 """
-import argparse, datetime as dt, json, os, subprocess, sys, tempfile, time
+import argparse, datetime as dt, json, os, re, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import gpu as G
@@ -79,6 +86,13 @@ def state_for(states, repo, issue):
 def gh_subprocess(args):
     return subprocess.run(["gh", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
+def gh_json(gh, args, what):
+    """One gh call whose stdout is JSON: raises RuntimeError (with gh's output, or `what failed`) on a non-zero
+    exit and json.loads the stdout (empty output reads as [])."""
+    r = gh(args)
+    if r.returncode != 0: raise RuntimeError(r.stdout or what + " failed")
+    return json.loads(r.stdout or "[]")
+
 def post_comment(repo, issue, body, states, gh=None, clock=None, log=None):
     """Comment only when a check took an action: the body must be non-empty, the item must not be excluded
     and its driver must not be alive and progressing; a comment lands at least COMMENT_GAP_S after the
@@ -125,7 +139,7 @@ def run_checks(repos=REPOS, gh=None, health=None, clock=None, log=None, own_prs=
     """Run every registered check exactly once. Each check gets (repos, gh, health, clock, log); a check's
     failure is caught, scrubbed and logged, and appears in the result list as 'error: <message>'.
     With own_prs=True, check 3 (own_green_prs_check) runs after the registered checks -- the full set the
-    driver-exit hook and the 30-min watchdog routine use (the `run-own-prs` CLI entry). Returns [(check name,
+    driver-exit hook uses (the `run-own-prs` CLI entry). Returns [(check name,
     result), ...]; the caller's result is never changed."""
     log = log or print
     gh = gh or gh_subprocess
@@ -175,11 +189,11 @@ QUIET_HEADS = ("Status: no progress",)                 # driver heartbeats are n
 def _ts(s):
     return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
 
-# ---------------------------------------------------------------- check 4: dead-driver idle items (pure rule)
+# ---------------------------------------------------------------- dead-driver idle items (pure rule, not a registered check)
 IDLE_MIN = 90
 
 def idle_decision(state, at, up, busy, alive=None, minutes=IDLE_MIN, size="small"):
-    """Pure decision rule for check 4: a dead driver whose item has been idle for more than `minutes` minutes
+    """Pure decision rule (not registered; red_main_check is check 4): a dead driver whose item has been idle for more than `minutes` minutes
     is restarted (resume on its recorded GPU), reassigned to a free healthy GPU, or waits. Never calls gh, the
     network or the filesystem. Returns (action, gpu):
     - ("leave", None)  — empty state, excluded item, status not running/error, live driver, or not yet idle
@@ -278,10 +292,8 @@ def fix_handoff_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
     states = L.all_states(); flagged = []; failed = []
     for repo in repos:
         try:
-            r = gh(["pr", "list", "-R", f"{L.ORG}/{repo}", "--state", "open", "--limit", "100",
-                    "--json", PR_LIST_FIELDS])   # no `commits`: GraphQL rejects 100 PRs x commits (500k-node limit)
-            if r.returncode != 0: raise RuntimeError(r.stdout or "gh pr list failed")
-            prs = json.loads(r.stdout or "[]")
+            prs = gh_json(gh, ["pr", "list", "-R", f"{L.ORG}/{repo}", "--state", "open", "--limit", "100",
+                               "--json", PR_LIST_FIELDS], "gh pr list")   # no `commits`: GraphQL rejects 100 PRs x commits (500k-node limit)
         except Exception as e:
             log("watchdog fix-handoff: PR list for %s failed: %s" % (repo, scrub(str(e)))); failed.append(repo); continue
         for pr in prs:
@@ -303,6 +315,90 @@ def fix_handoff_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
                 flagged.append(f"{repo}#{issue}")
     out = "ok" if not flagged else "stalled: " + ", ".join(flagged)
     return out + ("; list failed: " + ", ".join(failed) if failed else "")
+
+# ---------------------------------------------------------------- check 4: red default branch -> fix-forward issue + intake flag
+GREEN_CONCLUSIONS = ("success", "skipped", "neutral")   # item_loop.st_main's green set
+FIX_FORWARD = "fix-forward"
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+def main_key(repo):
+    """The red.json intake key for a repo's default branch (item_loop.st_main's key)."""
+    return f"{repo} main"
+
+def main_state(runs):
+    """Check 4's pure rule over one head sha's push runs ([{id, name, status, conclusion}], any order): only the
+    newest run (highest id) per workflow name counts. Returns ("red", [failed workflow names]) when a kept run
+    failed, ("green", []) when there is a kept run and every kept run completed success/skipped/neutral, else
+    ("unknown", []) -- no runs, a run in progress, cancelled, timed_out, action_required."""
+    newest = {}
+    for run in runs or []:
+        name = run.get("name")
+        if name not in newest or (run.get("id") or 0) > (newest[name].get("id") or 0): newest[name] = run
+    kept = list(newest.values())
+    failed = sorted(str(r.get("name")) for r in kept if r.get("conclusion") == "failure")
+    if failed: return ("red", failed)
+    if kept and all(r.get("status") == "completed" and r.get("conclusion") in GREEN_CONCLUSIONS for r in kept):
+        return ("green", [])
+    return ("unknown", [])
+
+def head_runs(repo, gh):
+    """(sha, runs) for the default-branch head: its sha, then that sha's push runs (st_main's query)."""
+    r = gh(["api", f"repos/{L.ORG}/{repo}/commits/main", "--jq", ".sha"])
+    sha = (r.stdout or "").strip()
+    if r.returncode != 0 or not SHA_RE.match(sha): raise RuntimeError("default-branch head lookup failed: " + (r.stdout or ""))
+    runs = gh_json(gh, ["api", f"repos/{L.ORG}/{repo}/actions/runs?head_sha={sha}&event=push&per_page=50",
+                        "--jq", "[.workflow_runs[]|{id,name,status,conclusion}]"], "gh api actions/runs")
+    return sha, runs
+
+def file_fix_forward(repo, key, what, gh, log):
+    """One open `Fix forward: <key> is red` issue (label fix-forward, assignee the bot, scrubbed body), as the
+    driver's fix_forward_issue files it. Returns True only when an issue was created; a failed open-issue lookup
+    creates nothing."""
+    full = f"{L.ORG}/{repo}"; title = f"Fix forward: {key} is red"
+    try:
+        titles = gh_json(gh, ["api", f"repos/{full}/issues?state=open&labels={FIX_FORWARD}&per_page=100",
+                              "--jq", "[.[].title]"], "open fix-forward issue lookup")
+    except Exception as e:
+        log("watchdog red-main: %s: open fix-forward lookup failed, no issue filed: %s" % (repo, scrub(str(e)))); return False
+    if title.lower() in {str(t).lower() for t in titles}: return False
+    gh(["label", "create", FIX_FORWARD, "-R", full, "--color", "B60205", "--description", "Red main or environment; fix forward"])
+    body = scrub(f"{what}.\n\nFound by the factory watchdog (check 4, red_main_check). Fix forward with a normal PR (plan "
+                 "`fix_forward: true`); never re-run, re-pin or promote by hand, and never weaken a test or gate. Intake of "
+                 "other items stays stopped until this is green.\n")
+    with tempfile.NamedTemporaryFile("w", prefix="wd-issue-", suffix=".md", delete=False) as f:
+        f.write(body); p = f.name
+    try:
+        x = gh(["issue", "create", "-R", full, "--title", title, "--body-file", p, "--label", FIX_FORWARD, "--assignee", L.BOT])
+    finally:
+        os.unlink(p)
+    if x.returncode != 0:
+        log("watchdog red-main: %s: issue create failed: %s" % (repo, scrub(x.stdout or ""))); return False
+    return True
+
+@register
+def red_main_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
+    """Check 4: a red default branch stops intake and gets one fix-forward issue; a green one resumes intake.
+    Per repo, main_state() over the head sha's push runs decides: red sets `<repo> main` in red.json (when not
+    already set) and files one fix-forward issue (file_fix_forward); green clears that key; unknown changes
+    nothing. Deploy keys are deploy_env_check's and never touched; no comment is posted; each repo's failure is
+    logged (scrubbed) and the check never raises."""
+    log = log or print; gh = gh or gh_subprocess
+    acted = []
+    for repo in repos:
+        key = main_key(repo)
+        try:
+            sha, runs = head_runs(repo, gh)
+            state, failed = main_state(runs)
+            if state == "red":
+                what = f"{', '.join(failed)} red at `{sha[:8]}` on the default branch"
+                if key not in L.red_load():
+                    L.red_set(key, what); acted.append(f"{repo} flagged")
+                if file_fix_forward(repo, key, what, gh, log): acted.append(f"{repo} filed")
+            elif state == "green" and key in L.red_load():
+                L.red_clear(key); acted.append(f"{repo} cleared")
+        except Exception as e:
+            log("watchdog red-main: %s skipped: %s" % (repo, scrub(str(e))))
+    return "ok" if not acted else "acted: " + ", ".join(acted)
 
 # ---------------------------------------------------------------- check 3: own green, mergeable, unmerged PRs
 OWN_PR_LIST_FIELDS = "number,author,headRefOid,mergeable,closingIssuesReferences"
@@ -455,10 +551,8 @@ def own_green_prs_check(repos=REPOS, gh=None, health=None, clock=None, log=None,
     acted, waited, failed = [], [], []
     for repo in repos:
         try:
-            r = gh(["pr", "list", "-R", f"{L.ORG}/{repo}", "--state", "open", "--limit", "100",
-                    "--json", OWN_PR_LIST_FIELDS])
-            if r.returncode != 0: raise RuntimeError(r.stdout or "gh pr list failed")
-            prs = json.loads(r.stdout or "[]")
+            prs = gh_json(gh, ["pr", "list", "-R", f"{L.ORG}/{repo}", "--state", "open", "--limit", "100",
+                               "--json", OWN_PR_LIST_FIELDS], "gh pr list")
         except Exception as e:
             log("watchdog own-prs: PR list for %s failed: %s" % (repo, scrub(str(e)))); failed.append(repo); continue
         for pr in prs:
