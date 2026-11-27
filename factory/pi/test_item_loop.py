@@ -3992,4 +3992,47 @@ class TestTimeouts(unittest.TestCase):   # cmdemo1-system#966: the TIMEOUTS tabl
         self.assertEqual(set(L.TIMEOUTS), {"verify", "evidence", "git", "gh_watch", "wait_ci", "api"})
 
 
+class ItemTest(unittest.TestCase):   # cmdemo1-system#869: the Item NamedTuple value object
+    def test_full_and_key(self):
+        self.assertEqual(L.Item("r", 5).full, f"{L.ORG}/r")
+        self.assertEqual(L.Item("r", 5).key, "r-5")
+
+    def test_tuple_equality_both_orders(self):
+        self.assertEqual(L.Item("r", 5), ("r", 5))
+        self.assertEqual(("r", 5), L.Item("r", 5))
+
+    def test_hash_equals_tuple_hash(self):
+        self.assertEqual(hash(L.Item("r", 5)), hash(("r", 5)))
+
+    def test_not_equal_to_3_tuple_or_string(self):
+        self.assertNotEqual(L.Item("r", 5), ("r", 5, 0))
+        self.assertNotEqual(L.Item("r", 5), "r-5")
+
+    def test_immutability(self):
+        it = L.Item("r", 5)
+        with self.assertRaises(AttributeError):
+            it.repo = "x"
+
+    def test_never_merge_and_hands_off_members_are_items(self):
+        for m in L.NEVER_MERGE:
+            self.assertIsInstance(m, L.Item)
+        for m in L.HANDS_OFF:
+            self.assertIsInstance(m, L.Item)
+
+    def test_unpacking(self):
+        repo, issue = L.Item("r", 5)
+        self.assertEqual(repo, "r")
+        self.assertEqual(issue, 5)
+
+    def test_malformed_plan_returns_list_not_raises(self):
+        # "issue": "abc" — validate_plan must return a list (no exception)
+        errs = L.validate_plan({"repo": "cmdemo1-system", "issue": "abc"})
+        self.assertIsInstance(errs, list)
+        # "issue": [1] and "issue": {} — the old code also raised TypeError (unhashable in set
+        # membership), so the new code must raise the same exception type, not something else.
+        for bad in ([1], {}):
+            with self.assertRaises(TypeError):
+                L.validate_plan({"repo": "cmdemo1-system", "issue": bad})
+
+
 if __name__ == "__main__": unittest.main()

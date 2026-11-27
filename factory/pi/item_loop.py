@@ -78,9 +78,20 @@ BOARD_ORDER = ["Merged", "TDD", "UAT", "Done"]
 REQUIRED = {"cmdemo1-workorders": ["Build result", "secret-scan"], "cmdemo1-system": ["env-checks"]}
 DEPLOYABLE = {"cmdemo1-workorders": "ui", "cmdemo1-dashboard": "dashboard", "cmdemo1-system": "system"}
 DELIVERY = f"https://raw.githubusercontent.com/{ORG}/cmdemo1-system/status/delivery.json"
-NEVER_MERGE = {("cmdemo1-workorders", 1918)}
+class Item(NamedTuple):
+    """One work item: (repo, issue). Immutable; equal to and hashes like the plain (repo, issue) tuple."""
+    repo: str
+    issue: int
+
+    @property
+    def full(self): return f"{ORG}/{self.repo}"
+
+    @property
+    def key(self): return f"{self.repo}-{self.issue}"
+
+NEVER_MERGE = {Item("cmdemo1-workorders", 1918)}
 # Jeffrey: leave these alone (no plan, no driver, no comment).
-HANDS_OFF = {("cmdemo1-system", 654), ("cmdemo1-workorders", 1875), ("cmdemo1-workorders", 1876)}
+HANDS_OFF = {Item("cmdemo1-system", 654), Item("cmdemo1-workorders", 1875), Item("cmdemo1-workorders", 1876)}
 WIP_LIMIT = 3             # per repository: In Progress + Review (default)
 WIP_LIMITS = {"cmdemo1-dashboard": 8}   # Jeffrey, 22 Nov 2026 7:31am CT: dashboard 8, workorders and system stay 3 (was 5 per 21 Nov 8:30am CT)
 def wip_limit(repo): return WIP_LIMITS.get(repo, WIP_LIMIT)
