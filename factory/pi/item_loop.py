@@ -118,8 +118,9 @@ RESEARCH_TIMEOUT_S = 1500    # the mandatory refactoring-research Pi pass
 PI_TASK_TIMEOUT_S = G.PI_TASK_TIMEOUT_S   # the default timeout for one plan task run through task_passes
 # The driver's command timeouts, named in one place (cmdemo1-system#966): seconds per command kind, so the inline
 # literals (evidence, gh run watch, wait_ci) read from here instead of re-typing the number at each call site.
-# `verify`, `git` and `api` name the intended budgets for command kinds that currently inherit run_cmd's deadline
-# (no explicit timeout at the call site) -- naming them here is what a future behaviour change edits.
+# `git` and `api` are passed at the call sites (cmdemo1-system#968: the Driver's GitRepo builders carry `git`, each gh
+# call passes `api`); Driver.sh and Driver.gh still default to timeout=None. `verify` is still only the intended budget:
+# Driver.verify passes None unless the plan sets verify_timeout (#967).
 TIMEOUTS = {
     "verify": 3600,            # one verify_cmd pass (Driver.verify)
     "evidence": 3600,          # one evidence_cmd pass (Driver.evidence_results / st_review)
@@ -540,13 +541,21 @@ class GitRepo:
     origin/<default>, falling back to origin/<default> when git cannot resolve it, so the protected-file gate is
     never made more permissive than it was) lives in merge_base(), and nowhere else."""
 
-    def __init__(self, sh, path):
+    def __init__(self, sh, path, timeout=None):
+        """`timeout` is this repo's per-call git budget (cmdemo1-system#968: the Driver builds its GitRepos with
+        TIMEOUTS["git"]); a call that passes its own timeout= keeps it. None (the module-level wrappers) adds none."""
         self.sh = sh
         self.path = path
+        self.timeout = timeout
 
     def _git(self, *a, **k):
         k.setdefault("cwd", self.path)
+        if self.timeout is not None: k.setdefault("timeout", self.timeout)
         return self.sh(["git", *a], **k)
+
+    def run(self, *a, **k):
+        """Any other git subcommand in this repo (worktree add / remove / prune, ls-remote, a refspec fetch)."""
+        return self._git(*a, **k)
 
     def add_all(self):
         return self._git("add", "-A")
@@ -1157,7 +1166,7 @@ class Driver:
         # The item's work tree as a GitRepo value object (cmdemo1-system#871): the work-tree path is deterministic
         # (worktree_path("wt"), exactly what setup_worktree records into self.s["wt"]), and the _sh seam resolves
         # self.sh at call time, so a test's `d.sh = ...` replacement is honored although this is built once here.
-        self.git = GitRepo(self._sh, self.worktree_path("wt"))
+        self.git = GitRepo(self._sh, self.worktree_path("wt"), timeout=TIMEOUTS["git"])
 
     # state / log
     def save(self, **kw):
@@ -1254,13 +1263,18 @@ class Driver:
     # Authored objects stay the bot user's: the merge gate requires PR author == BOT (cmdemo1-system#947: the
     # exclusion lives here, next to gh(), not at module level -- gh() already knows what it is building).
     GH_APP_USER_ONLY = {("pr", "create"), ("issue", "create")}
+    # gh subcommands that get the api budget when the caller passes no timeout (cmdemo1-system#968): `gh api` and
+    # `gh issue ...` (ensure_issue's list + create, whose exact gh kwargs are pinned). Every other gh call site
+    # passes its budget itself; `gh pr list` with no timeout still reaches sh with None (GhChokepoint).
+    GH_API_BUDGET = {"api", "issue"}
 
     def gh(self, *a, write=False, check=True, timeout=None):
         """Build a `Command` for a `gh` call and run it through sh(). `app_ok` is False for the subcommands in
         GH_APP_USER_ONLY (pr create / issue create stay on the user login); every other gh call tries the App
-        token first."""
+        token first. A GH_API_BUDGET subcommand with no caller timeout gets TIMEOUTS["api"] here, never in sh."""
         argv = ["gh", *a]
         app_ok = not (len(argv) >= 3 and tuple(argv[1:3]) in self.GH_APP_USER_ONLY)
+        if timeout is None and len(argv) >= 2 and argv[1] in self.GH_API_BUDGET: timeout = TIMEOUTS["api"]
         return self.sh(Command(argv, is_gh=True, app_ok=app_ok, write=write), check=check, timeout=timeout)
     def wait_alive(self, seconds, why):
         """Sleep in GH_RETRY_TICK_S steps, re-saving state.json each step (pid, `updated`, `gh_wait`) so a driver waiting
@@ -1279,7 +1293,7 @@ class Driver:
             if wait > 0: time.sleep(wait)   # never two comments within a minute on one item
         p = self.log_file(f"comment-{int(time.time())}.md", body)
         target = str(self.s["pr"]) if pr else str(self.issue)
-        self.gh("pr" if pr else "issue", "comment", target, "-R", self.full, "--body-file", p, write=True)
+        self.gh("pr" if pr else "issue", "comment", target, "-R", self.full, "--body-file", p, write=True, timeout=TIMEOUTS["api"])
         self.save(last_comment_at=iso()); self.log(f"comment {'drafted (dry-run)' if self.dry else 'posted'}: {p}")
 
     def review_fail_comment(self, body):
@@ -1291,12 +1305,12 @@ class Driver:
     def pr_body(self, check=True):
         """The PR body as GitHub has it now. check=False answers '' when the read fails: the research mirror and
         the independent review treat a body they cannot read as an empty one."""
-        return self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body", check=check).stdout
+        return self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "body", "-q", ".body", check=check, timeout=TIMEOUTS["api"]).stdout
 
     def edit_pr_body(self, body, name):
         """Replace the PR body with `body`, drafted (scrubbed) to logs/pr-body-<name>.md first."""
         p = self.log_file(f"pr-body-{name}.md", body)
-        self.gh("pr", "edit", str(self.s["pr"]), "-R", self.full, "--body-file", p, write=True)
+        self.gh("pr", "edit", str(self.s["pr"]), "-R", self.full, "--body-file", p, write=True, timeout=TIMEOUTS["api"])
 
     def lookup_board_item(self):
         """Return the board item id, looking it up if necessary. Logs and returns None on failure."""
@@ -1304,7 +1318,7 @@ class Driver:
             return self.s["item_id"]
         q = ('query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){'
              'projectItems(first:10){nodes{id project{id}}}}}}')
-        r = self.gh("api", "graphql", "-f", f"query={q}", "-f", f"o={ORG}", "-f", f"r={self.repo}", "-F", f"n={self.issue}", check=False)
+        r = self.gh("api", "graphql", "-f", f"query={q}", "-f", f"o={ORG}", "-f", f"r={self.repo}", "-F", f"n={self.issue}", check=False, timeout=TIMEOUTS["api"])
         try:
             nodes = json.loads(r.stdout)["data"]["repository"]["issue"]["projectItems"]["nodes"]
             item_id = next(n["id"] for n in nodes if n["project"]["id"] == PROJECT)
@@ -1320,7 +1334,7 @@ class Driver:
     def move_board_item(self, item_id, col):
         """Move the board item to col. Raises on failure."""
         self.gh("project", "item-edit", "--id", item_id, "--project-id", PROJECT, "--field-id", STATUS_FIELD,
-                "--single-select-option-id", STATUS[col], write=True)
+                "--single-select-option-id", STATUS[col], write=True, timeout=TIMEOUTS["api"])
         self.save(column=col); self.log(f"board -> {col}")
 
     def move(self, col):
@@ -1333,8 +1347,8 @@ class Driver:
     def wake_bot(self, reason):
         """Fire the bot's issue-assigned listener once (unassign + assign) so he reads state.json."""
         self.save(wake_reason=reason)
-        self.gh("api", "-X", "DELETE", f"repos/{self.full}/issues/{self.issue}/assignees", "-f", f"assignees[]={BOT}", write=True, check=False)
-        self.gh("api", "-X", "POST", f"repos/{self.full}/issues/{self.issue}/assignees", "-f", f"assignees[]={BOT}", write=True, check=False)
+        self.gh("api", "-X", "DELETE", f"repos/{self.full}/issues/{self.issue}/assignees", "-f", f"assignees[]={BOT}", write=True, check=False, timeout=TIMEOUTS["api"])
+        self.gh("api", "-X", "POST", f"repos/{self.full}/issues/{self.issue}/assignees", "-f", f"assignees[]={BOT}", write=True, check=False, timeout=TIMEOUTS["api"])
         self.log(f"woke the bot: {reason}")
 
     def blocker(self, what, who="Jeffrey"):
@@ -1345,7 +1359,7 @@ class Driver:
 
     def usage(self, final=False):
         a = [os.path.join(HERE, "usage-report"), "--run-dir", self.run_dir] + (["--final"] if final else [])
-        return self.sh(a, check=False).stdout.strip()
+        return self.sh(a, check=False, timeout=TIMEOUTS["api"]).stdout.strip()
 
     # Pi
     def gpu(self):
@@ -1483,7 +1497,7 @@ class Driver:
         return head
 
     def pr_checks(self):
-        r = self.gh("pr", "checks", str(self.s["pr"]), "-R", self.full, "--json", "name,bucket,link", check=False)
+        r = self.gh("pr", "checks", str(self.s["pr"]), "-R", self.full, "--json", "name,bucket,link", check=False, timeout=TIMEOUTS["api"])
         try: cs = json.loads(r.stdout or "[]")
         except Exception: cs = []
         return self.merge_gate(cs).required_state(), cs
@@ -1491,7 +1505,7 @@ class Driver:
     def pr_mergeable(self):
         """The PR's `mergeable` field from gh (MERGEABLE / CONFLICTING / UNKNOWN); `mergeableState` does not exist in
         gh, so the field name is `mergeable` (cmdemo1-system#921)."""
-        out = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "mergeable", "-q", ".mergeable", check=False).stdout.strip()
+        out = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "mergeable", "-q", ".mergeable", check=False, timeout=TIMEOUTS["api"]).stdout.strip()
         return out or "UNKNOWN"
 
     def merge_default_if_conflicting(self):
@@ -1540,7 +1554,7 @@ class Driver:
                 m = re.search(r"/actions/runs/(\d+)", c.get("link") or "")
                 if m: runs.add(m.group(1))
         for rid in sorted(runs):
-            r = self.gh("run", "view", rid, "-R", self.full, "--log-failed", check=False)
+            r = self.gh("run", "view", rid, "-R", self.full, "--log-failed", check=False, timeout=TIMEOUTS["api"])
             out.append(f"### run {rid}\n" + trim_log(r.stdout, 8000))
         return runs, "\n".join(out)[-16000:]
 
@@ -1551,10 +1565,15 @@ class Driver:
         clone = os.path.join(HOME, "factory-clones", self.repo)
         if not os.path.isdir(os.path.join(clone, ".git")):
             os.makedirs(os.path.dirname(clone), exist_ok=True)
-            self.gh("repo", "clone", self.full, clone, "--", "-q")
-        self.sh(["git", "fetch", "-q", "origin"], cwd=clone)
-        default = self.gh("repo", "view", self.full, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name").stdout.strip()
+            self.gh("repo", "clone", self.full, clone, "--", "-q", timeout=TIMEOUTS["git"])
+        self.clone_git(clone).fetch()
+        default = self.gh("repo", "view", self.full, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name",
+                          timeout=TIMEOUTS["api"]).stdout.strip()
         return clone, default
+
+    def clone_git(self, clone):
+        """The shared clone as a GitRepo with the git budget (cmdemo1-system#968), like self.git for the work tree."""
+        return GitRepo(self._sh, clone, timeout=TIMEOUTS["git"])
 
     def worktree_path(self, kind="wt"):
         """The work-tree path for this item under ~/factory-wt: <repo>-<issue> for kind `wt`, <repo>-<issue>-plan for `plan`."""
@@ -1562,23 +1581,23 @@ class Driver:
         return os.path.join(HOME, "factory-wt", f"{self.repo}-{self.issue}{suffix}")
 
     def setup_worktree(self):
-        p = self.s["plan"]; clone, default = self._clone_ready()
+        p = self.s["plan"]; clone, default = self._clone_ready(); g = self.clone_git(clone)
         wt = self.worktree_path("wt")
-        if os.path.isdir(self.worktree_path("plan")): self.sh(["git", "worktree", "remove", "--force", self.worktree_path("plan")], cwd=clone, check=False)
+        if os.path.isdir(self.worktree_path("plan")): g.run("worktree", "remove", "--force", self.worktree_path("plan"), check=False)
         if not os.path.isdir(wt):
-            remote = self.sh(["git", "ls-remote", "--heads", "origin", p["branch"]], cwd=clone).stdout.strip()
+            remote = g.run("ls-remote", "--heads", "origin", p["branch"]).stdout.strip()
             base = origin_ref(p["branch"]) if remote else origin_ref(default)
-            if remote: self.sh(["git", "fetch", "-q", "origin", remote_refspec(p["branch"])], cwd=clone)
-            self.sh(["git", "worktree", "prune"], cwd=clone)
-            self.sh(["git", "worktree", "add", "-q", "-B", p["branch"], wt, base], cwd=clone)
+            if remote: g.run("fetch", "-q", "origin", remote_refspec(p["branch"]))
+            g.run("worktree", "prune")
+            g.run("worktree", "add", "-q", "-B", p["branch"], wt, base)
         self.save(wt=wt, default=default, clone=clone)
 
     def plan_worktree(self):
         """Detached worktree at the default branch for Pi to read while drafting the plan (no branch is created)."""
-        clone, default = self._clone_ready()
+        clone, default = self._clone_ready(); g = self.clone_git(clone)
         wt = self.worktree_path("plan")
-        if os.path.isdir(wt): self.sh(["git", "worktree", "remove", "--force", wt], cwd=clone, check=False)
-        self.sh(["git", "worktree", "add", "-q", "--detach", wt, origin_ref(default)], cwd=clone)
+        if os.path.isdir(wt): g.run("worktree", "remove", "--force", wt, check=False)
+        g.run("worktree", "add", "-q", "--detach", wt, origin_ref(default))
         self.save(wt=wt, default=default, clone=clone)
 
     def run(self):
@@ -1595,8 +1614,7 @@ class Driver:
         meta = json.loads(read_text(meta_p)) if os.path.exists(meta_p) else {"start": self.s["start"]}
         meta.update(driver_run_id=self.s["run_id"], top_sessions=self.s.get("top_sessions") or [self.s.get("top_session", "unnamed")])
         meta.setdefault("top_session", self.s.get("top_session", "unnamed"))
-        meta.setdefault("pi_version", self.sh(["pi", "--version"], check=False).stdout.strip().splitlines()[-1:] and
-                        self.sh(["pi", "--version"], check=False).stdout.strip().splitlines()[-1])
+        if "pi_version" not in meta: meta["pi_version"] = self._pi_version()
         write_text(meta_p, json.dumps(meta, indent=1))
         self.progress()
         try:
@@ -1617,6 +1635,14 @@ class Driver:
             raise
         self.save(status="held" if self.s.get("status") == "held" else self.s["stage"], end=iso())
         watchdog_exit(self)
+
+    def _pi_version(self):
+        """`pi --version`'s last output line, probed once with the api budget (cmdemo1-system#968): a hung or timed-out
+        probe records "unknown" and run() goes on; empty output keeps the old falsy value ([])."""
+        try: lines = self.sh(["pi", "--version"], check=False, timeout=TIMEOUTS["api"]).stdout.strip().splitlines()
+        except subprocess.TimeoutExpired:
+            self.log(f"pi --version timed out after {TIMEOUTS['api']}s; recording pi_version unknown"); return "unknown"
+        return lines[-1] if lines else []
 
     def stop_if_held(self):
         """True (and status `held`) when the run dir has a HOLD file: an item handed off or held while this driver runs
@@ -1818,7 +1844,7 @@ class Driver:
         """Number of the PR already open for this branch, or None (gh prints a plain message, not a number, when there
         is none)."""
         p = self.s["plan"]
-        r = self.gh("pr", "list", "-R", self.full, "--head", p["branch"], "--state", "open", "--json", "number", "-q", ".[0].number", check=False)
+        r = self.gh("pr", "list", "-R", self.full, "--head", p["branch"], "--state", "open", "--json", "number", "-q", ".[0].number", check=False, timeout=TIMEOUTS["api"])
         return pr_number(r.stdout)
 
     def create_pr(self, head):
@@ -1830,7 +1856,7 @@ class Driver:
                                      f"planned, verified and merged by the factory bot's Pi driver (run `{self.s['run_id']}`).\n\n{DRIVER_MARK}\n",
                                      self.research_text()))
         r = self.gh("pr", "create", "-R", self.full, "--head", p["branch"], "--base", self.s["default"],
-                    "--title", p["pr_title"], "--body-file", body, write=True)
+                    "--title", p["pr_title"], "--body-file", body, write=True, timeout=TIMEOUTS["api"])
         n = pr_number(r.stdout)
         if n is None:
             raise RuntimeError(f"gh pr create output is not a PR number: {r.stdout!r}")
@@ -1879,7 +1905,7 @@ class Driver:
                 return self.blocker(f"the same infrastructure step failed {LIMITS['infra_rerun']} times (runs {', '.join(runs)}).")
             time.sleep(600)
             for rid in runs:
-                r = self.gh("run", "rerun", rid, "-R", self.full, "--failed", write=True, check=False)
+                r = self.gh("run", "rerun", rid, "-R", self.full, "--failed", write=True, check=False, timeout=TIMEOUTS["api"])
                 if r.returncode:   # refused: one empty commit instead (operating-instructions)
                     self.git.commit("Re-run CI after an infrastructure failure", allow_empty=True)
                     self.commit_push("Re-run CI"); break
@@ -2081,7 +2107,7 @@ class Driver:
     def st_merge(self):
         self.check_held()
         pr = int(self.s["pr"]); _, cs = self.pr_checks(); gate = self.merge_gate(cs); state = gate.state()
-        info = json.loads(self.gh("pr", "view", str(pr), "-R", self.full, "--json", "author,headRefOid,state").stdout)
+        info = json.loads(self.gh("pr", "view", str(pr), "-R", self.full, "--json", "author,headRefOid,state", timeout=TIMEOUTS["api"]).stdout)
         if (self.repo, pr) in NEVER_MERGE or info["author"]["login"] != BOT or not gate.green() or info["headRefOid"] != self.s["head"]:
             self.log(f"merge gate not met (checks {state}, head {info['headRefOid'][:8]})")
             exhausted = (f"merge gate not met after {LIMITS['merge_gate']} tries (checks {state}, PR head "
@@ -2089,8 +2115,8 @@ class Driver:
             if self.fix_pass("merge_gate", exhausted) is None: return   # was an unbounded ci -> review -> merge spin
             time.sleep(120); return self.save(stage="ci")
         if info["state"] != "MERGED":
-            self.gh(*merge_args(self.full, pr, self.s["head"]), write=True)
-        sha = self.gh("pr", "view", str(pr), "-R", self.full, "--json", "mergeCommit", "-q", ".mergeCommit.oid").stdout.strip()
+            self.gh(*merge_args(self.full, pr, self.s["head"]), write=True, timeout=TIMEOUTS["api"])
+        sha = self.gh("pr", "view", str(pr), "-R", self.full, "--json", "mergeCommit", "-q", ".mergeCommit.oid", timeout=TIMEOUTS["api"]).stdout.strip()
         self.save(merge_sha=sha, stage="main")
 
     def st_main(self):
@@ -2099,14 +2125,14 @@ class Driver:
         time.sleep(30); runs = []
         for _ in range(20):   # wait for push runs of the merge commit to appear (none when paths-ignore skips them)
             r = self.gh("api", f"repos/{self.full}/actions/runs?head_sha={sha}&event=push&per_page=50", "--jq",
-                        "[.workflow_runs[]|{id,name,conclusion}]", check=False)
+                        "[.workflow_runs[]|{id,name,conclusion}]", check=False, timeout=TIMEOUTS["api"])
             runs = json.loads(r.stdout or "[]")
             if runs: break
             time.sleep(30)
         for run in runs:
             self.gh("run", "watch", str(run["id"]), "-R", self.full, "--interval", "60", check=False, timeout=TIMEOUTS["gh_watch"])
         r = self.gh("api", f"repos/{self.full}/actions/runs?head_sha={sha}&event=push&per_page=50", "--jq",
-                    "[.workflow_runs[]|{name,conclusion}]", check=False)
+                    "[.workflow_runs[]|{name,conclusion}]", check=False, timeout=TIMEOUTS["api"])
         red = [x["name"] for x in json.loads(r.stdout or "[]") if x["conclusion"] not in ("success", "skipped", "neutral")]
         ev = "\n".join(f"- {t}: `{cmd}` passed — {last}" for t, cmd, last in self.s.get("evidence", []))
         col = "Done" if (d_only or no_release) and not red else "Merged"
@@ -2127,7 +2153,7 @@ class Driver:
 
     def merge_files(self, sha):
         """Files the merge commit changed ([] when GitHub cannot say, so the item still waits for its deploy)."""
-        r = self.gh("api", f"repos/{self.full}/commits/{sha}", "--jq", "[.files[].filename]", check=False)
+        r = self.gh("api", f"repos/{self.full}/commits/{sha}", "--jq", "[.files[].filename]", check=False, timeout=TIMEOUTS["api"])
         try: return json.loads(r.stdout or "[]")
         except Exception: return []
 
@@ -2164,7 +2190,7 @@ class Driver:
         x = next((x for x in env.get("deployables") or [] if x.get("name") == dep), None)
         if not x: return None
         st = json.loads(self.gh("api", f"repos/{self.full}/compare/{sha}...{x['commit']}", "--jq", "{status:.status}",
-                                check=False).stdout or "{}").get("status")
+                                check=False, timeout=TIMEOUTS["api"]).stdout or "{}").get("status")
         rk = f"{dep} {env['name']}"
         red = env_red(env, dep)
         # A deployable with no containerApps health entry is treated as healthy once its deploy has passed
@@ -2186,7 +2212,7 @@ class Driver:
         first (intake is stopped for everything else until it is green again)."""
         full = f"{ORG}/{repo or self.repo}"; title = f"Fix forward: {key} is red"
         self.gh("label", "create", "fix-forward", "-R", full, "--color", "B60205", "--description", "Red main or environment; fix forward",
-                write=True, check=False)
+                write=True, check=False, timeout=TIMEOUTS["api"])
         self.ensure_issue(title, f"{what}.\n\nFound while following #{self.issue} (run `{self.s.get('run_id')}`). Fix forward with a "
                                 "normal PR (plan `fix_forward: true`); never re-run, re-pin or promote by hand, and never "
                                 "weaken a test or gate. Intake of other items stays stopped until this is green.\n",
@@ -2237,7 +2263,7 @@ def draft_result(draft, pi_pass, errors, missing=None):
 
 def cmd_draft_plan(a):
     d = Driver(a.repo, a.issue, top_session=a.top_session)
-    iss = json.loads(d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "{title,body}").stdout)
+    iss = json.loads(d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "{title,body}", timeout=TIMEOUTS["api"]).stdout)
     d.plan_worktree()
     out, prompt = draft_plan_prompt(a.repo, a.issue, iss["title"], iss["body"], os.path.join(d.run_dir, PLAN_DRAFT_FILE))
     # plan drafting runs before the gpu stage: no gpu recorded yet, so ask for any free 262K GPU (#907) rather than queueing on pro5000
@@ -2263,7 +2289,7 @@ def cmd_start(a):
     d = Driver(a.repo, a.issue, top_session=a.top_session)
     plan_p = os.path.join(d.run_dir, PLAN_FILE)
     with open(plan_p) as f: p = json.load(f)
-    labels = d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "[.labels[].name]", check=False).stdout
+    labels = d.gh("api", f"repos/{d.full}/issues/{a.issue}", "--jq", "[.labels[].name]", check=False, timeout=TIMEOUTS["api"]).stdout
     try: labels = json.loads(labels or "[]")
     except Exception: labels = []
     if "enhancement" in labels and p.get("kind") != "enhancement": p["kind"] = "enhancement"

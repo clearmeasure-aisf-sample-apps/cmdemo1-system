@@ -3205,4 +3205,113 @@ class ConflictingPrMerge(unittest.TestCase):   # cmdemo1-system#921: a CONFLICTI
         self.assertFalse(any("4 hours" in b for b in posted), "the 4 h Blocker must not post on top of the conflict one")
 
 
+class CallSiteTimeouts(unittest.TestCase):   # cmdemo1-system#968: git, gh and pi --version get bounded budgets at the call sites
+    """Driver.sh's contract is unchanged (None stays None, TimeoutExpired still raises); the budgets come from the
+    callers: the Driver's GitRepo builders (TIMEOUTS["git"]), the gh call sites / gh() api policy (TIMEOUTS["api"]),
+    and run()'s single pi --version probe (TIMEOUTS["api"], a timeout records pi_version "unknown")."""
+
+    def test_pi_version_timeout_through_run_records_unknown_and_the_next_stage_runs(self):
+        version_calls, ran = [], []
+        with fake_modules({(L, "watchdog_exit"): lambda drv: None}):
+            with fake_home():
+                d = make_driver(repo="cmdemo1-system", issue=968)
+                with open(os.path.join(d.run_dir, "plan.json"), "w") as f: json.dump(PLAN, f)
+                def sh(cmd, **k):
+                    if list(getattr(cmd, "argv", cmd)) == ["pi", "--version"]:
+                        version_calls.append(k)
+                        raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                d.sh = sh
+                def st_research(): ran.append("research"); d.save(stage="done")
+                d.st_research = st_research
+                d.wake_bot = d.comment = lambda *a, **k: None
+                d.s["stage"] = "research"
+                d.run()
+                with open(os.path.join(d.run_dir, "run.json")) as f: meta = json.load(f)
+        self.assertEqual(ran, ["research"], "(a) the stage after the probe ran")
+        self.assertEqual(meta["pi_version"], "unknown", "(b) the saved run metadata records pi_version unknown")
+        self.assertEqual(len(version_calls), 1, "(c) pi --version is probed exactly once")
+        self.assertEqual(version_calls[0].get("timeout"), L.TIMEOUTS["api"], "(c) with the api budget")
+        self.assertIs(version_calls[0].get("check"), False, "(c) and check=False")
+
+    def test_git_call_with_no_caller_timeout_reaches_the_runner_with_the_git_budget(self):
+        with fake_home() as h:
+            d = make_driver(repo="cmdemo1-system", issue=968, dry_run=False)
+            run = fakes.gh_recorder()
+            with patch_run(run[0]):
+                d.git.fetch()                                   # the item work tree's GitRepo
+                d.clone_git(os.path.join(h, "clone")).run("worktree", "prune")   # the shared clone's GitRepo
+            calls = run[1]
+        self.assertEqual([list(c) for c, _ in calls], [["git", "fetch", "-q", "origin"], ["git", "worktree", "prune"]])
+        self.assertEqual([k.get("timeout") for _, k in calls], [L.TIMEOUTS["git"], L.TIMEOUTS["git"]])
+
+    def test_git_call_keeps_an_explicit_caller_timeout(self):
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=968)
+            sh, calls = fakes.gh_recorder(); d.sh = sh
+            d.git.run("status", timeout=7)
+        self.assertEqual(calls[0][1].get("timeout"), 7)
+
+    def test_setup_worktree_git_calls_all_carry_the_git_budget(self):
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=968)
+            d.s["plan"] = PLAN
+            sh, calls = fakes.gh_recorder(); d.sh = sh
+            d.setup_worktree()
+        git = [k.get("timeout") for c, k in calls if list(getattr(c, "argv", c))[0] == "git"]
+        gh = [(list(c.argv)[1:3], k.get("timeout")) for c, k in calls if isinstance(c, L.Command)]
+        self.assertGreaterEqual(len(git), 4)
+        self.assertEqual(set(git), {L.TIMEOUTS["git"]})
+        self.assertEqual(gh, [(["repo", "clone"], L.TIMEOUTS["git"]), (["repo", "view"], L.TIMEOUTS["api"])])
+
+    def test_gh_api_call_with_no_caller_timeout_reaches_the_runner_with_the_api_budget(self):
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=968, dry_run=False)
+            run = fakes.gh_recorder()
+            with fake_modules({(L, "app_token"): lambda *a, **k: None}):
+                with patch_run(run[0]):
+                    d.gh("api", "repos/o/r/issues/1", "--jq", ".title", check=False)
+                    d.ensure_issue("t", "b", "enhancement")      # its list + create pass no timeout themselves
+            calls = run[1]
+        self.assertEqual([list(c)[1:3] for c, _ in calls], [["api", "repos/o/r/issues/1"], ["api", calls[1][0][2]],
+                                                           ["issue", "create"]])
+        self.assertEqual([k.get("timeout") for _, k in calls], [L.TIMEOUTS["api"]] * 3)
+
+    def test_usage_report_gets_the_api_budget(self):
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=968)
+            sh, calls = fakes.gh_recorder(); d.sh = sh
+            d.usage()
+        self.assertEqual(calls[0][1].get("timeout"), L.TIMEOUTS["api"])
+
+    def test_pr_checks_watch_keeps_its_wait_ci_slice_and_its_timeout_is_still_caught(self):
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=968)
+            d.s["pr"] = 7
+            states = iter([(L.CheckState.PENDING, [{"name": "build"}]), (L.CheckState.GREEN, [{"name": "build"}])])
+            d.pr_checks = lambda: next(states)
+            d.heartbeat = lambda *a, **k: None
+            seen = []
+            def gh(*a, **k):
+                seen.append((a, k)); raise subprocess.TimeoutExpired(["gh", *a], k.get("timeout"))
+            d.gh = gh
+            with mock.patch.object(L.time, "sleep", lambda s: None):
+                state, _ = d.wait_ci()
+        self.assertEqual(state, L.CheckState.GREEN, "the TimeoutExpired of a watch slice is caught and the loop goes on")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("--watch", seen[0][0])
+        self.assertEqual(seen[0][1].get("timeout"), L.TIMEOUTS["wait_ci"])
+
+    def test_sh_and_gh_defaults_stay_none(self):
+        """The contract the pinned DriverShGroupKill / GhChokepoint tests hold: neither sh nor a non-api gh call
+        invents a timeout."""
+        self.assertIsNone(inspect.signature(L.Driver.sh).parameters["timeout"].default)
+        self.assertIsNone(inspect.signature(L.Driver.gh).parameters["timeout"].default)
+        with fake_home():
+            d = make_driver(repo="cmdemo1-system", issue=968)
+            sh, calls = fakes.gh_recorder(); d.sh = sh
+            d.gh("pr", "list")
+        self.assertIsNone(calls[0][1].get("timeout"))
+
+
 if __name__ == "__main__": unittest.main()
