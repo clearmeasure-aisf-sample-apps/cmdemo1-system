@@ -40,7 +40,7 @@ REPOS = ("cmdemo1-workorders", "cmdemo1-dashboard", "cmdemo1-system")
 
 # ---------------------------------------------------------------- shared hard-rule guards (used by every check)
 # item_loop's NEVER_MERGE and HANDS_OFF, plus the excluded issues Jeffrey named: system #652, workorders #1672.
-EXCLUDED = L.NEVER_MERGE | L.HANDS_OFF | {("cmdemo1-system", 652), ("cmdemo1-workorders", 1672)}
+EXCLUDED = L.NEVER_MERGE | L.HANDS_OFF | {L.Item("cmdemo1-system", 652), L.Item("cmdemo1-workorders", 1672)}
 COMMENT_GAP_S = 61.0   # never two comments on one item within a minute
 _last_comment = {}     # watchdog-owned: (repo, issue) -> iso time of the watchdog's last comment (state.json is never written)
 
