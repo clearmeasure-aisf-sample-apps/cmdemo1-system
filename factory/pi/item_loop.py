@@ -96,7 +96,7 @@ FOLLOWUP_MAX = 5          # follow-up refactoring issues one item may file
 RESEARCH_MIN_CHARS = 300
 DRIVER_MARK = "<!-- factory-pi-driver -->"
 # Existing limits (operating-instructions): 2 Review FAILs, 3 infrastructure reruns; then a Blocker.
-LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3, "research": 2, "review_infra": 2, "pi_relaunch": 2}
+LIMITS = {"local_fix": 3, "ci_fix": 3, "review_fail": 2, "infra_rerun": 3, "quality_fix": 3, "merge_gate": 3, "research": 2, "review_infra": 2, "pi_relaunch": 2, "conflict_merge": 2}
 def fresh_counts(): return {k: 0 for k in LIMITS}   # one place says what "every limit back to zero" is (a new item's, and a resume's)
 HANDOFF_START_S = 900     # a Pi hand-off with no model output 15 min after it got its slot is killed and relaunched (t85u)
 HANDOFF_STALL_S = 1800    # ... or, once started, no session record and no CPU work in its process group for 30 min
@@ -551,6 +551,16 @@ class GitRepo:
     def push(self, branch):
         """Push HEAD to the branch on origin (a write: skipped in dry-run by sh)."""
         return self._git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", write=True)
+
+    def fetch(self):
+        return self._git("fetch", "-q", "origin")
+
+    def merge(self, ref):
+        """Merge `ref` into HEAD as the bot (BOT_GIT identity). check=False: a conflict exits non-zero and the caller decides."""
+        return self._git(*BOT_GIT, "merge", "--no-edit", ref, check=False)
+
+    def merge_abort(self):
+        return self._git("merge", "--abort", check=False)
 
     def reset_hard(self, check=True):
         return self._git("reset", "-q", "--hard", check=check)
@@ -1435,13 +1445,40 @@ class Driver:
         looked up, so every stage asks the gate object instead of re-deriving it from raw buckets (#886)."""
         return MergeGate(cs, REQUIRED.get(self.repo))
 
+    def pr_mergeable(self):
+        """The PR's mergeable state or "UNKNOWN" on empty output: gh's field is `mergeable`, not `mergeableState` (#921)."""
+        r = self.gh("pr", "view", str(self.s["pr"]), "-R", self.full, "--json", "mergeable", "-q", ".mergeable", check=False)
+        return (r.stdout or "").strip() or "UNKNOWN"
+
+    def merge_default_if_conflicting(self):
+        """A CONFLICTING PR starts no workflows, so wait_ci would idle 4h on an empty checks list (#921): fetch, merge
+        origin/<default> as the bot and push, at most LIMITS['conflict_merge'] times, then Blocker. "none" (not
+        conflicting -- UNKNOWN included: the next iteration polls again), "pushed" (CI checks the clean merge), "blocked"."""
+        if self.pr_mergeable() != "CONFLICTING": return "none"
+        if not self.bump("conflict_merge"):
+            self.blocker(f"PR #{self.s['pr']} still conflicts with {self.s['default']} after "
+                         f"{LIMITS['conflict_merge']} merge attempts.")
+            return "blocked"
+        self.git.fetch()
+        r = self.git.merge(origin_ref(self.s["default"]))
+        if r.returncode != 0:   # any non-zero exit (a conflict, a dirty tree, a missing ref) is a failure
+            self.git.merge_abort()
+            self.blocker(f"merging {self.s['default']} into the PR branch conflicts; a human must resolve it.")
+            return "blocked"
+        self.git.push(self.s["plan"]["branch"])
+        self.save(head=self.git.head())
+        return "pushed"
+
     def wait_ci(self, max_s=4 * 3600):
-        """Zero-LLM wait: gh's own watch; falls back to a sleep loop until checks exist."""
+        """Zero-LLM wait: gh's own watch; falls back to a sleep loop until checks exist. An empty list means no
+        workflows started -- for a CONFLICTING PR that is permanent, so merge the default branch instead of idling (#921)."""
         t_end = time.time() + max_s
         while time.time() < t_end:
             state, cs = self.pr_checks()
             if cs and state != CheckState.PENDING: return state, cs
-            if cs:
+            if not cs:
+                if self.merge_default_if_conflicting() == "blocked": return CheckState.PENDING, []
+            else:
                 try:
                     self.gh("pr", "checks", str(self.s["pr"]), "-R", self.full, "--watch", "--interval", "60",
                             *(["--required"] if self.repo in REQUIRED else []), check=False, timeout=TIMEOUTS["wait_ci"])
@@ -1776,6 +1813,7 @@ class Driver:
 
     def st_ci(self):
         state, cs = self.wait_ci()
+        if self.s.get("stage") == "blocked": return   # wait_ci's conflict Blocker was posted; the 4h blocker would stack on it
         self.log(f"required checks {state}")
         gate = self.merge_gate(cs)
         if state == CheckState.GREEN and not gate.quality_red():

@@ -3992,4 +3992,113 @@ class TestTimeouts(unittest.TestCase):   # cmdemo1-system#966: the TIMEOUTS tabl
         self.assertEqual(set(L.TIMEOUTS), {"verify", "evidence", "git", "gh_watch", "wait_ci", "api"})
 
 
+class ConflictingPrMerge(unittest.TestCase):   # cmdemo1-system#921: a CONFLICTING PR starts no workflows; wait_ci merges origin/<default> instead of idling 4h
+    def driver(self):
+        d = make_driver(issue=921, repo="cmdemo1-system")
+        d.s.update(pr=921, default="main", plan={"branch": "cm-ai-ops-bot/conflict"})
+        d.comments = []
+        d.comment = lambda body, pr=False: d.comments.append(body)   # blocker posts through comment
+        d.usage = lambda final=False: ""
+        return d
+
+    def gh_recorder(self, d, stdout):
+        argvs = []
+        d.gh = lambda *a, **k: (argvs.append(list(a)), L.subprocess.CompletedProcess(["gh"], 0, stdout, ""))[1]
+        return argvs
+
+    def test_pr_mergeable_asks_gh_for_the_mergeable_field(self):
+        with fake_home():
+            d = self.driver()
+            argvs = self.gh_recorder(d, "CONFLICTING\n")
+            self.assertEqual(d.pr_mergeable(), "CONFLICTING")
+            for tok in ("--json", "mergeable", "-q", ".mergeable"):   # gh has `mergeable`, no `mergeableState`
+                self.assertIn(tok, argvs[0])
+
+    def test_pr_mergeable_empty_stdout_is_unknown(self):
+        with fake_home():
+            d = self.driver()
+            self.gh_recorder(d, "  \n")
+            self.assertEqual(d.pr_mergeable(), "UNKNOWN")
+
+    def test_clean_merge_fetches_merges_and_pushes_as_bot(self):
+        with fake_home():
+            d = self.driver()
+            d.sh = scripted_sh({"fetch": (0, ""), "merge": (0, ""), "push": (0, ""), "rev-parse": "head123\n"})
+            d.pr_mergeable = lambda: "CONFLICTING"
+            self.assertEqual(d.merge_default_if_conflicting(), "pushed")
+            def gi(w): return next(i for i, c in enumerate(d.sh.calls) if c[0] == "git" and w in c[1:])
+            self.assertLess(gi("fetch"), gi("merge")); self.assertLess(gi("merge"), gi("push"))   # fetch, merge, push in order
+            self.assertIn("user.name=cm-ai-ops-bot", d.sh.calls[gi("merge")])   # the merge commit is the bot's (BOT_GIT)
+            self.assertIn("origin/main", d.sh.calls[gi("merge")])
+            self.assertEqual(d.s["head"], "head123")
+
+    def test_failed_merge_is_aborted_nothing_pushed_and_one_blocker(self):
+        with fake_home():
+            d = self.driver()
+            d.sh = scripted_sh({"merge --abort": (0, ""), "merge": (1, "CONFLICT"), "fetch": (0, "")})
+            d.pr_mergeable = lambda: "CONFLICTING"
+            self.assertEqual(d.merge_default_if_conflicting(), "blocked")
+            self.assertTrue(any(c[0] == "git" and "merge" in c and "--abort" in c for c in d.sh.calls))
+            self.assertFalse(any(c[0] == "git" and c[1:2] == ["push"] for c in d.sh.calls))
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertEqual(len(d.comments), 1)
+            self.assertIn("resolve", d.comments[0])   # "a human must resolve it"
+
+    def test_third_conflict_posts_blocker_without_merging(self):
+        with fake_home():
+            d = self.driver()
+            d.s["counts"]["conflict_merge"] = L.LIMITS["conflict_merge"]   # the two merges are spent
+            d.sh = scripted_sh({})
+            d.pr_mergeable = lambda: "CONFLICTING"
+            self.assertEqual(d.merge_default_if_conflicting(), "blocked")
+            self.assertFalse(any(c[0] == "git" and ("merge" in c or "push" in c) for c in d.sh.calls))
+            self.assertTrue(any("Blocker:" in c for c in d.comments))
+
+    def test_not_conflicting_is_none_and_makes_no_git_calls(self):
+        for m in ("MERGEABLE", "UNKNOWN"):
+            with fake_home():
+                d = self.driver()
+                d.sh = scripted_sh({})
+                d.pr_mergeable = lambda m=m: m   # UNKNOWN counts as not conflicting: the next wait_ci iteration polls again
+                self.assertEqual(d.merge_default_if_conflicting(), "none")
+                self.assertEqual(d.sh.calls, [])
+
+    @contextlib.contextmanager
+    def fake_time(self):   # no real sleep: sleep() only advances the fake clock
+        class FT:
+            t = 1e9
+            def time(self): return self.t
+            def sleep(self, s): self.t += s
+        old, L.time = L.time, FT()
+        try: yield
+        finally: L.time = old
+
+    def test_wait_ci_blocks_on_conflict_after_one_iteration(self):
+        with fake_home():
+            d = self.driver()
+            d.sh = scripted_sh({"merge --abort": (0, ""), "merge": (1, "CONFLICT"), "fetch": (0, "")})
+            d.pr_mergeable = lambda: "CONFLICTING"
+            d.pr_checks = lambda: (L.CheckState.PENDING, [])
+            with self.fake_time():
+                self.assertEqual(d.wait_ci(), (L.CheckState.PENDING, []))   # blocked after one iteration
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertEqual(len(d.comments), 1)
+            self.assertIn("resolve", d.comments[0])
+
+    def test_st_ci_posts_exactly_one_blocker_when_wait_ci_blocks(self):
+        with fake_home():
+            d = self.driver()
+            d.s["counts"]["conflict_merge"] = L.LIMITS["conflict_merge"]   # the merge budget is spent: no merge, straight to Blocker
+            d.sh = scripted_sh({})
+            d.pr_mergeable = lambda: "CONFLICTING"
+            d.pr_checks = lambda: (L.CheckState.PENDING, [])
+            with self.fake_time():
+                d.st_ci()
+            self.assertEqual(d.s["stage"], "blocked")
+            self.assertFalse(any(c[0] == "git" and ("merge" in c or "push" in c) for c in d.sh.calls))
+            blockers = [c for c in d.comments if c.startswith("Blocker:")]
+            self.assertEqual(len(blockers), 1)   # the conflict blocker only; the 4h one must not stack on it
+            self.assertIn("merge attempts", blockers[0])
+
+
 if __name__ == "__main__": unittest.main()
