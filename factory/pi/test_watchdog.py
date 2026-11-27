@@ -748,3 +748,80 @@ class PiReviewDefault(unittest.TestCase):
         v = L.review_verdict(result, findings)
         self.assertTrue(v.is_infra)
         self.assertFalse(v.is_fail)
+
+
+# ---------------------------------------------------------------- check 4: idle_decision pure rule
+class IdleDecisionRule(unittest.TestCase):
+    """Check 4's pure rule: a dead driver whose item has been idle > 90 min is restarted, reassigned or waits.
+    Every test passes explicit state, at, up, busy and a fake alive lambda — no disk, no network."""
+
+    T0 = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+
+    def _state(self, **kw):
+        base = {"repo": "cmdemo1-system", "issue": 999, "status": "running", "pid": 2**22,
+                "progress_at": (self.T0 - dt.timedelta(minutes=91)).isoformat(), "gpu": "ts3"}
+        base.update(kw)
+        return base
+
+    def test_dead_driver_idle_91min_recorded_gpu_up_and_free_returns_resume(self):
+        at = self.T0
+        st = self._state(progress_at=(at - dt.timedelta(minutes=91)).isoformat(), gpu="ts3")
+        up = ["pro5000", "pro6000", "obs", "ts3"]
+        busy = []
+        alive = lambda pid: False
+        self.assertEqual(W.idle_decision(st, at, up, busy, alive=alive), ("resume", "ts3"))
+
+    def test_dead_driver_idle_89min_returns_leave(self):
+        at = self.T0
+        st = self._state(progress_at=(at - dt.timedelta(minutes=89)).isoformat())
+        up = ["pro5000", "pro6000", "obs", "ts3"]
+        busy = []
+        alive = lambda pid: False
+        self.assertEqual(W.idle_decision(st, at, up, busy, alive=alive), ("leave", None))
+
+    def test_live_pid_idle_300min_recorded_gpu_down_returns_leave(self):
+        at = self.T0
+        st = self._state(progress_at=(at - dt.timedelta(minutes=300)).isoformat(), gpu="ts3")
+        up = ["pro5000", "pro6000", "obs"]   # ts3 is down
+        busy = []
+        alive = lambda pid: True   # live driver: never restarted
+        self.assertEqual(W.idle_decision(st, at, up, busy, alive=alive), ("leave", None))
+
+    def test_dead_driver_idle_91min_recorded_gpu_down_other_gpu_free_returns_reassign(self):
+        at = self.T0
+        st = self._state(progress_at=(at - dt.timedelta(minutes=91)).isoformat(), gpu="ts3")
+        up = ["pro5000", "pro6000", "obs"]   # ts3 down; pro5000 is up and free
+        busy = []
+        alive = lambda pid: False
+        # G.pick_gpu("small", up, busy) → first free in PRIORITY order = "pro5000"
+        self.assertEqual(W.idle_decision(st, at, up, busy, alive=alive), ("reassign", "pro5000"))
+
+    def test_dead_driver_idle_91min_recorded_gpu_busy_no_other_free_returns_wait(self):
+        at = self.T0
+        st = self._state(progress_at=(at - dt.timedelta(minutes=91)).isoformat(), gpu="ts3")
+        up = ["pro5000", "pro6000", "obs", "ts3"]   # ts3 up but busy
+        busy = ["pro5000", "pro6000", "obs", "ts3"] # everything is busy
+        alive = lambda pid: False
+        # G.pick_gpu("small", up, busy) → no free GPU → None → wait
+        self.assertEqual(W.idle_decision(st, at, up, busy, alive=alive), ("wait", None))
+
+    def test_excluded_item_returns_leave(self):
+        at = self.T0
+        st = self._state(repo="cmdemo1-system", issue=652, progress_at=(at - dt.timedelta(minutes=91)).isoformat())
+        up = ["pro5000", "pro6000", "obs", "ts3"]
+        busy = []
+        alive = lambda pid: False
+        self.assertEqual(W.idle_decision(st, at, up, busy, alive=alive), ("leave", None))
+
+    def test_z_suffix_mixed_with_offset_no_exception_newest_used(self):
+        at = self.T0
+        # last_comment_at is 10 min ago with Z suffix; progress_at is 200 min ago with +00:00
+        st = self._state(
+            progress_at=(at - dt.timedelta(minutes=200)).isoformat(),          # +00:00 offset
+            last_comment_at=(at - dt.timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),  # Z suffix
+            gpu="ts3")
+        up = ["pro5000", "pro6000", "obs", "ts3"]
+        busy = []
+        alive = lambda pid: False
+        # newest is last_comment_at (10 min ago) < 90 min → leave
+        self.assertEqual(W.idle_decision(st, at, up, busy, alive=alive), ("leave", None))

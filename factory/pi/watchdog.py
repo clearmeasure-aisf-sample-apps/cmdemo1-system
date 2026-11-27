@@ -175,6 +175,39 @@ QUIET_HEADS = ("Status: no progress",)                 # driver heartbeats are n
 def _ts(s):
     return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
 
+# ---------------------------------------------------------------- check 4: dead-driver idle items (pure rule)
+IDLE_MIN = 90
+
+def idle_decision(state, at, up, busy, alive=None, minutes=IDLE_MIN, size="small"):
+    """Pure decision rule for check 4: a dead driver whose item has been idle for more than `minutes` minutes
+    is restarted (resume on its recorded GPU), reassigned to a free healthy GPU, or waits. Never calls gh, the
+    network or the filesystem. Returns (action, gpu):
+    - ("leave", None)  — empty state, excluded item, status not running/error, live driver, or not yet idle
+    - ("resume", gpu)  — dead driver, idle > minutes, recorded GPU is up and not busy
+    - ("reassign", g)  — dead driver, idle > minutes, recorded GPU down or busy, another free healthy GPU found
+    - ("wait", None)   — dead driver, idle > minutes, no free healthy GPU available
+    `alive` defaults to L.pid_alive. A live driver is never restarted or reassigned, even if stalled."""
+    alive = alive or L.pid_alive
+    if not state:
+        return ("leave", None)
+    if excluded(state.get("repo"), state.get("issue")):
+        return ("leave", None)
+    if state.get("status") not in ("running", "error"):
+        return ("leave", None)
+    if alive(state.get("pid")):
+        return ("leave", None)
+    stamps = [state[k] for k in ("progress_at", "start", "last_comment_at") if state.get(k)]
+    if not stamps:
+        return ("leave", None)
+    last = max(_ts(s) for s in stamps)
+    if (at - last).total_seconds() <= minutes * 60:
+        return ("leave", None)
+    g = state.get("gpu")
+    if g in up and g not in busy:
+        return ("resume", g)
+    g = G.pick_gpu(size, up, busy)
+    return ("reassign", g) if g is not None else ("wait", None)
+
 def fix_handoff_stalled(comments, head_at, at, minutes=FIX_HANDOFF_MIN):
     """Pure rule for check 2. `comments` is the issue journal ([{"body", "created_at"}], any order), `head_at` the
     newest commit time on the PR (or None). Returns the time of the latest review FAIL when its fix-up hand-off has
