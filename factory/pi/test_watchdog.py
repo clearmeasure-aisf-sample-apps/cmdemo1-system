@@ -684,7 +684,7 @@ class OwnGreenPrsEntry(unittest.TestCase):
         def fake(**kw): seen.append("own"); return "ok"
         with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home, (W, "own_green_prs_check"): fake}):
             r = W.run_checks(gh=no_prs, own_prs=True, log=lambda s: None)
-        self.assertEqual([n for n, _ in r], ["gpu_health_check", "fix_handoff_check", "red_main_check", "fake"])
+        self.assertEqual([n for n, _ in r], ["gpu_health_check", "fix_handoff_check", "red_main_check", "fake", "own_pr_red_check"])
         self.assertEqual(seen, ["own"])
         self.assertEqual(r[2], ("red_main_check", "ok"))
         self.assertEqual(r[3], ("fake", "ok"))
@@ -950,6 +950,153 @@ class RedMainCheck(unittest.TestCase):
         gh = FakeGh([run(1, "Build", "failure")])
         r = W.run_checks(repos=(SYS,), gh=gh, health=all_healthy, log=self.logs.append, own_prs=True)
         self.assertIn(("red_main_check", "acted: cmdemo1-system flagged, cmdemo1-system filed"), r)
-        self.assertEqual([n for n, _ in r][-1], "own_green_prs_check")
+        self.assertEqual([n for n, _ in r][-1], "own_pr_red_check")
         self.assertIn(SYS_KEY, L.red_load())
         self.assertEqual(len(gh.creates), 1)
+
+
+# ---------------------------------------------------------------- check: flag own PRs whose required check is red
+RED_CHECKS = [{"name": "Build result", "bucket": "fail", "link": "https://example.com/1"},
+              {"name": "secret-scan", "bucket": "pass", "link": "https://example.com/2"}]
+GREEN_CHECKS_RED = [{"name": "Build result", "bucket": "pass", "link": "https://example.com/1"},
+                    {"name": "secret-scan", "bucket": "pass", "link": "https://example.com/2"}]
+
+class OwnPrRedCheck(unittest.TestCase):
+    """own_pr_red_check end to end with a stub gh: a bot PR whose required checks are red gets one flag
+    comment per head SHA; guards respected; one bad PR never hides the others; the check never raises."""
+
+    PR = {"number": 100, "author": {"login": L.BOT}, "headRefOid": "abc123def456",
+          "mergeable": "MERGEABLE", "closingIssuesReferences": [{"number": 99}]}
+
+    def setUp(self):
+        W._last_comment.clear()
+
+    def _gh(self, prs, comments, checks, posted):
+        """gh stub: pr list, pr checks (name,bucket,link), api (issue comments), issue comment."""
+        def gh(args):
+            if args[:2] == ["pr", "list"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps(prs), "")
+            if args[:2] == ["pr", "checks"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps(checks), "")
+            if args[:2] == ["issue", "comment"]:
+                with open(args[args.index("--body-file") + 1]) as f: posted.append((args[2], f.read()))
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[0] == "api":
+                return subprocess.CompletedProcess(args, 0, "\n".join(json.dumps(x) for x in comments), "")
+            raise AssertionError(args)
+        return gh
+
+    def _run(self, prs, comments, checks, states=None, logs=None):
+        posted = []
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):
+            if states is not None:
+                rd = os.path.join(home, "factory-runs", "run1"); os.makedirs(rd)
+                with open(os.path.join(rd, "state.json"), "w") as f: json.dump(states, f)
+            r = W.own_pr_red_check(repos=("cmdemo1-workorders",),
+                                   gh=self._gh(prs, comments, checks, posted),
+                                   clock=lambda: T0,
+                                   log=logs.append if logs is not None else (lambda s: None))
+        return r, posted
+
+    def test_red_bot_pr_gets_one_flag_comment(self):
+        r, posted = self._run([self.PR], [], RED_CHECKS)
+        self.assertEqual(r, "flagged: cmdemo1-workorders PR #100")
+        self.assertEqual(len(posted), 1)
+        self.assertIn(W.RED_MARK % "abc123def456", posted[0][1])
+        self.assertIn("Build result", posted[0][1])
+        self.assertIn("The driver should resume this item", posted[0][1])
+        self.assertNotIn("resumed", posted[0][1].lower())   # does not claim anything was resumed
+
+    def test_human_pr_is_left_alone(self):
+        pr = dict(self.PR, author={"login": "some-human"})
+        r, posted = self._run([pr], [], RED_CHECKS)
+        self.assertEqual((r, posted), ("ok", []))
+
+    def test_workorders_pr_1918_is_left_alone(self):
+        pr = dict(self.PR, number=1918, closingIssuesReferences=[{"number": 1917}])
+        r, posted = self._run([pr], [], RED_CHECKS)
+        self.assertEqual((r, posted), ("ok", []))
+
+    def test_live_driver_is_left_alone(self):
+        states = {"repo": "cmdemo1-workorders", "issue": 99, "pid": os.getpid(),
+                  "progress_at": (T0 - dt.timedelta(seconds=60)).isoformat()}
+        r, posted = self._run([self.PR], [], RED_CHECKS, states=states)
+        self.assertEqual((r, posted), ("ok", []))
+
+    def test_green_pr_is_left_alone(self):
+        r, posted = self._run([self.PR], [], GREEN_CHECKS_RED)
+        self.assertEqual((r, posted), ("ok", []))
+
+    def test_second_run_on_same_head_adds_no_second_comment(self):
+        mark = W.RED_MARK % "abc123def456"
+        already_flagged = [c(mark, 1)]
+        r, posted = self._run([self.PR], already_flagged, RED_CHECKS)
+        self.assertEqual((r, posted), ("ok", []))
+
+    def test_new_head_sha_is_flagged_again(self):
+        mark_old = W.RED_MARK % "oldsha000000000000000000000000000000"
+        new_head = dict(self.PR, headRefOid="newsha111111111111111111111111111111")
+        r, posted = self._run([new_head], [c(mark_old, 1)], RED_CHECKS)
+        self.assertEqual(r, "flagged: cmdemo1-workorders PR #100")
+        self.assertEqual(len(posted), 1)
+        self.assertIn(W.RED_MARK % "newsha111111111111111111111111111111", posted[0][1])
+
+    def test_pr_that_closes_no_issue_is_flagged_without_raising(self):
+        pr = dict(self.PR, closingIssuesReferences=[])
+        r, posted = self._run([pr], [], RED_CHECKS)
+        self.assertEqual(r, "flagged: cmdemo1-workorders PR #100")
+        self.assertEqual(len(posted), 1)
+
+    def test_failing_gh_pr_checks_is_logged_and_others_still_processed(self):
+        good = dict(self.PR, number=101, closingIssuesReferences=[{"number": 100}])
+        bad = dict(self.PR, number=200, closingIssuesReferences=[{"number": 199}])
+        posted, logs = [], []
+        def gh(args):
+            if args[:2] == ["pr", "list"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps([bad, good]), "")
+            if args[:2] == ["pr", "checks"]:
+                if args[2] == "200":
+                    return subprocess.CompletedProcess(args, 1, "gh: boom", "")
+                return subprocess.CompletedProcess(args, 0, json.dumps(RED_CHECKS), "")
+            if args[:2] == ["issue", "comment"]:
+                with open(args[args.index("--body-file") + 1]) as f: posted.append((args[2], f.read()))
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[0] == "api":
+                return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(args)
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):
+            r = W.own_pr_red_check(repos=("cmdemo1-workorders",), gh=gh, clock=lambda: T0, log=logs.append)
+        self.assertIn("PR #101", r)   # the good PR was still flagged
+        self.assertTrue(any("PR #200 skipped" in l for l in logs))
+
+    def test_wip_full_repo_is_left_alone(self):
+        # 3 live, progressing drivers for cmdemo1-workorders (the WIP cap for that repo)
+        live_states = [(f"r{i}", {"repo": "cmdemo1-workorders", "issue": i, "stage": "implement",
+                                  "pid": os.getpid(),
+                                  "progress_at": (T0 - dt.timedelta(seconds=60)).isoformat()})
+                       for i in range(3)]
+        with fake_modules({(L, "all_states"): lambda: live_states, (L, "HOME"): "nonexistent"}):
+            r = W.own_pr_red_check(repos=("cmdemo1-workorders",),
+                                   gh=self._gh([self.PR], [], RED_CHECKS, []),
+                                   clock=lambda: T0, log=lambda s: None)
+        self.assertEqual(r, "ok")
+
+
+class OwnPrRedEntry(unittest.TestCase):
+    """Wiring: run_checks(own_prs=True) includes own_pr_red_check; the default does not."""
+
+    def test_run_checks_own_prs_includes_own_pr_red_check(self):
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):
+            r = W.run_checks(gh=no_prs, own_prs=True, log=lambda s: None)
+        names = [n for n, _ in r]
+        self.assertIn("own_pr_red_check", names)
+        self.assertIn("own_green_prs_check", names)
+        # own_pr_red_check runs after own_green_prs_check
+        self.assertGreater(names.index("own_pr_red_check"), names.index("own_green_prs_check"))
+
+    def test_default_run_checks_does_not_include_own_pr_red_check(self):
+        with tempfile.TemporaryDirectory() as home, fake_modules({(L, "HOME"): home}):
+            r = W.run_checks(gh=no_prs, log=lambda s: None)
+        names = [n for n, _ in r]
+        self.assertNotIn("own_pr_red_check", names)
+        self.assertNotIn("own_green_prs_check", names)

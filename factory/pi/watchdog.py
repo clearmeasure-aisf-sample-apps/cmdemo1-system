@@ -23,6 +23,13 @@ healthy GPU other than the author's, and is squash-merged with --match-head-comm
 unaddressed `Review: FAIL` or `Blocker:` (no commit and no Review: PASS after it) holds it too; an item with a
 live driver is left to the driver.
 
+own_pr_red_check (run via run_checks(own_prs=True) / the `run-own-prs` CLI / the driver-exit hook's full set,
+not registered): an own (cm-ai-ops-bot) PR whose required checks are red gets one flag comment per head SHA
+(a RED_MARK comment keyed on the PR's full headRefOid). Guards: the PR must be by the bot; excluded items
+(NEVER_MERGE, HANDS_OFF, #652, #1672) are left alone; a live driver for the closing issue is left alone;
+a WIP-full repo is left alone; the required checks must be RED (item_loop.MergeGate.required_state).
+It never launches or resumes a driver, never writes state.json, and never edits run dirs.
+
 Check 4 (red_main_check): for each repo, the default-branch head sha's push runs (newest run per workflow) decide
 red (some run failed), green (every run completed success/skipped/neutral) or unknown (no runs, in progress,
 cancelled, timed out, action required, a failed lookup: nothing changes). Red sets the `<repo> main` intake flag in
@@ -146,7 +153,7 @@ def run_checks(repos=REPOS, gh=None, health=None, clock=None, log=None, own_prs=
     health = health or L.gpu_health   # the driver's shared GpuHealthCache probe (cmdemo1-system#868), so an exit hook never fires three fresh GETs
     clock = clock or L.now
     results = []
-    checks = list(CHECKS) + ([own_green_prs_check] if own_prs else [])
+    checks = list(CHECKS) + ([own_green_prs_check, own_pr_red_check] if own_prs else [])
     for c in checks:
         try:
             results.append((c.__name__, c(repos=repos, gh=gh, health=health, clock=clock, log=log)))
@@ -271,8 +278,7 @@ def driver_alive(states, repo, issue, alive=None):
 def _stalled_pr(repo, pr, states, gh, clock):
     """(issue, fail_at) when this open PR is a driver PR whose fix-up hand-off stalled, else None."""
     if L.DRIVER_MARK not in (pr.get("body") or ""): return None
-    issues = [i.get("number") for i in pr.get("closingIssuesReferences") or []
-              if i.get("number") and (i.get("repository") or {}).get("name", repo) == repo]   # same-repo issues only
+    issues = _same_repo_issues(repo, pr)   # same-repo issues only
     if not issues or excluded(repo, issues[0]) or excluded(repo, pr["number"]): return None
     issue = issues[0]
     if driver_alive(states, repo, issue): return None
@@ -402,6 +408,12 @@ def red_main_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
 
 # ---------------------------------------------------------------- check 3: own green, mergeable, unmerged PRs
 OWN_PR_LIST_FIELDS = "number,author,headRefOid,mergeable,closingIssuesReferences"
+RED_MARK = "<!-- watchdog-own-pr-red:%s -->"   # one flag per PR head SHA: a later head can be flagged again
+
+def _same_repo_issues(repo, pr):
+    """The same-repo issue numbers a PR closes, in closingIssuesReferences order. [] when the PR closes no same-repo issue."""
+    return [i.get("number") for i in pr.get("closingIssuesReferences") or []
+            if i.get("number") and (i.get("repository") or {}).get("name", repo) == repo]
 JEFFREY_HOLD = "Not merging until Jeffrey confirms"   # a human hold: the watchdog never posts, lifts or merges past one
 HOLD_FAIL = "Review: FAIL"
 HOLD_BLOCKER = "Blocker:"
@@ -483,8 +495,7 @@ def _own_pr(repo, pr, states, gh, up, busy, review, clock, log):
     (excluded items and live, progressing drivers are never commented on)."""
     if (pr.get("author") or {}).get("login") != L.BOT: return None
     if pr.get("mergeable") != "MERGEABLE": return None
-    issues = [i.get("number") for i in pr.get("closingIssuesReferences") or []
-              if i.get("number") and (i.get("repository") or {}).get("name", repo) == repo]
+    issues = _same_repo_issues(repo, pr)
     issue = issues[0] if issues else None
     if excluded(repo, pr["number"]) or (issue is not None and excluded(repo, issue)): return None
     if issue is not None and driver_alive(states, repo, issue): return None   # a live driver owns the PR (check 2's rule)
@@ -564,6 +575,66 @@ def own_green_prs_check(repos=REPOS, gh=None, health=None, clock=None, log=None,
             elif a == "wait": waited.append(f"{repo} PR #{pr['number']}")
     parts = (["acted: " + ", ".join(acted)] if acted else []) + (["waiting: " + ", ".join(waited)] if waited else [])
     out = "ok" if not parts else "; ".join(parts)
+    return out + ("; list failed: " + ", ".join(failed) if failed else "")
+
+# ---------------------------------------------------------------- check: flag own PRs whose required check is red
+# Not registered (no @register): it runs only via run_checks(own_prs=True) / the `run-own-prs` CLI / the
+# driver-exit hook's full set. It never launches or resumes a driver, never writes state.json, and never edits
+# run dirs. It posts at most one flag comment per PR head SHA.
+
+def _own_pr_red(repo, pr, states, gh, clock, log):
+    """Flag one own (cm-ai-ops-bot) PR whose required checks are red, posting one comment per head SHA.
+    Returns 'flagged' when a comment was posted, None otherwise. Guards (in order):
+    - the PR author must be the bot;
+    - the PR or its closing issue must not be excluded (NEVER_MERGE, HANDS_OFF, #652, #1672);
+    - the closing issue must not have a live driver;
+    - the repo must not be WIP-full;
+    - the required checks must be RED (MergeGate.required_state);
+    - the head SHA must not already carry a RED_MARK comment."""
+    if (pr.get("author") or {}).get("login") != L.BOT: return None
+    issues = _same_repo_issues(repo, pr)
+    issue = issues[0] if issues else None
+    if excluded(repo, pr["number"]) or (issue is not None and excluded(repo, issue)): return None
+    if issue is not None and driver_alive(states, repo, issue): return None
+    if issue is not None and wip_full(states, repo): return None
+    r = gh(["pr", "checks", str(pr["number"]), "-R", f"{L.ORG}/{repo}", "--json", "name,bucket,link"])
+    if r.returncode != 0: raise RuntimeError(r.stdout or "gh pr checks failed")
+    cs = json.loads(r.stdout or "[]")
+    if L.MergeGate(cs, L.REQUIRED.get(repo)).required_state() != L.CheckState.RED: return None
+    mark = RED_MARK % pr["headRefOid"]
+    comments = issue_comments(repo, pr["number"], gh)
+    if any(mark in (c.get("body") or "") for c in comments): return None
+    names = sorted(n for n, b in L.latest_attempt(cs).items() if L.bucket_red(b))
+    body = (mark + "\n" +
+            "Failing required checks: " + (", ".join(names) if names else "(none listed)") + "\n" +
+            "The driver should resume this item at its CI stage (item-loop start --resume) or a human should take the fix over.")
+    if post_comment(repo, pr["number"], body, states, gh=gh, clock=clock, log=log):
+        return "flagged"
+    return None
+
+def own_pr_red_check(repos=REPOS, gh=None, health=None, clock=None, log=None):
+    """Flag own (cm-ai-ops-bot) PRs whose required checks are red, posting one comment per head SHA.
+    Run via run_checks(own_prs=True) / the `run-own-prs` CLI / the driver-exit hook's full set; not registered,
+    so plain `run` does not post comments. Every hard rule holds: excluded items (NEVER_MERGE, HANDS_OFF, #652,
+    #1672) are left alone; a live driver for the closing issue is left alone; a WIP-full repo is left alone; a
+    head SHA that already carries a RED_MARK comment is not flagged again. It never launches or resumes a driver,
+    never writes state.json, and never edits run dirs. One bad PR never hides the others; the check never raises."""
+    clock = clock or L.now; log = log or print; gh = gh or gh_subprocess
+    states = L.all_states()
+    flagged, failed = [], []
+    for repo in repos:
+        try:
+            prs = gh_json(gh, ["pr", "list", "-R", f"{L.ORG}/{repo}", "--state", "open", "--limit", "100",
+                               "--json", OWN_PR_LIST_FIELDS], "gh pr list")
+        except Exception as e:
+            log("watchdog own-pr-red: PR list for %s failed: %s" % (repo, scrub(str(e)))); failed.append(repo); continue
+        for pr in prs:
+            try:
+                a = _own_pr_red(repo, pr, states, gh, clock, log)
+            except Exception as e:
+                log("watchdog own-pr-red: %s PR #%s skipped: %s" % (repo, pr.get("number"), scrub(str(e)))); continue
+            if a == "flagged": flagged.append(f"{repo} PR #{pr['number']}")
+    out = "ok" if not flagged else "flagged: " + ", ".join(flagged)
     return out + ("; list failed: " + ", ".join(failed) if failed else "")
 
 # ---------------------------------------------------------------- CLI: run every check once (the same entry the driver-exit hook uses)
