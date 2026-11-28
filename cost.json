@@ -1,0 +1,99 @@
+{
+  "generated": "2026-11-28T06:46:53Z",
+  "currency": "USD",
+  "asOf": "2026-11-27",
+  "system": {
+    "yesterday": 11.84,
+    "last7Days": 89.95,
+    "monthToDate": 306.81
+  },
+  "environments": [
+    {
+      "name": "tdd",
+      "yesterday": 1.89,
+      "last7Days": 12.8,
+      "monthToDate": 122.46,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 89.62
+        },
+        {
+          "name": "Azure Monitor",
+          "monthToDate": 16.29
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 9.23
+        }
+      ]
+    },
+    {
+      "name": "uat",
+      "yesterday": 1.76,
+      "last7Days": 11.89,
+      "monthToDate": 47.39,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 39.61
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 4.35
+        },
+        {
+          "name": "Log Analytics",
+          "monthToDate": 3.4
+        }
+      ]
+    },
+    {
+      "name": "prod",
+      "yesterday": 2.01,
+      "last7Days": 13.81,
+      "monthToDate": 77.09,
+      "topServices": [
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 63.73
+        },
+        {
+          "name": "Log Analytics",
+          "monthToDate": 8.92
+        },
+        {
+          "name": "SQL Database",
+          "monthToDate": 4.35
+        }
+      ]
+    },
+    {
+      "name": "pool",
+      "yesterday": 0.0,
+      "last7Days": 0.0,
+      "monthToDate": 0.0,
+      "topServices": []
+    },
+    {
+      "name": "shared",
+      "yesterday": 6.18,
+      "last7Days": 51.45,
+      "monthToDate": 59.87,
+      "topServices": [
+        {
+          "name": "Log Analytics",
+          "monthToDate": 31.37
+        },
+        {
+          "name": "Azure Container Apps",
+          "monthToDate": 15.66
+        },
+        {
+          "name": "Container Registry",
+          "monthToDate": 11.37
+        }
+      ]
+    }
+  ]
+}

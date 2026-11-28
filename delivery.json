@@ -1,0 +1,267 @@
+{
+  "generated": "2026-11-28T14:46:51Z",
+  "environments": [
+    {
+      "name": "tdd",
+      "deployables": [
+        {
+          "name": "ui",
+          "version": "2.4.2826",
+          "deployedAt": "2026-11-28T12:41:38Z",
+          "signedOffBy": null,
+          "reason": null,
+          "lastPersonSignOff": null,
+          "commit": "1f7ab6651906bedd6a1834bb93cb40767cbba2ec",
+          "commitAt": "2026-11-28T12:21:42Z",
+          "leadTimeHours": 0.3,
+          "behindFirst": {
+            "versions": 0,
+            "days": 0
+          },
+          "deploymentsLast7Days": 53,
+          "failedLast7Days": 5,
+          "releaseUrl": "https://clearmeasure.octopus.app/app#/Spaces-355/projects/cmdemo1-ui/deployments/releases/2.4.2826"
+        },
+        {
+          "name": "dashboard",
+          "version": "1.0.1745",
+          "deployedAt": "2026-11-28T14:45:41Z",
+          "signedOffBy": null,
+          "reason": null,
+          "lastPersonSignOff": null,
+          "commit": "1b88716edeed37c820b3f5e3b4119c9dda41922f",
+          "commitAt": "2026-11-28T14:38:15Z",
+          "leadTimeHours": 0.1,
+          "behindFirst": {
+            "versions": 0,
+            "days": 0
+          },
+          "deploymentsLast7Days": 643,
+          "failedLast7Days": 3,
+          "releaseUrl": "https://clearmeasure.octopus.app/app#/Spaces-355/projects/cmdemo1-dashboard/deployments/releases/1.0.1745"
+        },
+        {
+          "name": "system",
+          "version": "1.0.257",
+          "deployedAt": "2026-11-26T21:49:51Z",
+          "signedOffBy": null,
+          "reason": null,
+          "lastPersonSignOff": null,
+          "commit": "f8fbc4b678f30041c1f96c9c87e154d25c7b69c5",
+          "commitAt": "2026-11-26T21:42:35Z",
+          "leadTimeHours": 0.1,
+          "behindFirst": {
+            "versions": 0,
+            "days": 0
+          },
+          "deploymentsLast7Days": 6,
+          "failedLast7Days": 0,
+          "releaseUrl": "https://clearmeasure.octopus.app/app#/Spaces-355/projects/cmdemo1-system/deployments/releases/1.0.257"
+        }
+      ],
+      "health": {
+        "last24Hours": {
+          "reports": 24,
+          "healthy": 24
+        },
+        "last7Days": {
+          "reports": 103,
+          "healthy": 103
+        },
+        "lastFailure": null,
+        "containerApps": [
+          {
+            "name": "ui",
+            "last": {
+              "result": "healthy",
+              "at": "2026-11-28T14:41:12Z"
+            },
+            "last24Hours": {
+              "reports": 24,
+              "healthy": 24
+            },
+            "last7Days": {
+              "reports": 103,
+              "healthy": 103
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "uat",
+      "deployables": [
+        {
+          "name": "ui",
+          "version": "2.4.2826",
+          "deployedAt": "2026-11-28T13:01:21Z",
+          "signedOffBy": "cmdemo1-github",
+          "reason": "Auto-promoted: no flag. checks green (44 passed), deployment and health ok in tdd, no pipeline change, no Hold label; run https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-system/actions/runs/46146393936",
+          "lastPersonSignOff": null,
+          "commit": "1f7ab6651906bedd6a1834bb93cb40767cbba2ec",
+          "commitAt": "2026-11-28T12:21:42Z",
+          "leadTimeHours": 0.7,
+          "behindFirst": {
+            "versions": 0,
+            "days": 0
+          },
+          "deploymentsLast7Days": 41,
+          "failedLast7Days": 0,
+          "releaseUrl": "https://clearmeasure.octopus.app/app#/Spaces-355/projects/cmdemo1-ui/deployments/releases/2.4.2826"
+        },
+        {
+          "name": "dashboard",
+          "version": "1.0.1729",
+          "deployedAt": "2026-11-28T14:22:11Z",
+          "signedOffBy": "cmdemo1-github",
+          "reason": "Auto-promoted: no flag. checks green (5 passed), deployment and health ok in tdd, no pipeline change, no Hold label; run https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-system/actions/runs/46153385677",
+          "lastPersonSignOff": null,
+          "commit": "e321219545a4c3102b37134abd031008ee36ba2f",
+          "commitAt": "2026-11-28T13:49:19Z",
+          "leadTimeHours": 0.5,
+          "behindFirst": {
+            "versions": 8,
+            "days": 0.2
+          },
+          "deploymentsLast7Days": 166,
+          "failedLast7Days": 0,
+          "releaseUrl": "https://clearmeasure.octopus.app/app#/Spaces-355/projects/cmdemo1-dashboard/deployments/releases/1.0.1729"
+        },
+        {
+          "name": "system",
+          "version": "1.0.257",
+          "deployedAt": "2026-11-26T23:24:47Z",
+          "signedOffBy": "cmdemo1-github",
+          "reason": "Auto-promoted: no flag. checks green (6 passed), deployment and health ok in tdd, no pipeline change, no Hold label; run https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-system/actions/runs/45909616291",
+          "lastPersonSignOff": null,
+          "commit": "f8fbc4b678f30041c1f96c9c87e154d25c7b69c5",
+          "commitAt": "2026-11-26T21:42:35Z",
+          "leadTimeHours": 1.7,
+          "behindFirst": {
+            "versions": 0,
+            "days": 0
+          },
+          "deploymentsLast7Days": 5,
+          "failedLast7Days": 0,
+          "releaseUrl": "https://clearmeasure.octopus.app/app#/Spaces-355/projects/cmdemo1-system/deployments/releases/1.0.257"
+        }
+      ],
+      "health": {
+        "last24Hours": {
+          "reports": 24,
+          "healthy": 24
+        },
+        "last7Days": {
+          "reports": 103,
+          "healthy": 103
+        },
+        "lastFailure": null,
+        "containerApps": [
+          {
+            "name": "ui",
+            "last": {
+              "result": "healthy",
+              "at": "2026-11-28T14:36:54Z"
+            },
+            "last24Hours": {
+              "reports": 24,
+              "healthy": 24
+            },
+            "last7Days": {
+              "reports": 103,
+              "healthy": 103
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "prod",
+      "deployables": [
+        {
+          "name": "ui",
+          "version": "2.4.2826",
+          "deployedAt": "2026-11-28T13:25:34Z",
+          "signedOffBy": "cmdemo1-github",
+          "reason": "Auto-promoted: no flag. checks green (44 passed), deployment and health ok in uat, no pipeline change, no Hold label; run https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-system/actions/runs/46148353664",
+          "lastPersonSignOff": null,
+          "commit": "1f7ab6651906bedd6a1834bb93cb40767cbba2ec",
+          "commitAt": "2026-11-28T12:21:42Z",
+          "leadTimeHours": 1.1,
+          "behindFirst": {
+            "versions": 0,
+            "days": 0
+          },
+          "deploymentsLast7Days": 42,
+          "failedLast7Days": 0,
+          "releaseUrl": "https://clearmeasure.octopus.app/app#/Spaces-355/projects/cmdemo1-ui/deployments/releases/2.4.2826"
+        },
+        {
+          "name": "dashboard",
+          "version": "1.0.1729",
+          "deployedAt": "2026-11-28T14:40:18Z",
+          "signedOffBy": "cmdemo1-github",
+          "reason": "Auto-promoted: no flag. checks green (5 passed), deployment and health ok in uat, no pipeline change, no Hold label; run https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-system/actions/runs/46154968810",
+          "lastPersonSignOff": null,
+          "commit": "e321219545a4c3102b37134abd031008ee36ba2f",
+          "commitAt": "2026-11-28T13:49:19Z",
+          "leadTimeHours": 0.8,
+          "behindFirst": {
+            "versions": 8,
+            "days": 0.2
+          },
+          "deploymentsLast7Days": 167,
+          "failedLast7Days": 1,
+          "releaseUrl": "https://clearmeasure.octopus.app/app#/Spaces-355/projects/cmdemo1-dashboard/deployments/releases/1.0.1729"
+        },
+        {
+          "name": "system",
+          "version": "1.0.257",
+          "deployedAt": "2026-11-26T23:47:11Z",
+          "signedOffBy": "cmdemo1-github",
+          "reason": "Auto-promoted: no flag. checks green (6 passed), deployment and health ok in uat, no pipeline change, no Hold label; run https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-system/actions/runs/45911632384",
+          "lastPersonSignOff": null,
+          "commit": "f8fbc4b678f30041c1f96c9c87e154d25c7b69c5",
+          "commitAt": "2026-11-26T21:42:35Z",
+          "leadTimeHours": 2.1,
+          "behindFirst": {
+            "versions": 0,
+            "days": 0
+          },
+          "deploymentsLast7Days": 6,
+          "failedLast7Days": 0,
+          "releaseUrl": "https://clearmeasure.octopus.app/app#/Spaces-355/projects/cmdemo1-system/deployments/releases/1.0.257"
+        }
+      ],
+      "health": {
+        "last24Hours": {
+          "reports": 24,
+          "healthy": 24
+        },
+        "last7Days": {
+          "reports": 103,
+          "healthy": 103
+        },
+        "lastFailure": null,
+        "containerApps": [
+          {
+            "name": "ui",
+            "last": {
+              "result": "healthy",
+              "at": "2026-11-28T14:41:12Z"
+            },
+            "last24Hours": {
+              "reports": 24,
+              "healthy": 24
+            },
+            "last7Days": {
+              "reports": 103,
+              "healthy": 103
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "failover": null
+}
