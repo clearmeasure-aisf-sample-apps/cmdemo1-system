@@ -24,11 +24,8 @@
          healthPath of system.json. It has no links: the system does not know the application's resources. Without
          a record in an environment the deployable is left out of that environment, and the log says so. A record
          that breaks the rules stops the step: it would break the dashboard's page.
-       - hosting "containerapp" (the default): one node ca-<slug>-<env>-<deployable> at the address the environment's
-         stack reported (-PageAddress), with healthPath /_healthcheck and healthDetailPath /_healthcheck/detailed
-         (or what system.json names). Without an address in that environment the deployable is left out there.
-         system.azureExcludeDeployables (#542) are never listed: Azure no longer has them, so the Health view must
-         not show them either.
+       Container-app deployables are left out: their address is not a convention (the platform generates it, and a
+       placement changes it), so the dashboard does not show them.
        The topology also says where the dashboard finds what the deployments pinned. Every address is a convention
        over system.json and none is a secret:
          system.repository      https://github.com/<system.githubOrg>/<system.repository>, the system repository
@@ -98,9 +95,8 @@
        app's slot holds seven lines under its badge: version, pin, traffic, failures, process, uptime and role, and
        an eighth, the marks of its detailed health check, for a deployable with healthDetailPath; then two more, as
        the slot of every node a deployment changes has: what is being deployed there and what just happened, in
-       words, from deployments.json). The script downloads the PlantUML release jar of the pinned version from GitHub
-       (a download GitHub does not answer, or answers 408, 429 or 5xx, is tried again: four attempts, 10, 30 and 60
-       seconds apart; Invoke-Retried), verifies its SHA-256, renders every diagram in one Java process (layout engine smetana: no Graphviz; security
+       words, from deployments.json). The script downloads the PlantUML release jar of the pinned version from GitHub,
+       verifies its SHA-256, renders every diagram in one Java process (layout engine smetana: no Graphviz; security
        profile SANDBOX) and checks that each SVG has every element the manifest names; a missing one fails the step.
        Java's output is logged as information; the download and the render are timed.
        The manifest also says where each box leads that topology.json has no link for (the frames, the regions, the
@@ -123,11 +119,6 @@
     3. The deployment, with the Static Web Apps CLI and the site's deployment token. The token is read from Azure
        when the step runs (the deploy identity may; the stack's deny settings keep everyone else from listing it),
        reaches the CLI through an environment variable, and is never stored, printed or passed as an argument.
-       npm fetches the CLI with its own retries (5, 10 to 60 seconds apart), and the CLI runs with --verbose silly, so
-       a failure says why; a deployment the CLI ends with a non-zero exit code is sent again, three attempts, 30 and
-       60 seconds apart (Get-RetryDelay), each attempt's output logged. A redeployment of the same folder is harmless:
-       the site serves the latest upload. A registry or upload blip (ECONNRESET, a 5xx, an exit code with no reason)
-       no longer fails the step on its own (cmdemo1-system #957; dashboard 1.0.1388 and 1.0.1390 in tdd, Nov 26).
     4. The proof: the site serves the topology this step wrote.
     With hosting "storagewebsite", 3 and 4 are Publish-StorageWebsite of scripts/deploy-storagewebsite.ps1, which
     octopus/projects.tf joins in before this script: the static website of the storage account the stack created.
@@ -234,75 +225,6 @@ function Get-ResourcesAddress {
     return "https://portal.azure.com/#${directory}blade/HubsExtension/ArgQueryBlade/query/$([Uri]::EscapeDataString($query))"
 }
 
-function Get-ReportedDeployableUrl {
-    # The https address of one deployable in a stack's outputs.deployables.value (or the same shape built from
-    # containers.json): name and url on each entry. Accepts a hashtable or a PSCustomObject so a Select-Object wrap
-    # or a ConvertFrom-Json without -AsHashtable still counts. Empty when the list has no such name or no https url.
-    param(
-        [AllowNull()] [object[]] $Reported = @(),
-        [Parameter(Mandatory)] [string] $Name
-    )
-    foreach ($entry in @($Reported)) {
-        if ($null -eq $entry) { continue }
-        $entryName = $null
-        $entryUrl = $null
-        if ($entry -is [Collections.IDictionary]) {
-            $entryName = [string] $entry['name']
-            $entryUrl = [string] $entry['url']
-        }
-        elseif ($entry.PSObject.Properties['name'] -and $entry.PSObject.Properties['url']) {
-            $entryName = [string] $entry.name
-            $entryUrl = [string] $entry.url
-        }
-        else { continue }
-        $address = $entryUrl.TrimEnd('/')
-        if ($entryName -eq $Name -and $address -match '^https://[^/\s]+$') { return $address }
-    }
-    return $null
-}
-
-function ConvertTo-PageAddressMap {
-    # The public https address of each wanted container-app deployable in one environment: prefer what that
-    # environment's stack reported (-Reported: outputs.deployables.value entries), then fill any still missing from
-    # containers.json on branch status (-Published: environments.<env> name->url). Own-environment stack outputs and
-    # a successful cross-environment read both used to skip the status file when they simply omitted an app (#573),
-    # so ui vanished from topology while containers.json still had it. azureExcludeDeployables are not in -Wanted.
-    # Returns @{ Addresses = @{ name = url }; Missing = @(names still without an address); FilledFromStatus = @(names) }.
-    param(
-        [Parameter(Mandatory)] [string[]] $Wanted,
-        [AllowNull()] [object[]] $Reported = @(),
-        [AllowNull()] [Collections.IDictionary] $Published = $null
-    )
-    $addresses = @{}
-    $missing = [Collections.Generic.List[string]]::new()
-    $filled = [Collections.Generic.List[string]]::new()
-    foreach ($deployableName in @($Wanted)) {
-        $fromStack = Get-ReportedDeployableUrl -Reported $Reported -Name $deployableName
-        if ($fromStack) {
-            $addresses[$deployableName] = $fromStack
-            continue
-        }
-        $fromStatus = $null
-        if ($Published -is [Collections.IDictionary]) {
-            $raw = [string] $Published[$deployableName]
-            if ($raw) {
-                $candidate = $raw.TrimEnd('/')
-                if ($candidate -match '^https://[^/\s]+$') { $fromStatus = $candidate }
-            }
-        }
-        if ($fromStatus) {
-            $addresses[$deployableName] = $fromStatus
-            $filled.Add($deployableName)
-        }
-        else { $missing.Add($deployableName) }
-    }
-    return @{
-        Addresses         = $addresses
-        Missing           = @($missing)
-        FilledFromStatus  = @($filled)
-    }
-}
-
 function ConvertTo-Topology {
     # The dashboard's topology from system.json (parsed, as a hashtable), the host name of each Front Door endpoint
     # by endpoint name (<slug>-<env>-<deployable>), and the recorded nodes of the deployables with hosting "own" by
@@ -322,11 +244,6 @@ function ConvertTo-Topology {
     # deployable's healthPath of system.json, or left out, and the dashboard then asks its own default), and
     # everything else is what system.json says of every deployable (projectUrl, telemetryPath, trafficPaths,
     # buildPath, healthDetailPath). It has no links: the system does not know the application's resources.
-    # A container-app deployable (hosting "containerapp" or left out) has one node at the address -PageAddress gives
-    # for it in that environment: ca-<slug>-<env>-<deployable>, healthPath /_healthcheck and healthDetailPath
-    # /_healthcheck/detailed unless system.json names others. Without an address it is left out of that environment.
-    # system.azureExcludeDeployables (#542) are omitted everywhere: they are not in Azure, so the Health view has no
-    # tile for them. A retired deployable (deployables[].retired, decision 0058) is omitted the same way.
     # A deployable that names a page of its own for the dashboard (deployables[].dashboardLink: text and path) gives
     # each environment it exists in an entry of "pages": the words, the deployable, and the path under the address the
     # deployable has in that environment (-PageAddress, by environment and deployable: the address the environment's
@@ -360,7 +277,6 @@ function ConvertTo-Topology {
         "$subscription/resourceGroups/$([string] $frontDoor.resourceGroup)/providers/Microsoft.Cdn/profiles/$([string] $frontDoor.profile)"
     }
     else { '' }
-    $azureExcluded = @(if ($System.system['azureExcludeDeployables']) { $System.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
     $environments = @(foreach ($environment in @($System.environments)) {
             $environmentName = [string] $environment.name
             $versionsPath = "main/environments/$environmentName/versions.json"
@@ -381,9 +297,7 @@ function ConvertTo-Topology {
             }
             if ($group) { $environmentLinks.resourceGroup = Get-PortalAddress -ResourceId $group -TenantId $tenantId }
             $recorded = if ($NodeRecord[$environmentName] -is [Collections.IDictionary]) { $NodeRecord[$environmentName] } else { @{} }
-            $addresses = if ($PageAddress[$environmentName] -is [Collections.IDictionary]) { $PageAddress[$environmentName] } else { @{} }
             $deployables = @(foreach ($app in @($System.deployables)) {
-                    if ($app['retired'] -eq $true) { continue }
                     if ($app['hosting'] -eq 'own') {
                         # What the application reported when it was last verified here; without a record it is left
                         # out of this environment.
@@ -408,69 +322,7 @@ function ConvertTo-Topology {
                         $entry
                         continue
                     }
-                    $hosting = if ($app['hosting']) { [string] $app.hosting } else { 'containerapp' }
-                    if ($hosting -eq 'containerapp') {
-                        # Only the apps this environment still declares in Azure: azureExcludeDeployables and an
-                        # environments list that leaves this one out are omitted, and so is an app whose address the
-                        # stack (or containers.json) has not given (-PageAddress).
-                        if ($azureExcluded -ccontains [string] $app.name) { continue }
-                        if ($app['environments'] -and @($app.environments) -notcontains $environmentName) { continue }
-                        $address = ([string] $addresses[[string] $app.name]).TrimEnd('/')
-                        if ($address -notmatch '^https://[^/\s]+$') { continue }
-                        $nodeName = "ca-$slug-$environmentName-$($app.name)"
-                        $region = $location
-                        $hostName = ([uri] $address).Host
-                        $azureAppName = ($hostName -split '\.', 2)[0]
-                        if ($hostName -match '^[^.]+\.(?<environment>[^.]+)\.(?<region>[^.]+)\.azurecontainerapps\.io$') {
-                            $region = [string] $Matches.region
-                        }
-                        $role = "$slug-$($app.name)"
-                        $nodeLinks = [ordered] @{}
-                        if ($group -and $azureAppName) {
-                            # The Azure name may carry a placement suffix; the topology node keeps the convention name
-                            # ca-<slug>-<env>-<deployable> so the Health view matches every environment.
-                            $nodeLinks.portal = Get-PortalAddress -ResourceId "$group/providers/Microsoft.App/containerApps/$azureAppName" -TenantId $tenantId
-                        }
-                        if ($insights) {
-                            $nodeLinks.liveMetrics = Get-PortalAddress -ResourceId $insights -Blade 'quickPulse' -TenantId $tenantId
-                            $nodeLinks.performance = Get-PortalAddress -ResourceId $insights -Blade 'performance' -TenantId $tenantId
-                            $nodeLinks.failures = Get-PortalAddress -ResourceId $insights -Blade 'failures' -TenantId $tenantId
-                            $nodeLinks.dependencies = Get-LogsAddress -ResourceId $insights -TenantId $tenantId -Query (@(
-                                    'dependencies'
-                                    "| where cloud_RoleName == `"$role`""
-                                    '| summarize calls = count(), failed = countif(success == false), avgMs = round(avg(duration), 1), p95Ms = round(percentile(duration, 95), 1) by type, target, name'
-                                    '| order by calls desc'
-                                ) -join "`n")
-                        }
-                        $node = [ordered] @{ name = $nodeName; region = $region; role = 'primary'; url = $address }
-                        if ($nodeLinks.Count -gt 0) { $node.links = $nodeLinks }
-                        $deployableLinks = [ordered] @{}
-                        if ($insights) {
-                            $deployableLinks.logs = Get-LogsAddress -ResourceId $insights -TenantId $tenantId -Query (@(
-                                    'requests'
-                                    "| where cloud_RoleName == `"$role`""
-                                    '| summarize requests = count(), failed = countif(success == false), p95Ms = round(percentile(duration, 95), 1) by bin(timestamp, 5m), cloud_RoleInstance'
-                                    '| order by timestamp desc'
-                                ) -join "`n")
-                        }
-                        $healthPath = if ($app['healthPath']) { [string] $app.healthPath } else { '/_healthcheck' }
-                        [ordered] @{
-                            name             = [string] $app.name
-                            projectUrl       = if ($projects) { "$projects/$slug-$($app.name)" } else { $null }
-                            frontDoor        = $null
-                            healthPath       = $healthPath
-                            alivePath        = $healthPath
-                            versionPath      = '/_version'
-                            telemetryPath    = if ($app['telemetryPath']) { [string] $app.telemetryPath } else { $null }
-                            trafficPaths     = if ($app['trafficPaths']) { , @($app.trafficPaths | ForEach-Object { [string] $_ }) } else { $null }
-                            buildPath        = if ($app['buildPath']) { [string] $app.buildPath } else { $null }
-                            healthDetailPath = if ($app['healthDetailPath']) { [string] $app.healthDetailPath } else { '/_healthcheck/detailed' }
-                            links            = $deployableLinks
-                            nodes            = @($node)
-                        }
-                        continue
-                    }
-                    if ($hosting -ne 'appservice') { continue }
+                    if ($app['hosting'] -ne 'appservice') { continue }
                     $primary = "app-$slug-$environmentName-$($app.name)"
                     $nodes = @([ordered] @{ name = $primary; region = $location; role = 'primary'; url = "https://$primary.azurewebsites.net" })
                     if ($standbyLocation) {
@@ -529,11 +381,10 @@ function ConvertTo-Topology {
                         nodes       = $nodes
                     }
                 })
+            $addresses = if ($PageAddress[$environmentName] -is [Collections.IDictionary]) { $PageAddress[$environmentName] } else { @{} }
             $pages = @(foreach ($app in @($System.deployables)) {
-                    if ($app['retired'] -eq $true) { continue }
                     $link = $app['dashboardLink']
                     if ($link -isnot [Collections.IDictionary] -or -not $link['text'] -or -not $link['path']) { continue }
-                    if ($azureExcluded -ccontains [string] $app.name) { continue }
                     if ($app['environments'] -and @($app.environments) -notcontains $environmentName) { continue }
                     $address = ([string] $addresses[[string] $app.name]).TrimEnd('/')
                     if ($address -notmatch '^https?://') { continue }
@@ -1016,12 +867,9 @@ function ConvertTo-RuntimeDiagram {
 
     # The container apps the system creates, in the Container Apps environment the platform made for them: named as the
     # platform names it in the apps' addresses, <app>.<environment>.<region>.azurecontainerapps.io.
-    # system.azureExcludeDeployables (#542) stay out: Azure no longer has them, so a stale address must not draw them.
-    $azureExcludedRuntime = @(if ($System.system['azureExcludeDeployables']) { $System.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
     $containerAddresses = if ($ContainerApp[$Environment] -is [System.Collections.IDictionary]) { $ContainerApp[$Environment] } else { @{} }
     $containers = @($System.deployables | Where-Object {
             (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
-            ($azureExcludedRuntime -cnotcontains [string] $_.name) -and
             (-not $_['environments'] -or @($_['environments']) -contains $Environment) -and
             ([string] $containerAddresses[[string] $_.name]) -match '^https://[^/]+'
         } | ForEach-Object {
@@ -1328,7 +1176,7 @@ function ConvertTo-RuntimeDiagram {
         if ($listedApp) { $container.Id = $listedApp.Id }
     }
     # A declared app whose stack gave no address, found in the list by the name the infrastructure gives it.
-    $declaredHere = @($System.deployables | Where-Object { (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and ($azureExcludedRuntime -cnotcontains [string] $_.name) -and (-not $_['environments'] -or @($_['environments']) -contains $Environment) } | ForEach-Object { [string] $_.name })
+    $declaredHere = @($System.deployables | Where-Object { (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and (-not $_['environments'] -or @($_['environments']) -contains $Environment) } | ForEach-Object { [string] $_.name })
     $unplacedApps = [Collections.Generic.List[object]]::new()
     $undeclared = 0
     # A container app that is the node of an application with its own runtime is that node, not a box of its own
@@ -1991,52 +1839,6 @@ function Find-PrivateRepository {
         })
 }
 
-function Get-HttpStatusOf {
-    # The HTTP status a failed web call was answered with, or 0 when it was not answered at all (a timeout, a reset).
-    param([Parameter(Mandatory)] [Management.Automation.ErrorRecord] $ErrorRecord)
-    $response = if ($ErrorRecord.Exception.PSObject.Properties['Response']) { $ErrorRecord.Exception.Response } else { $null }
-    if ($response) { return [int] $response.StatusCode }
-    return 0
-}
-
-function Test-TransientHttpStatus {
-    # Whether a web call that failed with this status may pass when sent again (principle 004): no answer, 408, 429,
-    # 500, 502, 503 or 504. A 404 or 403 will not, and is not retried.
-    param([Parameter(Mandatory)] [int] $Status)
-    return $Status -in 0, 408, 429, 500, 502, 503, 504
-}
-
-function Get-RetryDelay {
-    # The seconds to wait after failed attempt $Try (1-based): the entry of $DelaySeconds for it, the last entry for
-    # any attempt past the list.
-    param([Parameter(Mandatory)] [int] $Try, [Parameter(Mandatory)] [int[]] $DelaySeconds)
-    return $DelaySeconds[[Math]::Min([Math]::Max($Try, 1) - 1, $DelaySeconds.Count - 1)]
-}
-
-function Invoke-Retried {
-    # Runs $Action and returns what it returns; a failure $IsTransient accepts is tried again, up to $Attempts in all,
-    # Get-RetryDelay seconds apart, each retry one line of information (not a warning). Any other failure, and the last
-    # attempt's, is thrown as it came. The default classifier is Test-TransientHttpStatus of the failure's status.
-    param(
-        [Parameter(Mandatory)] [scriptblock] $Action,
-        [Parameter(Mandatory)] [string] $What,
-        [int] $Attempts = 4,
-        [int[]] $DelaySeconds = @(10, 30, 60),
-        [scriptblock] $IsTransient = { param($failure) Test-TransientHttpStatus -Status (Get-HttpStatusOf -ErrorRecord $failure) },
-        [scriptblock] $Sleep = { param($seconds) Start-Sleep -Seconds $seconds }
-    )
-    for ($try = 1; $true; $try++) {
-        try { return & $Action }
-        catch {
-            $failure = $_
-            if ($try -ge $Attempts -or -not (& $IsTransient $failure)) { throw }
-            $wait = Get-RetryDelay -Try $try -DelaySeconds $DelaySeconds
-            Write-Host "$What failed ($($failure.Exception.Message)), attempt $try of $Attempts; trying again in $wait seconds."
-            & $Sleep $wait
-        }
-    }
-}
-
 function Get-PlantUmlJar {
     # The PlantUML release jar of the pinned version, from the project's GitHub releases, into the folder; it fails when
     # its SHA-256 is not the pinned one. Returns the path and the seconds the download took.
@@ -2047,12 +1849,7 @@ function Get-PlantUmlJar {
     )
     $path = Join-Path $Folder "plantuml-$Version.jar"
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    # GitHub's release download (a redirect to its object store) has answered 504 (dashboard 1.0.1388 in tdd, Nov 26):
-    # Invoke-Retried sends it again for no answer, 408, 429 and 5xx; -OutFile writes the file anew on every attempt.
-    $uri = "https://github.com/plantuml/plantuml/releases/download/v$Version/plantuml-$Version.jar"
-    Invoke-Retried -What "Downloading plantuml-$Version.jar from GitHub" -Action {
-        Invoke-WebRequest -Uri $uri -OutFile $path -TimeoutSec 300
-    }
+    Invoke-WebRequest -Uri "https://github.com/plantuml/plantuml/releases/download/v$Version/plantuml-$Version.jar" -OutFile $path -TimeoutSec 300
     $seconds = $clock.Elapsed.TotalSeconds
     $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     if ($actual -ne $Sha256) {
@@ -2222,11 +2019,10 @@ foreach ($tier in @($system.environments | ForEach-Object { [string] $_['tier'] 
 
 # The address of each container app of the system, in every environment it exists in: what that environment's stack
 # reports for it (a container app's address is generated by the platform, so no convention names it). Two uses: the
-# Health tiles / Code card of each container app in topology.json, the link of a deployable that names a page of its
-# own for the dashboard (deployables[].dashboardLink), and the box of every container app in the runtime diagram.
-# This environment's stack is read already; another tier's group may be closed to this tier's deploy identity, and an
-# environment may not have the app yet. When the stack omits an address (own-environment outputs or a partial read) or
-# cannot be read, ConvertTo-PageAddressMap fills the gap from containers.json on branch status (#573).
+# link of a deployable that names a page of its own for the dashboard (deployables[].dashboardLink), and the box of
+# every container app in the runtime diagram. This environment's stack is read already; another tier's group may be
+# closed to this tier's deploy identity, and an environment may not have the app yet: a read that gives no address is
+# information, and the dashboard then shows that environment without the link and the box.
 $pageAddresses = @{}
 $status = $null
 $statusRead = $false
@@ -2244,11 +2040,7 @@ function Get-PublishedStatus {
     }
     return $script:status
 }
-$azureExcludedDeployables = @(if ($system.system['azureExcludeDeployables']) { $system.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
-$containerApps = @($system.deployables | Where-Object {
-        (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
-        ($azureExcludedDeployables -cnotcontains [string] $_.name)
-    })
+$containerApps = @($system.deployables | Where-Object { -not $_['hosting'] -or $_['hosting'] -eq 'containerapp' })
 if ($containerApps.Count -gt 0) {
     foreach ($environment in @($system.environments)) {
         $pageEnvironment = [string] $environment.name
@@ -2266,24 +2058,22 @@ if ($containerApps.Count -gt 0) {
             if ($readCode -eq 0 -and ($read -join '').Trim()) { $reported = @(($read -join "`n") | ConvertFrom-Json -AsHashtable) }
             else { $reason = if ($read.Count -gt 0) { ($read[0] -split "`n")[0] } else { "exit code $readCode" } }
         }
-        # Prefer the stack; for every wanted name still missing (own outputs that omitted ui, or a refused read), use
-        # containers.json. Replacing the whole list only on refusal left gaps when the stack answered without ui (#573).
-        $published = $null
-        $publishedEnv = $null
-        if (@($wanted | Where-Object { -not (Get-ReportedDeployableUrl -Reported $reported -Name $_) }).Count -gt 0 -or $reason) {
+        # A stack this identity may not read: what the workflow delivery published of it (containers.json on branch
+        # status, written as the plan identity, which reads every environment's stack; as old as its last run).
+        if ($reason) {
             $published = Get-PublishedStatus
             if ($published -and $published['environments'] -is [Collections.IDictionary] -and $published.environments[$pageEnvironment] -is [Collections.IDictionary]) {
-                $publishedEnv = $published.environments[$pageEnvironment]
+                $reported = @($published.environments[$pageEnvironment].GetEnumerator() | ForEach-Object { @{ name = [string] $_.Key; url = [string] $_.Value } })
+                Write-Host "The stack of $pageEnvironment could not be read ($reason): its container apps are those of containers.json on branch status, written $($published['generated'])."
+                $reason = ''
             }
         }
-        $mapped = ConvertTo-PageAddressMap -Wanted $wanted -Reported $reported -Published $publishedEnv
-        $pageAddresses[$pageEnvironment] = $mapped.Addresses
-        if ($mapped.FilledFromStatus.Count -gt 0 -and $published) {
-            $how = if ($reason) { "could not be read ($reason)" } else { "reported no address for $($mapped.FilledFromStatus -join ', ')" }
-            Write-Host "The stack of $pageEnvironment ${how}: using containers.json on branch status for $($mapped.FilledFromStatus -join ', '), written $($published['generated'])."
-            $reason = ''
+        $pageAddresses[$pageEnvironment] = @{}
+        $without = [Collections.Generic.List[string]]::new()
+        foreach ($deployableName in $wanted) {
+            $found = @($reported | Where-Object { $_ -is [Collections.IDictionary] -and $_['name'] -eq $deployableName -and $_['url'] }) | Select-Object -First 1
+            if ($found) { $pageAddresses[$pageEnvironment][$deployableName] = [string] $found.url } else { $without.Add($deployableName) }
         }
-        $without = @($mapped.Missing)
         if ($without.Count -gt 0 -and $reason) {
             Write-Host "The stack of $pageEnvironment could not be read ($reason): the runtime diagram and the links show no box or link for $($without -join ', ') there."
         }
@@ -2528,46 +2318,25 @@ $env:npm_config_update_notifier = 'false'
 $stage = Join-Path ([IO.Path]::GetTempPath()) "site-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -LiteralPath $folder -Destination (Join-Path $stage 'site') -Recurse
-# npm fetches the CLI and its dependencies from registry.npmjs.org, which has reset connections (ECONNRESET, exit code
-# 255: dashboard 1.0.839 in prod, #957): npm's own retries first, then the whole deployment again below.
-$env:npm_config_fetch_retries = '5'
-$env:npm_config_fetch_retry_mintimeout = '10000'
-$env:npm_config_fetch_retry_maxtimeout = '60000'
-# A failed deployment is sent again (the site serves the latest upload, so a second upload of the same folder is
-# harmless); each attempt's whole output is logged, at the CLI's most detailed level, because an exit code 1 with only
-# npm's deprecation notices said nothing of the cause (dashboard 1.0.1390 in tdd, Nov 26).
-$swaAttempts = 3
-$swaDelaySeconds = @(30, 60)
 Push-Location -LiteralPath $stage
 try {
-    for ($try = 1; $true; $try++) {
-        try {
-            $env:SWA_CLI_DEPLOYMENT_TOKEN = $token
-            $PSNativeCommandUseErrorActionPreference = $false
-            $output = @(npx --yes "@azure/static-web-apps-cli@$swaCliVersion" deploy ./site --env production --verbose silly 2>&1 | ForEach-Object { "$_" })
-            $code = $LASTEXITCODE
-        }
-        finally {
-            $PSNativeCommandUseErrorActionPreference = $true
-            Remove-Item -LiteralPath Env:SWA_CLI_DEPLOYMENT_TOKEN -ErrorAction SilentlyContinue
-        }
-        # Colour codes out, and the token too, should a tool ever echo it.
-        $lines = @($output | ForEach-Object { ($_ -replace '\x1b\[[0-9;?]*[ -/]*[@-~]', '').Replace($token, '***').TrimEnd() } | Where-Object { $_ })
-        Write-Host "Static Web Apps CLI, attempt $try of ${swaAttempts}: exit code $code, $($lines.Count) line(s) of output"
-        $lines | ForEach-Object { Write-Host "  $_" }
-        if ($code -eq 0) { break }
-        if ($try -ge $swaAttempts) {
-            Fail-Step "The Static Web Apps CLI ended with exit code $code while deploying $name $version to ${staticSite}, on all $swaAttempts attempts; their output is above."
-        }
-        $wait = Get-RetryDelay -Try $try -DelaySeconds $swaDelaySeconds
-        Write-Host "The Static Web Apps CLI ended with exit code $code (attempt $try of $swaAttempts); deploying again in $wait seconds."
-        Start-Sleep -Seconds $wait
-    }
+    $env:SWA_CLI_DEPLOYMENT_TOKEN = $token
+    $PSNativeCommandUseErrorActionPreference = $false
+    $output = @(npx --yes "@azure/static-web-apps-cli@$swaCliVersion" deploy ./site --env production 2>&1 | ForEach-Object { "$_" })
+    $code = $LASTEXITCODE
 }
 finally {
-    $token = $null
+    $PSNativeCommandUseErrorActionPreference = $true
+    Remove-Item -LiteralPath Env:SWA_CLI_DEPLOYMENT_TOKEN -ErrorAction SilentlyContinue
     Pop-Location
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+}
+# Colour codes out, and the token too, should a tool ever echo it.
+$lines = @($output | ForEach-Object { ($_ -replace '\x1b\[[0-9;?]*[ -/]*[@-~]', '').Replace($token, '***').TrimEnd() } | Where-Object { $_ })
+$token = $null
+$lines | ForEach-Object { Write-Host "  $_" }
+if ($code -ne 0) {
+    Fail-Step "The Static Web Apps CLI ended with exit code $code while deploying $name $version to ${staticSite}; its output is above."
 }
 
 # The proof that this release is what the site serves: the topology written above, by its time stamp. A deployment

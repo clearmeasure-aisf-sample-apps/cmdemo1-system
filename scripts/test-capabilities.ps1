@@ -38,18 +38,12 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $ProgressPreference = 'SilentlyContinue'
 $env:AZURE_CORE_DISABLE_PROGRESS_BAR = 'true'
-# Names marked retired in system.json. A stack that has not been applied since then may still list their container
-# apps. Those leftovers are not live deployables: checks that walk the stack skip them. ui and dashboard are not here.
-$script:retiredDeployableNames = @()
 
 # pwsh -File passes "CAP-001,CAP-002" as one string.
 $Only = @($Only | ForEach-Object { $_ -split '[,\s]+' } | Where-Object { $_ })
 if (-not $ListChecks) {
     $system = Get-Content -LiteralPath (Join-Path $Root 'system.json') -Raw | ConvertFrom-Json -AsHashtable
     # A retired deployable (deployables[].retired, decision 0058) is in no environment: nothing below sees it.
-    # The names are kept so a stack that still lists the app (the apply that deletes it has not run) is not treated
-    # as a missing box or an always-on app of a live deployable.
-    $script:retiredDeployableNames = @($system.deployables | Where-Object { $_['retired'] -eq $true } | ForEach-Object { [string] $_.name })
     $system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
     $slug = [string] $system.system.slug
     $org = [string] $system.system.githubOrg
@@ -181,16 +175,8 @@ function Get-SuccessfulVersion([string] $ProjectId, [string] $EnvironmentId, [in
         $items = @($page.Items)
         foreach ($deployment in $items) {
             if (([datetime] $deployment.Created).ToUniversalTime() -lt $since -or -not $succeeded.Contains([string] $deployment.Id)) { continue }
-            if (-not $releases.ContainsKey($deployment.ReleaseId)) {
-                # A pull-request prerelease build (2.4.387-pr.1911.aot2) is not a mainline release, so it neither
-                # proves nor disproves a rollback: read its version once, keep $null for the ones that do not parse,
-                # and skip those, which keeps CAP-037 from throwing (cmdemo1-system #774).
-                $raw = [string] (Invoke-Octopus "/api/$space/releases/$($deployment.ReleaseId)").Version
-                $parsed = $null
-                $null = [version]::TryParse($raw, [ref] $parsed)
-                $releases[$deployment.ReleaseId] = $parsed
-            }
-            if ($null -ne $releases[$deployment.ReleaseId]) { $versions.Add($releases[$deployment.ReleaseId]) }
+            if (-not $releases.ContainsKey($deployment.ReleaseId)) { $releases[$deployment.ReleaseId] = [version] (Invoke-Octopus "/api/$space/releases/$($deployment.ReleaseId)").Version }
+            $versions.Add($releases[$deployment.ReleaseId])
         }
         if ($items.Count -lt 100 -or ([datetime] $items[-1].Created).ToUniversalTime() -lt $since) { break }
     }
@@ -276,10 +262,8 @@ function Get-App([string] $Environment) {
 }
 function Get-ContainerApp([string] $Environment) {
     # Every container app of the environment, by the names the stack reports, each with the deployable it runs.
-    # A retired deployable is not one of them: its app may still be in a stack applied before the retirement.
     $entries = az stack group show --name "stack-$slug-$Environment" --resource-group (Get-Group $Environment) --query 'outputs.deployables.value[?containerApp].{name: name, app: containerApp}' --output json | ConvertFrom-Json -AsHashtable
     foreach ($entry in @($entries)) {
-        if ($script:retiredDeployableNames -contains [string] $entry.name) { continue }
         $app = az containerapp show --name $entry.app --resource-group (Get-Group $Environment) --output json | ConvertFrom-Json -AsHashtable
         $app.deployable = [string] $entry.name
         $app
@@ -436,23 +420,18 @@ $checks = [ordered] @{
         $steps = @(Get-ProcessStep $deployableProject)
         $step = @($steps | Where-Object Name -eq 'Revert pin')
         Assert-That ($step.Count -eq 1 -and $step[0].Condition -eq 'Failure') 'no Revert pin on failure'
-        $firstHosting = if ($system.deployables[0].ContainsKey('hosting')) { [string] $system.deployables[0].hosting } else { 'containerapp' }
-        # A static site: Revert pin alone records what runs; there is no container image to put back in this process.
-        if ($firstHosting -in 'staticwebapp', 'storagewebsite') { return 'Revert pin runs on failure' }
-        # Container app or hosting "own": put the version before back, verify it, then revert the pin (principle 002).
+        if (-not $ownRuntime) { return 'Revert pin runs on failure' }
+        # An application that brings its own runtime: nothing of the system's puts the version before back, so its
+        # own deploy.ps1 does, in a step of its own that stands before "Revert pin".
         $names = @($steps | ForEach-Object { [string] $_.Name })
         $revert = @($steps | Where-Object Name -eq 'Revert deployable')
         Assert-That ($revert.Count -eq 1 -and $revert[0].Condition -eq 'Failure') 'no Revert deployable on failure'
         Assert-That ($names.IndexOf('Revert deployable') -lt $names.IndexOf('Revert pin')) 'Revert deployable does not stand before Revert pin'
-        # A rollback is verified like an update (decision 0018): verify right after the revert, on failure only,
-        # waiting for it; then (hosting "own") the nodes it reported, and the pin last.
+        # A rollback is verified like an update (decision 0018): the application's verify.ps1 right after the revert,
+        # on failure only, waiting for it; then the nodes it reported, and the pin last.
         $verify = @($steps | Where-Object Name -eq 'Verify revert')
         Assert-That ($verify.Count -eq 1 -and $verify[0].Condition -eq 'Failure' -and [string] $verify[0].StartTrigger -ne 'StartWithPrevious') 'no Verify revert on failure that waits for the revert'
         Assert-That ($names.IndexOf('Verify revert') -eq $names.IndexOf('Revert deployable') + 1) 'Verify revert does not stand right after Revert deployable'
-        if (-not $ownRuntime) {
-            Assert-That ($names.IndexOf('Verify revert') -lt $names.IndexOf('Revert pin')) 'Verify revert does not stand before Revert pin'
-            return 'Revert deployable, Verify revert, then Revert pin, run on failure'
-        }
         $record = @($steps | Where-Object Name -eq 'Record nodes after revert')
         Assert-That ($record.Count -eq 1 -and $record[0].Condition -eq 'Failure') 'no Record nodes after revert on failure'
         Assert-That ($names.IndexOf('Verify revert') -lt $names.IndexOf('Record nodes after revert') -and $names.IndexOf('Record nodes after revert') -lt $names.IndexOf('Revert pin')) 'the failure steps are not in the order revert, verify, record, pin'
@@ -551,16 +530,10 @@ $checks = [ordered] @{
             Assert-That ($s.Name -eq 'Sign-off' -and $s.Actions[0].ActionType -eq 'Octopus.Manual') "$project does not start with Sign-off"
             $responsible = $s.Actions[0].Properties.PSObject.Properties['Octopus.Action.Manual.ResponsibleTeamIds']
             $responsibleIds = if ($responsible) { [string] $responsible.Value } else { '' }
-            # pipelineSignOff (decision 0048) adds a second responsible team, "<slug> pipeline sign-off":
-            # system.pipelineSignOff for the system project, deployables[].pipelineSignOff for a deployable.
-            # Any other Sign-off has the approvers alone.
+            # A deployable with pipelineSignOff (decision 0048) has a second responsible team, "<slug> pipeline
+            # sign-off"; any other Sign-off has the approvers alone.
             $ids = @($responsibleIds -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            $pipeline = if ($project -eq $systemProject) {
-                $system.system['pipelineSignOff'] -eq $true
-            }
-            else {
-                @($system.deployables | Where-Object { "$slug-$($_.name)" -eq $project -and $_['pipelineSignOff'] -eq $true }).Count -gt 0
-            }
+            $pipeline = $project -ne $systemProject -and @($system.deployables | Where-Object { "$slug-$($_.name)" -eq $project -and $_['pipelineSignOff'] -eq $true }).Count -gt 0
             $pipelineTeam = if ($pipeline) { @((Invoke-Octopus "/api/$space/teams?partialName=$([uri]::EscapeDataString("$slug pipeline sign-off"))&take=100").Items | Where-Object { $_.Name -eq "$slug pipeline sign-off" -and $_.SpaceId -eq $space }) | Select-Object -First 1 }
             $want = @($team.Id) + @(if ($pipelineTeam) { $pipelineTeam.Id })
             Assert-That (-not $pipeline -or $null -ne $pipelineTeam) "$project has pipelineSignOff, and the space has no team '$slug pipeline sign-off'"
@@ -844,10 +817,7 @@ $checks = [ordered] @{
                 $manifest = $(if ($manifestAnswer.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($manifestAnswer.Content) } else { [string] $manifestAnswer.Content }) | ConvertFrom-Json -AsHashtable
                 $inStack = @(az stack group show --name "stack-$slug-$drawnEnvironment" --resource-group (Get-Group $drawnEnvironment) --query "outputs.deployables.value[?hosting=='containerapp'].name" --output json | ConvertFrom-Json)
                 $boxed = @($manifest['nodes'] | Where-Object { $_ -is [System.Collections.IDictionary] -and $_['kind'] -eq 'containerapp' } | ForEach-Object { [string] $_['deployable'] })
-                # Retired deployables are not drawn (decision 0058). A stack applied before the retirement can still
-                # name them; that is not a missing box. A live deployable that the stack has and the diagram does not
-                # still fails.
-                $unboxed = @($inStack | Where-Object { $boxed -notcontains $_ -and $script:retiredDeployableNames -notcontains $_ })
+                $unboxed = @($inStack | Where-Object { $boxed -notcontains $_ })
                 Assert-That ($unboxed.Count -eq 0) "the runtime diagram of $drawnEnvironment in $e has no box for the container app(s) $($unboxed -join ', '): deploy the release of $slug-$dashboardName to $e again"
                 # Everything else the system's resource groups hold is on it too, in every group of azure.resourceGroups:
                 # what is tagged with the environment, and what no environment tag places (no tag, or a tag of no
@@ -999,13 +969,7 @@ $checks = [ordered] @{
             # Each container app of the environment has what the hourly health reports found for it (health.containerApps,
             # read from the reports' logs), once the system's last deployment there, which makes and removes the apps,
             # is 90 minutes old. An environment whose health the file does not have (no runbook, or not read) has none.
-            # Match write-delivery.ps1 Select-DeliveryDeployable (#577): azureExcludeDeployables and retired are absent.
-            $azureExcluded = @(if ($system.system['azureExcludeDeployables']) { $system.system.azureExcludeDeployables | ForEach-Object { [string] $_ } })
-            $apps = @($system.deployables | Where-Object {
-                    $_['retired'] -ne $true -and $azureExcluded -cnotcontains [string] $_.name -and
-                    (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and
-                    (-not $_['environments'] -or @($_['environments']) -contains $e)
-                } | ForEach-Object { [string] $_.name })
+            $apps = @($system.deployables | Where-Object { (-not $_['hosting'] -or $_['hosting'] -eq 'containerapp') -and (-not $_['environments'] -or @($_['environments']) -contains $e) } | ForEach-Object { [string] $_.name })
             $health = $entry['health']
             if ($systemSettled -and $apps.Count -gt 0 -and $health -is [System.Collections.IDictionary]) {
                 $facts = @($health['containerApps'] | Where-Object { $_ -is [System.Collections.IDictionary] })

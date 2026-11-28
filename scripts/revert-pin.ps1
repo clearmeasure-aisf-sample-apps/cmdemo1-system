@@ -8,10 +8,10 @@
 .DESCRIPTION
     Step "Revert pin" of the Octopus project <slug>-<deployable>, which runs only when an earlier step failed;
     octopus/projects.tf inlines this file. "Pin version" commits the new version first (desired state first) and
-    records what it replaced (output variables Pinned and PreviousVersion). When Migrate, Update, Verify or the
-    Acceptance tests then fail, this step restores the previous version, so main does not keep a version whose
-    deployment failed and the next apply of the stack does not roll that version out. It changes nothing when the pin
-    did not commit, or when versions.json no longer pins this release (a later deployment already moved it).
+    records what it replaced (output variables Pinned and PreviousVersion). When Migrate, Update or Verify then fails,
+    this step restores the previous version, so main keeps describing what runs and the next apply of the stack does
+    not roll out a version that never deployed. It changes nothing when the pin did not commit, or when versions.json
+    no longer pins this release (a later deployment already moved it).
 #>
 # No param block: octopus/projects.tf joins scripts/github-token.ps1 and this file into one script, this one second.
 
@@ -57,8 +57,8 @@ function Invoke-GitHub {
     # or 408, 429, 500, 502, 503 or 504. Four attempts, 5, 10 and 15 seconds apart; each retry is one line of
     # information, not a warning. Any other failure, and the fourth of these, is thrown as it came. The write may be
     # sent again too: it names the version of the file it replaces (sha), so a write whose answer was lost and that is
-    # sent a second time is refused (409), and the loop below reads the file again (2026-10-30: one 500 on the write
-    # failed a deployment that nothing retried).
+    # sent a second time is refused (409), and the loop below reads the file again (cmdemo1-fworker, 2026-10-30: one
+    # 500 on the write failed a deployment that nothing retried).
     param([Parameter(Mandatory)] [hashtable] $Call, [Parameter(Mandatory)] [string] $What)
     for ($try = 1; $true; $try++) {
         try { return Invoke-RestMethod @Call }

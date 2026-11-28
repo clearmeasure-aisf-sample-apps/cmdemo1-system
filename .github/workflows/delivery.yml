@@ -111,7 +111,6 @@ jobs:
       # One commit without a parent, made from the files alone (no checkout of the branch), as github-actions[bot] with
       # the token the checkout step kept. Each file is the one this run wrote when its content differs from the
       # published one (the time of generation aside), and the published one otherwise: also when this run wrote none.
-      # workitems.json is workflow "workitems"'s: this run writes none and keeps the published one.
       # Nothing is pushed when no file changed.
       - name: Publish on branch status
         env:
@@ -127,7 +126,7 @@ jobs:
           mkdir -p "$PUBLISHED"
           if [ -n "$(git ls-remote --heads origin status)" ]; then
             git fetch --quiet --depth=1 origin status
-            for file in delivery.json cost.json containers.json health-reports.json workitems.json; do
+            for file in delivery.json cost.json containers.json health-reports.json; do
               if git cat-file -e "FETCH_HEAD:$file" 2>/dev/null; then
                 git show "FETCH_HEAD:$file" > "$PUBLISHED/$file"
               fi
@@ -135,7 +134,7 @@ jobs:
           fi
           entries=""
           changed=""
-          for file in delivery.json cost.json containers.json health-reports.json workitems.json; do
+          for file in delivery.json cost.json containers.json health-reports.json; do
             if [ ! -s "$WRITTEN/$file" ]; then
               source="$PUBLISHED/$file"
             elif [ -f "$PUBLISHED/$file" ] && [ "$(facts "$WRITTEN/$file")" = "$(facts "$PUBLISHED/$file" 2>/dev/null || true)" ]; then

@@ -191,6 +191,39 @@ function Get-SqlPassword {
     Fail-Step "Cannot read sql-admin-password from vault $vault as the deploy identity. Check its Key Vault Secrets Officer assignment."
 }
 
+function Get-LoginPassword {
+    # One database login per App Service deployable (system.json hosting "appservice"). Its password stays in the
+    # vault; a new deployable or a new environment gets a generated one. Either way the grant step then sets the
+    # login's password to the vault's, so a value generated after a failed read still matches.
+    param([hashtable] $Outputs, [string[]] $Names)
+    $result = @{}
+    foreach ($name in $Names) {
+        $value = $null
+        if ($Outputs -and $Outputs.ContainsKey('keyVaultName')) {
+            # Only a secret that does not exist yet gets a new password; another failure to read it stops the step.
+            for ($attempt = 1; $attempt -le 3 -and -not $value; $attempt++) {
+                $PSNativeCommandUseErrorActionPreference = $false
+                $read = az keyvault secret show --vault-name ([string] $Outputs.keyVaultName.value) --name "$name-sql-password" --query value --output tsv 2>&1
+                $code = $LASTEXITCODE
+                $PSNativeCommandUseErrorActionPreference = $true
+                if ($code -eq 0) { $value = [string] $read; break }
+                if ("$read" -match 'SecretNotFound|was not found') { break }
+                if ($attempt -eq 3) { Fail-Step "Cannot read $name-sql-password: the vault answered $("$read" -replace '\s+', ' ')" }
+                Write-Host "Reading $name-sql-password failed (attempt $attempt of 3); retrying in 30 seconds."
+                Start-Sleep -Seconds 30
+            }
+        }
+        if ($value) {
+            $result[$name] = ([string] $value).Trim()
+        }
+        else {
+            Write-Host "Generating the database login password of $name."
+            $result[$name] = New-SqlPassword
+        }
+    }
+    return $result
+}
+
 function Read-VaultSecret {
     # The value of a vault secret, or $null when the vault or the secret does not exist yet. Any other failure to read
     # it is retried, then stops the step: taking an unreadable secret for a missing one would replace it.
@@ -253,26 +286,32 @@ $system = Get-Content -LiteralPath (Join-Path $root 'system.json') -Raw | Conver
 # app it had here until this apply is still there when the apply starts, and its removal is the change, not downtime.
 $retiredDeployables = @($system.deployables | Where-Object { $_['retired'] -eq $true } | ForEach-Object { [string] $_.name })
 $system.deployables = @($system.deployables | Where-Object { $_['retired'] -ne $true })
-# system.azureExcludeDeployables (#542): omit from Azure only (infra/main.bicep). Match that filter here so secrets,
-# SQL, and the availability probe do not treat those apps as still required; their removal is the change, not downtime.
-# Octopus projects for those names stay until a later follow-up removes them.
-$azureExcludedDeployables = @()
-if ($system.system.ContainsKey('azureExcludeDeployables')) {
-    $azureExcludedDeployables = @($system.system.azureExcludeDeployables | ForEach-Object { [string] $_ })
-}
 # deployables[].environments: a deployable may exist in some environments only; this one's are the rest of the work.
-$deployablesHere = @($system.deployables | Where-Object {
-        (-not $_.ContainsKey('environments') -or @($_.environments) -contains $environmentName) -and
-        $azureExcludedDeployables -notcontains [string] $_.name
-    })
+$deployablesHere = @($system.deployables | Where-Object { -not $_.ContainsKey('environments') -or @($_.environments) -contains $environmentName })
 # The same rule as infra/main.bicep (hasDatabase): a container deployable uses the database unless it says
-# "database": false. Without one the environment has no SQL server, and there is no administrator password to read or
-# generate.
+# "database": false, and an App Service deployable shares it. Without one the environment has no SQL server, and there
+# is no administrator password to read or generate.
 $hasDatabase = @($deployablesHere | Where-Object {
         $hosting = if ($_.ContainsKey('hosting')) { [string] $_.hosting } else { 'containerapp' }
-        $hosting -eq 'containerapp' -and -not ($_.ContainsKey('database') -and $_.database -eq $false)
+        ($hosting -eq 'containerapp' -and -not ($_.ContainsKey('database') -and $_.database -eq $false)) -or $hosting -eq 'appservice'
     }).Count -gt 0
 $password = if ($hasDatabase) { Get-SqlPassword -Outputs $outputs } else { Write-Host "No app in $environmentName uses a database: no SQL server, no SQL password."; '' }
+$loginNames = @($deployablesHere | Where-Object { $_['hosting'] -eq 'appservice' } | ForEach-Object { [string] $_.name })
+# A change of an App Service plan's size (system.planSku, or the dormant switch, which makes every plan Free) restarts
+# the apps on that plan: Azure moves them to other workers. The plans this environment owns carry its tag; one whose
+# size differs from the size system.json now declares will be resized by this apply, and the restart is then reported
+# below, not counted as downtime the apply caused by mistake.
+$tierName = [string] ($system.environments | Where-Object { $_.name -eq $environmentName } | Select-Object -First 1).tier
+$isDormant = $system.azure.ContainsKey('frontDoor') -and $system.azure.frontDoor['dormant']
+$wantedPlan = if (-not $isDormant -and $system.system.ContainsKey('planSku') -and $system.system.planSku[$tierName]) { [string] $system.system.planSku[$tierName] } else { 'F1' }
+$PSNativeCommandUseErrorActionPreference = $false
+$ownedPlans = @(az resource list --resource-group $resourceGroup --resource-type Microsoft.Web/serverfarms --query "[?tags.environment=='$environmentName'].{name: name, sku: sku.name}" --output json 2>$null | ConvertFrom-Json)
+$PSNativeCommandUseErrorActionPreference = $true
+$resizedPlans = @($ownedPlans | Where-Object { $_ -and $_.sku -ne $wantedPlan } | ForEach-Object { "$($_.name) $($_.sku) to $wantedPlan" })
+if ($resizedPlans.Count -gt 0) {
+    Write-Host "This apply changes a plan size ($($resizedPlans -join ', ')): the apps on it restart."
+}
+$loginPasswords = Get-LoginPassword -Outputs $outputs -Names $loginNames
 $secrets = Get-DeployableSecret -Outputs $outputs -Deployables $deployablesHere
 foreach ($name in $secrets.Missing.Keys) {
     $absent = @($secrets.Missing[$name])
@@ -294,6 +333,7 @@ $parameters = @{
         versions          = @{ value = $versions }
         sqlAdminPassword  = @{ value = $password }
         deployPrincipalId = @{ value = $deployPrincipalId }
+        loginPasswords    = @{ value = $loginPasswords }
         presentSecrets    = @{ value = @($secrets.Present) }
         generatedSecrets  = @{ value = $secrets.Generated }
     }
@@ -317,8 +357,8 @@ function Start-AvailabilityProbe {
     if ($Outputs -and $Outputs.ContainsKey('deployables')) {
         foreach ($entry in @($Outputs.deployables.value)) {
             $paths[[string] $entry.name] = [string] $entry.healthPath
-            # Static sites keep the URL the stack reports; container apps are listed below.
-            if ($entry['hosting'] -eq 'staticwebapp') { $static[[string] $entry.name] = [string] $entry.url }
+            # App Service apps and static sites keep the URL the stack reports; container apps are listed below.
+            if (@('appservice', 'staticwebapp') -contains $entry['hosting']) { $static[[string] $entry.name] = [string] $entry.url }
         }
     }
     $probe = [hashtable]::Synchronized(@{ Stop = $false; Samples = [Collections.Generic.List[object]]::new(); Error = '' })
@@ -417,9 +457,8 @@ function Stop-AvailabilityProbe {
 # app it created, which the application's next deployment creates again, and that is the change, not downtime.
 $ownRuntime = @($system.deployables | Where-Object { $_['hosting'] -eq 'own' } | ForEach-Object { [string] $_.name })
 if ($ownRuntime.Count -gt 0) { Write-Host "Not watched here (they bring their own runtime): $($ownRuntime -join ', ')" }
-# A deployable that system.json no longer places in this environment (deployables[].environments, retired, or
-# azureExcludeDeployables) is removed by this apply, and its app going away is the change, not downtime: it is not
-# watched either. Without azureExclude here, 1.0.178 failed tdd after the stack deleted aisf/fworker (#542).
+# A deployable that system.json no longer places in this environment (deployables[].environments, or retired) is
+# removed by this apply, and its app going away is the change, not downtime: it is not watched either.
 $notPlacedHere = @(@($system.deployables | Where-Object { $deployablesHere.name -notcontains $_.name } | ForEach-Object { [string] $_.name }) + $retiredDeployables)
 if ($notPlacedHere.Count -gt 0) { Write-Host "Not watched here (the apply removes them from $environmentName): $($notPlacedHere -join ', ')" }
 $probe = Start-AvailabilityProbe -Group $resourceGroup -Environment $environmentName -Outputs $outputs -Ignore @($ownRuntime + $notPlacedHere)
@@ -486,272 +525,37 @@ function Invoke-StackApply {
     }
 }
 
-# This system has no App Service hosting, so an App Service plan an earlier apply made for this environment (its tag)
-# leaves the stack with this apply, and Azure refuses to delete a plan that still holds a web app. The tier's other
-# environments ran their web apps on the plan of the tier's first environment (app2-ui in uat on asp-<slug>-tdd), so
-# every web app on such a plan is deleted first, as this tier's deploy identity, which the stacks' deny settings
-# exclude. The stack that listed a deleted web app finds it gone at its own next apply. Without such a plan: nothing.
-$PSNativeCommandUseErrorActionPreference = $false
-$retiredPlans = @(az resource list --resource-group $resourceGroup --resource-type Microsoft.Web/serverfarms --query "[?tags.environment=='$environmentName'].id" --output json 2>$null | ConvertFrom-Json)
-$PSNativeCommandUseErrorActionPreference = $true
-if ($retiredPlans.Count -gt 0) {
-    $sites = @(az webapp list --resource-group $resourceGroup --query '[].{id: id, name: name, plan: serverFarmId}' --output json | ConvertFrom-Json)
-    foreach ($site in @($sites | Where-Object { $plan = [string] $_.plan; @($retiredPlans | Where-Object { $_ -ieq $plan }).Count -gt 0 })) {
-        Write-Host "Deleting web app $($site.name): its App Service plan leaves stack $stackName with this apply."
-        az resource delete --ids ([string] $site.id) --output none
-    }
-}
-
-# Deprecated aisf/fworker container apps and fwrunner jobs in prod (#575). Retirement (deployables[].retired,
-# decision 0058 / #617) already omits them from the stack template, and --action-on-unmanage deleteResources removes
-# stack-managed ones. This deletes the four exact prod names when they are still in the group (jobs that left the
-# stack oddly, or a prior apply that did not finish the delete), as the prod deploy identity, idempotently. tdd/uat
-# are left alone here: uat was #574. Identities, storage and AI leftovers stay for #578.
-function Get-DeprecatedProdComputeName {
-    param(
-        [Parameter(Mandatory)] [string] $Slug,
-        [Parameter(Mandatory)] [string] $Environment,
-        [string[]] $Retired = @()
-    )
-    # Always [string[]] (possibly empty). A unary-comma empty return wrapped in @() nests an empty array so .Count
-    # is 1 and -Name fails (system 1.0.208 in tdd after #674). Plain empty becomes $null on assignment; the caller
-    # normalizes null to [string[]]@().
-    if ($Environment -cne 'prod') { return [string[]]@() }
-    $retiredSet = @($Retired | ForEach-Object { [string] $_ })
-    if ($retiredSet -cnotcontains 'aisf' -or $retiredSet -cnotcontains 'fworker') { return [string[]]@() }
-    # Exact names from issue #575 (resource group rg-<slug>-prod). The container-app suffix is the live prod name.
-    return [string[]]@(
-        "ca-$Slug-prod-aisf-bhj5"
-        "ca-$Slug-prod-fworker-bhj5"
-        "caj-$Slug-prod-fwrunner"
-        "caj-$Slug-prod-fwrunner-codex"
-    )
-}
-function Select-PresentResourceName {
-    # Names from -Wanted that appear in -Present (case-insensitive Azure resource names). Pure: no Azure call.
-    param([string[]] $Wanted = @(), [string[]] $Present = @())
-    $presentLower = @{}
-    foreach ($name in @($Present)) { if ($name) { $presentLower[([string] $name).ToLowerInvariant()] = [string] $name } }
-    $found = [string[]]@($Wanted | Where-Object { $_ -and $presentLower.ContainsKey(([string] $_).ToLowerInvariant()) } | ForEach-Object { $presentLower[([string] $_).ToLowerInvariant()] })
-    if ($null -eq $found) { return [string[]]@() }
-    return $found
-}
-function Remove-DeprecatedProdCompute {
-    param(
-        [Parameter(Mandatory)] [string] $Group,
-        # AllowEmptyCollection: safe if called with @(). Prefer skipping the call when Count is 0 (tdd/uat).
-        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Name
-    )
-    if ($Name.Count -eq 0) { return }
-    $PSNativeCommandUseErrorActionPreference = $false
-    $listed = @(az resource list --resource-group $Group --query '[].{id:id,name:name}' --output json 2>$null | ConvertFrom-Json)
-    $PSNativeCommandUseErrorActionPreference = $true
-    $presentNames = @($listed | ForEach-Object { [string] $_.name })
-    $toRemove = @(Select-PresentResourceName -Wanted $Name -Present $presentNames)
-    if ($toRemove.Count -eq 0) {
-        Write-Host "Deprecated prod aisf/fworker/fwrunner compute (#575): none of $($Name -join ', ') remain in $Group."
-        return
-    }
-    foreach ($gone in $toRemove) {
-        $id = [string] (@($listed | Where-Object { [string] $_.name -ieq $gone })[0].id)
-        Write-Host "Deleting deprecated prod compute $($gone) (#575): retired aisf/fworker; stack apply would omit it."
-        az resource delete --ids $id --output none
-    }
-}
-# Normalize: empty [string[]] from the function becomes $null on assignment in PowerShell.
-$deprecatedProdCompute = Get-DeprecatedProdComputeName -Slug $slug -Environment $environmentName -Retired $retiredDeployables
-if ($null -eq $deprecatedProdCompute) { $deprecatedProdCompute = [string[]]@() }
-elseif ($deprecatedProdCompute -isnot [string[]]) { $deprecatedProdCompute = [string[]]@($deprecatedProdCompute) }
-# Only call when prod has names: nested empty arrays from an old `return , @()` + `@()` wrapper made Count 1 and
-# failed system 1.0.208 in tdd (#575 / #674).
-if ($deprecatedProdCompute.Length -gt 0) {
-    Remove-DeprecatedProdCompute -Group $resourceGroup -Name $deprecatedProdCompute
-}
-
-# Leftover AISF/fworker identities, fwrunner storage and unused AI accounts in prod and uat (#578). #542 removed them
-# from infra/own; stack --action-on-unmanage deleteResources may have already cleared them. This deletes the exact
-# names when still present, as the tier deploy identity, after confirming the env's aisf/fworker apps and fwrunner
-# jobs are gone (#574 / #575). Keep-list identities and storage (app/ui/deploy/plan/acr/octopus/scorecard-site,
-# st…ssc…, st…tf…) are never in the wanted set. tdd has no leftovers here.
-function Get-DeprecatedAisfLeftoverName {
-    param(
-        [Parameter(Mandatory)] [string] $Slug,
-        [Parameter(Mandatory)] [string] $Environment,
-        [string[]] $Retired = @()
-    )
-    if ($Environment -cnotin @('prod', 'uat')) { return [string[]]@() }
-    $retiredSet = @($Retired | ForEach-Object { [string] $_ })
-    if ($retiredSet -cnotcontains 'aisf' -or $retiredSet -cnotcontains 'fworker') { return [string[]]@() }
-    # Exact names from issue #578. Storage suffixes are the live uniqueString values for this system's groups.
-    $storage = if ($Environment -ceq 'prod') { "st${Slug}prodfwrj7265dy3" } else { "st${Slug}uatfwr2bttonyso" }
-    return [string[]]@(
-        "id-$Slug-$Environment-aisf"
-        "id-$Slug-$Environment-fworker"
-        "id-$Slug-$Environment-fwrunner"
-        $storage
-        "aif-$Slug-$Environment"
-    )
-}
-function Get-DeprecatedAisfComputePrerequisiteName {
-    # Apps/jobs that must already be gone before leftover delete (#574 uat, #575 prod). Exact live suffixes.
-    param(
-        [Parameter(Mandatory)] [string] $Slug,
-        [Parameter(Mandatory)] [string] $Environment
-    )
-    if ($Environment -ceq 'prod') {
-        return [string[]]@(
-            "ca-$Slug-prod-aisf-bhj5"
-            "ca-$Slug-prod-fworker-bhj5"
-            "caj-$Slug-prod-fwrunner"
-            "caj-$Slug-prod-fwrunner-codex"
-        )
-    }
-    if ($Environment -ceq 'uat') {
-        return [string[]]@(
-            "ca-$Slug-uat-aisf-fccv"
-            "ca-$Slug-uat-fworker-fccv"
-            "caj-$Slug-uat-fwrunner"
-            "caj-$Slug-uat-fwrunner-codex"
-        )
-    }
-    return [string[]]@()
-}
-function Get-AisfLeftoverKeepName {
-    # Names #578 must never delete (identities/storage that stay). Used by tests and as a belt-and-braces filter.
-    param([Parameter(Mandatory)] [string] $Slug)
-    return [string[]]@(
-        "id-$Slug-tdd-app"
-        "id-$Slug-uat-app"
-        "id-$Slug-prod-app"
-        "id-$Slug-tdd-ui"
-        "id-$Slug-uat-ui"
-        "id-$Slug-prod-ui"
-        "id-$Slug-deploy-nonprod"
-        "id-$Slug-deploy-prod"
-        "id-$Slug-plan"
-        "id-$Slug-acr-push"
-        "id-$Slug-octopus-config"
-        "id-$Slug-prod-scorecard-site"
-        "st${Slug}prodsscj7265dy3"
-        "st${Slug}tfchu4gq"
-    )
-}
-function Write-StorageAccountBlobInventory {
-    # List container names and blob counts before deleting a fwrunner storage account (#578 rollback note). No blob
-    # content, no keys: auth-mode login as the deploy identity. Missing account is a no-op line.
-    param([Parameter(Mandatory)] [string] $AccountName, [Parameter(Mandatory)] [string] $Group)
-    $PSNativeCommandUseErrorActionPreference = $false
-    $exists = az storage account show --name $AccountName --resource-group $Group --query name --output tsv 2>$null
-    $PSNativeCommandUseErrorActionPreference = $true
-    if (-not $exists) {
-        Write-Host "Blob inventory $($AccountName): account already absent in $Group (nothing to list)."
-        return
-    }
-    $PSNativeCommandUseErrorActionPreference = $false
-    $containersJson = az storage container list --account-name $AccountName --auth-mode login --query '[].name' --output json 2>$null
-    $listCode = $LASTEXITCODE
-    $PSNativeCommandUseErrorActionPreference = $true
-    if ($listCode -ne 0 -or -not $containersJson) {
-        Write-Host "Blob inventory $($AccountName): could not list containers (exit $listCode); delete continues."
-        return
-    }
-    $containers = @($containersJson | ConvertFrom-Json)
-    if ($containers.Count -eq 0) {
-        Write-Host "Blob inventory $($AccountName): 0 containers."
-        return
-    }
-    foreach ($container in $containers) {
-        $PSNativeCommandUseErrorActionPreference = $false
-        $count = az storage blob list --account-name $AccountName --container-name $container --auth-mode login --query 'length(@)' --output tsv 2>$null
-        $PSNativeCommandUseErrorActionPreference = $true
-        if (-not $count) { $count = '?' }
-        Write-Host "Blob inventory $($AccountName): container '$container' blobCount=$count"
-    }
-}
-function Test-UiReferencesAisfLeftover {
-    # Pure: true when a ui app-settings JSON (az containerapp show) still names any leftover. ui uses its own OpenAI
-    # endpoint (system.json AI_OpenAI_Url), not aif-cmdemo1-*.
-    param([string] $SettingsJson = '', [string[]] $LeftoverName = @())
-    if (-not $SettingsJson -or $LeftoverName.Count -eq 0) { return $false }
-    $lower = $SettingsJson.ToLowerInvariant()
-    foreach ($name in $LeftoverName) {
-        if ($name -and $lower.Contains(([string] $name).ToLowerInvariant())) { return $true }
-    }
-    return $false
-}
-function Remove-DeprecatedAisfLeftover {
-    param(
-        [Parameter(Mandatory)] [string] $Group,
-        [Parameter(Mandatory)] [string] $Slug,
-        [Parameter(Mandatory)] [string] $Environment,
-        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Name,
-        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $PrerequisiteName
-    )
-    if ($Name.Count -eq 0) { return }
-    $keep = @(Get-AisfLeftoverKeepName -Slug $Slug)
-    $keepLower = @{}
-    foreach ($k in $keep) { $keepLower[$k.ToLowerInvariant()] = $true }
-    $blocked = @($Name | Where-Object { $_ -and $keepLower.ContainsKey(([string] $_).ToLowerInvariant()) })
-    if ($blocked.Count -gt 0) {
-        Fail-Step "Deprecated aisf leftovers (#578): refused to delete keep-list name(s) $($blocked -join ', ')."
-    }
-    $PSNativeCommandUseErrorActionPreference = $false
-    $listed = @(az resource list --resource-group $Group --query '[].{id:id,name:name,type:type}' --output json 2>$null | ConvertFrom-Json)
-    $PSNativeCommandUseErrorActionPreference = $true
-    $presentNames = @($listed | ForEach-Object { [string] $_.name })
-    $prereqStillThere = @(Select-PresentResourceName -Wanted $PrerequisiteName -Present $presentNames)
-    if ($prereqStillThere.Count -gt 0) {
-        Fail-Step "Deprecated aisf leftovers (#578): prerequisite compute still present in ${Group}: $($prereqStillThere -join ', '). Finish #574/#575 (aisf/fworker apps and fwrunner jobs) before removing identities/storage/AI accounts."
-    }
-    # ui app settings must not still name a leftover (Key Vault secret refs / OpenAI endpoint / identity ids).
-    $uiNamePattern = '^ca-' + [regex]::Escape($Slug) + '-' + [regex]::Escape($Environment) + '-ui'
-    $uiApps = @($listed | Where-Object { [string] $_.type -ieq 'Microsoft.App/containerApps' -and [string] $_.name -match $uiNamePattern })
-    foreach ($ui in $uiApps) {
-        $PSNativeCommandUseErrorActionPreference = $false
-        $settingsJson = az containerapp show --ids ([string] $ui.id) --query 'properties.template.containers[0].env' --output json 2>$null
-        $PSNativeCommandUseErrorActionPreference = $true
-        if (Test-UiReferencesAisfLeftover -SettingsJson ([string] $settingsJson) -LeftoverName $Name) {
-            Fail-Step "Deprecated aisf leftovers (#578): ui app $([string] $ui.name) still references a leftover name. Clear that reference before delete."
-        }
-    }
-    $toRemove = @(Select-PresentResourceName -Wanted $Name -Present $presentNames)
-    if ($toRemove.Count -eq 0) {
-        Write-Host "Deprecated aisf/fworker leftovers (#578): none of $($Name -join ', ') remain in $Group."
-        return
-    }
-    foreach ($gone in $toRemove) {
-        $row = @($listed | Where-Object { [string] $_.name -ieq $gone })[0]
-        $id = [string] $row.id
-        $type = [string] $row.type
-        if ($type -ieq 'Microsoft.Storage/storageAccounts') {
-            Write-StorageAccountBlobInventory -AccountName $gone -Group $Group
-        }
-        Write-Host "Deleting deprecated aisf/fworker leftover $($gone) (#578): identities/storage/AI left by retired aisf/fworker."
-        az resource delete --ids $id --output none
-    }
-}
-$deprecatedAisfLeftover = Get-DeprecatedAisfLeftoverName -Slug $slug -Environment $environmentName -Retired $retiredDeployables
-if ($null -eq $deprecatedAisfLeftover) { $deprecatedAisfLeftover = [string[]]@() }
-elseif ($deprecatedAisfLeftover -isnot [string[]]) { $deprecatedAisfLeftover = [string[]]@($deprecatedAisfLeftover) }
-$deprecatedAisfPrereq = Get-DeprecatedAisfComputePrerequisiteName -Slug $slug -Environment $environmentName
-if ($null -eq $deprecatedAisfPrereq) { $deprecatedAisfPrereq = [string[]]@() }
-elseif ($deprecatedAisfPrereq -isnot [string[]]) { $deprecatedAisfPrereq = [string[]]@($deprecatedAisfPrereq) }
-if ($deprecatedAisfLeftover.Length -gt 0) {
-    Remove-DeprecatedAisfLeftover -Group $resourceGroup -Slug $slug -Environment $environmentName -Name $deprecatedAisfLeftover -PrerequisiteName $deprecatedAisfPrereq
-}
-
 try {
     $result = Invoke-StackApply -Name $stackName -Group $resourceGroup -TemplateFile $template -ParametersFile $parametersFile
 }
 finally {
     Remove-Item -LiteralPath $parametersFile -Force -ErrorAction SilentlyContinue
 }
+# App Service resolves Key Vault references when a site starts and caches them for up to a day. A site whose identity
+# the apply just replaced (a moved environment) may have tried before its new role on the secret took effect: check the
+# references, and force a new resolution while one is not resolved yet (up to five minutes).
 $applied = ($result | ConvertFrom-Json -AsHashtable).outputs
+# The same apps in the standby region (environments[].standbyLocation); empty without one.
+$standbySites = @(if ($applied.ContainsKey('standby')) { $applied.standby.value })
+foreach ($site in @($applied.deployables.value | Where-Object { $_['hosting'] -eq 'appservice' }) + $standbySites) {
+    $siteId = ([string] (az resource show --resource-group $resourceGroup --name ([string] $site.webApp) --resource-type Microsoft.Web/sites --query id --output tsv)).Trim()
+    $deadline = (Get-Date).AddMinutes(5)
+    while ($true) {
+        $pending = @((az rest --method get --url "https://management.azure.com$siteId/config/configreferences/appsettings?api-version=2022-03-01" --output json | ConvertFrom-Json -AsHashtable).value |
+                Where-Object { $_.properties.status -ne 'Resolved' } | ForEach-Object { "$($_.name): $($_.properties.status)" })
+        if ($pending.Count -eq 0) { break }
+        if ((Get-Date) -gt $deadline) { Fail-Step "Key Vault references of $($site.webApp) did not resolve within 5 minutes: $($pending -join '; ')" }
+        Write-Host "Key Vault references of $($site.webApp) not resolved yet ($($pending -join '; ')); refreshing in 30 seconds."
+        Start-Sleep -Seconds 30
+        az rest --method post --url "https://management.azure.com$siteId/config/configreferences/appsettings/refresh?api-version=2022-03-01" --output none
+    }
+}
+
 # Capability "frontdoor": the environment's public address, one Front Door endpoint per deployable in the system's
 # profile (system.json azure.frontDoor; the seed creates it in a resource group of its own, shared by both tiers). It is
-# a stack of its own in that group, stack-<slug>-<env>-edge, with the apps this stack reports as origins. Its deny
-# settings exclude only this tier's deploy identity. Without the capability, a stack left from before is removed with
-# its endpoints.
+# a stack of its own in that group, stack-<slug>-<env>-edge, with the apps this stack reports as origins: the primary at
+# priority 1 and the standby at priority 2. Its deny settings exclude only this tier's deploy identity. Without the
+# capability, a stack left from before is removed with its endpoints.
 $frontDoor = if ($system.azure.ContainsKey('frontDoor')) { $system.azure.frontDoor } else { @{} }
 $edgeStackName = "$stackName-edge"
 $endpoints = @()
@@ -764,9 +568,13 @@ if (@($applied.capabilities.value) -contains 'frontdoor' -and -not $dormant) {
         Fail-Step "Environment $environmentName has capability frontdoor, but system.json has no azure.frontDoor: run the seed with azure.frontDoor in the demo file, and add its output to system.json."
     }
     # A static site (hosting "staticwebapp" or "storagewebsite") gets no endpoint: it is served under an address of
-    # its own.
+    # its own, and it has no standby to fail over to.
     $edgeDeployables = @(foreach ($deployable in @($applied.deployables.value | Where-Object { $_['hosting'] -notin 'staticwebapp', 'storagewebsite' })) {
-            @{ name = [string] $deployable.name; origins = @(@{ name = 'primary'; hostName = ([uri] [string] $deployable.url).Host; priority = 1 }) }
+            $origins = @(@{ name = 'primary'; hostName = ([uri] [string] $deployable.url).Host; priority = 1 })
+            foreach ($site in @($standbySites | Where-Object { $_.name -eq $deployable.name })) {
+                $origins += @{ name = 'standby'; hostName = ([uri] [string] $site.url).Host; priority = 2 }
+            }
+            @{ name = [string] $deployable.name; origins = $origins }
         })
     $edgeParameters = @{
         '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
@@ -825,7 +633,10 @@ elseif ($frontDoor['resourceGroup']) {
 # A little longer than the apply: the stack removes replaced apps at its end, and the new ones take over.
 Start-Sleep -Seconds 30
 $downtime = Stop-AvailabilityProbe -Handle $probe
-if ($downtime -gt 0) {
+if ($downtime -gt 0 -and $resizedPlans.Count -gt 0) {
+    Write-Highlight "The plan size changed ($($resizedPlans -join ', ')): Azure restarts the apps on a resized plan, so the $downtime downtime period(s) above are that restart, measured and expected, and do not fail the apply."
+}
+elseif ($downtime -gt 0) {
     Fail-Step "The apply of $stackName caused $downtime downtime period(s); the timeline is above."
 }
 
@@ -834,6 +645,9 @@ foreach ($deployable in $stack.outputs.deployables.value) {
     $label = if ($deployable.version) { $deployable.version } else { 'placeholder' }
     Write-Highlight "$($deployable.name) in ${environmentName}: $($deployable.url) ($label)"
     Set-OctopusVariable -name "Url.$($deployable.name)" -value $deployable.url
+}
+foreach ($site in $standbySites) {
+    Write-Highlight "$($site.name) in ${environmentName}, standby in $($site.region): $($site.url)"
 }
 foreach ($endpoint in $endpoints) {
     Write-Highlight "$($endpoint.name) in ${environmentName} behind Front Door: $($endpoint.url) ($(@($endpoint.origins).Count) origin(s), probe $($endpoint.probePath))"
